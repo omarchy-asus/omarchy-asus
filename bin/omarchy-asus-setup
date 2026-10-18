@@ -51,7 +51,20 @@ DRY_RUN=0
 FORCE=0
 MODE=install
 
-usage() { sed -n '2,14s/^# \{0,1\}//p' "$0"; }
+# Under `curl ... | bash`, $0 is "bash", not this file: fall back to the URL.
+if [[ -f $0 ]]; then
+  SELF=$0
+else
+  SELF="curl -fsSL https://raw.githubusercontent.com/$GH_REPO/$GH_BRANCH/bin/omarchy-asus-setup | bash -s --"
+fi
+
+usage() {
+  if [[ -f $0 ]]; then
+    sed -n '2,14s/^# \{0,1\}//p' "$0"
+  else
+    echo "usage: omarchy-asus-setup [--uninstall] [--dry-run] [--force]"
+  fi
+}
 
 for arg in "$@"; do
   case $arg in
@@ -365,7 +378,7 @@ do_install() {
   offer_upgrade
   step "Done"
   info "Later 'omarchy refresh pacman' runs keep the repo in place through the hook."
-  info "Undo with: $0 --uninstall"
+  info "Undo with: $SELF --uninstall"
 }
 
 do_uninstall() {
