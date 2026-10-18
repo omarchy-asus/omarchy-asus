@@ -1,0 +1,593 @@
+#!/bin/bash
+# g16-check: read-only health report for an ASUS ROG Zephyrus G16 GA605 running
+# Omarchy with (or about to get) the omarchy-asus repo. EXPERIMENTAL.
+#
+#   g16-check                 run every check and print a PASS/WARN/FAIL report
+#   g16-check --live[=SECS]   also wait SECS (default 15) for you to press Fn+Super
+#                             and confirm the Win-lock report reaches hidraw
+#   g16-check --no-redact     print your user name and host name as they are
+#   g16-check --no-color
+#
+# Run it as your normal user. It changes nothing. A few checks need root to see
+# the answer (the pacman keyring, /etc/sudoers.d); they try `sudo -n` (never a
+# password prompt) and report WARN "needs root" when that isn't allowed.
+# By default your user name and host name are replaced by <user> and <host>, so
+# the output can be pasted into an issue (bin/issue still scans it).
+#
+# Sections:
+#   1. Win-lock: kernel with patch 0568, in-tree hid-asus, the hidraw node, its
+#      access, the g16-winlock service and udev rule.
+#   2. Local workarounds that must be off before the patched omarchy (4.0.5-1.1)
+#      is installed: each is "present (turn off before omarchy 1.1)" or "clear".
+#   3. Repo state: [omarchy-asus] order, signing key, which packages come from it,
+#      and omarchy-asus-g16-apply --check.
+#
+# Exit status: 0 when nothing FAILs, 1 when something does, 2 on bad usage.
+set -uo pipefail
+
+REPO=omarchy-asus
+FPR=0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
+VIDPID=00000B05:000019B6
+UDEV_RULE=/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules
+APPLY_SHARE=/usr/share/omarchy-asus-g16-apply
+PACMAN_CONF=/etc/pacman.conf
+
+LIVE=0 REDACT=1 COLOR=1
+[[ -t 1 ]] || COLOR=0
+for arg in "$@"; do
+  case $arg in
+    --live) LIVE=15 ;;
+    --live=*)
+      LIVE=${arg#--live=}
+      [[ $LIVE =~ ^[1-9][0-9]*$ ]] || { echo "--live needs a number of seconds" >&2; exit 2; }
+      ;;
+    --no-redact) REDACT=0 ;;
+    --no-color) COLOR=0 ;;
+    -h | --help) sed -n '2,25s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
+  esac
+done
+
+if ((COLOR)); then B=$'\e[1m' R=$'\e[31m' Y=$'\e[33m' G=$'\e[32m' D=$'\e[2m' N=$'\e[0m'; else B='' R='' Y='' G='' D='' N=''; fi
+
+ME=$(id -un 2>/dev/null || echo "${USER:-}")
+HOST=$(cat /proc/sys/kernel/hostname 2>/dev/null || hostname 2>/dev/null || true)
+
+# Replace $HOME, the user name and the host name in report text.
+redact() {
+  local s=$1
+  s=${s//"$HOME"/\~}
+  if ((REDACT)); then
+    # Repeat until nothing changes: one sed pass consumes the separator, so
+    # "name name" would keep its second copy. The placeholders have no letters
+    # or digits, so they can never match a name and loop.
+    local word mark prev
+    for word in "$ME:"$'\x01' "$HOST:"$'\x02'; do
+      mark=${word##*:} word=${word%:*}
+      [[ -n $word ]] || continue
+      word=$(sed 's/[][\\.*^$/+?(){}|]/\\&/g' <<<"$word")
+      prev=''
+      while [[ $s != "$prev" ]]; do
+        prev=$s
+        s=$(sed -E "s/(^|[^A-Za-z0-9_.-])${word}([^A-Za-z0-9_.-]|$)/\\1${mark}\\2/g" <<<"$s")
+      done
+    done
+    s=${s//$'\x01'/<user>}
+    s=${s//$'\x02'/<host>}
+  fi
+  printf '%s' "$s"
+}
+
+NPASS=0 NWARN=0 NFAIL=0
+section() { printf '\n%s== %s ==%s\n' "$B" "$*" "$N"; }
+pass() { NPASS=$((NPASS + 1)); printf '  %sPASS%s  %s\n' "$G" "$N" "$(redact "$*")"; }
+warn() { NWARN=$((NWARN + 1)); printf '  %sWARN%s  %s\n' "$Y" "$N" "$(redact "$*")"; }
+fail() { NFAIL=$((NFAIL + 1)); printf '  %sFAIL%s  %s\n' "$R" "$N" "$(redact "$*")"; }
+info() { printf '        %s%s%s\n' "$D" "$(redact "$*")" "$N"; }
+# Section 2 results.
+present() { NWARN=$((NWARN + 1)); printf '  %sWARN%s  present (turn off before omarchy 1.1): %s\n' "$Y" "$N" "$(redact "$*")"; }
+clear_() { NPASS=$((NPASS + 1)); printf '  %sPASS%s  clear: %s\n' "$G" "$N" "$(redact "$*")"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Run a command as root without ever prompting; fails when sudo needs a password.
+try_root() {
+  if ((EUID == 0)); then "$@"; else have sudo && sudo -n "$@" 2>/dev/null; fi
+}
+
+# ---------------------------------------------------------------------------
+# Machine
+
+dmi() { local v=''; read -r v </sys/class/dmi/id/"$1" 2>/dev/null; printf '%s' "$v"; }
+PRODUCT=$(dmi product_name)
+BOARD=$(dmi board_name)
+KREL=$(uname -r)
+
+printf '%sg16-check%s  %s\n' "$B" "$N" "$(date -u +%Y-%m-%dT%H:%MZ)"
+printf '  model:  %s / %s\n' "${PRODUCT:-?}" "${BOARD:-?}"
+printf '  kernel: %s\n' "$KREL"
+if [[ -r /etc/os-release ]]; then
+  # shellcheck source=/dev/null
+  printf '  os:     %s\n' "$(. /etc/os-release && echo "${PRETTY_NAME:-?}")"
+fi
+if have pacman; then
+  printf '  omarchy: %s\n' "$(pacman -Q omarchy 2>/dev/null | cut -d' ' -f2 || echo 'not installed')"
+fi
+if [[ $PRODUCT != *GA605* && $BOARD != *GA605* ]]; then
+  printf '  %sThis is not a GA605: the checks below assume an ASUS ROG Zephyrus G16 GA605.%s\n' "$Y" "$N"
+fi
+
+# Sync database versions: SYNC_VER[repo/name], and for each name the first repo
+# other than ours (pacman's order) that has it.
+declare -A SYNC_VER=() STOCK_REPO=() IN_ASUS=()
+REPOS=()
+if have pacman-conf; then mapfile -t REPOS < <(pacman-conf --repo-list 2>/dev/null); fi
+if have pacman; then
+  while read -r repo name ver _; do
+    [[ -n $name ]] || continue
+    SYNC_VER[$repo/$name]=$ver
+    if [[ $repo == "$REPO" ]]; then
+      IN_ASUS[$name]=1
+    elif [[ -z ${STOCK_REPO[$name]:-} ]]; then
+      STOCK_REPO[$name]=$repo
+    fi
+  done < <(pacman -Sl 2>/dev/null)
+fi
+
+# Where an installed package's version comes from: "omarchy-asus", "<repo>",
+# or "unknown" (a local build, or a sync database older than the package).
+origin() {
+  local name=$1 ver=$2 repo
+  [[ ${SYNC_VER[$REPO/$name]:-} == "$ver" ]] && { echo "$REPO"; return; }
+  for repo in "${REPOS[@]}"; do
+    [[ $repo != "$REPO" && ${SYNC_VER[$repo/$name]:-} == "$ver" ]] && { echo "$repo"; return; }
+  done
+  echo unknown
+}
+
+# ---------------------------------------------------------------------------
+section "1. Win-lock (Fn+Super) - kernel patch 0568, hid-asus, hidraw, g16-winlock"
+
+# Kernel release: ours ends in -<pkgrel with .N>-omarchy, e.g. 7.2.8-9.1-omarchy.
+if [[ $KREL =~ -[0-9]+\.[0-9]+-omarchy$ ]]; then
+  pass "running kernel $KREL has an omarchy-asus pkgrel (.N)"
+elif [[ $KREL == *-omarchy ]]; then
+  fail "running kernel $KREL is a stock linux-omarchy (no .N pkgrel, so no patch 0568)"
+else
+  warn "running kernel $KREL is not linux-omarchy (a fallback kernel?); Win-lock pass-through needs linux-omarchy from $REPO"
+fi
+
+if pkgver=$(pacman -Q linux-omarchy 2>/dev/null); then
+  pkgver=${pkgver#* }
+  packager=$(LC_ALL=C pacman -Qi linux-omarchy 2>/dev/null | sed -n 's/^Packager *: //p')
+  from=$(origin linux-omarchy "$pkgver")
+  if [[ $from == "$REPO" ]]; then
+    pass "linux-omarchy $pkgver is the $REPO build"
+  elif [[ $pkgver =~ -[0-9]+\.[0-9]+$ ]]; then
+    warn "linux-omarchy $pkgver has a .N pkgrel but doesn't match the $REPO database (${SYNC_VER[$REPO/linux-omarchy]:-not listed}); local build or stale database?"
+  else
+    fail "linux-omarchy $pkgver comes from ${from/unknown/an unknown source} (stock: no patch 0568)"
+  fi
+  info "packager: ${packager:-?}"
+  if [[ $KREL != "$pkgver-omarchy" && $KREL == *-omarchy ]]; then
+    warn "installed linux-omarchy $pkgver is not the running kernel $KREL: reboot to use it"
+  fi
+else
+  fail "linux-omarchy is not installed"
+fi
+
+# hid-asus: the in-tree (patched) module, not a DKMS/out-of-tree copy.
+if have modinfo; then
+  modpath=$(modinfo -n hid_asus 2>/dev/null || true)
+  intree=/usr/lib/modules/$KREL/kernel/
+  if [[ -z $modpath ]]; then
+    fail "modinfo finds no hid_asus module for $KREL"
+  elif [[ $modpath == "(builtin)" ]]; then
+    warn "hid_asus is built into the kernel (unexpected for linux-omarchy)"
+  elif [[ $modpath == "$intree"* || $modpath == "/lib/modules/$KREL/kernel/"* ]]; then
+    pass "hid_asus resolves to the in-tree module ${modpath#*/modules/"$KREL"/}"
+  else
+    fail "hid_asus resolves to $modpath, which overrides the in-tree (patched) module: remove the out-of-tree/DKMS copy"
+  fi
+  if [[ -r /sys/module/hid_asus/srcversion && -n $modpath && $modpath != "(builtin)" ]]; then
+    loaded=$(</sys/module/hid_asus/srcversion)
+    ondisk=$(modinfo -F srcversion "$modpath" 2>/dev/null || true)
+    if [[ -n $ondisk && $loaded != "$ondisk" ]]; then
+      warn "the loaded hid_asus (srcversion $loaded) is not $modpath ($ondisk): an initramfs or earlier copy was loaded; rebuild the initramfs and reboot"
+    fi
+  elif [[ ! -d /sys/module/hid_asus ]]; then
+    warn "hid_asus is not loaded"
+  fi
+else
+  warn "modinfo not found; can't check which hid_asus is used"
+fi
+extra=()
+for d in updates extra; do
+  while IFS= read -r f; do extra+=("$f"); done < <(find "/usr/lib/modules/$KREL/$d" -name 'hid-asus*.ko*' 2>/dev/null)
+done
+if ((${#extra[@]})); then
+  fail "out-of-tree hid-asus module(s) for $KREL: ${extra[*]}"
+fi
+if have dkms; then
+  dk=$(dkms status 2>/dev/null | grep -i 'hid.asus' || true)
+  if [[ -n $dk ]]; then
+    fail "DKMS still registers a hid-asus module (remove it: sudo dkms remove <module>/<version> --all):"
+    while IFS= read -r l; do info "$l"; done <<<"$dk"
+  else
+    pass "no hid-asus module registered with DKMS"
+  fi
+else
+  pass "dkms not installed (no DKMS hid-asus)"
+fi
+
+# The hidraw node of the ROG N-Key keyboard whose descriptor declares report ID 0x5D
+# (same descriptor walk as g16-winlock's report_ids()).
+NODE=''
+if have python3; then
+  mapfile -t nodes < <(python3 -I - "$VIDPID" <<'PY'
+import glob, sys
+from pathlib import Path
+
+want = sys.argv[1]
+
+def report_ids(d):
+    ids, i, n = set(), 0, len(d)
+    while i < n:
+        p = d[i]
+        if p == 0xFE:
+            if i + 2 >= n:
+                return None
+            i += 3 + d[i + 1]
+            continue
+        size = (0, 1, 2, 4)[p & 0x03]
+        if i + 1 + size > n:
+            return None
+        if p & 0xFC == 0x84 and size >= 1:
+            ids.add(d[i + 1])
+        i += 1 + size
+    return ids
+
+for ue in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
+    try:
+        if want not in Path(ue).read_text(errors="replace").upper():
+            continue
+    except OSError:
+        continue
+    node = Path(ue).parents[1]
+    try:
+        ids = report_ids((node / "device" / "report_descriptor").read_bytes())
+    except OSError:
+        ids = None
+    shown = "unreadable" if ids is None else " ".join("%02x" % i for i in sorted(ids))
+    print("/dev/" + node.name + "\t" + shown)
+PY
+  )
+  if ((${#nodes[@]} == 0)); then
+    fail "no hidraw node for the ROG N-Key keyboard (USB 0b05:19b6)"
+  else
+    for l in "${nodes[@]}"; do
+      ids=${l#*$'\t'}
+      [[ -z $NODE && " $ids " == *" 5d "* ]] && NODE=${l%%$'\t'*}
+      info "${l%%$'\t'*}: report IDs ${ids:-none}"
+    done
+    if [[ -n $NODE ]]; then
+      pass "Win-lock hidraw node: $NODE (0b05:19b6, report ID 0x5d)"
+    else
+      fail "${#nodes[@]} hidraw node(s) for 0b05:19b6, but none declares report ID 0x5d"
+    fi
+  fi
+else
+  warn "python3 not found; can't parse the hidraw report descriptors"
+fi
+
+# Access to that node.
+if [[ -n $NODE ]]; then
+  info "$(ls -l "$NODE" 2>&1)"
+  if have getfacl; then
+    while IFS= read -r l; do [[ -n $l && $l != \#* ]] && info "acl: $l"; done < <(getfacl -p "$NODE" 2>/dev/null)
+  fi
+  probe() {
+    python3 -I -c 'import os, sys
+flags = os.O_RDWR if sys.argv[2] == "rw" else os.O_RDONLY
+try:
+    os.close(os.open(sys.argv[1], flags | os.O_NONBLOCK))
+except OSError as e:
+    print(e.strerror or e)
+    sys.exit(1)' "$NODE" "$1"
+  }
+  if err=$(probe ro); then
+    pass "you can open $NODE for reading (g16-winlock watch)"
+  else
+    fail "you can't open $NODE for reading ($err): the udev rule's uaccess ACL is missing (log out and in, or sudo udevadm trigger --subsystem-match=hidraw)"
+  fi
+  if err=$(probe rw); then
+    pass "you can open $NODE for writing (lock/unlock and auto-unlock mode)"
+  else
+    warn "you can't open $NODE for writing ($err): only toast mode will work"
+  fi
+fi
+
+if [[ -f $UDEV_RULE ]]; then
+  pass "packaged udev rule present: $UDEV_RULE"
+else
+  fail "packaged udev rule missing: $UDEV_RULE (install asus-rog-nkey-winlock)"
+fi
+for f in /etc/udev/rules.d/*winlock*.rules /etc/udev/rules.d/*19b6*.rules; do
+  [[ -e $f ]] && warn "a local udev rule may duplicate the packaged one: $f"
+done
+
+# The helper and its user service.
+helper=$(command -v g16-winlock 2>/dev/null || true)
+if [[ -z $helper ]]; then
+  fail "g16-winlock is not installed (asus-rog-nkey-winlock)"
+elif [[ $helper != /usr/bin/g16-winlock ]]; then
+  warn "g16-winlock on PATH is $helper, not the packaged /usr/bin/g16-winlock (a local copy shadows it)"
+else
+  pass "g16-winlock is the packaged /usr/bin/g16-winlock"
+fi
+for f in "$HOME/.config/systemd/user/g16-winlock.service" /etc/systemd/user/g16-winlock.service; do
+  if [[ -L $f && $(readlink "$f") == /dev/null ]]; then
+    warn "g16-winlock.service is masked ($f)"
+  elif [[ -e $f ]]; then
+    warn "a local $f shadows the packaged /usr/lib/systemd/user/g16-winlock.service"
+  fi
+done
+if have systemctl; then
+  en=$(systemctl --user is-enabled g16-winlock.service 2>/dev/null || true)
+  act=$(systemctl --user is-active g16-winlock.service 2>/dev/null || true)
+  case $en in
+    enabled | enabled-runtime | static | indirect | alias | linked) en_ok=1 ;;
+    *) en_ok=0 ;;
+  esac
+  if [[ $act == active ]]; then
+    pass "g16-winlock.service is active (is-enabled: ${en:-unknown})"
+  elif [[ -z $en || $en == not-found ]]; then
+    fail "g16-winlock.service not found by systemd --user (install asus-rog-nkey-winlock)"
+  elif ((en_ok)); then
+    warn "g16-winlock.service is $en but ${act:-not running}; it starts with the desktop session (run this from a terminal in Hyprland), see: journalctl --user -u g16-winlock"
+  else
+    fail "g16-winlock.service is ${en} and ${act:-inactive}: systemctl --user enable --now g16-winlock.service"
+  fi
+  [[ -n $act ]] && mode=$(systemctl --user show -P Environment g16-winlock.service 2>/dev/null | grep -o 'G16_WINLOCK_MODE=[a-z]*' || true)
+  [[ -n ${mode:-} ]] && info "${mode}"
+else
+  warn "systemctl not found"
+fi
+
+# Optional live test: the patched hid-asus passes the 5D BF 01 <state> report to hidraw.
+if ((LIVE)) && [[ -n $NODE ]]; then
+  printf '\n  %sPress Fn+Super now (twice, to end unlocked). Waiting %ss...%s\n' "$B" "$LIVE" "$N"
+  if out=$(python3 -I - "$NODE" "$LIVE" <<'PY'
+import os, select, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
+end = time.monotonic() + int(sys.argv[2])
+seen = []
+while time.monotonic() < end:
+    r, _, _ = select.select([fd], [], [], max(0.0, end - time.monotonic()))
+    if not r:
+        break
+    try:
+        d = os.read(fd, 64)
+    except BlockingIOError:
+        continue
+    if len(d) >= 4 and d[:3] == bytes([0x5D, 0xBF, 0x01]):
+        seen.append("on" if d[3] else "off")
+        if len(seen) >= 2:
+            break
+os.close(fd)
+print(" ".join(seen))
+sys.exit(0 if seen else 1)
+PY
+  ); then
+    pass "Win-lock reports reach hidraw (seen: $out): patch 0568 works"
+  else
+    fail "no Win-lock report on $NODE within ${LIVE}s (${out:-nothing seen}): the running hid-asus drops it, or the key wasn't pressed"
+  fi
+elif ((LIVE)); then
+  warn "--live skipped: no Win-lock hidraw node"
+fi
+
+# ---------------------------------------------------------------------------
+section "2. Local workarounds to turn off before the patched omarchy 4.0.5-1.1 (#58)"
+info "#58's migrations and scripts do these themselves; a hand-made copy doubles or fights them."
+
+# Non-comment lines in the user's Hyprland config matching an ERE, minus the lines
+# omarchy-asus-g16-apply adds (reported separately). Prints "file:line".
+hypr_grep() {
+  [[ -d $HOME/.config/hypr ]] || return 1
+  find -L "$HOME/.config/hypr" -maxdepth 3 -type f \( -name '*.lua' -o -name '*.conf' \) 2>/dev/null | sort |
+    while IFS= read -r f; do
+      grep -nE "$1" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*(--|#)' | grep -vF "$APPLY_SHARE" |
+        sed "s|^\([0-9]*\):.*|$f:\1|"
+    done | head -n 3
+}
+env_grep() {
+  local f
+  for f in "$HOME/.config/uwsm/env" "$HOME/.config/uwsm/env-hyprland" "$HOME"/.config/environment.d/*.conf; do
+    [[ -f $f ]] || continue
+    grep -nE "^[[:space:]]*(export[[:space:]]+)?$1" "$f" 2>/dev/null | sed "s|^\([0-9]*\):.*|$f:\1|"
+  done | head -n 3
+}
+report() { # report "<label>" "<hits, one per line>"
+  if [[ -n $2 ]]; then present "$1: $(tr '\n' ' ' <<<"$2")"; else clear_ "$1"; fi
+}
+
+report "LIBVA_DRIVER_NAME set in your Hyprland/uwsm config" "$(hypr_grep 'LIBVA_DRIVER_NAME'; env_grep 'LIBVA_DRIVER_NAME=')"
+report "AQ_NO_ATOMIC guard in your Hyprland/uwsm config" "$(hypr_grep 'AQ_NO_ATOMIC'; env_grep 'AQ_NO_ATOMIC=')"
+report "software cursor (no_hardware_cursors) in your Hyprland config" "$(hypr_grep 'no_hardware_cursors')"
+
+applied=''
+if [[ -f $HOME/.config/hypr/hyprland.lua ]]; then
+  applied=$(grep -nF "$APPLY_SHARE/hypr/" "$HOME/.config/hypr/hyprland.lua" 2>/dev/null | grep -v '^[0-9]*:[[:space:]]*--' |
+    sed -E 's|^([0-9]+):.*/hypr/([a-z-]+\.lua).*|\2 (line \1)|')
+fi
+report "omarchy-asus-g16-apply lines in hyprland.lua (#58 ships the same fixes)" "$applied"
+
+# rog-power: a user or system unit, plus its nvidia-smi power-limit sudoers line.
+hits=''
+for f in "$HOME"/.config/systemd/user/rog-power*.service /etc/systemd/user/rog-power*.service /etc/systemd/system/rog-power*.service; do
+  [[ -e $f ]] && hits+="$f "
+done
+if have systemctl; then
+  for s in "--user" "--system"; do
+    st=$(systemctl "$s" is-active rog-power.service 2>/dev/null || true)
+    [[ $st == active || $st == activating ]] && hits+="(${s#--} unit $st) "
+  done
+fi
+have pgrep && pgrep -x rog-power >/dev/null 2>&1 && hits+="(process running) "
+[[ -f $HOME/.local/state/omarchy/toggles/powerprofiles-autoswitch-off ]] &&
+  info "powerprofiles-autoswitch-off toggle is set (keeps another power manager the owner)"
+report "rog-power service" "$hits"
+
+if sudoers=$(try_root grep -rlE 'nvidia-smi' /etc/sudoers.d); then
+  present "nvidia-smi line in sudoers.d (rog-power power limits): $(tr '\n' ' ' <<<"$sudoers")"
+elif try_root true; then
+  clear_ "nvidia-smi line in sudoers.d (rog-power power limits)"
+else
+  warn "nvidia-smi line in sudoers.d: needs root to check (sudo grep -rl nvidia-smi /etc/sudoers.d)"
+fi
+
+hits=''
+for f in "$HOME"/.config/systemd/user/*power-tune*.service /etc/systemd/user/*power-tune*.service /etc/systemd/system/*power-tune*.service; do
+  [[ -e $f ]] && hits+="$f "
+done
+report "power-tune.service (fights the ROG keyboard theme setter)" "$hits"
+
+hits=$(grep -lE '^[[:space:]]*HibernateMode[[:space:]]*=' /etc/systemd/sleep.conf.d/*.conf /etc/systemd/sleep.conf 2>/dev/null || true)
+report "local HibernateMode drop-in in /etc/systemd (omarchy-asus-g16 ships it under /usr/lib)" "$hits"
+
+hits=''
+for f in /etc/udev/rules.d/*touchpad*.rules; do
+  [[ -f $f ]] && grep -q 'ASUF1209' "$f" && hits+="$f "
+done
+report "local ASUF1209 touchpad-wake udev rule in /etc/udev/rules.d" "$hits"
+
+hits=''
+for f in /etc/mkinitcpio.conf.d/nvidia.conf.disabled /etc/mkinitcpio.conf.d/nvidia.conf.*; do
+  [[ -e $f ]] && hits+="$f "
+done
+report "renamed NVIDIA mkinitcpio drop-in (#58's initramfs migration manages nvidia.conf)" "$(tr ' ' '\n' <<<"$hits" | sort -u | tr '\n' ' ' | sed 's/^ *//')"
+
+hits=''
+((${#extra[@]})) && hits+="${extra[*]} "
+have dkms && hits+=$(dkms status 2>/dev/null | grep -i 'hid.asus' | cut -d, -f1 | tr '\n' ' ')
+report "out-of-tree / DKMS hid-asus" "$hits"
+
+hits=$(grep -nE '^[[:space:]]*Ignore(Pkg|Group)[[:space:]]*=' "$PACMAN_CONF" 2>/dev/null | grep -E 'nvidia|hyprland|hyprpm|aquamarine|linux-omarchy|omarchy' || true)
+report "IgnorePkg for nvidia/hyprland/aquamarine/linux-omarchy/omarchy in $PACMAN_CONF" "$hits"
+
+# ---------------------------------------------------------------------------
+section "3. Repo state"
+
+if ((${#REPOS[@]} == 0)); then
+  fail "pacman-conf lists no repositories"
+else
+  pos() { local i; for i in "${!REPOS[@]}"; do [[ ${REPOS[$i]} == "$1" ]] && { echo "$i"; return; }; done; echo -1; }
+  pa=$(pos "$REPO") po=$(pos omarchy) pc=$(pos core)
+  info "repo order: ${REPOS[*]}"
+  if ((pa < 0)); then
+    fail "[$REPO] is not configured (run bin/omarchy-asus-setup)"
+  elif { ((po >= 0 && pa > po)) || ((pc >= 0 && pa > pc)); }; then
+    fail "[$REPO] comes after [omarchy] or [core], so the stock builds win: move the Include line up (omarchy-asus-setup does it)"
+  else
+    pass "[$REPO] comes before [omarchy] and [core]"
+  fi
+  if ((pa >= 0)); then
+    # pacman-conf prints one Package*/Database* token per line; nothing when the
+    # repo inherits the global SigLevel.
+    sig=$(pacman-conf --repo="$REPO" SigLevel 2>/dev/null)
+    [[ -n $sig ]] || sig=$(pacman-conf SigLevel 2>/dev/null)
+    sig=" $(tr '\n' ' ' <<<"$sig")"
+    if [[ $sig == *" PackageRequired "* && $sig == *" DatabaseRequired "* && $sig != *TrustAll* ]]; then
+      pass "[$REPO] requires signed packages and database (SigLevel:$sig)"
+    else
+      fail "[$REPO] doesn't require signatures on both packages and database (SigLevel:${sig:- default}); use SigLevel = Required"
+    fi
+  fi
+fi
+hook=$HOME/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo
+if [[ -x $hook ]]; then
+  pass "Omarchy pre-refresh hook present (keeps the repo after 'omarchy refresh pacman')"
+elif ((${#IN_ASUS[@]})); then
+  warn "no executable $hook: 'omarchy refresh pacman' would drop the repo's Include line"
+fi
+
+# Key: pacman's public keyring is world-readable, so gpg can list it without
+# root (it only notes that the trustdb isn't writable); sudo -n as a fallback.
+gpgk=(gpg --homedir /etc/pacman.d/gnupg --no-permission-warning --batch --with-colons --list-keys "$FPR")
+keyout=$("${gpgk[@]}" 2>/dev/null) || keyout=$(try_root "${gpgk[@]}") || keyout=''
+if [[ -z $keyout ]]; then
+  if [[ -r /etc/pacman.d/gnupg/pubring.gpg || -r /etc/pacman.d/gnupg/pubring.kbx ]]; then
+    fail "repo key $FPR is not in pacman's keyring"
+  else
+    warn "can't read pacman's keyring without root: sudo pacman-key --list-keys $FPR"
+  fi
+else
+  validity=$(awk -F: '$1 == "pub" { print $2; exit }' <<<"$keyout")
+  case $validity in
+    f | u) pass "repo key $FPR is in pacman's keyring and trusted (validity $validity)" ;;
+    r) fail "repo key $FPR is revoked" ;;
+    e) fail "repo key $FPR has expired" ;;
+    *) fail "repo key $FPR is in pacman's keyring but not trusted (validity '${validity:-?}'): sudo pacman-key --lsign-key $FPR" ;;
+  esac
+fi
+
+# Installed packages that the repo also ships: whose build is installed?
+if ((${#IN_ASUS[@]} == 0)); then
+  warn "no packages from [$REPO] in the sync databases (repo not configured, or never synced)"
+else
+  dbage=''
+  [[ -f /var/lib/pacman/sync/$REPO.db ]] && dbage=$(date -u -r "/var/lib/pacman/sync/$REPO.db" +%Y-%m-%d 2>/dev/null)
+  info "sync databases as of the last 'omarchy update' / pacman -Sy${dbage:+ ($REPO.db: $dbage)}"
+  ours=() stock=() other=() absent=()
+  while read -r name; do
+    if inst=$(pacman -Q "$name" 2>/dev/null); then
+      inst=${inst#* }
+      from=$(origin "$name" "$inst")
+      line="$name $inst"
+      srepo=${STOCK_REPO[$name]:-}
+      sver=${srepo:+${SYNC_VER[$srepo/$name]}}
+      case $from in
+        "$REPO") ours+=("$line") ;;
+        unknown) other+=("$line (repo has ${SYNC_VER[$REPO/$name]})") ;;
+        *) stock+=("$line from [$from]") ;;
+      esac
+      if [[ $from == "$REPO" && -n $sver ]] && (($(vercmp "$sver" "$inst") > 0)); then
+        warn "$name: stock [$srepo] $sver is newer than the installed $REPO build $inst (our build lags; the repo order keeps ours)"
+      fi
+    else
+      absent+=("$name")
+    fi
+  done < <(printf '%s\n' "${!IN_ASUS[@]}" | sort)
+  if ((${#ours[@]})); then
+    pass "installed from [$REPO]: ${#ours[@]}"
+    for l in "${ours[@]}"; do info "$l"; done
+  fi
+  if ((${#stock[@]})); then
+    warn "installed as the stock build although [$REPO] has one (run 'omarchy update'):"
+    for l in "${stock[@]}"; do info "$l"; done
+  fi
+  if ((${#other[@]})); then
+    warn "installed version matches no sync database (local build, or databases out of date):"
+    for l in "${other[@]}"; do info "$l"; done
+  fi
+  ((${#absent[@]})) && info "in [$REPO] but not installed: ${absent[*]}"
+fi
+
+if have omarchy-asus-g16-apply; then
+  printf '\n  omarchy-asus-g16-apply --check:\n'
+  out=$(omarchy-asus-g16-apply --check 2>&1)
+  rc=$?
+  while IFS= read -r l; do info "$l"; done <<<"$out" # not a tty: no colour codes
+  case $rc in
+    0) pass "omarchy-asus-g16-apply --check: every default fix in place" ;;
+    10) warn "omarchy-asus-g16-apply --check: default fixes missing (run omarchy-asus-g16-apply)" ;;
+    *) warn "omarchy-asus-g16-apply --check exited $rc" ;;
+  esac
+else
+  info "omarchy-asus-g16-apply not installed"
+fi
+
+# ---------------------------------------------------------------------------
+printf '\n%sSummary:%s %s%d PASS%s, %s%d WARN%s, %s%d FAIL%s\n' "$B" "$N" "$G" "$NPASS" "$N" "$Y" "$NWARN" "$N" "$R" "$NFAIL" "$N"
+((NFAIL == 0))

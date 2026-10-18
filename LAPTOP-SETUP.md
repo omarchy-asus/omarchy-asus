@@ -109,7 +109,8 @@ before you run the script. The script only warns about them.
    no longer builds against the patched kernel, so expect one DKMS error. The patched kernel has
    the fix built in, so removing the module first makes no difference to how the laptop behaves:
    `sudo dkms remove <module>/<version> --all`.
-5. **Reboot and check:**
+5. **Reboot and check.** [`bin/g16-check`](bin/g16-check) (read-only) checks most of this and
+   prints PASS/WARN/FAIL; `bin/g16-check --live` also waits for Fn+Super. By hand:
    - `uname -r` ends in `-9.1-omarchy`.
    - Fn+Super toggles the Win-lock.
    - An external display looks right after you unplug and replug HDMI.
