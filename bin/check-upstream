@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare every package we carry with the version upstream currently ships.
 
-Usage: bin/check-upstream [--json] [--refresh] [--no-prs]
+Usage: bin/check-upstream [--json] [--refresh] [--no-prs] [--recipe DIR]...
 
 Our packages: every recipes/<dir>/PKGBUILD (via `makepkg --printsrcinfo`, one
 entry per split package) plus anything in the local repo db ($REPO_DIR).
@@ -9,7 +9,7 @@ Upstream: the repos the laptop uses, in pacman.conf order, first match wins:
 [omarchy] pkgs.omarchy.org/stable, then core/extra/multilib from the Omarchy
 stable mirror.
 
-Base version = our pkgver-pkgrel with the trailing ".1" removed.
+Base version = our pkgver-pkgrel with the trailing ".N" removed (".1", ".2", ...).
 Text output, one line per package:  name ours upstream status
   current          upstream == base and the repo db holds the recipe's version
   rebuild-needed   upstream moved past our base (rebuild with rebased patches, or unpublish)
@@ -17,12 +17,24 @@ Text output, one line per package:  name ours upstream status
   not-built        recipe exists but the package is not in the repo db
   repo-stale       repo db holds a different version than the recipe
   not-upstream     no upstream repo ships this name
-  bad-pkgrel       our pkgrel does not end in ".1"
+  bad-pkgrel       our pkgrel does not end in ".N"
+  local            local-only package (recipes/<dir>/LOCAL_ONLY exists: no upstream build,
+                   plain pkgrel) and the repo db holds the recipe's version; for these
+                   only not-built / repo-stale are reported, never bad-pkgrel
+  dep-mismatch     an exact-version dependency (depends=(x=ver)) no longer matches the
+                   version upstream ships, so installing ours would break the
+                   update (e.g. nvidia-open-dkms vs nvidia-utils)
+rebuild-needed and dep-mismatch are urgent: pacman takes the FIRST repo that has a
+name regardless of version, so a lagging package here never yields to a newer stock
+one; it blocks or breaks `omarchy update` until it is rebuilt or unpublished.
 "ours" is the recipe version (the repo db version when there is no recipe).
 
 Patch status: each recipes/<dir>/UPSTREAM_PRS lists "owner/repo#N" lines; the
 PR state is fetched from the public GitHub API, cached 24h in $DATA/cache.
 A merged PR is reported as needing action (drop the patch when rebasing).
+
+Testing: OMARCHY_ASUS_UPSTREAM_OVERRIDE="name=ver,name=ver" replaces the upstream
+version of those names (simulated upstream bumps).
 
 Exit: 0 all current, 10 something needs action, 1 error.
 """
@@ -37,7 +49,7 @@ import tarfile
 import time
 import urllib.request
 
-WORKSPACE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+WORKSPACE = os.environ.get("OMARCHY_ASUS_WORKSPACE") or os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 UPSTREAM_DBS = [  # pacman.conf order
     ("omarchy", "https://pkgs.omarchy.org/stable/x86_64/omarchy.db"),
     ("core", "https://stable-mirror.omarchy.org/core/os/x86_64/core.db"),
@@ -52,7 +64,7 @@ UA = "omarchy-asus-check-upstream"
 def env_from_sh():
     """DATA and REPO_DIR as bin/env.sh defines them."""
     out = subprocess.run(
-        ["bash", "-c", 'source "$1" >/dev/null 2>&1; printf "%s\\n%s\\n%s\\n" "$DATA" "$REPO_DIR" "$REPO_NAME"',
+        ["bash", "-c", 'source "$1" >/dev/null 2>&1 || exit 1; printf "%s\\n%s\\n%s\\n" "$DATA" "$REPO_DIR" "$REPO_NAME"',
          "_", os.path.join(WORKSPACE, "bin", "env.sh")],
         capture_output=True, text=True, check=True).stdout.splitlines()
     return out[0], out[1], out[2]
@@ -108,29 +120,38 @@ def fetch(url, cache_file, ttl, refresh):
     return data
 
 
-def recipe_packages():
-    """[(recipe_dir, pkgname, version)] from recipes/*/PKGBUILD."""
+def recipe_packages(only=None):
+    """[(recipe_dir, pkgname, version, depends)] from recipes/*/PKGBUILD."""
     out = []
     rdir = os.path.join(WORKSPACE, "recipes")
     for d in sorted(os.listdir(rdir)):
         path = os.path.join(rdir, d)
         if d.startswith(".") or not os.path.isfile(os.path.join(path, "PKGBUILD")):
             continue
+        if only and d not in only:
+            continue
         r = subprocess.run(["makepkg", "--printsrcinfo"], cwd=path, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"warning: recipes/{d}: makepkg --printsrcinfo failed: {r.stderr.strip()}", file=sys.stderr)
             continue
         info, names = {}, []
+        base_deps, deps, section = [], {}, None
         for line in r.stdout.splitlines():
             k, _, v = line.strip().partition(" = ")
             if k == "pkgname":
                 names.append(v)
+                section = v
             elif k in ("pkgver", "pkgrel", "epoch") and k not in info:
                 info[k] = v
+            elif k == "depends" or k == "depends_x86_64":
+                if section is None:
+                    base_deps.append(v)
+                else:
+                    deps.setdefault(section, []).append(v)
         ver = f"{info['pkgver']}-{info['pkgrel']}"
         if info.get("epoch"):
             ver = f"{info['epoch']}:{ver}"
-        out += [(d, n, ver) for n in names]
+        out += [(d, n, ver, deps.get(n, base_deps)) for n in names]
     return out
 
 
@@ -139,7 +160,27 @@ def vercmp(a, b):
 
 
 def base_of(ver):
-    return ver[:-2] if ver.endswith(".1") else None
+    m = re.fullmatch(r"(.+-[^-]+)\.\d+", ver)
+    return m.group(1) if m else None
+
+
+def exact_deps(deps):
+    """[(name, version)] for depends entries pinned with '=' (not >=, <=)."""
+    out = []
+    for d in deps:
+        m = re.fullmatch(r"([^<>=]+)=([^<>=]+)", d)
+        if m:
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def dep_satisfied(want, have):
+    """depends=x=want against version have; without a pkgrel in want, compare pkgver only."""
+    if "-" not in want:
+        have = have.rsplit("-", 1)[0]
+        if ":" in have and ":" not in want:
+            have = have.split(":", 1)[1]
+    return vercmp(want, have) == 0
 
 
 def pr_states(cache_dir, refresh):
@@ -171,6 +212,7 @@ def main():
     ap.add_argument("--json", action="store_true", help="machine-readable JSON instead of text lines")
     ap.add_argument("--refresh", action="store_true", help="ignore caches (dbs 1h, PR state 24h)")
     ap.add_argument("--no-prs", action="store_true", help="skip the GitHub PR state check")
+    ap.add_argument("--recipe", action="append", help="only this recipes/ directory (repeatable)")
     args = ap.parse_args()
 
     data_dir, repo_dir, repo_name = env_from_sh()
@@ -180,6 +222,13 @@ def main():
     upstream = []  # [(repo, {name: ver})] in priority order
     for name, url in UPSTREAM_DBS:
         upstream.append((name, parse_db(fetch(url, os.path.join(cache_dir, f"{name}.db"), DB_TTL, args.refresh))))
+    override = {}
+    for item in filter(None, os.environ.get("OMARCHY_ASUS_UPSTREAM_OVERRIDE", "").split(",")):
+        n, _, v = item.strip().partition("=")
+        override[n] = v
+    if override:
+        print(f"warning: upstream versions overridden for testing: {override}", file=sys.stderr)
+        upstream.insert(0, ("override", override))
 
     local_db = os.path.join(repo_dir, f"{repo_name}.db")
     ours_repo = {}
@@ -187,21 +236,39 @@ def main():
         with open(local_db, "rb") as f:
             ours_repo = parse_db(f.read())
 
-    recipes = recipe_packages()
+    recipes = recipe_packages(args.recipe)
     rows, seen = [], set()
-    for recipe, name, ver in recipes + [(None, n, v) for n, v in sorted(ours_repo.items())]:
+    extra = [] if args.recipe else [(None, n, v, []) for n, v in sorted(ours_repo.items())]
+    for recipe, name, ver, deps in recipes + extra:
         if name in seen:
             continue
         seen.add(name)
         up_repo, up_ver = next(((r, p[name]) for r, p in upstream if name in p), (None, None))
+        mismatches = []
+        for dn, want in exact_deps(deps):
+            have = next((p[dn] for _, p in upstream if dn in p), None) or ours_repo.get(dn)
+            if have is None or not dep_satisfied(want, have):
+                mismatches.append({"dep": dn, "want": want, "upstream": have})
         repo_ver = ours_repo.get(name)
         base = base_of(ver)
-        if base is None:
+        local_only = recipe is not None and os.path.isfile(os.path.join(WORKSPACE, "recipes", recipe, "LOCAL_ONLY"))
+        if local_only:
+            if repo_ver is None:
+                status = "not-built"
+            elif repo_ver != ver:
+                status = "repo-stale"
+            elif mismatches:
+                status = "dep-mismatch"
+            else:
+                status = "local"
+        elif base is None:
             status = "bad-pkgrel"
         elif up_ver is None:
             status = "not-upstream"
         elif (c := vercmp(up_ver, base)) > 0:
             status = "rebuild-needed"
+        elif mismatches:
+            status = "dep-mismatch"
         elif c < 0:
             status = "upstream-older"
         elif repo_ver is None:
@@ -210,11 +277,13 @@ def main():
             status = "repo-stale"
         else:
             status = "current"
-        rows.append({"name": name, "ours": ver, "base": base, "repo": repo_ver,
-                     "upstream": up_ver, "upstream_repo": up_repo, "recipe": recipe, "status": status})
+        rows.append({"name": name, "ours": ver, "base": None if local_only else base, "repo": repo_ver,
+                     "local_only": local_only,
+                     "upstream": up_ver, "upstream_repo": up_repo, "recipe": recipe, "status": status,
+                     "dep_mismatch": mismatches})
 
     prs = [] if args.no_prs else pr_states(cache_dir, args.refresh)
-    action = any(r["status"] != "current" for r in rows) or any(p[2] in ("merged", "closed") for p in prs)
+    action = any(r["status"] not in ("current", "local") for r in rows) or any(p[2] in ("merged", "closed") for p in prs)
 
     if args.json:
         json.dump({"packages": rows,
@@ -223,7 +292,8 @@ def main():
         print()
     else:
         for r in rows:
-            print(r["name"], r["ours"], r["upstream"] or "-", r["status"])
+            extra = "".join(f" [{m['dep']}={m['want']} vs upstream {m['upstream'] or 'none'}]" for m in r["dep_mismatch"])
+            print(r["name"], r["ours"], r["upstream"] or "-", r["status"] + extra)
         for d, p, s, m in prs:
             print(f"pr {p} {s}{' ' + m if m else ''} ({d})")
     return 10 if action else 0

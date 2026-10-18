@@ -1,0 +1,72 @@
+#!/bin/bash
+# Install (or remove) the daily auto-update service. Prints what it would do unless
+# --apply is given; --apply must be run by the user with sudo, from a reviewed checkout.
+#
+# Usage: bin/install-auto-update [--apply] [--enable]     install / update the copy
+#        bin/install-auto-update --uninstall [--apply]    remove it (state is kept)
+#
+# Installs a root-owned copy of the scripts to /usr/local/lib/omarchy-asus (the service
+# never executes the user-writable workspace), the unit and timer to
+# /etc/systemd/system, and /etc/omarchy-asus/auto-update.conf (only if missing, with
+# BUILD_USER set to the sudo user). --enable also starts the timer; without it the
+# timer is installed but off. Re-run after merging changes to bin/ to update the copy.
+set -euo pipefail
+src=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
+LIB=/usr/local/lib/omarchy-asus
+UNITS=/etc/systemd/system
+CONF=/etc/omarchy-asus/auto-update.conf
+scripts=(auto-update auto-update-state build-pkg check-upstream env.sh mkchroot publish rebase-recipe sync-release unpublish)
+units=(omarchy-asus-auto-update.service omarchy-asus-auto-update.timer)
+
+apply=0 enable=0 uninstall=0
+for a in "$@"; do
+    case $a in
+        --apply) apply=1 ;;
+        --enable) enable=1 ;;
+        --uninstall) uninstall=1 ;;
+        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $a" >&2; exit 64 ;;
+    esac
+done
+if ((apply)) && [[ $EUID -ne 0 ]]; then echo "--apply needs root: sudo $0 $*" >&2; exit 1; fi
+do_() { if ((apply)); then echo "+ $*"; "$@"; else echo "would run: $*"; fi; }
+
+if ((uninstall)); then
+    do_ systemctl disable --now omarchy-asus-auto-update.timer
+    for u in "${units[@]}"; do do_ rm -f "$UNITS/$u"; done
+    do_ systemctl daemon-reload
+    do_ rm -rf "$LIB"
+    echo "kept: $CONF, the build chroot (/var/lib/omarchy-asus) and the user's state dir;"
+    echo "remove them by hand if wanted."
+    exit 0
+fi
+
+user=${SUDO_USER:-$(id -un)}
+[[ $user != root ]] || { echo "run through sudo from the build user's account (BUILD_USER comes from SUDO_USER)" >&2; exit 1; }
+if [[ -n $(cd "$src" && runuser -u "$user" -- git status --porcelain -- bin systemd 2>/dev/null || git status --porcelain -- bin systemd) ]]; then
+    echo "warning: bin/ or systemd/ has uncommitted changes; install from a reviewed, committed checkout" >&2
+fi
+echo "source: $src ($(cd "$src" && git rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout'))"
+do_ install -d -o root -g root -m 0755 "$LIB" "$LIB/bin" "$LIB/systemd" /etc/omarchy-asus
+for s in "${scripts[@]}"; do
+    mode=0755; [[ $s == env.sh ]] && mode=0644
+    do_ install -o root -g root -m "$mode" "$src/bin/$s" "$LIB/bin/$s"
+done
+do_ install -o root -g root -m 0644 "$src/systemd/README.md" "$src/systemd/auto-update.conf.example" "$LIB/systemd/"
+for u in "${units[@]}"; do do_ install -o root -g root -m 0644 "$src/systemd/$u" "$UNITS/$u"; done
+if [[ -e $CONF ]]; then
+    echo "keeping existing $CONF"
+else
+    if ((apply)); then
+        echo "+ create $CONF (BUILD_USER=$user)"
+        sed "s/^BUILD_USER=$/BUILD_USER=$user/" "$src/systemd/auto-update.conf.example" > "$CONF"
+        chown root:root "$CONF"; chmod 0644 "$CONF"
+    else
+        echo "would create $CONF from systemd/auto-update.conf.example with BUILD_USER=$user"
+    fi
+fi
+do_ systemctl daemon-reload
+if ((enable)); then do_ systemctl enable --now omarchy-asus-auto-update.timer
+else echo "timer not enabled; when ready: sudo systemctl enable --now omarchy-asus-auto-update.timer"; fi
+[[ -d /var/lib/omarchy-asus/chroot/root ]] || echo "note: no build chroot yet; run bin/mkchroot once (sudo) before the first run"
+echo "first run by hand (watch it): sudo systemctl start omarchy-asus-auto-update.service; journalctl -fu omarchy-asus-auto-update"

@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""State and planning helpers for bin/auto-update (runs as the build user).
+
+  plan CHECK_JSON STATUS_JSON        print the run plan, one TSV line per recipe:
+                                     recipe action target repo_names all_names note
+  record STATUS_JSON RUN_ID RECIPE RESULT ACTION [key=value...]
+                                     update the recipe's entry (RESULT: ok, failed,
+                                     attention, skipped) and append it to its history
+  get STATUS_JSON RECIPE KEY         print one field of a recipe's last entry
+  summary STATUS_JSON RUN_ID OUT_MD  write the human summary, print it, exit 1 if a
+                                     recipe failed this run (2 if only attention items)
+  review VERDICT_JSON                parse a headless review's JSON output: prints
+                                     "approve" or "reject" on line 1, the notes after
+  replies VERDICT_JSON               the review's thread replies, "id<TAB>reply" per line
+
+Plan actions:
+  rebase     upstream moved past our base: rebase the recipe onto TARGET (= upstream)
+  build      recipe on the base branch is not in the repo db, or the db holds another
+             version (not-built / repo-stale): build and publish it as is
+  unpublish  stale and nothing to rebuild from (dep-mismatch, or a db entry with no
+             recipe): drop it so the stock build flows through
+  attention  needs a human (upstream merged/closed one of our PRs, upstream older than
+             our base, bad pkgrel, not in any upstream repo); no automatic change
+Config via env: SKIP_RECIPES (space separated), BUILD_NOT_BUILT (yes/no).
+"""
+import json
+import os
+import sys
+import time
+
+HISTORY = 30
+
+
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"recipes": {}}
+
+
+def save(path, data):
+    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def plan(check_path, status_path):
+    check = json.load(open(check_path))
+    skip = set(os.environ.get("SKIP_RECIPES", "").split())
+    build_not_built = os.environ.get("BUILD_NOT_BUILT", "yes") == "yes"
+    by_recipe = {}
+    for row in check["packages"]:
+        key = row["recipe"] or f"(db) {row['name']}"
+        by_recipe.setdefault(key, []).append(row)
+    prs = {}
+    for p in check.get("prs", []):
+        prs.setdefault(p["recipe"], []).append(p)
+    out = []
+    for recipe, rows in sorted(by_recipe.items(), key=lambda kv: (kv[0] in HEAVY, kv[0])):
+        statuses = {r["status"] for r in rows}
+        names = [r["name"] for r in rows]
+        in_repo = [r["name"] for r in rows if r["repo"]]
+        notes = []
+        for p in prs.get(recipe, []):
+            if p["state"] in ("merged", "closed"):
+                notes.append(f"upstream PR {p['pr']} is {p['state']}: re-check the patch carrying it (not dropped automatically)")
+        for r in rows:
+            for m in r.get("dep_mismatch") or []:
+                notes.append(f"{r['name']} needs {m['dep']}={m['want']}, upstream has {m['upstream'] or 'none'}")
+        target = max((r["upstream"] for r in rows if r["upstream"]), default="", key=VerKey)
+        if recipe in skip:
+            action, notes = "attention", notes + [f"skipped by SKIP_RECIPES ({', '.join(sorted(statuses))})"]
+        elif not rows[0]["recipe"]:
+            if statuses & {"rebuild-needed", "dep-mismatch", "upstream-older"}:
+                action = "unpublish"
+                notes.append("in the repo db without a recipe and no longer current")
+            else:
+                action = "attention"
+                notes.append("in the repo db without a recipe")
+        elif "rebuild-needed" in statuses:
+            action = "rebase"
+        elif "dep-mismatch" in statuses:
+            action = "unpublish" if in_repo else "attention"
+        elif statuses & {"bad-pkgrel", "not-upstream", "upstream-older"}:
+            action = "attention"
+            notes.append("status: " + ", ".join(sorted(statuses)))
+        elif statuses & {"not-built", "repo-stale"}:
+            action = "build" if build_not_built else "attention"
+            notes.append("status: " + ", ".join(sorted(statuses)))
+        elif notes:
+            action = "attention"
+        else:
+            action = "current"
+        out.append("\t".join([recipe, action, target, ",".join(in_repo) or "-", ",".join(names),
+                              "; ".join(notes) or "-"]))
+    print("\n".join(out))
+
+
+HEAVY = {"linux-omarchy"}  # built last: an hour of chroot time
+
+
+class VerKey:
+    """Sort key using vercmp semantics (pyalpm-free)."""
+    def __init__(self, v):
+        self.v = v
+
+    def __lt__(self, other):
+        import subprocess
+        return int(subprocess.run(["vercmp", self.v, other.v], capture_output=True, text=True).stdout) < 0
+
+
+def record(status_path, run_id, recipe, result, action, kv):
+    data = load(status_path)
+    entry = {"run": run_id, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "result": result, "action": action}
+    for item in kv:
+        k, _, v = item.partition("=")
+        entry[k] = v
+    rec = data["recipes"].setdefault(recipe, {"history": []})
+    prev = rec.get("last", {})
+    if entry.get("class") == "fetch":
+        entry["consecutive_fetch_failures"] = str(int(prev.get("consecutive_fetch_failures", "0")) + 1)
+    rec["last"] = entry
+    rec["history"] = (rec.get("history", []) + [entry])[-HISTORY:]
+    save(status_path, data)
+
+
+def get(status_path, recipe, key):
+    print(load(status_path)["recipes"].get(recipe, {}).get("last", {}).get(key, ""))
+
+
+def summary(status_path, run_id, out_md):
+    data = load(status_path)
+    lines = ["# omarchy-asus auto-update status", "",
+             f"Last run: `{run_id}` (updated {data.get('updated', '?')}). Machine-readable: `status.json`.", "",
+             "| recipe | result | action | version | details |", "|---|---|---|---|---|"]
+    worst = 0
+    for recipe, rec in sorted(data["recipes"].items()):
+        last = rec.get("last", {})
+        this_run = last.get("run") == run_id
+        res = last.get("result", "?")
+        if this_run and res == "failed":
+            worst = 1
+        elif this_run and res == "attention" and worst == 0:
+            worst = 2
+        details = "; ".join(x for x in (last.get("class") and f"[{last['class']}]", last.get("message"),
+                                        last.get("pr")) if x)
+        lines.append(f"| {recipe} | {res}{'' if this_run else ' (earlier run)'} | {last.get('action', '')} | "
+                     f"{last.get('version', '')} | {details.replace('|', '/')} |")
+    text = "\n".join(lines) + "\n"
+    tmp = out_md + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, out_md)
+    print(text)
+    return worst
+
+
+def verdict_object(path):
+    raw = open(path, errors="replace").read()
+    text = raw
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and "result" in obj:
+            text = obj["result"] or ""
+    except ValueError:
+        pass
+    for start in [i for i, ch in enumerate(text) if ch == "{"][::-1]:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text[start:])
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("verdict") in ("approve", "reject"):
+            return obj
+    return None
+
+
+def replies(path):
+    obj = verdict_object(path) or {}
+    for r in obj.get("replies") or []:
+        if isinstance(r, dict) and str(r.get("id", "")).isdigit() and r.get("reply"):
+            body = str(r["reply"]).replace("\t", " ").replace("\r", "").replace("\n", " / ")
+            print(f"{r['id']}\t{body[:3000]} (auto-update agent)")
+
+
+def review(path):
+    """Accept `claude -p --output-format json` output ({"result": "..."}) or plain text."""
+    raw = open(path, errors="replace").read()
+    text = raw
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and "result" in obj:
+            text = obj["result"] or ""
+            if obj.get("is_error"):
+                print("reject")
+                print(f"review run reported an error: {text[:2000]}")
+                return
+    except ValueError:
+        pass
+    verdict, notes = None, text.strip()
+    # the prompt asks for a final JSON object {"verdict": ..., "notes": ...}
+    for start in [i for i, ch in enumerate(text) if ch == "{"][::-1]:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text[start:])
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("verdict") in ("approve", "reject"):
+            verdict, notes = obj["verdict"], str(obj.get("notes", "")).strip()
+            break
+    print(verdict or "reject")
+    print(notes if verdict else f"could not find a verdict in the review output:\n{notes[:2000]}")
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__)
+        return 1
+    cmd, a = argv[1], argv[2:]
+    if cmd == "plan" and len(a) == 2:
+        plan(*a)
+    elif cmd == "record" and len(a) >= 5:
+        record(a[0], a[1], a[2], a[3], a[4], a[5:])
+    elif cmd == "get" and len(a) == 3:
+        get(*a)
+    elif cmd == "summary" and len(a) == 3:
+        return summary(*a)
+    elif cmd == "review" and len(a) == 1:
+        review(a[0])
+    elif cmd == "replies" and len(a) == 1:
+        replies(a[0])
+    else:
+        print(__doc__)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

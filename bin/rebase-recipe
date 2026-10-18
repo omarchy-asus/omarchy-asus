@@ -1,0 +1,600 @@
+#!/usr/bin/env python3
+"""Rebuild a recipe from a new upstream release plus our declared delta.
+
+Usage: bin/rebase-recipe RECIPE --version UPSTREAM_VER --out DIR
+                         [--verify] [--report FILE] [--force]
+
+RECIPE is a directory name under recipes/. UPSTREAM_VER is the version upstream
+ships (pkgver-pkgrel, from bin/check-upstream). DIR receives the rebased recipe
+(created; must not exist unless --force). Nothing in recipes/ is modified.
+
+The delta: recipes/<name>/DELTA, one directive per line (# comments):
+
+  upstream arch <pkgbase>          Arch packaging git, tag <version> (':' -> '-')
+  upstream omarchy-pkgs <path>     omacom/omarchy-pkgs, newest master commit whose
+                                   <path>/PKGBUILD has that pkgver/pkgrel
+  mode overlay|template            overlay (default): start from upstream's files and
+                                   re-apply the edits below. template: our PKGBUILD is
+                                   kept as is (e.g. a trimmed split package); only
+                                   pkgver/pkgrel and checksums follow upstream.
+  take <glob>...                   overlay: upstream files to copy (default: all but
+                                   .git, .SRCINFO, .nvchecker.toml)
+  keep <file>...                   our own files carried over unchanged (NOTES.md, ...)
+  patch <file> prepare             add to source=() at the end and append
+                                   `patch -Np1 -i "$srcdir/<file>"` to the end of prepare()
+  patch <file> after <glob>        add to source=() after the last entry matching <glob>
+                                   (for recipes whose prepare() applies every *.patch in
+                                   source order, like linux-omarchy)
+  patch <file> end [-- comment]    add at the end of source=(), optionally after a comment
+  patch <file> template            template mode: already wired into our PKGBUILD
+  reference <path>                 also store upstream's PKGBUILD at <path> (for review)
+  fixed-upstream <owner/repo> <commit> <tag-format>
+                                   flag (never drop) when the new release tag, e.g.
+                                   v{pkgver}, contains <commit> (GitHub compare API)
+
+Always: pkgrel = upstream pkgrel + ".1". Checksums: every source file upstream also
+has gets upstream's checksum (so a changed upstream download fails verification
+instead of being re-hashed); our local files are hashed here. No download is needed
+for this step.
+
+--verify runs `makepkg --nobuild --nodeps` on a scratch copy: sources are fetched
+and checked, and prepare() applies every patch. A hunk applied with fuzz is
+reported (fuzz=true) and is not counted as a clean rebase.
+
+Exit: 0 ok; 2 patches don't apply / prepare() failed; 3 upstream fetch failed;
+4 delta or checksum inconsistency; 1 other error. --report writes a JSON summary
+in every case.
+
+Env: OMARCHY_ASUS_ARCH_GIT_URL (default
+https://gitlab.archlinux.org/archlinux/packaging/packages/{pkgbase}.git),
+OMARCHY_ASUS_OMARCHY_PKGS_GIT_URL (default https://github.com/omacom/omarchy-pkgs.git),
+OMARCHY_ASUS_WORKSPACE / OMARCHY_ASUS_DATA as in bin/env.sh.
+"""
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+WORKSPACE = os.environ.get("OMARCHY_ASUS_WORKSPACE") or os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+ARCH_GIT_URL = os.environ.get("OMARCHY_ASUS_ARCH_GIT_URL",
+                              "https://gitlab.archlinux.org/archlinux/packaging/packages/{pkgbase}.git")
+OMARCHY_PKGS_GIT_URL = os.environ.get("OMARCHY_ASUS_OMARCHY_PKGS_GIT_URL", "https://github.com/omacom/omarchy-pkgs.git")
+SUM_ALGOS = ("cksums", "md5sums", "sha1sums", "sha224sums", "sha256sums", "sha384sums", "sha512sums", "b2sums")
+DEFAULT_SKIP = (".git", ".SRCINFO", ".nvchecker.toml")
+BUILD_JUNK = ("src", "pkg")
+
+
+class Fail(Exception):
+    def __init__(self, code, cls, msg):
+        super().__init__(msg)
+        self.code, self.cls = code, cls
+
+
+def data_dir():
+    if os.environ.get("OMARCHY_ASUS_DATA"):
+        return os.environ["OMARCHY_ASUS_DATA"]
+    return os.path.join(os.path.expanduser("~"), ".local/share/omarchy-asus")
+
+
+def run(cmd, cwd=None, check=True, env=None, capture=True):
+    r = subprocess.run(cmd, cwd=cwd, env=env, text=True,
+                       stdout=subprocess.PIPE if capture else None,
+                       stderr=subprocess.STDOUT if capture else None)
+    if check and r.returncode != 0:
+        raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout)
+    return r
+
+
+def git(*args, cwd=None, check=True):
+    return run(["git", *args], cwd=cwd, check=check)
+
+
+# ---------------------------------------------------------------- DELTA parsing
+
+def parse_delta(path):
+    d = {"upstream": None, "mode": "overlay", "take": [], "keep": [], "patches": [],
+         "reference": None, "fixed_upstream": []}
+    with open(path) as f:
+        for n, raw in enumerate(f, 1):
+            line, _, comment = raw.partition(" -- ")
+            line = line.split("#", 1)[0].strip() if not raw.lstrip().startswith("#") else ""
+            if not line:
+                continue
+            w = line.split()
+            k, a = w[0], w[1:]
+            if k == "upstream" and len(a) == 2 and a[0] in ("arch", "omarchy-pkgs"):
+                d["upstream"] = (a[0], a[1])
+            elif k == "mode" and a in (["overlay"], ["template"]):
+                d["mode"] = a[0]
+            elif k in ("take", "keep") and a:
+                d[k] += a
+            elif k == "patch" and len(a) >= 2 and a[1] in ("prepare", "end", "template") \
+                    or k == "patch" and len(a) == 3 and a[1] == "after":
+                d["patches"].append({"file": a[0], "where": a[1], "glob": a[2] if a[1] == "after" else None,
+                                     "comment": comment.strip() or None})
+            elif k == "reference" and len(a) == 1:
+                d["reference"] = a[0]
+            elif k == "fixed-upstream" and len(a) == 3:
+                d["fixed_upstream"].append({"repo": a[0], "commit": a[1], "tag": a[2]})
+            else:
+                raise Fail(4, "delta", f"{path}:{n}: cannot parse: {raw.strip()}")
+    if not d["upstream"]:
+        raise Fail(4, "delta", f"{path}: no 'upstream' line")
+    return d
+
+
+# ---------------------------------------------------------------- upstream fetch
+
+def split_version(ver):
+    epoch, _, rest = ver.rpartition(":")
+    pkgver, _, pkgrel = rest.rpartition("-")
+    return epoch, pkgver, pkgrel
+
+
+def fetch_arch(pkgbase, version, dest, cache):
+    repo = os.path.join(cache, f"arch-{pkgbase}")
+    url = ARCH_GIT_URL.format(pkgbase=pkgbase)
+    tag = version.replace(":", "-")
+    try:
+        if not os.path.isdir(os.path.join(repo, ".git")):
+            shutil.rmtree(repo, ignore_errors=True)
+            git("clone", "--quiet", "--no-checkout", url, repo)
+        git("remote", "set-url", "origin", url, cwd=repo)
+        git("fetch", "--quiet", "--force", "--prune", "--tags", "origin", cwd=repo)
+    except subprocess.CalledProcessError as e:
+        raise Fail(3, "fetch", f"{url}: {e.output.strip()[-500:]}")
+    r = git("rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}", cwd=repo, check=False)
+    if r.returncode != 0:
+        raise Fail(3, "fetch", f"{url}: no tag {tag} (upstream db has it, packaging git does not yet)")
+    commit = r.stdout.strip()
+    export_tree(repo, commit, "", dest)
+    return {"url": url, "ref": tag, "commit": commit}
+
+
+def fetch_omarchy_pkgs(path, version, dest, cache):
+    repo = os.path.join(cache, "omarchy-pkgs")
+    url = OMARCHY_PKGS_GIT_URL
+    path = path.strip("/")
+    try:
+        if not os.path.isdir(os.path.join(repo, ".git")):
+            shutil.rmtree(repo, ignore_errors=True)
+            # blobless: history and trees only; blobs are fetched on demand for one path
+            git("clone", "--quiet", "--filter=blob:none", "--no-checkout", "--single-branch",
+                "--branch", "master", url, repo)
+        git("remote", "set-url", "origin", url, cwd=repo)
+        git("fetch", "--quiet", "--force", "origin", "master", cwd=repo)
+    except subprocess.CalledProcessError as e:
+        raise Fail(3, "fetch", f"{url}: {e.output.strip()[-500:]}")
+    _, want_ver, want_rel = split_version(version)
+    commits = git("log", "--format=%H", "-n", "200", "FETCH_HEAD", "--", f"{path}/PKGBUILD", cwd=repo).stdout.split()
+    for c in commits:
+        text = git("show", f"{c}:{path}/PKGBUILD", cwd=repo, check=False).stdout
+        v = re.search(r"^pkgver=['\"]?([^'\"\s]+)", text, re.M)
+        r = re.search(r"^pkgrel=['\"]?([^'\"\s]+)", text, re.M)
+        if v and r and v.group(1) == want_ver and r.group(1) == want_rel:
+            export_tree(repo, c, path, dest)
+            return {"url": url, "ref": f"{path}@{c[:12]}", "commit": c}
+    raise Fail(3, "fetch", f"{url}: no commit of {path}/PKGBUILD in the last 200 has {want_ver}-{want_rel}")
+
+
+def export_tree(repo, commit, path, dest):
+    """Write commit:path into dest (git archive; blobs are fetched in one batch first)."""
+    os.makedirs(dest)
+    spec = f"{commit}:{path}" if path else commit
+    # batch-prefetch missing blobs of a partial clone (one request instead of one per file)
+    blobs = git("ls-tree", "-r", "--format=%(objectname)", spec, cwd=repo).stdout.split()
+    partial = git("config", "--get", "remote.origin.promisor", cwd=repo, check=False).stdout.strip() == "true"
+    if blobs and partial:
+        subprocess.run(["git", "-c", "fetch.negotiationAlgorithm=noop", "fetch", "--quiet", "--no-tags",
+                        "--no-write-fetch-head", "--filter=blob:none", "origin", *blobs],
+                       cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tar = subprocess.Popen(["git", "archive", "--format=tar", spec], cwd=repo, stdout=subprocess.PIPE)
+    subprocess.run(["tar", "-x", "-C", dest], stdin=tar.stdout, check=True)
+    if tar.wait() != 0:
+        raise Fail(3, "fetch", f"git archive {spec} failed")
+
+
+# ---------------------------------------------------------------- PKGBUILD editing
+
+def array_span(lines, name):
+    """(start, end) line indexes of `name=(...)` (end inclusive), or None."""
+    for i, l in enumerate(lines):
+        if re.match(rf"^{re.escape(name)}=\(", l):
+            depth = 0
+            for j in range(i, len(lines)):
+                depth += strip_comment(lines[j]).count("(") - strip_comment(lines[j]).count(")")
+                if depth <= 0:
+                    return i, j
+            raise Fail(4, "delta", f"unterminated {name}=( array")
+    return None
+
+
+def strip_comment(l):
+    out, q = [], None
+    for ch in l:
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch == "#":
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def entry_name(token):
+    t = token.strip().strip("'\"")
+    t = t.split("::", 1)[0]
+    t = re.sub(r"\{[^}]*\}$", "", t)
+    return t.rsplit("/", 1)[-1]
+
+
+def insert_source(lines, file, where, glob=None, comment=None):
+    span = array_span(lines, "source")
+    if not span:
+        raise Fail(4, "delta", "PKGBUILD has no source=() array")
+    s, e = span
+    first = lines[s]
+    if first.rstrip() != "source=(" and len(lines) > s:
+        indent = " " * len("source=(")
+    else:
+        indent = re.match(r"\s*", lines[s + 1]).group(0) if s + 1 <= e else "  "
+    new = [f"{indent}# {comment}"] if comment else []
+    new.append(f"{indent}{file}")
+    if where == "after":
+        hits = [i for i in range(s, e + 1)
+                if any(fnmatch.fnmatch(entry_name(tok), glob)
+                       for tok in strip_comment(lines[i]).replace("source=(", " ").replace(")", " ").split())]
+        if not hits:
+            raise Fail(2, "patch", f"no source=() entry matches {glob!r} to insert {file} after")
+        i = hits[-1]
+        if i == e and strip_comment(lines[e]).rstrip().endswith(")"):  # closing paren on that line
+            lines[e] = re.sub(r"\)(\s*(#.*)?)$", r"\1", lines[e], count=1)
+            new[-1] += ")"
+        lines[i + 1:i + 1] = new
+        return
+    # end
+    if re.fullmatch(r"\s*\)\s*", lines[e]):
+        lines[e:e] = new
+    else:
+        lines[e] = re.sub(r"\)(\s*(#.*)?)$", r"\1", lines[e], count=1)
+        new[-1] += ")"
+        lines[e + 1:e + 1] = new
+
+
+def append_prepare(lines, text):
+    for i, l in enumerate(lines):
+        if re.match(r"^prepare\(\)\s*\{", l):
+            for j in range(i + 1, len(lines)):
+                if lines[j].rstrip() == "}":
+                    prev = next((lines[k] for k in range(j - 1, i, -1) if lines[k].strip()), "\t")
+                    indent = re.match(r"\s*", prev).group(0) or "\t"
+                    lines.insert(j, f"{indent}{text}")
+                    return
+    raise Fail(4, "delta", "PKGBUILD has no prepare() function to append to")
+
+
+def set_var(lines, name, value):
+    for i, l in enumerate(lines):
+        if re.match(rf"^{name}=", l):
+            lines[i] = f"{name}={value}"
+            return
+    raise Fail(4, "delta", f"PKGBUILD has no {name}=")
+
+
+def get_var(lines, name):
+    for l in lines:
+        m = re.match(rf"^{name}=['\"]?([^'\"\s]+)", l)
+        if m:
+            return m.group(1)
+    return None
+
+
+# ---------------------------------------------------------------- checksums
+
+def srcinfo(d):
+    r = run(["makepkg", "--printsrcinfo"], cwd=d, check=False)
+    if r.returncode != 0:
+        raise Fail(4, "delta", f"makepkg --printsrcinfo failed in {d}: {r.stdout.strip()[-500:]}")
+    arrays = {}
+    for line in r.stdout.splitlines():
+        if line.startswith("pkgname = "):
+            break  # pkgbase section only
+        k, _, v = line.strip().partition(" = ")
+        if v:
+            arrays.setdefault(k, []).append(v)
+    return arrays
+
+
+def src_filename(entry):
+    if "::" in entry:
+        return entry.split("::", 1)[0]
+    e = entry.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    name = e.rsplit("/", 1)[-1]
+    if re.match(r"^(git|hg|svn|bzr|fossil)\+", entry):
+        name = re.sub(r"\.git$", "", name)
+    return name
+
+
+def hash_file(path, algo):
+    if algo == "cksums":
+        return run(["cksum", path]).stdout.split()[0]
+    h = {"md5sums": hashlib.md5, "sha1sums": hashlib.sha1, "sha224sums": hashlib.sha224,
+         "sha256sums": hashlib.sha256, "sha384sums": hashlib.sha384, "sha512sums": hashlib.sha512,
+         "b2sums": hashlib.blake2b}[algo]()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sum_map(info):
+    """{(arch_suffix, filename): {algo: sum}} from a pkgbase srcinfo."""
+    out = {}
+    for key, entries in info.items():
+        m = re.fullmatch(r"source(_\w+)?", key)
+        if not m:
+            continue
+        suf = m.group(1) or ""
+        for algo in SUM_ALGOS:
+            sums = info.get(algo + suf)
+            if not sums:
+                continue
+            if len(sums) != len(entries):
+                raise Fail(4, "sums", f"{algo}{suf}: {len(sums)} sums for {len(entries)} sources")
+            for e, s in zip(entries, sums):
+                out.setdefault((suf, src_filename(e)), {})[algo] = s
+    return out
+
+
+def rewrite_sums(new_dir, up_dir, report):
+    """Rebuild every checksum array of new_dir/PKGBUILD from upstream's sums + local hashes."""
+    up = sum_map(srcinfo(up_dir))
+    info = srcinfo(new_dir)
+    path = os.path.join(new_dir, "PKGBUILD")
+    lines = open(path).read().split("\n")
+    local, reused = set(), set()
+    for key, entries in info.items():
+        m = re.fullmatch(r"source(_\w+)?", key)
+        if not m:
+            continue
+        suf = m.group(1) or ""
+        for algo in SUM_ALGOS:
+            name = algo + suf
+            span = array_span(lines, name)
+            if not span:
+                continue
+            sums = []
+            for e in entries:
+                fn = src_filename(e)
+                have = up.get((suf, fn), {}).get(algo) or up.get(("", fn), {}).get(algo)
+                if have:
+                    sums.append(have)
+                    reused.add(fn)
+                elif os.path.isfile(os.path.join(new_dir, fn)):
+                    sums.append(hash_file(os.path.join(new_dir, fn), algo))
+                    local.add(fn)
+                else:
+                    raise Fail(4, "sums", f"{fn}: not a local file and upstream publishes no {algo} for it")
+            pad = " " * (len(name) + 2)
+            body = [f"{name}=('{sums[0]}'"] + [f"{pad}'{x}'" for x in sums[1:]]
+            body[-1] += ")"
+            s, e2 = span
+            lines[s:e2 + 1] = body
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    report["local_files_hashed"] = sorted(local)
+    return local
+
+
+# ---------------------------------------------------------------- verify
+
+def verify(new_dir, work, report):
+    """makepkg --nobuild in a scratch copy. Returns (ok, fuzz)."""
+    build = os.path.join(work, "verify")
+    shutil.rmtree(build, ignore_errors=True)
+    shutil.copytree(new_dir, build)
+    env = dict(os.environ)
+    srcdest = os.path.join(data_dir(), "srcdest")
+    os.makedirs(srcdest, exist_ok=True)
+    env.update(SRCDEST=srcdest, BUILDDIR=os.path.join(work, "verify-build"), PKGDEST=os.path.join(work, "verify-pkg"))
+    args = ["makepkg", "--nobuild", "--nodeps", "--noconfirm", "--cleanbuild"]
+    if os.path.isdir(os.path.join(build, "keys", "pgp")):
+        gh = os.path.join(work, "verify-gnupg")
+        shutil.rmtree(gh, ignore_errors=True)
+        os.makedirs(gh, mode=0o700)
+        env["GNUPGHOME"] = gh
+        keys = [os.path.join(build, "keys", "pgp", k) for k in os.listdir(os.path.join(build, "keys", "pgp"))]
+        run(["gpg", "--batch", "--quiet", "--import", *keys], env=env)
+    elif re.search(r"^validpgpkeys=", open(os.path.join(build, "PKGBUILD")).read(), re.M):
+        args.append("--skippgpcheck")
+    log = os.path.join(work, "verify.log")
+    with open(log, "w") as lf:
+        r = subprocess.run(args, cwd=build, env=env, stdout=lf, stderr=subprocess.STDOUT, text=True)
+    text = open(log, errors="replace").read()
+    fuzz = sorted(set(re.findall(r"^Hunk #\d+ succeeded at \d+ with fuzz \d+.*$", text, re.M)))
+    offsets = len(re.findall(r"^Hunk #\d+ succeeded at \d+ \(offset", text, re.M))
+    report["verify_log"] = log
+    report["verify_fuzz"] = fuzz
+    report["verify_offset_hunks"] = offsets
+    shutil.rmtree(os.path.join(work, "verify-build"), ignore_errors=True)  # kernel trees are large
+    shutil.rmtree(build, ignore_errors=True)
+    if r.returncode != 0:
+        tail = "\n".join(text.strip().splitlines()[-25:])
+        failed = re.findall(r"^.*(?:FAILED|can't find file|Reversed \(or previously applied\)).*$", text, re.M)
+        if re.search(r"(ERROR: (One or more files did not pass the validity check|Failure while downloading"
+                     r"|One or more PGP signatures could not be verified))", text):
+            if "did not pass the validity check" in text:
+                raise Fail(4, "sums", "upstream source does not match upstream's checksum:\n" + tail)
+            raise Fail(3, "fetch", "source download/signature failed:\n" + tail)
+        raise Fail(2, "patch", ("patch failed: " + "; ".join(failed[:5]) + "\n" if failed else "") + tail)
+    return True, bool(fuzz)
+
+
+# ---------------------------------------------------------------- upstream-fix check
+
+def fixed_upstream_flags(delta, pkgver, report):
+    flags = []
+    for fx in delta["fixed_upstream"]:
+        tag = fx["tag"].format(pkgver=pkgver)
+        url = f"https://api.github.com/repos/{fx['repo']}/compare/{fx['commit']}...{tag}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "omarchy-asus-rebase-recipe",
+                                                       "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                st = json.load(r).get("status")
+        except OSError as e:
+            flags.append(f"could not check whether {fx['repo']}@{fx['commit']} is in {tag}: {e}")
+            continue
+        if st in ("ahead", "identical"):
+            flags.append(f"upstream-fixed: {tag} contains {fx['repo']}@{fx['commit']}; "
+                         "test without our patch and drop it if the bug is gone")
+    report["flags"] += flags
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("recipe")
+    ap.add_argument("--version", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--report")
+    ap.add_argument("--force", action="store_true")
+    args = ap.parse_args()
+
+    report = {"recipe": args.recipe, "upstream_version": args.version, "ok": False, "flags": []}
+    code = 0
+    try:
+        rdir = os.path.join(WORKSPACE, "recipes", args.recipe)
+        delta = parse_delta(os.path.join(rdir, "DELTA"))
+        old_lines = open(os.path.join(rdir, "PKGBUILD")).read().split("\n")
+        old_ver, old_rel = get_var(old_lines, "pkgver"), get_var(old_lines, "pkgrel")
+        report["from"] = f"{old_ver}-{old_rel}"
+        epoch, up_ver, up_rel = split_version(args.version)
+        new_rel = f"{up_rel}.1"
+        report["to"] = f"{epoch + ':' if epoch else ''}{up_ver}-{new_rel}"
+        report["pkgver_changed"] = up_ver != old_ver
+
+        out = os.path.abspath(args.out)
+        if os.path.exists(out):
+            if not args.force:
+                raise Fail(1, "usage", f"{out} exists")
+            shutil.rmtree(out)
+        work = tempfile.mkdtemp(prefix=f"rebase-{args.recipe}.", dir=os.path.dirname(out))
+        cache = os.path.join(data_dir(), "upstream")
+        os.makedirs(cache, exist_ok=True)
+        updir = os.path.join(work, "upstream")
+        kind, where = delta["upstream"]
+        report["upstream_source"] = (fetch_arch if kind == "arch" else fetch_omarchy_pkgs)(where, args.version, updir, cache)
+        up_lines = open(os.path.join(updir, "PKGBUILD")).read().split("\n")
+        if (get_var(up_lines, "pkgver"), get_var(up_lines, "pkgrel")) != (up_ver, up_rel):
+            raise Fail(4, "delta", f"upstream PKGBUILD at {report['upstream_source']['ref']} is "
+                                   f"{get_var(up_lines, 'pkgver')}-{get_var(up_lines, 'pkgrel')}, expected {up_ver}-{up_rel}")
+
+        patch_files = [p["file"] for p in delta["patches"]]
+        for f in patch_files + delta["keep"]:
+            if not os.path.isfile(os.path.join(rdir, f)):
+                raise Fail(4, "delta", f"DELTA names {f}, which is not in recipes/{args.recipe}")
+        os.makedirs(out)
+        if delta["mode"] == "overlay":
+            takes = delta["take"]
+            for root, dirs, files in os.walk(updir):
+                dirs[:] = [x for x in dirs if x != ".git"]
+                for fn in files:
+                    rel = os.path.relpath(os.path.join(root, fn), updir)
+                    if takes:
+                        if not any(fnmatch.fnmatch(rel, g) for g in takes):
+                            continue
+                    elif rel in DEFAULT_SKIP:
+                        continue
+                    os.makedirs(os.path.dirname(os.path.join(out, rel)), exist_ok=True)
+                    shutil.copy2(os.path.join(updir, rel), os.path.join(out, rel))
+            for f in patch_files + delta["keep"] + ["DELTA"]:
+                os.makedirs(os.path.dirname(os.path.join(out, f)) or out, exist_ok=True)
+                if os.path.exists(os.path.join(updir, f)) and f in patch_files:
+                    raise Fail(4, "delta", f"upstream now ships a file named {f}; rename our patch")
+                shutil.copy2(os.path.join(rdir, f), os.path.join(out, f))
+            lines = open(os.path.join(out, "PKGBUILD")).read().split("\n")
+            set_var(lines, "pkgrel", new_rel)
+            for p in delta["patches"]:
+                if p["where"] == "template":
+                    raise Fail(4, "delta", "'patch ... template' only belongs in mode template")
+                if p["where"] == "prepare":
+                    insert_source(lines, p["file"], "end")
+                    append_prepare(lines, f'patch -Np1 -i "$srcdir/{p["file"]}"')
+                else:
+                    insert_source(lines, p["file"], p["where"], p["glob"], p["comment"])
+        else:  # template
+            for root, dirs, files in os.walk(rdir):
+                dirs[:] = [x for x in dirs if x not in BUILD_JUNK]
+                for fn in files:
+                    if fn.endswith((".pkg.tar.zst", ".tar.xz", ".tar.gz", ".log")):
+                        continue
+                    rel = os.path.relpath(os.path.join(root, fn), rdir)
+                    os.makedirs(os.path.dirname(os.path.join(out, rel)), exist_ok=True)
+                    shutil.copy2(os.path.join(rdir, rel), os.path.join(out, rel))
+            lines = open(os.path.join(out, "PKGBUILD")).read().split("\n")
+            set_var(lines, "pkgver", up_ver)
+            set_var(lines, "pkgrel", new_rel)
+        if delta["reference"]:
+            os.makedirs(os.path.dirname(os.path.join(out, delta["reference"])) or out, exist_ok=True)
+            shutil.copy2(os.path.join(updir, "PKGBUILD"), os.path.join(out, delta["reference"]))
+        with open(os.path.join(out, "PKGBUILD"), "w") as f:
+            f.write("\n".join(lines))
+
+        local = rewrite_sums(out, updir, report)
+        # Every file we hash ourselves must be one of ours: never re-hash an upstream download.
+        allowed = set(patch_files) | set(delta["keep"])
+        if delta["mode"] == "template":
+            allowed |= {os.path.relpath(os.path.join(r, f), rdir) for r, _, fs in os.walk(rdir) for f in fs}
+        stray = sorted(local - allowed - set(os.listdir(updir)))
+        if stray:
+            raise Fail(4, "sums", f"sources that are neither upstream's nor declared in DELTA: {stray}")
+
+        old_files = {os.path.relpath(os.path.join(r, f), rdir) for r, d, fs in os.walk(rdir) for f in fs
+                     if "/src/" not in os.path.join(r, f) + "/" and not f.endswith(".pkg.tar.zst")}
+        new_files = {os.path.relpath(os.path.join(r, f), out) for r, _, fs in os.walk(out) for f in fs}
+        report["files_added"] = sorted(new_files - old_files)
+        report["files_removed"] = sorted(old_files - new_files)
+        report["patches"] = patch_files
+        report["out"] = out
+
+        if report["pkgver_changed"]:
+            fixed_upstream_flags(delta, up_ver, report)
+        if args.verify:
+            ok, fuzz = verify(out, work, report)
+            report["verify"] = "ok"
+            report["fuzz"] = fuzz
+            if fuzz:
+                report["flags"].append("a patch applied with fuzz; review before merging")
+        report["ok"] = True
+        shutil.rmtree(updir, ignore_errors=True)
+    except Fail as e:
+        report.update(error_class=e.cls, error=str(e))
+        code = e.code
+    except (OSError, subprocess.CalledProcessError) as e:
+        out_txt = getattr(e, "output", "") or ""
+        report.update(error_class="other", error=f"{e} {out_txt[-500:]}".strip())
+        code = 1
+    if args.report:
+        with open(args.report, "w") as f:
+            json.dump(report, f, indent=2)
+            f.write("\n")
+    print(json.dumps({k: report.get(k) for k in ("recipe", "from", "to", "ok", "error_class", "error", "flags",
+                                                  "verify", "fuzz", "files_added", "files_removed") if k in report},
+                     indent=2))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -54,8 +54,8 @@ real bugs on this hardware.
 - **Kernel 7.2.8-9.2:** an `i2c-designware` RX threshold backport (the touchpad fires about
   52 interrupts per report today) and GA605KM power limits for `asus-armoury`.
 - **Win-lock helper and G16 Control widget:** a toast when Fn+Super locks or unlocks the key.
-- **Daily auto-update pipeline:** rebuild and publish on a schedule, and withdraw anything
-  that fails.
+- **Daily auto-update pipeline:** the code is in this repo (`bin/auto-update`, `systemd/`);
+  it will be installed on the build host soon.
 
 ## Install (G16, experimental)
 
@@ -89,7 +89,9 @@ The repo is listed first in `pacman.conf`, so our build wins even when upstream 
 one. That means we have to keep up. A daily check compares each package with upstream and
 rebuilds it when upstream moves. If a patch stops applying or the build fails, our package is
 withdrawn from the repo and the stock build flows through again. You never get stuck on a
-stale pin. Until the automation is live, that check is run by hand.
+stale pin. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
+pull request, builds it in a clean chroot as CI, and merges and publishes only after
+CodeRabbit and an agent review pass. Until the timer is installed, it is run by hand.
 
 ## Supported hardware
 
@@ -127,7 +129,8 @@ Where our fixes are headed:
 ## Repo layout
 
 - `recipes/<pkg>/`: PKGBUILDs, patches and a `NOTES.md` for each package (base, changes,
-  upstream status, how to rebase).
+  upstream status, how to rebase). `DELTA` declares how the recipe differs from upstream;
+  `LOCAL_ONLY` marks a package with no upstream build.
 - `recipes/omarchy-asus-keyring/`: keyring package (`pacman-key --populate omarchy-asus`),
   packaged like omarchy-keyring. Its `omarchy-asus.gpg` is a copy of `keys/omarchy-asus.asc`.
 - `bin/omarchy-asus-setup`: the one-step setup a user runs on a G16. See LAPTOP-SETUP.md.
@@ -145,6 +148,12 @@ Where our fixes are headed:
   `python3 -I tests/test_issue.py`.
 - `bin/check-upstream [--json]`: compares each package with the version upstream ships and
   the state of its upstream PRs. Exits 10 when something needs action.
+- `bin/rebase-recipe`: rebuilds a recipe from a new upstream release plus its `DELTA` and
+  checks it with `makepkg --nobuild`.
+- `bin/auto-update`: the daily pipeline (rebase PR, chroot build, reviews, merge and
+  publish, or unpublish on failure).
+- `bin/install-auto-update` and `systemd/`: the service and timer units and their installer;
+  [systemd/README.md](systemd/README.md) covers the design and the privilege model.
 - `keys/`: the repo signing key.
 
 Maintained by [@rdoupe](https://github.com/rdoupe) and contributors.

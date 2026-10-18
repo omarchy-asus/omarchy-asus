@@ -3,6 +3,7 @@
 # Usage: bin/publish $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+: "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
 mkdir -p "$REPO_DIR"
 added=()
 for f in "$@"; do

@@ -1,31 +1,55 @@
 #!/bin/bash
 # Build one recipe in a clean chroot copy at low priority; output lands in $STAGE_DIR.
 # Usage: bin/build-pkg recipes/<name> [extra makechrootpkg args]
+#
+# Run as a normal user: makechrootpkg is started through sudo (SUDO="sudo -S"
+# reads the password from stdin). Run as root (bin/auto-update under systemd):
+# BUILD_USER must be set; everything except makechrootpkg runs as that user, and
+# makechrootpkg gets SUDO_USER=$BUILD_USER, which is exactly what an interactive
+# `sudo makechrootpkg` sees (files owned by, and makepkg run as, the build user).
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 recipe=$(realpath "$1"); shift
 name=$(basename "$recipe")
-mkdir -p "$STAGE_DIR" "$LOG_DIR"
-work=$(mktemp -d "$DATA/work-$name.XXXX")
-cp -a "$recipe"/. "$work"/
-rm -rf "$work"/{src,pkg} "$work"/*.pkg.tar.zst
-cd "$work"
+
+if [[ $EUID -eq 0 ]]; then
+    : "${BUILD_USER:?running as root needs BUILD_USER}"
+    [[ $(id -u "$BUILD_USER") -ne 0 ]] || { echo "BUILD_USER must not be root" >&2; exit 1; }
+    user_home=$(getent passwd "$BUILD_USER" | cut -d: -f6)
+    as_user() { runuser -u "$BUILD_USER" -- env HOME="$user_home" USER="$BUILD_USER" LOGNAME="$BUILD_USER" \
+        PATH="$PATH" GNUPGHOME="$GNUPGHOME" "$@"; }
+    as_root() { env SUDO_USER="$BUILD_USER" "$@"; }
+    chroot_user=(-U "$BUILD_USER")
+else
+    as_user() { "$@"; }
+    as_root() { ${SUDO:-sudo} "$@"; }
+    chroot_user=()
+fi
+
+as_user mkdir -p "$STAGE_DIR" "$LOG_DIR"
+work=$(as_user mktemp -d "$DATA/work-$name.XXXX")
 log=$LOG_DIR/$name-$(date +%Y%m%d-%H%M%S).log
-makepkg_args=()
+# Copy and verify as the user: root never reads the recipe tree itself.
 # Recipes with keys/pgp (validpgpkeys): download and verify sources here, with
 # a keyring holding only the recipe's keys, then let the chroot build skip
 # the PGP step (checksums are still checked there).
-if [[ -d keys/pgp ]]; then
-    export GNUPGHOME=$DATA/verify-gnupg/$name
-    rm -rf "$GNUPGHOME"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
-    gpg --batch --quiet --import keys/pgp/*.asc
-    makepkg --verifysource 2>&1 | tee "$log.verify"
-    makepkg_args=(-- --skippgpcheck)
-fi
+as_user bash -euo pipefail -c '
+    recipe=$1 work=$2 log=$3 name=$4 data=$5
+    cp -a "$recipe"/. "$work"/
+    rm -rf "$work"/{src,pkg} "$work"/*.pkg.tar.zst
+    cd "$work"
+    if [[ -d keys/pgp ]]; then
+        export GNUPGHOME=$data/verify-gnupg/$name
+        rm -rf "$GNUPGHOME"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+        gpg --batch --quiet --import keys/pgp/*.asc
+        makepkg --verifysource 2>&1 | tee "$log.verify"
+    fi' _ "$recipe" "$work" "$log" "$name" "$DATA"
+makepkg_args=()
+[[ -d $work/keys/pgp ]] && makepkg_args=(-- --skippgpcheck)
+
 # -c: fresh copy of the root chroot; -u: update it first.
-# makechrootpkg needs root; run it via sudo directly (its own sudo re-exec
-# needs a tty; SUDO="sudo -S" reads the password from stdin). Builds as $SUDO_USER.
-${SUDO:-sudo} nice -n 19 ionice -c 3 makechrootpkg -c -u -r "$CHROOT" "$@" "${makepkg_args[@]}" 2>&1 | tee "$log"
-mv -v "$work"/*.pkg.tar.zst "$STAGE_DIR"/
-rm -rf "$work"
+cd "$work"
+as_root nice -n 19 ionice -c 3 makechrootpkg -c -u -r "$CHROOT" "${chroot_user[@]}" "$@" "${makepkg_args[@]}" 2>&1 |
+    as_user tee "$log"
+as_user bash -c 'mv -v "$1"/*.pkg.tar.zst "$2"/ && rm -rf "$1"' _ "$work" "$STAGE_DIR"
 echo "log: $log"

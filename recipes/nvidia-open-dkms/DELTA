@@ -1,0 +1,10 @@
+# How recipes/nvidia-open-dkms differs from upstream; bin/rebase-recipe re-applies it to
+# each new upstream release (see its --help for the format).
+# Our PKGBUILD is Arch's nvidia-utils trimmed to the nvidia-open-dkms split, so it is a
+# template: only pkgver/pkgrel and the checksums follow upstream. arch/PKGBUILD is
+# refreshed to upstream's so a reviewer can diff what Arch changed.
+upstream arch nvidia-utils
+mode template
+reference arch/PKGBUILD
+patch 0001-nvidia-skip-teardown-in-nv_pci_shutdown-while-hibernate-suspended.patch template
+patch 0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.patch template

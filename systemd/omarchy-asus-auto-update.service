@@ -1,0 +1,23 @@
+[Unit]
+Description=omarchy-asus: rebase, build and publish packages when upstream moves
+Documentation=file:///usr/local/lib/omarchy-asus/systemd/README.md
+Wants=network-online.target
+After=network-online.target
+# A kernel build is an hour of all cores: skip the day's run on battery.
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+# Root-owned copy installed by bin/install-auto-update; it refuses to run as root from
+# anywhere a non-root user can write. Only makechrootpkg runs as root; every other step
+# runs as BUILD_USER (from /etc/omarchy-asus/auto-update.conf) via runuser.
+ExecStart=/usr/local/lib/omarchy-asus/bin/auto-update
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+TimeoutStartSec=8h
+KillMode=control-group
+PrivateTmp=yes
+# makechrootpkg needs systemd-nspawn, btrfs subvolumes, bind mounts and sudo -u, so the
+# usual sandboxing (ProtectSystem, NoNewPrivileges, ProtectHome, ...) would break it.
+SyslogIdentifier=omarchy-asus-auto-update

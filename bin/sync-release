@@ -1,24 +1,146 @@
 #!/bin/bash
 # Mirror $REPO_DIR to the GitHub release that pacman pulls from:
 #   Server = https://github.com/$GH_REPO/releases/download/$GH_TAG
+# Usage: bin/sync-release [--dry-run]
+#        bin/sync-release --pii-scan FILE...   (only run the PII scan below on these files)
+#
+# Incremental, to keep GitHub traffic (and the window where an asset 404s) small:
+# - one API call reads the release's assets (name, size, sha256 digest);
+# - a package already uploaded with the same bytes is skipped; a package filename
+#   that is already uploaded with DIFFERENT bytes is refused (a rebuild must bump
+#   pkgrel: pacman and caches treat a filename as immutable);
+# - new packages and signatures go up first, the db/files (+ .sig) last and only
+#   when they changed, and assets the db no longer names are deleted only after
+#   the new db is up.
 # Release assets can't be symlinks, so the db/files links are uploaded as real
-# files under the names pacman requests. Assets no longer in $REPO_DIR are deleted.
+# files under the names pacman requests.
+#
+# PII guard: before anything is uploaded, the new packages and the db are scanned
+# (strings of every file in them, plus file names) against the denylist
+# ($PII_DENYLIST, default ~/.config/agent-pii/denylist), whole-word and
+# case-insensitive. A hit aborts the sync unless the package file matches a glob
+# in build/pii-allow-packages. Only denylist line numbers are printed, never the
+# entries or the matched text. A missing denylist aborts too (PII_SCAN=off skips
+# the scan, for a machine without one).
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+dry=0 scan_only=0
+case ${1:-} in --dry-run) dry=1 ;; --pii-scan) scan_only=1; shift ;; esac
+run() { if ((dry)); then echo "would run: $*"; else "$@"; fi; }
+
 up=$(mktemp -d); trap 'rm -rf "$up"' EXIT
+# --- PII scan (used below on what is about to become public) ---
+pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 if any is not allowed
+    [[ ${PII_SCAN:-on} == off ]] && { echo "PII scan skipped (PII_SCAN=off)"; return 0; }
+    local list=${PII_DENYLIST:-$HOME/.config/agent-pii/denylist}
+    [[ -r $list ]] || { echo "PII denylist $list is missing; refusing to upload (PII_SCAN=off to skip)" >&2; return 1; }
+    local allow=$WORKSPACE/build/pii-allow-packages globs=() g
+    [[ -r $allow ]] && while IFS= read -r g; do
+        g=${g%%#*}; g=${g%"${g##*[![:space:]]}"}; [[ -n $g ]] && globs+=("$g")
+    done <"$allow"
+    # Whole-word regex per denylist line (same rules as the publish guard's wrap()).
+    local -a res=() nums=()
+    local e pre post i=0 lineno=0
+    while IFS= read -r e; do
+        lineno=$((lineno + 1))
+        [[ $e =~ ^[[:space:]]*(#|$) ]] && continue
+        local alts=("$e")
+        [[ $e == *'|'* && $e =~ ^[[:alnum:]|._@-]+$ ]] && IFS='|' read -ra alts <<<"$e"
+        for a in "${alts[@]}"; do
+            pre=''; post=''
+            [[ $a =~ ^[[:alnum:]] ]] && pre='(^|[^[:alnum:]])'
+            [[ $a =~ [[:alnum:]]$ ]] && post='([^[:alnum:]]|$)'
+            res+=("$pre($a)$post"); nums+=("$lineno")
+        done
+    done <"$list"
+    ((${#res[@]})) || return 0
+    local pattern; pattern=$(IFS='|'; echo "${res[*]}")
+    local f rc=0 m hit
+    for f in "$@"; do
+        declare -A seen=()
+        { bsdtar -tf "$f" 2>/dev/null; bsdtar -xOf "$f" 2>/dev/null | strings -n 4; } |
+            grep -oiE -- "$pattern" >"$up/.hits" || true
+        [[ -s $up/.hits ]] || { unset seen; continue; }
+        while IFS= read -r m; do
+            for i in "${!res[@]}"; do
+                shopt -s nocasematch
+                [[ $m =~ ${res[$i]} ]] && seen[${nums[$i]}]=1
+                shopt -u nocasematch
+            done
+        done < <(sort -u "$up/.hits")
+        rm -f "$up/.hits"
+        hit="$(basename "$f"): denylist line(s) $(printf '%s\n' "${!seen[@]}" | sort -n | paste -sd, -)"
+        local ok=0
+        for g in "${globs[@]}"; do [[ $(basename "$f") == $g ]] && ok=1; done
+        if ((ok)); then echo "PII scan: allowed by build/pii-allow-packages: $hit"
+        else echo "PII scan: BLOCKED $hit" >&2; rc=1; fi
+        unset seen
+    done
+    return $rc
+}
+if ((scan_only)); then pii_scan "$@"; exit; fi
+
 for f in "$REPO_DIR"/*; do
     case $(basename "$f") in *.tar.gz|*.tar.gz.sig|*.old|*.old.sig) continue ;; esac
     cp -L "$f" "$up/$(basename "$f")"
 done
-if ! gh release view "$GH_TAG" -R "$GH_REPO" >/dev/null 2>&1; then
-    gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
+dbfiles=("$REPO_NAME".db "$REPO_NAME".db.sig "$REPO_NAME".files "$REPO_NAME".files.sig)
+for f in "${dbfiles[@]}"; do [[ -e $up/$f ]] || { echo "missing $REPO_DIR/$f" >&2; exit 1; }; done
+# Every package the db names must be here (with its signature), or pacman would 404.
+while IFS= read -r f; do
+    [[ -e $up/$f && -e $up/$f.sig ]] || { echo "db names $f but $REPO_DIR lacks it (or its .sig)" >&2; exit 1; }
+done < <(bsdtar -xOf "$up/$REPO_NAME.db" '*/desc' | awk 'p {print; p=0} /^%FILENAME%$/ {p=1}')
+
+# --- remote state (one API call) ---
+declare -A rsize rdigest
+if ! assets=$(gh release view "$GH_TAG" -R "$GH_REPO" --json assets \
+        --jq '.assets[] | [.name, (.size|tostring), (.digest // "")] | @tsv' 2>/dev/null); then
+    echo "release $GH_TAG does not exist yet"
+    run gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
         --prerelease --title "EXPERIMENTAL omarchy-asus pacman repo ($GH_TAG) - ROG Zephyrus G16 GA605 only" \
         --notes-file "$WORKSPACE/build/release-notes.md"
+    assets=
 fi
-# packages first, db last, so the db never names a package that isn't uploaded yet
-gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "$up"/*.pkg.tar.zst "$up"/*.pkg.tar.zst.sig
-gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "$up/$REPO_NAME".{db,db.sig,files,files.sig}
-for a in $(gh release view "$GH_TAG" -R "$GH_REPO" --json assets --jq '.assets[].name'); do
-    [[ -e $up/$a ]] || gh release delete-asset "$GH_TAG" "$a" -R "$GH_REPO" --yes
+while IFS=$'\t' read -r n s d; do
+    [[ -n $n ]] || continue
+    rsize[$n]=$s; rdigest[$n]=$d
+done <<<"$assets"
+
+same() {  # same <local file>: remote asset of that name has the same bytes
+    local n; n=$(basename "$1")
+    [[ -n ${rsize[$n]:-} ]] || return 1
+    [[ ${rsize[$n]} == "$(stat -c %s "$1")" ]] || return 1
+    [[ -z ${rdigest[$n]} || ${rdigest[$n]} == "sha256:$(sha256sum "$1" | cut -d' ' -f1)" ]]
+}
+
+new_pkgs=() upload_pkgs=() upload_db=()
+for f in "$up"/*.pkg.tar.zst; do
+    [[ -e $f ]] || continue
+    n=$(basename "$f")
+    if same "$f"; then :
+    elif [[ -n ${rsize[$n]:-} ]]; then
+        echo "refusing: $n is already in the release with different bytes; bump pkgrel instead" >&2
+        exit 1
+    else
+        new_pkgs+=("$f"); upload_pkgs+=("$f")
+    fi
+    # A signature may differ for unchanged package bytes (re-signed); both verify.
+    same "$f.sig" || upload_pkgs+=("$f.sig")
 done
-gh release view "$GH_TAG" -R "$GH_REPO" --json assets --jq '.assets[] | "\(.name) \(.size)"'
+for n in "${dbfiles[@]}"; do same "$up/$n" || upload_db+=("$up/$n"); done
+
+# --- PII scan of what is about to become public ---
+scan=("${new_pkgs[@]}")
+((${#upload_db[@]})) && scan+=("$up/$REPO_NAME.db" "$up/$REPO_NAME.files")
+if ((${#scan[@]})); then
+    pii_scan "${scan[@]}" || { echo "sync aborted: nothing uploaded" >&2; exit 1; }
+fi
+
+# --- upload: packages first, db last, then prune ---
+((${#upload_pkgs[@]})) && run gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "${upload_pkgs[@]}"
+((${#upload_db[@]})) && run gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "${upload_db[@]}"
+for a in "${!rsize[@]}"; do
+    [[ -e $up/$a ]] || run gh release delete-asset "$GH_TAG" "$a" -R "$GH_REPO" --yes
+done
+echo "sync: ${#upload_pkgs[@]} package file(s) and ${#upload_db[@]} db file(s) uploaded" \
+    "($(( ${#rsize[@]} )) assets were in the release)"
