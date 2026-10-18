@@ -8,3 +8,4 @@ mode template
 reference arch/PKGBUILD
 patch 0001-nvidia-skip-teardown-in-nv_pci_shutdown-while-hibernate-suspended.patch template
 patch 0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.patch template
+patch 0003-nvidia-modeset-free-semaphore-surface-callback-when-already-signalled.patch template
