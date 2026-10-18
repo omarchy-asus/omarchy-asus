@@ -262,17 +262,20 @@ cr_state() {  # cr_state <pr number> <out json>: CodeRabbit's state for the PR h
     to_file "$out.raw" gh api graphql -F owner="$owner" -F name="$name" -F number="$num" -f query='
 query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
   headRefOid
-  commits(last:1){nodes{commit{oid status{contexts{context state description}}}}}
-  reviews(last:30){nodes{author{login} state commit{oid} body}}
+  commits(last:1){nodes{commit{oid status{contexts{context state description creator{__typename login}}}}}}
+  reviews(last:30){nodes{author{__typename login} state commit{oid} body}}
   reviewThreads(first:100){nodes{isResolved isOutdated
-    comments(first:1){nodes{databaseId author{login} body path line url}}}}}}}' || return 1
+    comments(first:1){nodes{databaseId author{__typename login} body path line url}}}}}}}' || return 1
     as_user python3 -c '
 import json, sys
 raw = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"]
 head = raw["headRefOid"]
-bot = lambda a: (a or {}).get("login", "").startswith("coderabbit")
+# Only the CodeRabbit GitHub App counts: REST shows it as user "coderabbitai[bot]" with
+# type "Bot"; GraphQL as a Bot actor with login "coderabbitai". A user account named
+# coderabbit-something is not it.
+bot = lambda a: (a or {}).get("__typename") == "Bot" and a.get("login") in ("coderabbitai", "coderabbitai[bot]")
 ctx = [c for n in raw["commits"]["nodes"] for c in ((n["commit"].get("status") or {}).get("contexts") or [])
-       if "coderabbit" in c["context"].lower()]
+       if "coderabbit" in c["context"].lower() and bot(c.get("creator"))]
 # "Review completed" counts; "Review skipped: ..." (e.g. base branch not enabled) does not
 status_done = any(c["state"] == "SUCCESS" and "skipped" not in (c.get("description") or "").lower() for c in ctx)
 status_pending = any(c["state"] == "PENDING" for c in ctx)
