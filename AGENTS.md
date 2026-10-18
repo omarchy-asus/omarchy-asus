@@ -36,8 +36,7 @@ change and Codex `gpt-6.1-sol` reviews it**. The author never reviews its own ch
 - Contributors' agents may pair the other way round (Codex writes, Opus reviews).
 - Pull requests from external contributors are reviewed by us, against these rules.
 - The required `ai-review` check on `main` is how this runs on a PR (`bin/ai-review`, #50).
-- `bin/auto-update` still uses one Claude run as both fixer and reviewer; #54 moves its review
-  to Codex Sol.
+- `bin/auto-update` follows it too: Claude only fixes, and ai-review (Codex Sol) gates (#54).
 
 ## Labels
 

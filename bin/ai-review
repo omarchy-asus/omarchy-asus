@@ -471,7 +471,11 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
     cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}-{mb[:12]}.json")
     lock = open(cache + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
-    if not os.path.exists(cache) and os.path.exists(cache + ".unposted") and not force:
+    if force:  # a forced review replaces whatever this head had, posted or not
+        for f in (cache, cache + ".unposted"):
+            if os.path.exists(f):
+                os.remove(f)
+    if not os.path.exists(cache) and os.path.exists(cache + ".unposted"):
         os.replace(cache + ".unposted", cache)  # reviewed, posting failed: post it, don't review again
     if os.path.exists(cache) and not force:
         res = json.load(open(cache))

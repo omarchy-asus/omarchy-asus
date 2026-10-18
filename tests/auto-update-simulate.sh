@@ -163,7 +163,7 @@ EOF
     cat >"$T/cfg/omarchy-asus/auto-update.conf" <<EOF
 GIT_URL=$T/hub.git
 EXTRA_PATH=$B
-CODERABBIT=off
+AI_REVIEW=off
 REVIEW_CMD=$B/agent
 MERGE_MODE=auto
 EOF
