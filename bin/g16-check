@@ -58,8 +58,22 @@ redact() {
   local s=$1
   s=${s//"$HOME"/\~}
   if ((REDACT)); then
-    [[ -n $ME && ${#ME} -ge 2 ]] && s=$(sed -E "s/(^|[^A-Za-z0-9_.-])${ME//./\\.}([^A-Za-z0-9_.-]|$)/\1<user>\2/g" <<<"$s")
-    [[ -n $HOST && ${#HOST} -ge 2 ]] && s=$(sed -E "s/(^|[^A-Za-z0-9_.-])${HOST//./\\.}([^A-Za-z0-9_.-]|$)/\1<host>\2/g" <<<"$s")
+    # Repeat until nothing changes: one sed pass consumes the separator, so
+    # "name name" would keep its second copy. The placeholders have no letters
+    # or digits, so they can never match a name and loop.
+    local word mark prev
+    for word in "$ME:"$'\x01' "$HOST:"$'\x02'; do
+      mark=${word##*:} word=${word%:*}
+      [[ -n $word ]] || continue
+      word=$(sed 's/[][\\.*^$/+?(){}|]/\\&/g' <<<"$word")
+      prev=''
+      while [[ $s != "$prev" ]]; do
+        prev=$s
+        s=$(sed -E "s/(^|[^A-Za-z0-9_.-])${word}([^A-Za-z0-9_.-]|$)/\\1${mark}\\2/g" <<<"$s")
+      done
+    done
+    s=${s//$'\x01'/<user>}
+    s=${s//$'\x02'/<host>}
   fi
   printf '%s' "$s"
 }
@@ -479,8 +493,16 @@ else
     pass "[$REPO] comes before [omarchy] and [core]"
   fi
   if ((pa >= 0)); then
-    sig=$(pacman-conf --repo="$REPO" SigLevel 2>/dev/null | tr '\n' ' ')
-    if [[ $sig == *Required* ]]; then pass "[$REPO] SigLevel: $sig"; else warn "[$REPO] SigLevel is '${sig:-default}', not Required"; fi
+    # pacman-conf prints one Package*/Database* token per line; nothing when the
+    # repo inherits the global SigLevel.
+    sig=$(pacman-conf --repo="$REPO" SigLevel 2>/dev/null)
+    [[ -n $sig ]] || sig=$(pacman-conf SigLevel 2>/dev/null)
+    sig=" $(tr '\n' ' ' <<<"$sig")"
+    if [[ $sig == *" PackageRequired "* && $sig == *" DatabaseRequired "* && $sig != *TrustAll* ]]; then
+      pass "[$REPO] requires signed packages and database (SigLevel:$sig)"
+    else
+      fail "[$REPO] doesn't require signatures on both packages and database (SigLevel:${sig:- default}); use SigLevel = Required"
+    fi
   fi
 fi
 hook=$HOME/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo
