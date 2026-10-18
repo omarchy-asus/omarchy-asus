@@ -1,0 +1,71 @@
+#!/bin/bash
+# Review a pull request with our own Codex session and gate merges on it.
+# Usage: bin/codex-review <pr-number> [--no-post]
+#
+# Checks out the PR head in a throwaway worktree, runs `codex exec` read-only
+# (model $CODEX_REVIEW_MODEL, default gpt-6.1-sol) over the diff against the
+# base, posts the verdict as one PR comment and sets the commit status
+# `codex-review` on the head: success only when the reviewer answers LGTM,
+# failure otherwise. main requires this status, so a PR merges only after a
+# clean review of its exact head; any new push needs a new review.
+#
+# Local paths are scrubbed from the review text and the text is scanned
+# against the PII denylist (whole-word, like the publish guard) before it is
+# posted; a hit means nothing is posted and the review stays local.
+set -euo pipefail
+source "$(dirname "$0")/env.sh"
+pr=${1:?usage: bin/codex-review <pr-number> [--no-post]}
+post=1; [[ ${2:-} == --no-post ]] && post=0
+model=${CODEX_REVIEW_MODEL:-gpt-6.1-sol}
+repo=$GH_REPO
+out=$DATA/reviews; mkdir -p "$out"
+
+head=$(gh pr view "$pr" -R "$repo" --json headRefOid --jq .headRefOid)
+base=$(gh pr view "$pr" -R "$repo" --json baseRefName --jq .baseRefName)
+title=$(gh pr view "$pr" -R "$repo" --json title --jq .title)
+
+wt=$(mktemp -d "$DATA/review-wt.XXXX"); rmdir "$wt"
+cleanup() { git -C "$WORKSPACE" worktree remove --force "$wt" 2>/dev/null || true; }
+trap cleanup EXIT
+git -C "$WORKSPACE" fetch -q "$(git -C "$WORKSPACE" remote get-url hub 2>/dev/null || echo origin)" \
+    "+refs/pull/$pr/head:refs/review/pr-$pr" "+refs/heads/$base:refs/review/base-$pr"
+git -C "$WORKSPACE" worktree add -q --detach "$wt" "refs/review/pr-$pr"
+git -C "$wt" diff "refs/review/base-$pr...HEAD" >"$wt/.review.diff"
+
+prev=$out/pr$pr.final
+prompt="You are a careful senior reviewer for omarchy-asus, an EXPERIMENTAL signed pacman repo of ASUS ROG Zephyrus G16 fixes for Omarchy (Arch-based). Review pull request #$pr ($title). The diff against $base is in .review.diff; the checked-out PR head is the current directory, so read any file you need. Report ONLY real problems: bugs, wrong logic, security issues (privilege, signing, unsafe shell), packaging mistakes (checksums, file conflicts, wrong paths, pkgrel), broken links or references, personal information (hostnames, home paths, emails) in published files, and docs that contradict the code. For each: severity (high/medium/low), file:line, what is wrong, concrete fix. No style nits. If nothing material, answer with exactly: LGTM"
+[[ -s $prev ]] && prompt+=" A previous review of this PR is below; check each earlier finding was fixed, and say briefly which. Previous review: $(head -c 6000 "$prev")"
+
+log=$out/pr$pr.log
+codex exec -m "$model" -s read-only -C "$wt" --skip-git-repo-check "$prompt" </dev/null >"$log" 2>&1 || true
+awk '/^codex$/{buf="";cap=1;next} /^tokens used/{cap=0} cap{buf=buf $0 "\n"} END{printf "%s", buf}' "$log" >"$prev.new"
+[[ -s $prev.new ]] || { echo "codex produced no review (see $log)" >&2; exit 1; }
+sed -i "s|$wt|<repo>|g; s|$HOME|~|g" "$prev.new"
+mv "$prev.new" "$prev"
+
+verdict=failure
+grep -qE '(^|[^[:alpha:]])LGTM\.?[[:space:]]*$' "$prev" && ! grep -qiE '^- \*\*(high|medium)' "$prev" && verdict=success
+echo "== codex-review PR #$pr @ ${head:0:8}: $verdict"; cat "$prev"
+((post)) || exit 0
+
+# PII scan before anything leaves the machine.
+list=${PII_DENYLIST:-$HOME/.config/agent-pii/denylist}
+[[ -r $list ]] || { echo "PII denylist missing; not posting" >&2; exit 1; }
+hits=0
+while IFS= read -r e; do
+    [[ $e =~ ^[[:space:]]*(#|$) ]] && continue
+    alts=("$e"); [[ $e == *'|'* && $e =~ ^[[:alnum:]|._@-]+$ ]] && IFS='|' read -ra alts <<<"$e"
+    for a in "${alts[@]}"; do
+        pre=''; post_=''
+        [[ $a =~ ^[[:alnum:]] ]] && pre='(^|[^[:alnum:]])'
+        [[ $a =~ [[:alnum:]]$ ]] && post_='([^[:alnum:]]|$)'
+        grep -qaiE -- "$pre($a)$post_" "$prev" && hits=$((hits + 1))
+    done
+done <"$list"
+((hits == 0)) || { echo "review text matches the PII denylist ($hits); not posting (kept in $prev)" >&2; exit 1; }
+
+{ echo "**Codex review** (\`$model\`, read-only) of \`${head:0:8}\`: **$verdict**"; echo; cat "$prev"; } >"$out/pr$pr.comment"
+gh pr comment "$pr" -R "$repo" --body-file "$out/pr$pr.comment" >/dev/null
+desc="Codex $model review: $([[ $verdict == success ]] && echo LGTM || echo 'changes requested')"
+gh api -X POST "repos/$repo/statuses/$head" -f state="$verdict" -f context=codex-review -f description="$desc" >/dev/null
+echo "posted comment and status codex-review=$verdict on ${head:0:8}"

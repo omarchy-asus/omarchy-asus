@@ -96,7 +96,7 @@ rebuilds it when upstream moves. If a patch stops applying or the build fails, o
 withdrawn from the repo and the stock build flows through again. You never get stuck on a
 stale pin. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
 pull request, builds it in a clean chroot as CI, and merges and publishes only after
-CodeRabbit and an agent review pass. Until the timer is installed, it is run by hand.
+a Codex review (`bin/codex-review`) passes. Until the timer is installed, it is run by hand.
 
 ## Supported hardware
 

@@ -74,3 +74,9 @@ gh issue comment N -R $R --body-file comment.md
 ```
 
 End the body with `Filed by <agent role>`.
+
+## Pull requests and reviews
+
+- Open PRs ready for review, never as drafts.
+- Reviews come from our own Codex session: run `bin/codex-review <pr>` after every push. It posts the review as a PR comment and sets the `codex-review` commit status on the head. `main` requires that status, so a PR merges only after a clean review (`LGTM`) of its exact head.
+- Fix what the review finds (or answer it in the PR with reasoning), push, and run `bin/codex-review` again.
