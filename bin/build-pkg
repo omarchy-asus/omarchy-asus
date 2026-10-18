@@ -5,8 +5,16 @@
 # Run as a normal user: makechrootpkg is started through sudo (SUDO="sudo -S"
 # reads the password from stdin). Run as root (bin/auto-update under systemd):
 # BUILD_USER must be set; everything except makechrootpkg runs as that user, and
-# makechrootpkg gets SUDO_USER=$BUILD_USER, which is exactly what an interactive
+# makechrootpkg gets SUDO_USER=$BUILD_USER, which is what an interactive
 # `sudo makechrootpkg` sees (files owned by, and makepkg run as, the build user).
+# One difference: makechrootpkg loads the host makepkg config as root with HOME
+# set to SUDO_USER's home (from getent, so overriding HOME does not help), and
+# makepkg's source_makepkg_config then sources ~/.config/pacman/makepkg.conf or
+# ~/.makepkg.conf -- user-writable shell code running as root. It only does that
+# when MAKEPKG_CONF is literally "/etc/makepkg.conf", so the root path passes
+# the same root-owned file spelled /etc/./makepkg.conf: /etc/makepkg.conf and
+# /etc/makepkg.conf.d/*.conf are still read, the user overrides are not.
+# PACKAGER still comes from the chroot's own /etc/makepkg.conf.d.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 recipe=$(realpath "$1"); shift
@@ -18,7 +26,7 @@ if [[ $EUID -eq 0 ]]; then
     user_home=$(getent passwd "$BUILD_USER" | cut -d: -f6)
     as_user() { runuser -u "$BUILD_USER" -- env HOME="$user_home" USER="$BUILD_USER" LOGNAME="$BUILD_USER" \
         PATH="$PATH" GNUPGHOME="$GNUPGHOME" "$@"; }
-    as_root() { env SUDO_USER="$BUILD_USER" "$@"; }
+    as_root() { env -u XDG_CONFIG_HOME SUDO_USER="$BUILD_USER" MAKEPKG_CONF=/etc/./makepkg.conf "$@"; }
     chroot_user=(-U "$BUILD_USER")
 else
     as_user() { "$@"; }
