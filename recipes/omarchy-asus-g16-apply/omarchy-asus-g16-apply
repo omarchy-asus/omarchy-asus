@@ -606,14 +606,25 @@ check_winlock() {
     ST=n/a DETAIL="asus-rog-nkey-winlock is not installed"
     return
   fi
-  if [[ -e $unit ]]; then
+  if [[ -L $unit && $(readlink "$unit") == /dev/null ]]; then
+    ST=local DETAIL="g16-winlock.service is masked by you; left alone"
+    return
+  elif [[ -e $unit ]]; then
     ST=local DETAIL="your own unit $(tilde "$unit") (shadows the packaged one); left alone"
-  elif [[ -L $HOME/.config/systemd/user/default.target.wants/g16-winlock.service ||
-    -L $(r /etc/systemd/user/default.target.wants/g16-winlock.service) ]]; then
-    ST=applied DETAIL="g16-winlock.service enabled"
-  else
-    ST=missing DETAIL="g16-winlock.service is installed but not enabled"
+    return
   fi
+  # The package enables it for every user under graphical-session.target;
+  # older builds and a manual enable may have used default.target.
+  local t dir
+  for t in graphical-session default; do
+    for dir in "$HOME/.config/systemd/user" "$(r /etc/systemd/user)" "$(r /usr/lib/systemd/user)"; do
+      if [[ -L $dir/$t.target.wants/g16-winlock.service ]]; then
+        ST=applied DETAIL="g16-winlock.service enabled ($t.target)"
+        return
+      fi
+    done
+  done
+  ST=missing DETAIL="g16-winlock.service is installed but not enabled"
 }
 
 apply_winlock() {

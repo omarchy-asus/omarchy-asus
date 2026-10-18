@@ -53,8 +53,10 @@ one-shot commands work with any kernel.
   the `uaccess` ACL for whoever is logged in at the seat. No reboot, and no
   `input` group.
 - `g16-winlock.service` ships enabled for every user
-  (`/usr/lib/systemd/user/default.target.wants/`). It starts at your next login,
-  or now with `systemctl --user start g16-winlock.service`.
+  (`/usr/lib/systemd/user/graphical-session.target.wants/`). It starts with your next
+  desktop session (Omarchy's uwsm session activates `graphical-session.target`, so the
+  OSD tools and Wayland variables are in its environment), or now with
+  `systemctl --user start g16-winlock.service`.
 - The default mode is `toast`: Fn+Super locks Super in the keyboard firmware,
   as designed, and you see an OSD saying so.
 

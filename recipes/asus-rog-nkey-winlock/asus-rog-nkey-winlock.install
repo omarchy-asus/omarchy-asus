@@ -1,6 +1,6 @@
 # Re-run the hidraw rules so the keyboard node gets its uaccess ACL now,
 # without a reboot or a replug. The user unit is enabled by the package
-# itself (default.target.wants) and starts at the next login.
+# itself (graphical-session.target.wants) and starts with the next desktop session.
 _g16_winlock_trigger() {
   udevadm control --reload >/dev/null 2>&1 || true
   udevadm trigger --action=change --subsystem-match=hidraw >/dev/null 2>&1 || true

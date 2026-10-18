@@ -38,11 +38,11 @@ source=(
 )
 sha256sums=('9d606b080f560963255c1793b430f323464cacac6f77ec043983c074694bd045'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
-            'c72bbf1adfef8dc1a1af68434315fa334dded3ff850f414572fbcb20911396da'
+            '85955d0a7eb12911ead8c0cb68cd89d356aae02d67d4668f187136be3e767bfd'
             '5cf036a8b150d79f0d8013e82f56396d9d58f0b1e5cf07677de45c613565f575'
             '5af7dddac89ddcf4d6e05f6a4d17dea4fa6503087dd6e25be051e86b9c09c2b7'
             '0d8d7044336e5c55d3cac089fb8d0db7420b38780cef7c4181533441d00da630'
-            '4f901f99a6ac590c014b94e420a4f46a7abee2b34ee67423c829e147918a45f7')
+            '414bcee8427aecabca99a1c65570e040923441319bbd00fdc50d22222741dc3f')
 
 _plugin_id=omarchy-asus.g16
 
@@ -62,8 +62,8 @@ package_asus-rog-nkey-winlock() {
   install -Dm644 g16-winlock.service "$pkgdir/usr/lib/systemd/user/g16-winlock.service"
   # Enabled for every user: it does nothing on machines without the 0b05:19b6
   # keyboard. Opt out per user with `systemctl --user mask g16-winlock.service`.
-  install -dm755 "$pkgdir/usr/lib/systemd/user/default.target.wants"
-  ln -s ../g16-winlock.service "$pkgdir/usr/lib/systemd/user/default.target.wants/g16-winlock.service"
+  install -dm755 "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants"
+  ln -s ../g16-winlock.service "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/g16-winlock.service"
   install -Dm644 README.md "$pkgdir/usr/share/doc/asus-rog-nkey-winlock/README.md"
 }
 

@@ -1,6 +1,7 @@
 [Unit]
 Description=G16 Win-lock toast / auto-unlock helper
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 ExecStart=/usr/bin/g16-winlock watch
@@ -9,4 +10,4 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

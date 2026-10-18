@@ -197,8 +197,10 @@ asusd drop-in already sets these.
 **What:** `systemctl --user enable --now g16-winlock.service`, once
 `asus-rog-nkey-winlock` is installed.
 
-**Why:** that package doesn't enable anything itself. The Fn+Super toast also
-needs `linux-omarchy` 7.2.8-9.1 or later from this repo.
+**Why:** current builds of that package enable it for every user
+(`graphical-session.target.wants`), so this is usually reported as applied; it
+covers older builds that didn't. A masked unit counts as your own setting. The
+Fn+Super toast also needs `linux-omarchy` 7.2.8-9.1 or later from this repo.
 
 **When to remove:** with `asus-rog-nkey-winlock`.
 
@@ -292,5 +294,6 @@ Omarchy:
   busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnBattery b true
   busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform PlatformProfileLinkedEpp b true
   ```
-- winlock: `systemctl --user disable --now g16-winlock.service`.
+- winlock: `systemctl --user disable --now g16-winlock.service`, or
+  `systemctl --user mask --now g16-winlock.service` where the package enabled it.
 - audio-master, rtkit, initramfs-no-nvidia: no undo needed; set Master, remove rtkit, or restore `nvidia.conf` by hand if you want the old state.
