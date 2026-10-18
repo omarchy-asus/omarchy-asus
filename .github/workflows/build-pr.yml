@@ -92,11 +92,15 @@ jobs:
           docker run --rm -v "$PWD:/repo:ro" -v "$PWD/out:/out" "$BUILDER_IMAGE" /repo/ci/build-recipe "$RECIPE"
           ls -l out
           { echo "### $RECIPE"; echo; echo '```'; (cd out && ls -l -- *.pkg.tar.zst); echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # -debug packages (devtools makepkg.conf enables debug) are not
+      # published and are large (hyprland-debug ~120 MB): left out.
       - name: Upload packages (unsigned)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pkgs-${{ matrix.recipe }}
-          path: out/*.pkg.tar.zst
+          path: |
+            out/*.pkg.tar.zst
+            !out/*-debug-*.pkg.tar.zst
           if-no-files-found: error
           retention-days: 3
           compression-level: 0

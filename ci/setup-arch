@@ -32,7 +32,7 @@ cp /usr/share/devtools/makepkg.conf.d/x86_64.conf /etc/makepkg.conf
 mkdir -p /etc/makepkg.conf.d
 cat >/etc/makepkg.conf.d/zz-ci.conf <<EOF
 MAKEFLAGS="-j$(nproc)"
-PACKAGER="omarchy-asus CI (unsigned)"
+PACKAGER="omarchy-asus CI (unsigned) <ci@omarchy-asus.invalid>"
 EOF
 
 if ! id builder >/dev/null 2>&1; then
