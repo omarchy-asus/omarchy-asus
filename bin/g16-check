@@ -22,6 +22,8 @@
 #      and unowned /etc files a repo package would install.
 #   3. Repo state: [omarchy-asus] order, signing key, which packages come from it,
 #      and omarchy-asus-g16-apply --check.
+#   4. Way back: the fallback kernel's headers, NVIDIA DKMS build, Limine entry
+#      and boot record, and a snapshot newer than the last pacman transaction.
 #
 # Exit status: 0 when nothing FAILs, 1 when something does, 2 on bad usage.
 set -uo pipefail
@@ -33,6 +35,8 @@ UDEV_RULE=/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules
 APPLY_SHARE=/usr/share/omarchy-asus-g16-apply
 PACMAN_CONF=/etc/pacman.conf
 SRC_ROOT=${G16_CHECK_SRC_ROOT:-/usr/src} # DKMS source root; the override is for tests only
+LIMINE_CONF=${G16_CHECK_LIMINE_CONF:-/boot/limine.conf} # the override is for tests only
+PACMAN_LOG=${G16_CHECK_PACMAN_LOG:-/var/log/pacman.log} # the override is for tests only
 
 LIVE=0 REDACT=1 COLOR=1
 [[ -t 1 ]] || COLOR=0
@@ -45,7 +49,7 @@ for arg in "$@"; do
       ;;
     --no-redact) REDACT=0 ;;
     --no-color) COLOR=0 ;;
-    -h | --help) sed -n '2,26s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,28s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -703,6 +707,108 @@ if have omarchy-asus-g16-apply; then
   esac
 else
   info "omarchy-asus-g16-apply not installed"
+fi
+
+# ---------------------------------------------------------------------------
+section "4. Way back (fallback kernel, snapshot)"
+info "what you boot or roll back to if the switch goes wrong; WARN only, nothing here is changed."
+
+# A stock kernel next to linux-omarchy: it needs its headers and an NVIDIA DKMS
+# build to reach a desktop, a Limine entry to be picked, and a boot that proved it.
+if ! have pacman; then
+  warn "pacman not found; can't check the fallback kernels"
+else
+  fallbacks=()
+  for k in linux linux-lts linux-zen linux-hardened; do
+    pacman -Q "$k" >/dev/null 2>&1 && fallbacks+=("$k")
+  done
+  ((${#fallbacks[@]})) || warn "no fallback kernel installed (sudo pacman -S linux linux-headers)"
+  limine='' limine_ok=0 boots='' boots_how='' nv_dkms=0 dkms_out=''
+  if ((${#fallbacks[@]})); then
+    if [[ -r $LIMINE_CONF ]] && limine=$(cat "$LIMINE_CONF" 2>/dev/null); then
+      limine_ok=1
+    elif limine=$(try_root cat "$LIMINE_CONF"); then
+      limine_ok=1
+    fi
+    if have last; then
+      boots=$(last -w -x reboot 2>/dev/null) boots_how=last
+    elif have wtmpdb; then
+      boots=$(wtmpdb last reboot 2>/dev/null) boots_how=wtmpdb
+    fi
+    pacman -Q nvidia-open-dkms >/dev/null 2>&1 && nv_dkms=1
+    ((nv_dkms)) && have dkms && dkms_out=$(dkms status 2>/dev/null)
+  fi
+  for k in "${fallbacks[@]}"; do
+    krel=$(pacman -Qlq "$k" 2>/dev/null | sed -n 's|^/usr/lib/modules/\([^/]*\)/vmlinuz$|\1|p' | head -n1)
+    if pacman -Q "$k-headers" >/dev/null 2>&1; then
+      pass "$k: $k-headers installed"
+    else
+      warn "$k: $k-headers not installed (DKMS can't build NVIDIA for it)"
+    fi
+    if [[ -z $krel ]]; then
+      warn "$k: no /usr/lib/modules/<release>/vmlinuz in the package; can't check its NVIDIA DKMS build or boot record"
+    elif ((nv_dkms == 0)); then
+      info "$k: nvidia-open-dkms not installed; no NVIDIA DKMS build to check"
+    elif ! have dkms; then
+      warn "$k: dkms not found, so there is no NVIDIA DKMS build for $krel"
+    # "nvidia/580.82.09, 7.2.8-arch1-1, x86_64: installed"; fixed strings (krel has dots).
+    elif awk -v rel=", $krel," 'index($0, "nvidia") && index($0, rel) && index($0, ": installed") { f = 1 } END { exit !f }' <<<"$dkms_out"; then
+      pass "$k: NVIDIA DKMS build installed for $krel"
+    else
+      warn "$k: no NVIDIA DKMS build installed for $krel (sudo dkms autoinstall -k $krel)"
+    fi
+    if ((limine_ok == 0)); then
+      warn "$k: Limine entry: needs root to read $LIMINE_CONF"
+    elif grep -qE "vmlinuz-${k}([^-A-Za-z0-9_]|$)" <<<"$limine"; then
+      pass "$k: Limine entry for vmlinuz-$k in $LIMINE_CONF"
+    else
+      warn "$k: no Limine entry for vmlinuz-$k in $LIMINE_CONF (sudo limine-update)"
+    fi
+    if [[ -z $krel ]]; then
+      :
+    elif [[ -z $boots_how ]]; then
+      warn "$k: can't check whether $krel has booted (neither last nor wtmpdb found)"
+    # A whole field, so 7.2.8-arch1-1 doesn't count a boot of 7.2.8-arch1-10.
+    elif K=$krel awk '{ for (i = 1; i <= NF; i++) if ($i == ENVIRON["K"]) f = 1 } END { exit !f }' <<<"$boots"; then
+      pass "$k: $krel has booted before"
+    else
+      warn "$k: $krel has never booted here (boot it once before the switch; login records can be rotated)"
+    fi
+  done
+fi
+
+# A snapshot taken after the last package transaction: something to roll back
+# to that has the system as it is now.
+tx_epoch=''
+if [[ -r $PACMAN_LOG ]]; then
+  # "[2026-10-18T12:34:56+0200] [ALPM] transaction completed"
+  last_tx=$(grep -F '[ALPM] transaction completed' "$PACMAN_LOG" 2>/dev/null | tail -n1)
+  if [[ -n $last_tx ]]; then
+    ts=${last_tx#*\[} ts=${ts%%\]*}
+    tx_epoch=$(date -d "$ts" +%s 2>/dev/null) ||
+      tx_epoch=$(date -d "$(sed -E 's/([+-][0-9]{2})([0-9]{2})$/\1:\2/' <<<"$ts")" +%s 2>/dev/null) ||
+      tx_epoch=''
+  fi
+fi
+snap_cmd=(snapper --utc --iso -c root --csvout list --columns "number,date")
+if ! have snapper; then
+  warn "snapper not installed: no snapshots"
+elif ! snaps=$("${snap_cmd[@]}" 2>/dev/null) && ! snaps=$(try_root "${snap_cmd[@]}"); then
+  warn "needs root to list snapshots (sudo snapper -c root list)"
+elif [[ -z $tx_epoch ]]; then
+  warn "can't tell whether a snapshot is newer than the last pacman transaction: no completed transaction found in $PACMAN_LOG"
+else
+  snap_n='' snap_epoch=''
+  while IFS=, read -r num sdate _; do
+    [[ $num =~ ^[0-9]+$ && $num != 0 && -n $sdate ]] || continue
+    e=$(date -u -d "$sdate" +%s 2>/dev/null) || continue
+    if [[ -z $snap_epoch ]] || ((e > snap_epoch)); then snap_n=$num snap_epoch=$e; fi
+  done <<<"$snaps"
+  if [[ -n $snap_epoch ]] && ((snap_epoch >= tx_epoch)); then
+    pass "a snapshot (#$snap_n) is newer than the last pacman transaction"
+  else
+    warn "no snapshot is newer than the last pacman transaction: take one before the switch (sudo snapper -c root create -d 'before omarchy-asus'); omarchy update carries on without one if its snapshot fails"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
