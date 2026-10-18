@@ -8,7 +8,7 @@
 `omarchy-asus` is a signed pacman repo of ASUS-patched builds. It is listed ahead of
 `[omarchy]` and `[core]`, so `omarchy update` installs the patched builds in place of
 the stock ones. Packages are served from the `x86_64` release of
-[rdoupe-omarchy/omarchy-asus-pkgs](https://github.com/rdoupe-omarchy/omarchy-asus-pkgs/releases/tag/x86_64).
+[omarchy-asus/omarchy-asus](https://github.com/omarchy-asus/omarchy-asus/releases/tag/x86_64).
 
 ## 1. Import and locally sign the repo key
 
@@ -18,7 +18,7 @@ Fingerprint: **`0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88`**
 
 ```bash
 curl -fLo /tmp/omarchy-asus.asc \
-  https://raw.githubusercontent.com/rdoupe-omarchy/omarchy-asus-pkgs/omarchy-asus-repo/keys/omarchy-asus.asc
+  https://raw.githubusercontent.com/omarchy-asus/omarchy-asus/main/keys/omarchy-asus.asc
 gpg --show-keys --with-fingerprint /tmp/omarchy-asus.asc   # must show 0B44 FF7C CDD9 29F6 1BE4  A2E4 36FE 6B28 AB24 EC88
 sudo pacman-key --add /tmp/omarchy-asus.asc
 sudo pacman-key --lsign-key 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
@@ -29,7 +29,7 @@ sudo pacman-key --lsign-key 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
 ```ini
 [omarchy-asus]
 SigLevel = Required
-Server = https://github.com/rdoupe-omarchy/omarchy-asus-pkgs/releases/download/$arch
+Server = https://github.com/omarchy-asus/omarchy-asus/releases/download/$arch
 ```
 
 `SigLevel = Required` covers both the packages and the database, because both are signed.
@@ -44,8 +44,8 @@ comes first. Make it executable (`chmod +x`).
 ```bash
 #!/bin/bash
 # Put the omarchy-asus repo ahead of every other repo so its patched builds win
-# over the stock ones. See LAPTOP-SETUP.md on the omarchy-asus-repo branch of
-# rdoupe-omarchy/omarchy-asus-pkgs.
+# over the stock ones. See LAPTOP-SETUP.md in
+# https://github.com/omarchy-asus/omarchy-asus.
 CONF=/etc/pacman.conf
 SNIPPET=/etc/pacman.d/custom-repos.conf
 MARKER="Include = $SNIPPET"

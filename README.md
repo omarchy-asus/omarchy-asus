@@ -17,7 +17,7 @@ patches no longer apply or the build fails, the package is removed from the repo
 build flows through again. Until that automation is live, the check is run by hand.
 
 - **Install:** see [LAPTOP-SETUP.md](LAPTOP-SETUP.md).
-- **Packages:** the [`x86_64` release](https://github.com/rdoupe-omarchy/omarchy-asus-pkgs/releases/tag/x86_64)
+- **Packages:** the [`x86_64` release](https://github.com/omarchy-asus/omarchy-asus/releases/tag/x86_64)
   holds the packages, their signatures and the signed repo database.
 - **Signing key:** `keys/omarchy-asus.asc`, fingerprint `0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88`.
 

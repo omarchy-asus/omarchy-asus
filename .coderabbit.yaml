@@ -5,4 +5,4 @@ reviews:
     enabled: true
     drafts: true
     base_branches:
-      - omarchy-asus-repo
+      - main

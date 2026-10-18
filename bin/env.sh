@@ -8,6 +8,6 @@ REPO_DIR=$DATA/repo/x86_64                # local repo; mirrored to the GitHub r
 STAGE_DIR=$DATA/stage                     # chroot build output before signing
 LOG_DIR=$DATA/logs
 CHROOT=/var/lib/omarchy-asus/chroot       # mkarchroot parent dir (btrfs)
-GH_REPO=rdoupe-omarchy/omarchy-asus-pkgs  # public; pacman pulls from its release
+GH_REPO=omarchy-asus/omarchy-asus         # public; pacman pulls from its release
 GH_TAG=x86_64                             # Server = .../releases/download/$arch
-GH_BRANCH=omarchy-asus-repo
+GH_BRANCH=main
