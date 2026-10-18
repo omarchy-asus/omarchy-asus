@@ -183,10 +183,10 @@ sudo bin/install-auto-update --uninstall --apply
 
 This stops and disables the timer, removes the units and `/usr/local/lib/omarchy-asus`. It keeps the config, the chroot and the user's state.
 
-## ai-review on every PR
+## ai-review
 
-`bin/ai-review` replaces CodeRabbit on every omarchy-asus repo. There is no review service: the
-agent that opens or updates a PR reviews it inline, from its own checkout, on the user's Codex
-login (see AGENTS.md, "Code Review Rules"). This pipeline does the same for its rebase PRs.
-The `ai-review` commit status is the required check on every default branch (enforce_admins on).
+`bin/ai-review` runs on the user's Codex login, from a local checkout; there is no review
+service. This pipeline still gates its own rebase PRs on it. It is no longer a required check:
+the maintainer's own work is reviewed inside clud's `/do` and `/grind` workflow (see AGENTS.md,
+"Who writes, who reviews"), and `ai-review` stays available for outside contributors' PRs.
 `bin/ai-review sweep --dry-run` lists open PRs whose head has no `ai-review` status yet.
