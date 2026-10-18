@@ -24,9 +24,11 @@ chown -R builder: "$work"
 
 builder_home=$(getent passwd builder | cut -d: -f6)
 as_builder() { runuser -u builder -- env -C "$work" HOME="$builder_home" "$@"; }
-if [[ -d $work/keys/pgp ]]; then
-    echo "==> importing $(find "$work/keys/pgp" -name '*.asc' | wc -l) recipe PGP key(s) into the builder keyring"
-    as_builder gpg --batch --quiet --import "$work"/keys/pgp/*.asc
+shopt -s nullglob
+keys=("$work"/keys/pgp/*.asc)
+if (( ${#keys[@]} )); then
+    echo "==> importing ${#keys[@]} recipe PGP key(s) into the builder keyring"
+    as_builder gpg --batch --quiet --import "${keys[@]}"
 fi
 
 echo "==> makepkg -s ($name, MAKEFLAGS from /etc/makepkg.conf.d/zz-ci.conf, $(nproc) CPUs)"
