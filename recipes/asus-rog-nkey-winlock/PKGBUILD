@@ -15,7 +15,8 @@
 # depend, so these packages survive the fix landing in a stock kernel.
 #
 # These are local packages with no upstream build to track, so pkgrel does not
-# use the repo's "<upstream>.1" scheme. See README.md.
+# use the repo's "<upstream>.1" scheme, and the LOCAL_ONLY marker next to this
+# file tells check-upstream there is nothing to compare against. See README.md.
 
 pkgbase=asus-rog-nkey-winlock
 pkgname=(asus-rog-nkey-winlock asus-zephyrus-g16-control)
@@ -35,13 +36,13 @@ source=(
   'g16ctl'
   'README.md'
 )
-sha256sums=('01141d007fd09462c541069bc84e7f38e75d3b0b4a1a0b6a9d98488425d99195'
+sha256sums=('f2fc74cdec96b9030e8090f9f5d83f09ce80b7deaab374863cc101357dfc2955'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
             'c72bbf1adfef8dc1a1af68434315fa334dded3ff850f414572fbcb20911396da'
             '5cf036a8b150d79f0d8013e82f56396d9d58f0b1e5cf07677de45c613565f575'
-            'e4e223beb516b778533b0972f0a417f9959a40e15f255c19de2c0d80ee7fcfd1'
-            '4cfbb5e75ec11b6e8e8af8b04333890adb0ad8669e3810633066545ac1768532'
-            '8ce1bc5457eec7213dec8f0c876b2b83f18ea8ae846ac7f461f944c996eb787c')
+            '62638ce9a74aadf1d143c1363c21fe98dc0b9b63b3b61782b656b06b7e322dd0'
+            'fb4494ca5418e5fe22de36111758354bc03d528f21db284226c8b1d815285b78'
+            '4f901f99a6ac590c014b94e420a4f46a7abee2b34ee67423c829e147918a45f7')
 
 _plugin_id=omarchy-asus.g16
 
