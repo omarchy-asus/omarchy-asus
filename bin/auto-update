@@ -298,7 +298,9 @@ publish_files() {  # publish_files <recipe dir> <version>: publish the staged pa
     done <<<"$members"
     for p in "${partners[@]}"; do
         if [[ $fetched == no ]]; then
-            ugit fetch --quiet origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" || true
+            # a stale origin/$BASE_BRANCH could approve a partner whose recipe changed (or got a HOLD)
+            ugit fetch --quiet origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" ||
+                { note publish "cannot fetch $BASE_BRANCH to check the cohort partners of ${dir##*/}: not publishing"; return 1; }
             fetched=yes
         fi
         ptree=$(ugit rev-parse --verify --quiet "origin/$BASE_BRANCH:recipes/$p" 2>/dev/null) || ptree=

@@ -49,6 +49,15 @@ expect "members hyprland: hyprland only" "$(members hyprland)" "hyprland"
 mkdb "$T/no-settings.db.tar.gz" omarchy-4.0.5-1.2 hyprland-0.50-1.1
 expect "members --db without omarchy-settings: omarchy only" \
     "$(members --db "$T/no-settings.db.tar.gz" omarchy)" "omarchy"
+# bin/unpublish: a member a partner's withdrawal already took out is skipped
+expect "members --db --present, both asked, settings gone: omarchy only" \
+    "$(members --db "$T/no-settings.db.tar.gz" --present omarchy-settings omarchy)" "omarchy"
+expect "members --db --present, settings gone: its partner omarchy still goes" \
+    "$(members --db "$T/no-settings.db.tar.gz" --present omarchy-settings)" "omarchy"
+mkdb "$T/no-cohort.db.tar.gz" hyprland-0.50-1.1
+expect "members --db --present, the whole cohort gone: nothing" \
+    "$(members --db "$T/no-cohort.db.tar.gz" --present omarchy omarchy-settings)" ""
+expect "members --present without --db: usage error" "$(status members --present omarchy)" 64
 
 om=$(pkg omarchy-4.0.5-1.2-x86_64.pkg.tar.zst)
 st=$(pkg omarchy-settings-4.0.5-1.2-x86_64.pkg.tar.zst)

@@ -3,10 +3,11 @@
 
 Usage: bin/release-cohort [--cohorts FILE] [--workspace DIR] <command> [args]
 
-  members [--db DB] NAME...
+  members [--db DB [--present]] NAME...
       Print each NAME, then every cohort partner of every NAME, one per line,
       de-duplicated in first-seen order. With --db (a pacman repo db .tar.gz),
-      a partner is printed only if the db holds it; the NAMEs always print.
+      a partner is printed only if the db holds it; the NAMEs always print,
+      unless --present: then only the names the db holds print (none: no output).
   check-publish [--db DB] FILE...
       Refuse (exit 1) a set of package files that would publish a cohort member
       without every partner at the same pkgver-pkgrel, either in the same set
@@ -111,6 +112,8 @@ def partners_of(name, cohorts):
 
 
 def cmd_members(args, cohorts):
+    if args.present and not args.db:
+        raise UsageError("members: --present needs --db")
     in_db = db_versions(args.db) if args.db else None
     seen = []
     for name in args.names:
@@ -124,6 +127,8 @@ def cmd_members(args, cohorts):
                 continue
             seen.append(partner)
     for name in seen:
+        if args.present and name not in in_db:
+            continue
         print(name)
     return 0
 
@@ -265,6 +270,7 @@ def main(argv):
     members = sub.add_parser("members", add_help=False)
     members.add_argument("-h", "--help", action=DocHelp)
     members.add_argument("--db")
+    members.add_argument("--present", action="store_true")
     members.add_argument("names", nargs="+")
     publish = sub.add_parser("check-publish", add_help=False)
     publish.add_argument("-h", "--help", action=DocHelp)
