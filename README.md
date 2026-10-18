@@ -59,6 +59,11 @@ real bugs on this hardware.
   your own config or `/etc` (iGPU video decode, HDMI cursor, speaker level, rtkit, asusd,
   Win-lock). Settings you already have are left alone. See
   [its README](recipes/omarchy-asus-g16-apply/README.md).
+- **Patched `omarchy` + `omarchy-settings` 4.0.5-1.1 (experimental):** stock 4.0.5 plus the
+  fork's fixes that live in Omarchy's own scripts, config and migrations. These cover ROG
+  power-profile ownership, USB-C power policy, quiet fans on battery, the HDMI cursor, iGPU
+  video decode, ALC285 volume, rtkit, NVIDIA initramfs and four perf fixes. They arrive with
+  `omarchy update`. Staged only, not published yet ([notes](recipes/omarchy/NOTES.md)).
 - **Daily auto-update pipeline:** the code is in this repo (`bin/auto-update`, `systemd/`);
   it will be installed on the build host soon.
 

@@ -1,0 +1,351 @@
+From 20f7ec56da1a684ac9bcced8d88bdc789d1df7df Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:26:17 -0400
+Subject: [PATCH 04/18] Stop the idle fans on battery on the ROG Zephyrus G16
+ GA605KM
+
+In balanced its fans spin at 2000-3800 rpm even idle and cool. On battery
+in balanced, set only the asus-wmi profile handler to quiet and leave
+amd-pmf on balanced: the fans stop (~0.8 W saved) and the CPU still
+boosts fully. A helper with a two-argument sudoers grant does the write,
+only when the state changes, since each write wakes the dGPU for ~20 s.
+
+Backport to v4.0.5: v4.0.5's omarchy-powerprofiles-set does not refresh the
+shell's battery service after a set (no `omarchy-shell -q battery
+refreshPowerProfile`, which is quattro-only), so the quiet-fans call goes right
+after powerprofilesctl set without that line.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: c55ffe2b0b6ad1a81bd012dc5130294b36544556
+Backport-of: 2abed31b3cbf71db54d64a6a34dbe24120b6c30c (fixup)
+
+(cherry picked from commit c55ffe2b0b6ad1a81bd012dc5130294b36544556)
+---
+ bin/omarchy-powerprofiles-asus-quiet-fans | 118 +++++++++++++++++
+ bin/omarchy-powerprofiles-set             |  10 ++
+ etc/sudoers.d/omarchy-asus-quiet-fans     |   6 +
+ test/shell.d/asus-quiet-fans-test.sh      | 153 ++++++++++++++++++++++
+ 4 files changed, 287 insertions(+)
+ create mode 100755 bin/omarchy-powerprofiles-asus-quiet-fans
+ create mode 100644 etc/sudoers.d/omarchy-asus-quiet-fans
+ create mode 100755 test/shell.d/asus-quiet-fans-test.sh
+
+diff --git a/bin/omarchy-powerprofiles-asus-quiet-fans b/bin/omarchy-powerprofiles-asus-quiet-fans
+new file mode 100755
+index 00000000..cf83bba2
+--- /dev/null
++++ b/bin/omarchy-powerprofiles-asus-quiet-fans
+@@ -0,0 +1,118 @@
++#!/bin/bash
++
++# omarchy:summary=Stop the idle fans of the ROG Zephyrus G16 GA605KM on battery without slowing it down
++# omarchy:args=on|off
++# omarchy:requires-sudo=true
++# omarchy:hidden=true
++
++set -euo pipefail
++
++# The GA605KM has two platform profile handlers, and the balanced profile
++# keeps its fans at ~2000-3800 rpm even when idle and cool. The fan floor comes
++# from the ASUS handler (asus-wmi), the clock limits from the AMD one
++# (amd-pmf). With asus-wmi on quiet and amd-pmf left on balanced the fans stop
++# and the CPU still boosts to its full clock, which saved ~0.8 W on battery
++# (A/B, 3 of 4 rounds); the full quiet profile also stops the fans but caps the
++# CPU at 2 GHz. power-profiles-daemon reads the mixed state as "custom" and
++# keeps its own profile, balanced.
++#
++# on  - on battery, with both handlers on balanced: set asus-wmi to quiet.
++# off - undo exactly that mixed state; leave any other state alone.
++#
++# Each profile write makes the firmware wake the discrete GPU for ~20 s, so
++# this writes only when the state has to change.
++
++# Root never resolves a helper out of a dev checkout on sudo's secure_path,
++# and tests point the paths below into a fixture only as an ordinary user.
++if (( EUID == 0 )); then
++  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
++  sys=/sys
++else
++  sys="${OMARCHY_SYS_ROOT:-/sys}"
++fi
++
++# The path etc/sudoers.d/omarchy-asus-quiet-fans names.
++PACKAGED_PATH=/usr/bin/omarchy-powerprofiles-asus-quiet-fans
++
++usage() {
++  echo "Usage: omarchy-powerprofiles-asus-quiet-fans on|off" >&2
++  exit 1
++}
++
++(( $# == 1 )) || usage
++case "$1" in
++  on | off) mode=$1 ;;
++  *) usage ;;
++esac
++
++product=""
++read -r product <"$sys/class/dmi/id/product_name" 2>/dev/null || true
++[[ $product == *GA605KM* ]] || exit 0
++
++handler() {
++  local dir name
++  for dir in "$sys"/class/platform-profile/platform-profile-*; do
++    name=""
++    read -r name <"$dir/name" 2>/dev/null || true
++    if [[ $name == "$1" ]]; then
++      printf '%s\n' "$dir"
++      return 0
++    fi
++  done
++  return 1
++}
++
++on_battery() {
++  local supply online type
++  for supply in "$sys"/class/power_supply/*; do
++    type="" online=""
++    read -r type <"$supply/type" 2>/dev/null || true
++    [[ $type == "Mains" ]] || continue
++    read -r online <"$supply/online" 2>/dev/null || true
++    [[ $online == "1" ]] && return 1
++  done
++  return 0
++}
++
++asus=$(handler asus-wmi) || exit 0
++amd=$(handler amd-pmf) || exit 0
++read -r asus_profile <"$asus/profile"
++read -r amd_profile <"$amd/profile"
++
++if [[ $mode == "on" ]]; then
++  current=balanced target=quiet
++  # Quiet on AC would slow the fans while the machine runs at full power.
++  on_battery || exit 0
++else
++  current=quiet target=balanced
++fi
++[[ $asus_profile == "$current" && $amd_profile == "balanced" ]] || exit 0
++
++if (( EUID != 0 )) && [[ -z ${OMARCHY_SYS_ROOT:-} ]]; then
++  # Runs on every power source change from the shell, which has no terminal
++  # to ask for a password in. The sudoers grant covers exactly on and off; if
++  # it is missing, ask in a terminal and otherwise leave the fans as they are
++  # rather than raise a password dialog on every plug.
++  if [[ -x $PACKAGED_PATH ]] && sudo -n "$PACKAGED_PATH" "$mode" 2>/dev/null; then
++    exit 0
++  elif [[ -x $PACKAGED_PATH && -t 0 ]]; then
++    exec sudo "$PACKAGED_PATH" "$mode"
++  else
++    # Say why once per boot, in the journal: a checkout linked with `omarchy
++    # dev link` has neither the packaged helper nor the sudoers grant until the
++    # omarchy package is built from it (omarchy-dev-pkg-test).
++    flag="${XDG_RUNTIME_DIR:-/tmp}/omarchy-powerprofiles-asus-quiet-fans.skipped"
++    if [[ ! -e $flag ]]; then
++      : >"$flag" 2>/dev/null || true
++      if [[ -x $PACKAGED_PATH ]]; then
++        reason="its sudoers grant in /etc/sudoers.d is missing"
++      else
++        reason="$PACKAGED_PATH is not installed"
++      fi
++      logger -t omarchy-powerprofiles-asus-quiet-fans "fans left as they are: $reason (install the omarchy package, or omarchy-dev-pkg-test from a dev checkout)" 2>/dev/null || true
++    fi
++    exit 0
++  fi
++fi
++
++printf '%s\n' "$target" >"$asus/profile"
+diff --git a/bin/omarchy-powerprofiles-set b/bin/omarchy-powerprofiles-set
+index 5d67f819..e06e05b1 100755
+--- a/bin/omarchy-powerprofiles-set
++++ b/bin/omarchy-powerprofiles-set
+@@ -78,6 +78,16 @@ fi
+ 
+ powerprofilesctl set "$profile" || exit
+ 
++# The G16 GA605KM's fans run at idle in balanced; on battery they can stop
++# without slowing the CPU. Leaving battery or balanced undoes it.
++if omarchy-hw-match "GA605KM"; then
++  if [[ $action == "battery" && $profile == "balanced" ]]; then
++    omarchy-powerprofiles-asus-quiet-fans on || true
++  else
++    omarchy-powerprofiles-asus-quiet-fans off || true
++  fi
++fi
++
+ if [[ -n $requested_profile ]]; then
+   mkdir -p "$state_dir"
+   printf '%s\n' "$requested_profile" >"$state_file"
+diff --git a/etc/sudoers.d/omarchy-asus-quiet-fans b/etc/sudoers.d/omarchy-asus-quiet-fans
+new file mode 100644
+index 00000000..8e4e23c9
+--- /dev/null
++++ b/etc/sudoers.d/omarchy-asus-quiet-fans
+@@ -0,0 +1,6 @@
++# The power profile follows the power source from the shell, which has no
++# terminal for a password, so the ROG Zephyrus G16 GA605KM's quiet battery
++# fans must not stop for one. The rule names both arguments whole (no
++# wildcard), and the helper writes only the ASUS platform profile handler, only
++# between balanced and quiet, and only on that model.
++%wheel ALL=(root) NOPASSWD: /usr/bin/omarchy-powerprofiles-asus-quiet-fans on, /usr/bin/omarchy-powerprofiles-asus-quiet-fans off
+diff --git a/test/shell.d/asus-quiet-fans-test.sh b/test/shell.d/asus-quiet-fans-test.sh
+new file mode 100755
+index 00000000..07cc797f
+--- /dev/null
++++ b/test/shell.d/asus-quiet-fans-test.sh
+@@ -0,0 +1,153 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++helper="$ROOT/bin/omarchy-powerprofiles-asus-quiet-fans"
++sudoers_file="$ROOT/etc/sudoers.d/omarchy-asus-quiet-fans"
++rule='%wheel ALL=(root) NOPASSWD: /usr/bin/omarchy-powerprofiles-asus-quiet-fans on, /usr/bin/omarchy-powerprofiles-asus-quiet-fans off'
++
++# Exactly the two whole commands. Dropping the arguments, which sudoers reads
++# as "any arguments", would let the grant carry anything the helper accepts
++# later.
++rules=$(grep -vE '^[[:space:]]*(#|$)' "$sudoers_file")
++[[ $rules == "$rule" ]] ||
++  fail "quiet fans sudoers file carries exactly the on and off rule" "got: $rules"
++if command -v visudo >/dev/null; then
++  visudo -cf "$sudoers_file" >/dev/null || fail "quiet fans sudoers rule parses"
++fi
++grep -Fx 'PACKAGED_PATH=/usr/bin/omarchy-powerprofiles-asus-quiet-fans' "$helper" >/dev/null ||
++  fail "the helper elevates the path the sudoers rule names"
++grep -F 'sudo -n "$PACKAGED_PATH" "$mode"' "$helper" >/dev/null ||
++  fail "the helper takes the grant without prompting"
++# Without the packaged helper or the grant (a dev-linked checkout) the fans are
++# left alone, and the journal says why once per boot.
++grep -F 'logger -t omarchy-powerprofiles-asus-quiet-fans' "$helper" >/dev/null &&
++  grep -F 'omarchy-powerprofiles-asus-quiet-fans.skipped' "$helper" >/dev/null ||
++  fail "a missing helper or grant is logged once instead of skipped silently"
++gated=$(grep -A1 -E '^if \(\( EUID == 0 \)\); then$' "$helper" || true)
++[[ $gated == *"export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin"* ]] ||
++  fail "the helper pins PATH to system directories when it holds root"
++if grep -E '^[^#]*\bomarchy-[a-z]' "$helper" | grep -v 'omarchy-powerprofiles-asus-quiet-fans' >/dev/null; then
++  fail "the helper calls no other omarchy command, which root could resolve from a checkout"
++fi
++pass "the sudoers grant covers on and off of one packaged helper"
++
++tmp_dir=$(mktemp -d)
++trap 'rm -rf "$tmp_dir"' EXIT
++# Toggle flags live under $HOME; keep the developer's own out of the test.
++export HOME="$tmp_dir/home"
++mkdir -p "$HOME"
++
++sys="$tmp_dir/sys"
++amd="$sys/class/platform-profile/platform-profile-0"
++asus="$sys/class/platform-profile/platform-profile-1"
++mkdir -p "$sys/class/dmi/id" "$amd" "$asus" "$sys/class/power_supply/ACAD" "$sys/class/power_supply/BAT1"
++printf 'ROG Zephyrus G16 GA605KM_GA605KM\n' >"$sys/class/dmi/id/product_name"
++printf 'amd-pmf\n' >"$amd/name"
++printf 'asus-wmi\n' >"$asus/name"
++printf 'Mains\n' >"$sys/class/power_supply/ACAD/type"
++printf 'Battery\n' >"$sys/class/power_supply/BAT1/type"
++
++state() {
++  chmod u+w "$amd/profile" "$asus/profile" 2>/dev/null || true
++  printf '%s\n' "$1" >"$asus/profile"
++  printf '%s\n' "$2" >"$amd/profile"
++  printf '%s\n' "$3" >"$sys/class/power_supply/ACAD/online"
++}
++
++# A write the helper should not make fails here, and the helper with it.
++frozen() {
++  chmod a-w "$amd/profile" "$asus/profile"
++}
++
++fans() {
++  OMARCHY_SYS_ROOT="$sys" "$helper" "$@"
++}
++
++profiles() {
++  printf '%s %s\n' "$(<"$asus/profile")" "$(<"$amd/profile")"
++}
++
++state balanced balanced 0
++fans on
++[[ $(profiles) == "quiet balanced" ]] || fail "on battery the ASUS handler goes quiet and the AMD one stays balanced" "got: $(profiles)"
++frozen
++fans on || fail "a second on writes nothing"
++pass "on battery in balanced the fans go quiet once"
++
++state balanced balanced 1
++frozen
++fans on || fail "on AC nothing is written"
++state performance performance 0
++frozen
++fans on || fail "outside balanced nothing is written"
++state quiet low-power 0
++frozen
++fans on || fail "the full quiet profile is left alone"
++pass "quiet fans apply only on battery with both handlers balanced"
++
++state quiet balanced 1
++fans off
++[[ $(profiles) == "balanced balanced" ]] || fail "off restores balanced" "got: $(profiles)"
++frozen
++fans off || fail "off from balanced writes nothing"
++state performance performance 1
++frozen
++fans off || fail "off leaves a profile set by someone else alone"
++pass "off undoes only the mixed quiet state"
++
++state balanced balanced 0
++printf 'ROG Zephyrus G14 GA403UV\n' >"$sys/class/dmi/id/product_name"
++frozen
++fans on || fail "another model is left alone"
++printf 'ROG Zephyrus G16 GA605KM_GA605KM\n' >"$sys/class/dmi/id/product_name"
++rm -r "$asus"
++fans on || fail "a GA605KM without the ASUS handler is left alone"
++pass "only a GA605KM with both handlers is touched"
++
++for bad in "" quiet normal "on off" "../x" "on;id"; do
++  if fans "$bad" >/dev/null 2>&1; then
++    fail "the helper rejects '$bad'"
++  fi
++done
++if fans on off >/dev/null 2>&1; then
++  fail "the helper rejects more than one argument"
++fi
++pass "the helper accepts nothing but on or off"
++
++# omarchy-powerprofiles-set picks on or off from the source and the profile.
++mkdir -p "$tmp_dir/bin" "$tmp_dir/state"
++cat >"$tmp_dir/bin/omarchy-hw-match" <<'EOF'
++#!/bin/bash
++[[ ${STUB_PRODUCT:-GA605KM} == *"$1"* ]]
++EOF
++cat >"$tmp_dir/bin/omarchy-hw-asus-rog-usbc-power" <<'EOF'
++#!/bin/bash
++exit 1
++EOF
++cat >"$tmp_dir/bin/omarchy-powerprofiles-asus-quiet-fans" <<'EOF'
++#!/bin/bash
++printf '%s\n' "$1" >>"$FANS_LOG"
++EOF
++cat >"$tmp_dir/bin/powerprofilesctl" <<'EOF'
++#!/bin/bash
++[[ $1 == "list" ]] && printf '  power-saver:\n* balanced:\n  performance:\n'
++exit 0
++EOF
++chmod +x "$tmp_dir/bin/"*
++
++set_profile() {
++  : >"$tmp_dir/fans"
++  FANS_LOG="$tmp_dir/fans" PATH="$tmp_dir/bin:$ROOT/bin:$PATH" \
++    OMARCHY_POWERPROFILES_STATE_DIR="$tmp_dir/state" \
++    "$ROOT/bin/omarchy-powerprofiles-set" "$@"
++  cat "$tmp_dir/fans"
++}
++
++[[ $(set_profile battery) == "on" ]] || fail "battery in balanced turns quiet fans on"
++[[ $(set_profile ac) == "off" ]] || fail "AC turns quiet fans off"
++[[ $(set_profile battery power-saver) == "off" ]] || fail "power-saver on battery turns quiet fans off"
++[[ $(STUB_PRODUCT=GA403UV set_profile battery balanced) == "" ]] || fail "other machines never call the helper"
++pass "omarchy-powerprofiles-set turns quiet fans on only for balanced on battery on the GA605KM"
+-- 
+2.55.0
+

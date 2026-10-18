@@ -1,0 +1,60 @@
+From 603657feb7b65123b2fccbc2e9b129fc79288f1d Mon Sep 17 00:00:00 2001
+From: Zack Siri
+Date: Fri, 18 Sep 2026 23:08:43 +0700
+Subject: [PATCH 10/18] Install rtkit so PipeWire gets realtime priority
+
+PipeWire requests realtime scheduling from RealtimeKit at startup, but
+rtkit is not a dependency of Arch's pipewire packages and no rlimits
+fallback is configured either. On a stock install every data-loop thread
+runs at SCHED_OTHER nice 0, so audio produces xruns and crackling under
+sustained CPU/GPU load (gaming, GPU inference, compilation).
+
+Ship rtkit in the base package list, and repair existing installs with a
+migration that installs it and restarts the running audio units so the
+priority request succeeds without a reboot.
+
+Fixes #9390
+
+Upstream: omacom/omarchy#12428
+Backport-of: c906004781964cf0575b404e88d5d15872363aa4
+
+(cherry picked from commit c906004781964cf0575b404e88d5d15872363aa4)
+---
+ install/omarchy-other.packages |  1 +
+ migrations/1789747667.sh       | 12 ++++++++++++
+ 2 files changed, 13 insertions(+)
+ create mode 100644 migrations/1789747667.sh
+
+diff --git a/install/omarchy-other.packages b/install/omarchy-other.packages
+index d859fca8..cdc848ea 100644
+--- a/install/omarchy-other.packages
++++ b/install/omarchy-other.packages
+@@ -36,6 +36,7 @@ pipewire-alsa
+ pipewire-jack
+ pipewire-pulse
+ qt6-wayland
++rtkit
+ snapper
+ sof-firmware
+ thermald
+diff --git a/migrations/1789747667.sh b/migrations/1789747667.sh
+new file mode 100644
+index 00000000..dac3cfca
+--- /dev/null
++++ b/migrations/1789747667.sh
+@@ -0,0 +1,12 @@
++echo "Install rtkit so PipeWire gets realtime priority"
++
++# PipeWire requests realtime scheduling via RealtimeKit at startup, but rtkit
++# is not a dependency of Arch's pipewire packages and the rlimits fallback is
++# not configured either (see https://github.com/omacom/omarchy/issues/9390).
++# Without it, audio threads run at SCHED_OTHER nice 0 and produce xruns under
++# sustained load.
++omarchy-pkg-add rtkit
++
++# rtkit only takes effect when PipeWire re-requests priority at startup.
++# Restart the audio units if they are running; harmless when idle or as root.
++systemctl --user try-restart pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null || true
+-- 
+2.55.0
+

@@ -1,0 +1,380 @@
+From 33b1c9b04589334a370a1f2abcf40424da925303 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:29:49 -0400
+Subject: [PATCH 17/18] Reconcile clamshell state on logind events instead of a
+ 2s poll
+
+While a laptop was docked, the monitor watcher re-ran the whole clamshell sync
+(hyprctl, jq, flock and friends) every 2 seconds as a backstop for lid drift
+the Hyprland binds can miss, mostly across suspend. That cost about 6% of a
+core for as long as an external display was attached.
+
+Listen to logind instead: its PrepareForSleep(false) resume signal and its
+LidClosed property change are exactly the moments that drift can happen.
+Each runs the same sync with the delayed retries a monitor change gets.
+
+Backport to v4.0.5: v4.0.5 has no lid-inhibit test (quattro-only), so its
+gdbus stub is dropped; the watcher itself applies unchanged.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: 092904dd002552e851bd40439f197b1465c2381b
+Backport-of: 58a8d2e1f7cef99c6096b2f6a3929b5649bbbed2 (fixup)
+
+(cherry picked from commit 092904dd002552e851bd40439f197b1465c2381b)
+---
+ bin/omarchy-hyprland-monitor-watch        |  62 ++++---
+ test/shell.d/monitor-modeless-test.sh     |   7 +
+ test/shell.d/monitor-recovery-test.sh     |  12 +-
+ test/shell.d/monitor-watch-events-test.sh | 196 ++++++++++++++++++++++
+ 4 files changed, 247 insertions(+), 30 deletions(-)
+ create mode 100644 test/shell.d/monitor-watch-events-test.sh
+
+diff --git a/bin/omarchy-hyprland-monitor-watch b/bin/omarchy-hyprland-monitor-watch
+index 33e8f2c5..8ecb5a5f 100755
+--- a/bin/omarchy-hyprland-monitor-watch
++++ b/bin/omarchy-hyprland-monitor-watch
+@@ -60,48 +60,55 @@ recover_modeless() {
+   ) 9>"$MODELESS_LOCK" &
+ }
+ 
+-poll_clamshell_state() {
++# Lid open/close itself is handled by the Hyprland "switch:*:Lid Switch" binds.
++# Logind's lid state and its resume signal are the backstop for drift those binds
++# can miss (e.g. across suspend/resume), so reconcile on those events instead of
++# polling: a docked laptop used to run the whole clamshell sync every 2 seconds.
++# LidClosed is announced with PropertiesChanged (logind marks only Docked and
++# OnExternalPower as not emitting). If logind restarts, the monitor exits and is
++# started again.
++logind_events() {
++  local monitor=""
++
++  trap '[[ -n $monitor ]] && kill "$monitor" 2>/dev/null; exit 0' TERM
+   while true; do
+-    sleep 2
+-    sync_clamshell
++    gdbus monitor --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1 2>/dev/null &
++    monitor=$!
++    wait "$monitor"
++    monitor=""
++    sleep 5
+   done
+ }
+ 
+-# The internal panel is only ever disabled while a laptop is docked (lid shut
+-# with an external monitor active), so the reconciliation poll only has anything
+-# to reconcile in that window. Run it while docked, stop it when undocked, and
+-# never on a machine without a lid. Lid open/close itself is handled by the
+-# Hyprland "switch:*:Lid Switch" binds; this poll is the recovery backstop for
+-# drift those binds can miss (e.g. across suspend/resume).
+-poll_pid=""
+-sync_poll_state() {
+-  if omarchy-hw-laptop && omarchy-hyprland-monitor-external-active; then
+-    if [[ -z $poll_pid ]] || ! kill -0 "$poll_pid" 2>/dev/null; then
+-      poll_clamshell_state &
+-      poll_pid=$!
+-    fi
+-  elif [[ -n $poll_pid ]]; then
+-    kill "$poll_pid" 2>/dev/null
+-    poll_pid=""
++# Hyprland's events and logind's, in one stream. Logind's watcher goes with the
++# compositor's socket, which is what ends this loop. Only a laptop has a lid to
++# drift, as before, when the backstop only ran on a docked laptop.
++events() {
++  local logind_pid=""
++
++  if omarchy-hw-laptop; then
++    logind_events &
++    logind_pid=$!
+   fi
++
++  socat -U - "UNIX-CONNECT:$SOCKET"
++
++  [[ -n $logind_pid ]] && kill "$logind_pid" 2>/dev/null
+ }
+ 
+ sync_clamshell_after_monitor_change
+-sync_poll_state
+ recover_modeless
+ 
+-# Process substitution (not a pipe) keeps this loop in the main shell, so
+-# sync_poll_state can start and stop the background poll as monitors come and go.
++# Process substitution (not a pipe) keeps this loop, and the recovery jobs it
++# starts, in the main shell.
+ while read -r event; do
+   case "$event" in
+     monitoradded\>\>*|monitoraddedv2\>\>*)
+       sync_clamshell_after_monitor_change
+-      sync_poll_state
+       recover_modeless
+       ;;
+     monitorremoved\>\>*|monitorremovedv2\>\>*)
+       sync_clamshell_after_monitor_change
+-      sync_poll_state
+       recover_modeless
+       ;;
+     # A reload while the monitor is unpowered leaves it at 0x0 with no hotplug
+@@ -110,5 +117,10 @@ while read -r event; do
+     configreloaded\>\>*)
+       recover_modeless
+       ;;
++    # Outputs come back from a suspend at their own pace, and a lid moved while
++    # the binds could not act leaves the panel in the wrong state.
++    *".PrepareForSleep (false,)"* | *PropertiesChanged*"'LidClosed'"*)
++      sync_clamshell_after_monitor_change
++      ;;
+   esac
+-done < <(socat -U - "UNIX-CONNECT:$SOCKET")
++done < <(events)
+diff --git a/test/shell.d/monitor-modeless-test.sh b/test/shell.d/monitor-modeless-test.sh
+index decee06c..e71ecf6e 100755
+--- a/test/shell.d/monitor-modeless-test.sh
++++ b/test/shell.d/monitor-modeless-test.sh
+@@ -84,6 +84,13 @@ cat >"$fake_bin/socat" <<'SH'
+ exec cat "$OMARCHY_TEST_EVENTS"
+ SH
+ 
++# Logind's events are not part of this test; keep the watcher off the real bus.
++cat >"$fake_bin/gdbus" <<'SH'
++#!/bin/bash
++
++exec sleep infinity
++SH
++
+ # A desktop, so the clamshell half of the watcher stays idle.
+ cat >"$fake_bin/omarchy-hw-laptop" <<'SH'
+ #!/bin/bash
+diff --git a/test/shell.d/monitor-recovery-test.sh b/test/shell.d/monitor-recovery-test.sh
+index 3401abc1..3f9b7af9 100755
+--- a/test/shell.d/monitor-recovery-test.sh
++++ b/test/shell.d/monitor-recovery-test.sh
+@@ -18,7 +18,6 @@ utilities="$ROOT/default/hypr/bindings/utilities.lua"
+ 
+ grep -F 'sleep "$delay"' "$monitor_watch" >/dev/null
+ grep -F 'for delay in 1 3 7; do' "$monitor_watch" >/dev/null
+-grep -F 'poll_clamshell_state &' "$monitor_watch" >/dev/null
+ grep -F 'flock -n 9' "$monitor_watch" >/dev/null
+ grep -F 'omarchy-hyprland-monitor-clamshell' "$monitor_watch" >/dev/null
+ pass "monitor watcher retries internal monitor recovery after removal"
+@@ -31,10 +30,13 @@ grep -F 'sync_clamshell_after_monitor_change' "$monitor_watch" >/dev/null
+ grep -F 'socat -U - "UNIX-CONNECT:$SOCKET"' "$monitor_watch" >/dev/null
+ pass "monitor watcher reconciles clamshell state on startup"
+ 
+-grep -F 'omarchy-hw-laptop && omarchy-hyprland-monitor-external-active' "$monitor_watch" >/dev/null
+-grep -F 'sync_poll_state' "$monitor_watch" >/dev/null
+-grep -F 'done < <(socat' "$monitor_watch" >/dev/null
+-pass "clamshell poll only runs on a docked laptop, not desktops or undocked laptops"
++# Drift the lid binds miss is caught by logind's lid and resume events (see
++# monitor-watch-events-test.sh), not by a timer.
++! grep -E '^[[:space:]]*sleep 2$' "$monitor_watch" >/dev/null ||
++  fail "monitor watcher does not poll the clamshell state"
++grep -F 'PrepareForSleep (false,)' "$monitor_watch" >/dev/null
++grep -F "'LidClosed'" "$monitor_watch" >/dev/null
++pass "monitor watcher reconciles on logind lid and resume events instead of polling"
+ 
+ # Recovery costs a reload per attempt, so it must not run on a healthy machine,
+ # and only one loop may run across the events that start it.
+diff --git a/test/shell.d/monitor-watch-events-test.sh b/test/shell.d/monitor-watch-events-test.sh
+new file mode 100644
+index 00000000..bb45e126
+--- /dev/null
++++ b/test/shell.d/monitor-watch-events-test.sh
+@@ -0,0 +1,196 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++test_tmp=$(mktemp -d)
++watch_pid=""
++events_fd=""
++logind_fd=""
++
++# The watcher forks delayed clamshell retries and the recovery loop; kill the
++# whole tree so nothing outlives the test tree it runs against.
++stop_watcher() {
++  local child descendants
++
++  if [[ -n $watch_pid ]]; then
++    descendants=$(pgrep -P "$watch_pid" 2>/dev/null || true)
++    for child in $descendants; do
++      descendants+=" $(pgrep -P "$child" 2>/dev/null || true)"
++    done
++
++    kill -KILL "$watch_pid" 2>/dev/null || true
++    wait "$watch_pid" 2>/dev/null || true
++    for child in $descendants; do
++      kill -KILL "$child" 2>/dev/null || true
++    done
++    watch_pid=""
++  fi
++
++  if [[ -n $events_fd ]]; then
++    exec {events_fd}>&-
++    events_fd=""
++  fi
++
++  if [[ -n $logind_fd ]]; then
++    exec {logind_fd}>&-
++    logind_fd=""
++  fi
++
++  return 0
++}
++
++cleanup() {
++  stop_watcher
++  rm -rf "$test_tmp"
++}
++trap cleanup EXIT
++
++fake_bin="$test_tmp/bin"
++mkdir -p "$fake_bin"
++
++events="$test_tmp/events"
++logind="$test_tmp/logind"
++sync_log="$test_tmp/sync.log"
++gdbus_args="$test_tmp/gdbus-args"
++
++cat >"$fake_bin/socat" <<'SH'
++#!/bin/bash
++
++exec cat "$OMARCHY_TEST_EVENTS"
++SH
++
++# Stands in for `gdbus monitor` on logind, printing what the test feeds it.
++cat >"$fake_bin/gdbus" <<'SH'
++#!/bin/bash
++
++printf '%s\n' "$*" >"$OMARCHY_TEST_GDBUS_ARGS"
++exec cat "$OMARCHY_TEST_LOGIND"
++SH
++
++cat >"$fake_bin/omarchy-hyprland-monitor-clamshell" <<'SH'
++#!/bin/bash
++
++printf 'sync\n' >>"$OMARCHY_TEST_SYNC_LOG"
++SH
++
++for command in omarchy-system-lid-inhibit omarchy-hyprland-monitor-external-active omarchy-hw-laptop; do
++  cat >"$fake_bin/$command" <<'SH'
++#!/bin/bash
++
++exit 0
++SH
++done
++
++# Every monitor reports a mode, so the recovery loop stays quiet.
++cat >"$fake_bin/omarchy-hyprland-monitor-modeless" <<'SH'
++#!/bin/bash
++
++exit 1
++SH
++
++chmod +x "$fake_bin"/*
++
++syncs() {
++  [[ -f $sync_log ]] || { echo 0; return; }
++  wc -l <"$sync_log"
++}
++
++await_syncs() {
++  local waited
++
++  for (( waited = 0; waited < 40; waited++ )); do
++    (( $(syncs) >= $1 )) && return 0
++    sleep 0.05
++  done
++
++  return 1
++}
++
++rm -f "$events" "$logind" "$sync_log"
++mkfifo "$events" "$logind"
++
++PATH="$fake_bin:$PATH" \
++XDG_RUNTIME_DIR="$test_tmp" \
++HYPRLAND_INSTANCE_SIGNATURE=test \
++OMARCHY_TEST_EVENTS="$events" \
++OMARCHY_TEST_LOGIND="$logind" \
++OMARCHY_TEST_GDBUS_ARGS="$gdbus_args" \
++OMARCHY_TEST_SYNC_LOG="$sync_log" \
++  "$ROOT/bin/omarchy-hyprland-monitor-watch" >/dev/null 2>&1 &
++watch_pid=$!
++
++exec {events_fd}>"$events"
++exec {logind_fd}>"$logind"
++
++await_syncs 1 || fail "the watcher reconciles the clamshell state at startup"
++pass "the watcher reconciles the clamshell state at startup"
++
++grep -F -- '--system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1' "$gdbus_args" >/dev/null ||
++  fail "the watcher listens to logind on the system bus" "$(cat "$gdbus_args" 2>/dev/null)"
++pass "the watcher listens to logind on the system bus"
++
++# The startup retries run at 1, 3 and 7 seconds. The old docked poll added a
++# sync every 2 seconds on top; nothing should land between the first two retries.
++sleep 2.6
++(( $(syncs) == 2 )) || fail "the watcher does not poll the clamshell state" "syncs after 2.6s: $(syncs)"
++pass "the watcher does not poll the clamshell state"
++
++before=$(syncs)
++printf '%s\n' "/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (true,)" >&"$logind_fd"
++printf '%s\n' "/org/freedesktop/login1: org.freedesktop.login1.Manager.SessionNew ('3', objectpath '/org/freedesktop/login1/session/_33')" >&"$logind_fd"
++sleep 0.3
++(( $(syncs) == before )) || fail "going to sleep and unrelated logind signals do not reconcile" "$before -> $(syncs)"
++pass "going to sleep and unrelated logind signals do not reconcile"
++
++printf '%s\n' "/org/freedesktop/login1: org.freedesktop.login1.Manager.PrepareForSleep (false,)" >&"$logind_fd"
++await_syncs $(( before + 1 )) || fail "a resume reconciles the clamshell state"
++pass "a resume reconciles the clamshell state"
++
++# Let the resume's own retry settle so the lid's sync is not swallowed by its lock.
++sleep 1.3
++before=$(syncs)
++printf '%s\n' "/org/freedesktop/login1: org.freedesktop.DBus.Properties.PropertiesChanged ('org.freedesktop.login1.Manager', {'LidClosed': <true>}, @as [])" >&"$logind_fd"
++await_syncs $(( before + 1 )) || fail "a lid change reported by logind reconciles the clamshell state"
++pass "a lid change reported by logind reconciles the clamshell state"
++
++before=$(syncs)
++printf 'monitorremovedv2>>1,HDMI-A-1,Display\n' >&"$events_fd"
++await_syncs $(( before + 1 )) || fail "a monitor removal still reconciles the clamshell state"
++pass "a monitor removal still reconciles the clamshell state"
++
++# The compositor going away ends the watcher, and logind's listener with it.
++exec {events_fd}>&-
++events_fd=""
++for (( waited = 0; waited < 40; waited++ )); do
++  kill -0 "$watch_pid" 2>/dev/null || break
++  sleep 0.05
++done
++! kill -0 "$watch_pid" 2>/dev/null || fail "the watcher exits when the compositor's event socket closes"
++wait "$watch_pid" 2>/dev/null || true
++watch_pid=""
++pass "the watcher exits when the compositor's event socket closes"
++
++# A machine without a lid has nothing for logind's lid and resume events to fix,
++# so no logind monitor runs there.
++printf '#!/bin/bash\n\nexit 1\n' >"$fake_bin/omarchy-hw-laptop"
++rm -f "$events" "$gdbus_args"
++mkfifo "$events"
++PATH="$fake_bin:$PATH" \
++XDG_RUNTIME_DIR="$test_tmp" \
++HYPRLAND_INSTANCE_SIGNATURE=test \
++OMARCHY_TEST_EVENTS="$events" \
++OMARCHY_TEST_LOGIND="$logind" \
++OMARCHY_TEST_GDBUS_ARGS="$gdbus_args" \
++OMARCHY_TEST_SYNC_LOG="$sync_log" \
++  "$ROOT/bin/omarchy-hyprland-monitor-watch" >/dev/null 2>&1 &
++watch_pid=$!
++exec {events_fd}>"$events"
++sleep 0.5
++[[ ! -e $gdbus_args ]] || fail "a machine without a lid runs no logind monitor"
++exec {events_fd}>&-
++events_fd=""
++wait "$watch_pid" 2>/dev/null || true
++watch_pid=""
++pass "a machine without a lid runs no logind monitor"
+-- 
+2.55.0
+

@@ -1,0 +1,173 @@
+From 73f831c275f56db8df30f325167637d53c663fd3 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:28:04 -0400
+Subject: [PATCH 09/18] Set the ASUS ROG ALC285 Master to full scale under the
+ soft mixer
+
+The ASUS ROG audio setup moves volume into software (api.alsa.soft-mixer)
+and then set the ALC285 hardware Master to 80%. The soft mixer never
+touches Master again, and fix-mic.sh's alsactl store keeps the 80%, so
+the volume slider's 100% sat 12.75 dB below full scale on a 0-87 codec.
+
+Install now unmutes Master at 100%. Existing installs are not changed:
+raising Master during an update would make the speakers jump 12.75 dB.
+Instead, a migration finds installs still at the exact old 80% with the
+soft-mixer drop-in in place, and tells the user once, in the update
+output and as a notification, the amixer command that lifts the cap.
+
+Fixes #11046
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: ae5acf14ea0bec7c0488434f1f09648cdd1d11ae
+
+(cherry picked from commit ae5acf14ea0bec7c0488434f1f09648cdd1d11ae)
+---
+ install/user/hardware/asus/fix-audio-mixer.sh |  6 +-
+ migrations/1792162887.sh                      | 22 +++++
+ test/shell.d/asus-rog-master-volume-test.sh   | 87 +++++++++++++++++++
+ 3 files changed, 113 insertions(+), 2 deletions(-)
+ create mode 100644 migrations/1792162887.sh
+ create mode 100644 test/shell.d/asus-rog-master-volume-test.sh
+
+diff --git a/install/user/hardware/asus/fix-audio-mixer.sh b/install/user/hardware/asus/fix-audio-mixer.sh
+index dd30c496..9d779011 100644
+--- a/install/user/hardware/asus/fix-audio-mixer.sh
++++ b/install/user/hardware/asus/fix-audio-mixer.sh
+@@ -5,9 +5,11 @@ if omarchy-hw-asus-rog; then
+   cp "$OMARCHY_PATH/default/wireplumber/wireplumber.conf.d/alsa-soft-mixer.conf" ~/.config/wireplumber/wireplumber.conf.d/
+   rm -rf ~/.local/state/wireplumber/default-routes
+ 
+-  # Unmute the Master control on the ALC285 card (often muted by default)
++  # Unmute the Master control on the ALC285 card (often muted by default).
++  # The soft mixer never touches it again, so anything below 100% caps what
++  # the volume slider calls full volume.
+   card=$(aplay -l 2>/dev/null | grep -i "ALC285" | head -1 | sed 's/card \([0-9]*\).*/\1/')
+   if [[ -n $card ]]; then
+-    amixer -c "$card" set Master 80% unmute 2>/dev/null
++    amixer -c "$card" set Master 100% unmute 2>/dev/null
+   fi
+ fi
+diff --git a/migrations/1792162887.sh b/migrations/1792162887.sh
+new file mode 100644
+index 00000000..4be616d2
+--- /dev/null
++++ b/migrations/1792162887.sh
+@@ -0,0 +1,22 @@
++echo "Tell ASUS ROG ALC285 users how to lift the 80% Master cap"
++
++# Install used to set the ALC285 hardware Master to 80% under the soft mixer,
++# which never moves it again, so the volume slider's 100% sat 12.75 dB below
++# full scale on a 0-87 codec. New installs now use 100%. Raising it here would
++# make the speakers jump in volume during an update, so this leaves Master alone
++# and only says how to raise it. omarchy-migrate shows the echo once in the
++# update terminal; the notification outlives that scrollback.
++# Without the soft mixer PipeWire drives Master and 80% is just the volume.
++
++omarchy-hw-asus-rog || exit 0
++[[ -f ~/.config/wireplumber/wireplumber.conf.d/alsa-soft-mixer.conf ]] || exit 0
++
++card=$(aplay -l 2>/dev/null | grep -i "ALC285" | head -1 | sed 's/^card [0-9]*: \([^ ]*\) .*/\1/' || true)
++[[ -n $card ]] || exit 0
++
++[[ $(amixer -c "$card" sget Master 2>/dev/null) == *"[80%]"* ]] || exit 0
++
++command="amixer -c $card set Master 100% unmute"
++echo "  The speaker hardware volume is capped at 80%, so 100% on the volume slider is 12.75 dB below full volume."
++echo "  To lift the cap (speakers get louder at the same slider setting), run: $command"
++omarchy-notification-send "Speaker volume is capped at 80%" "100% on the slider is 12.75 dB below full volume. To lift the cap (louder at the same setting), run: $command" || true
+diff --git a/test/shell.d/asus-rog-master-volume-test.sh b/test/shell.d/asus-rog-master-volume-test.sh
+new file mode 100644
+index 00000000..3002b55e
+--- /dev/null
++++ b/test/shell.d/asus-rog-master-volume-test.sh
+@@ -0,0 +1,87 @@
++#!/bin/bash
++#
++# On ASUS ROG laptops the soft mixer leaves the ALC285 hardware Master where
++# install set it, so install must set it to full scale. The migration must never
++# change the level on an existing install: it only tells installs still at the
++# old 80% how to raise it, once, and stays silent everywhere else.
++
++set -euo pipefail
++
++source "$(dirname "${BASH_SOURCE[0]}")/base-test.sh"
++
++leaf="$ROOT/install/user/hardware/asus/fix-audio-mixer.sh"
++migration="$ROOT/migrations/1792162887.sh"
++test_dir=$(mktemp -d)
++trap 'rm -rf "$test_dir"' EXIT
++
++stub_bin="$test_dir/bin"
++calls="$test_dir/calls"
++mkdir -p "$stub_bin"
++
++cat >"$stub_bin/omarchy-hw-asus-rog" <<'STUB'
++#!/bin/bash
++[[ ${IS_ROG:-1} == 1 ]]
++STUB
++cat >"$stub_bin/aplay" <<'STUB'
++#!/bin/bash
++[[ ${HAS_ALC285:-1} == 1 ]] && echo "card 2: Generic_1 [HD-Audio Generic], device 0: ALC285 Analog [ALC285 Analog]"
++exit 0
++STUB
++cat >"$stub_bin/omarchy-notification-send" <<'STUB'
++#!/bin/bash
++printf 'notify %s\n' "$*" >>"$CALLS"
++STUB
++cat >"$stub_bin/amixer" <<'STUB'
++#!/bin/bash
++printf 'amixer %s\n' "$*" >>"$CALLS"
++if [[ $* == *"sget Master"* ]]; then
++  echo "Simple mixer control 'Master',0"
++  echo "  Mono: Playback ${MASTER:-70 [80%] [-12.75dB] [on]}"
++fi
++exit 0
++STUB
++chmod +x "$stub_bin"/*
++
++soft_mixer="$test_dir/home/.config/wireplumber/wireplumber.conf.d/alsa-soft-mixer.conf"
++mkdir -p "$(dirname "$soft_mixer")"
++touch "$soft_mixer"
++
++run() {
++  local script="$1"
++  shift
++  rm -f "$calls"
++  touch "$calls"
++  env HOME="$test_dir/home" OMARCHY_PATH="$ROOT" CALLS="$calls" PATH="$stub_bin:$PATH" "$@" \
++    bash -euo pipefail "$script" >"$test_dir/out" 2>&1
++}
++
++run "$leaf" || fail "install leaf succeeds on a ROG with an ALC285"
++grep -qx 'amixer -c 2 set Master 100% unmute' "$calls" || fail "install sets Master to full scale" "$(cat "$calls")"
++pass "install unmutes Master at full scale"
++
++never_sets() { ! grep -q '^amixer .*set Master' "$calls" || fail "$1" "$(cat "$calls")"; }
++
++run "$migration" || fail "migration succeeds at the old install level"
++never_sets "migration never changes Master at the old install level"
++grep -q '^notify Speaker volume is capped at 80%.*run: amixer -c Generic_1 set Master 100% unmute$' "$calls" || fail "migration notifies once with the command" "$(cat "$calls")"
++[[ $(grep -c '^notify' "$calls") == 1 ]] || fail "migration sends exactly one notification" "$(cat "$calls")"
++grep -q 'run: amixer -c Generic_1 set Master 100% unmute' "$test_dir/out" || fail "migration prints the command" "$(cat "$test_dir/out")"
++pass "migration leaves the old 80% alone and tells the user the command"
++
++for level in '60 [69%] [-20.25dB] [on]' '87 [100%] [0.00dB] [on]'; do
++  run "$migration" MASTER="$level" || fail "migration succeeds at $level"
++  never_sets "migration never changes Master at $level"
++  ! grep -q '^notify' "$calls" || fail "migration is silent at $level" "$(cat "$calls")"
++done
++pass "migration is silent at a user-chosen level or full scale"
++
++run "$migration" HAS_ALC285=0 || fail "migration succeeds without an ALC285"
++! grep -q -e '^amixer' -e '^notify' "$calls" || fail "migration skips machines without an ALC285" "$(cat "$calls")"
++run "$migration" IS_ROG=0 || fail "migration succeeds off ROG hardware"
++! grep -q -e '^amixer' -e '^notify' "$calls" || fail "migration skips non-ROG machines" "$(cat "$calls")"
++pass "migration only acts on ROG machines with an ALC285"
++
++rm "$soft_mixer"
++run "$migration" || fail "migration succeeds without the soft mixer"
++! grep -q -e '^amixer .*set Master' -e '^notify' "$calls" || fail "migration is silent when PipeWire drives Master" "$(cat "$calls")"
++pass "migration only acts while the soft mixer is in use"
+-- 
+2.55.0
+

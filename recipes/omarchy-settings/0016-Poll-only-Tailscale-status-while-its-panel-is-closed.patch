@@ -1,0 +1,104 @@
+From 28041fc78c0a402bf843dcd70864646ec8a05e30 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:29:31 -0400
+Subject: [PATCH 16/18] Poll only Tailscale status while its panel is closed
+
+Every 30 seconds each bar ran three tailscale clients: status, the exit-node
+list and the account list. Only status feeds the bar icon; exit nodes and
+accounts are shown in the panel alone. Fetch those when the panel opens and
+while it is open, so the background poll is one client.
+
+Backport to v4.0.5: Panel.qml there focuses keyCatcher on open (quattro uses
+panel.loadedContent); only the tailscale.refresh() call is removed.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: 1b7804501d4d8b3855e7f7efbdf3a1e2e9512db8
+
+(cherry picked from commit 1b7804501d4d8b3855e7f7efbdf3a1e2e9512db8)
+---
+ shell/plugins/panels/tailscale/Panel.qml   |  4 +++-
+ shell/plugins/panels/tailscale/Service.qml | 10 ++++++++--
+ test/shell.d/tailscale-test.sh             | 13 +++++++++++++
+ 3 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/shell/plugins/panels/tailscale/Panel.qml b/shell/plugins/panels/tailscale/Panel.qml
+index 5e44883f..6eaf8cc3 100644
+--- a/shell/plugins/panels/tailscale/Panel.qml
++++ b/shell/plugins/panels/tailscale/Panel.qml
+@@ -341,7 +341,6 @@ Panel {
+   onOpenedChanged: if (opened) {
+     cursorActive = false
+     if (panelFlick) panelFlick.contentY = 0
+-    tailscale.refresh()
+     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+   }
+   onPeerIndexChanged: scrollCursorIntoView()
+@@ -355,6 +354,9 @@ Panel {
+   Service {
+     id: tailscale
+     settings: root.settings
++    // Opening the panel refreshes everything it shows, exit nodes and accounts
++    // included; see Service.panelOpen.
++    panelOpen: root.opened
+   }
+ 
+   Connections {
+diff --git a/shell/plugins/panels/tailscale/Service.qml b/shell/plugins/panels/tailscale/Service.qml
+index 13fbfbc5..df217b33 100644
+--- a/shell/plugins/panels/tailscale/Service.qml
++++ b/shell/plugins/panels/tailscale/Service.qml
+@@ -42,6 +42,11 @@ Item {
+   property string lastError: ""
+ 
+   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
++  // Exit nodes and accounts are only shown in the open panel, while the bar
++  // icon needs status alone. Fetch them while the panel is open rather than
++  // spawning two more tailscale clients on every background poll.
++  property bool panelOpen: false
++  onPanelOpenChanged: if (panelOpen) refresh()
+   readonly property bool busy: whichProcess.running || statusProcess.running || mullvadExitNodesProcess.running || accountsProcess.running || actionProcess.running || loginProcess.running || switchProcess.running || operatorProcess.running || exitNodeProcess.running
+   readonly property string userName: Quickshell.env("USER") || Quickshell.env("LOGNAME")
+ 
+@@ -168,7 +173,8 @@ Item {
+       statusProcess.running = true
+       launched = true
+     }
+-    if (!mullvadExitNodesProcess.running) {
++    var panelData = panelOpen || forceAccounts === true
++    if (panelData && !mullvadExitNodesProcess.running) {
+       _mullvadExitNodesOutput = ""
+       _mullvadExitNodesError = ""
+       mullvadExitNodesProcess.command = ["tailscale", "exit-node", "list"]
+@@ -176,7 +182,7 @@ Item {
+       launched = true
+     }
+     var now = Date.now()
+-    var shouldRefreshAccounts = forceAccounts === true || accounts.length === 0 || now - _lastAccountsRefreshMs > 60000
++    var shouldRefreshAccounts = panelData && (forceAccounts === true || accounts.length === 0 || now - _lastAccountsRefreshMs > 60000)
+     if (shouldRefreshAccounts && !accountsProcess.running) {
+       _accountsOutput = ""
+       _accountsError = ""
+diff --git a/test/shell.d/tailscale-test.sh b/test/shell.d/tailscale-test.sh
+index 9c04cca9..832dab6b 100644
+--- a/test/shell.d/tailscale-test.sh
++++ b/test/shell.d/tailscale-test.sh
+@@ -208,3 +208,16 @@ assertDeepEqual(
+ assertDeepEqual(tailscale.parseStatus('{'), { ok: false, unavailable: true, message: 'Status error', error: 'Failed to parse tailscale status' }, 'tailscale reports invalid status JSON')
+ assertDeepEqual(tailscale.parseAccounts('{'), { accounts: [], selectedAccountId: '', selectedAccountLabel: '' }, 'tailscale handles invalid account JSON')
+ JS
++
++# The bar icon needs status alone; exit nodes and accounts belong to the open
++# panel, so a background poll must not spawn their clients.
++service_qml="$ROOT/shell/plugins/panels/tailscale/Service.qml"
++panel_qml="$ROOT/shell/plugins/panels/tailscale/Panel.qml"
++grep -F 'var panelData = panelOpen || forceAccounts === true' "$service_qml" >/dev/null &&
++  grep -F 'if (panelData && !mullvadExitNodesProcess.running) {' "$service_qml" >/dev/null &&
++  grep -F 'var shouldRefreshAccounts = panelData && (' "$service_qml" >/dev/null ||
++  fail "tailscale polls exit nodes and accounts only for the open panel"
++grep -F 'onPanelOpenChanged: if (panelOpen) refresh()' "$service_qml" >/dev/null &&
++  grep -F 'panelOpen: root.opened' "$panel_qml" >/dev/null ||
++  fail "opening the tailscale panel refreshes what it shows"
++pass "tailscale polls exit nodes and accounts only for the open panel"
+-- 
+2.55.0
+

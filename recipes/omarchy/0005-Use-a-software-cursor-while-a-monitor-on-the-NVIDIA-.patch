@@ -1,0 +1,271 @@
+From 6494916356e269f984850dc2091e089ddc4c703f Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:26:37 -0400
+Subject: [PATCH 05/18] Use a software cursor while a monitor on the NVIDIA GPU
+ is plugged into a hybrid laptop
+
+On a hybrid the iGPU renders, but ports such as HDMI are often wired to
+the NVIDIA GPU. A hardware cursor there is copied across GPUs on every
+update; with the NVIDIA driver that blit fails each time (about 74,000
+"cursor blit failed" errors in 20 hours on a ROG Zephyrus G16 GA605KM)
+and aquamarine leaks the buffers of every failed attempt, so Hyprland's
+memory grows while the monitor is plugged in. Hyprland's auto mode only
+switches to a software cursor when NVIDIA is the renderer.
+
+Load default/hypr/hybrid-cursor.lua from nvidia.lua. When an NVIDIA DRM
+card sits next to another vendor's display card, it sets a software
+cursor while a connected monitor's connector belongs to the NVIDIA card
+and goes back to auto when the last one is unplugged, so the panel keeps
+its hardware cursor. It reads cached sysfs only, reacts to monitor,
+start and reload events, and leaves a value the user set alone.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: 942c3e771bfc3ceba6f3007079edc9522463fc75
+
+(cherry picked from commit 942c3e771bfc3ceba6f3007079edc9522463fc75)
+---
+ default/hypr/hybrid-cursor.lua              | 108 ++++++++++++++++++++
+ default/hypr/nvidia.lua                     |   2 +
+ test/shell.d/hw-nvidia-test.sh              |   2 +-
+ test/shell.d/hyprland-hybrid-cursor-test.sh |  90 ++++++++++++++++
+ 4 files changed, 201 insertions(+), 1 deletion(-)
+ create mode 100644 default/hypr/hybrid-cursor.lua
+ create mode 100644 test/shell.d/hyprland-hybrid-cursor-test.sh
+
+diff --git a/default/hypr/hybrid-cursor.lua b/default/hypr/hybrid-cursor.lua
+new file mode 100644
+index 00000000..da81bdf2
+--- /dev/null
++++ b/default/hypr/hybrid-cursor.lua
+@@ -0,0 +1,108 @@
++-- On a hybrid laptop the iGPU renders every frame, but some ports (HDMI on most
++-- gaming laptops) are wired to the NVIDIA GPU. A hardware cursor on such an
++-- output has to be copied across GPUs on every update, and with the NVIDIA
++-- driver that copy fails ("cursor blit failed", hundreds a minute) while each
++-- failed attempt leaks GPU buffers in aquamarine, so Hyprland's memory grows
++-- for as long as the monitor is plugged in. Hyprland's own "auto" only picks a
++-- software cursor when NVIDIA is the renderer, which it is not here.
++--
++-- no_hardware_cursors is global, so use a software cursor only while an output
++-- on the NVIDIA card is connected and go back to auto when it is unplugged; the
++-- laptop panel keeps its hardware cursor the rest of the time. A value the user
++-- sets themselves is left alone.
++
++local drm_path = os.getenv("OMARCHY_DRM_PATH")
++if drm_path == nil or drm_path == "" then
++  drm_path = "/sys/class/drm"
++end
++
++local NVIDIA_VENDOR = "0x10de"
++local AUTO = 2
++local SOFTWARE = 1
++
++-- Reads cached sysfs only: the PCI vendor ID never resumes a sleeping GPU.
++local function card_vendor(card)
++  local file = io.open(drm_path .. "/" .. card .. "/device/vendor", "r")
++  if not file then
++    return nil
++  end
++  local vendor = file:read("*l")
++  file:close()
++  return vendor
++end
++
++local function connector_card(connector)
++  for index = 0, 15 do
++    local file = io.open(drm_path .. "/card" .. index .. "-" .. connector .. "/status", "r")
++    if file then
++      file:close()
++      return "card" .. index
++    end
++  end
++  return nil
++end
++
++-- Hybrid: an NVIDIA card next to a display card from another vendor.
++local function hybrid()
++  local nvidia, other = false, false
++  for index = 0, 15 do
++    local vendor = card_vendor("card" .. index)
++    if vendor == NVIDIA_VENDOR then
++      nvidia = true
++    elseif vendor then
++      other = true
++    end
++  end
++  return nvidia and other
++end
++
++if not hybrid() then
++  return
++end
++
++local function nvidia_output_connected()
++  for _, monitor in ipairs(hl.get_monitors() or {}) do
++    local card = monitor.name and connector_card(monitor.name)
++    if card and card_vendor(card) == NVIDIA_VENDOR then
++      return true
++    end
++  end
++  return false
++end
++
++local applied = nil
++
++local function apply()
++  local current = tonumber(hl.get_config("cursor.no_hardware_cursors"))
++  if applied == nil and current ~= nil and current ~= AUTO then
++    return
++  end
++  if applied ~= nil and current ~= applied then
++    return
++  end
++
++  local wanted = nvidia_output_connected() and SOFTWARE or AUTO
++  if wanted ~= current then
++    hl.config({ cursor = { no_hardware_cursors = wanted } })
++  end
++  applied = wanted
++end
++
++-- A removed monitor can still be listed while its event runs, so look again a
++-- moment later.
++local function on_monitor_change()
++  apply()
++  hl.timer(apply, { timeout = 1000, type = "oneshot" })
++end
++
++hl.on("monitor.added", on_monitor_change)
++hl.on("monitor.removed", on_monitor_change)
++-- A reload puts every option back to what the config files say, so whatever
++-- is set then is the user's own choice (or auto).
++local function on_reload()
++  applied = nil
++  apply()
++end
++
++hl.on("hyprland.start", apply)
++hl.on("config.reloaded", on_reload)
+diff --git a/default/hypr/nvidia.lua b/default/hypr/nvidia.lua
+index a3a15546..10abeeeb 100644
+--- a/default/hypr/nvidia.lua
++++ b/default/hypr/nvidia.lua
+@@ -25,4 +25,6 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+       hl.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+     end
+   end
++
++  require("default.hypr.hybrid-cursor")
+ end
+diff --git a/test/shell.d/hw-nvidia-test.sh b/test/shell.d/hw-nvidia-test.sh
+index eba3f7ab..f0ec8e20 100755
+--- a/test/shell.d/hw-nvidia-test.sh
++++ b/test/shell.d/hw-nvidia-test.sh
+@@ -7,7 +7,7 @@ require_command lua
+ 
+ tmp_dir=$(mktemp -d)
+ trap 'rm -rf "$tmp_dir"' EXIT
+-export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_PATH="$ROOT" PATH="$ROOT/bin:$PATH"
++export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_DRM_PATH="$tmp_dir/drm" OMARCHY_PATH="$ROOT" PATH="$ROOT/bin:$PATH"
+ 
+ # Exit statuses, expected NVD_BACKEND/LIBVA/GLX values, then vendor:device:class[:boot_vga].
+ while IFS='|' read -r description nvidia gsp without_gsp display expected_env devices; do
+diff --git a/test/shell.d/hyprland-hybrid-cursor-test.sh b/test/shell.d/hyprland-hybrid-cursor-test.sh
+new file mode 100644
+index 00000000..c9e73e6f
+--- /dev/null
++++ b/test/shell.d/hyprland-hybrid-cursor-test.sh
+@@ -0,0 +1,90 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++require_command lua
++
++tmp_dir=$(mktemp -d)
++trap 'rm -rf "$tmp_dir"' EXIT
++export OMARCHY_DRM_PATH="$tmp_dir/drm"
++
++# card <index> <vendor> [connector...]
++card() {
++  local index=$1 vendor=$2 connector
++  shift 2
++  mkdir -p "$OMARCHY_DRM_PATH/card$index/device"
++  printf '%s\n' "$vendor" >"$OMARCHY_DRM_PATH/card$index/device/vendor"
++  for connector in "$@"; do
++    mkdir -p "$OMARCHY_DRM_PATH/card$index-$connector"
++    printf 'connected\n' >"$OMARCHY_DRM_PATH/card$index-$connector/status"
++  done
++}
++
++# Loads the module under a stub hl, then runs the given steps. Each step is
++# "start", "reload", "add:<name>", "remove:<name>", "user:<value>" (a value from
++# the user's config) or "timers" (run pending one-shot timers). Prints the
++# cursor value after every step, or "events=0" when nothing was registered.
++run() {
++  lua - "$@" <<'LUA'
++package.path = os.getenv("ROOT") .. "/?.lua;" .. package.path
++local monitors, handlers, timers, value = {}, {}, {}, 2
++hl = {
++  get_monitors = function()
++    local list = {}
++    for _, name in ipairs(monitors) do list[#list + 1] = { name = name } end
++    return list
++  end,
++  get_config = function(key) assert(key == "cursor.no_hardware_cursors"); return value end,
++  config = function(c) value = c.cursor.no_hardware_cursors end,
++  on = function(event, fn) handlers[event] = handlers[event] or {}; table.insert(handlers[event], fn) end,
++  timer = function(fn) table.insert(timers, fn) end,
++}
++local function fire(event) for _, fn in ipairs(handlers[event] or {}) do fn() end end
++require("default.hypr.hybrid-cursor")
++if next(handlers) == nil then print("events=0") return end
++local out = {}
++for _, step in ipairs(arg) do
++  local verb, name = step:match("^(%a+):?(.*)$")
++  if verb == "start" then fire("hyprland.start")
++  elseif verb == "reload" then value = 2; fire("config.reloaded")
++  elseif verb == "user" then value = tonumber(name); fire("config.reloaded")
++  elseif verb == "add" then table.insert(monitors, name); fire("monitor.added")
++  elseif verb == "remove" then
++    for i, m in ipairs(monitors) do if m == name then table.remove(monitors, i) break end end
++    fire("monitor.removed")
++  elseif verb == "timers" then local t = timers; timers = {}; for _, fn in ipairs(t) do fn() end
++  end
++  out[#out + 1] = tostring(value)
++end
++print(table.concat(out, " "))
++LUA
++}
++
++expect() {
++  local description=$1 expected=$2 actual
++  shift 2
++  actual=$(run "$@")
++  [[ $actual == "$expected" ]] || fail "$description" "expected '$expected', got '$actual'"
++  pass "$description"
++}
++
++card 0 0x1002 eDP-1
++card 1 0x10de HDMI-A-1 DP-1
++expect "hybrid: panel only keeps the hardware cursor" "2 2" start add:eDP-1
++expect "hybrid: monitor on the NVIDIA card switches to a software cursor" "2 1 1" add:eDP-1 add:HDMI-A-1 timers
++expect "hybrid: any NVIDIA connector counts, not just HDMI" "1" add:DP-1
++expect "hybrid: unplugging it goes back to auto" "1 2 2" add:HDMI-A-1 remove:HDMI-A-1 timers
++expect "hybrid: a reload with the monitor plugged in re-applies" "1 1" add:HDMI-A-1 reload
++expect "hybrid: a value the user set is left alone" "0 0 0" user:0 add:HDMI-A-1 remove:HDMI-A-1
++
++rm -rf "$OMARCHY_DRM_PATH"
++card 0 0x10de HDMI-A-1 eDP-1
++expect "NVIDIA only: nothing registered" "events=0"
++
++rm -rf "$OMARCHY_DRM_PATH"
++card 0 0x1002 eDP-1 HDMI-A-1
++expect "no NVIDIA card: nothing registered" "events=0"
++
++rm -rf "$OMARCHY_DRM_PATH"
++expect "no DRM cards: nothing registered" "events=0"
+-- 
+2.55.0
+

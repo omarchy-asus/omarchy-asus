@@ -1,0 +1,221 @@
+# Maintainer: Ryan Hughes <ryan@omarchy.org>
+# Release versioning convention (do not "fix" this; enforced by bin/omarchy-pkgs release):
+#  - Pre-releases use the ATTACHED form pkgver=X.Y.ZrcN — NO separator. pacman's
+#    vercmp orders 4.0.0rc1 < 4.0.0rc2 < 4.0.0, but 4.0.0.rc1 and 4.0.0_rc1
+#    both sort AFTER 4.0.0 and would strand users on the pre-release.
+#  - pkgrel resets to 1 whenever pkgver changes; bump pkgrel alone only to
+#    repackage the same source.
+#  - epoch is a manual escape hatch decided by a human; tooling never sets it.
+#  - _commit is the single source of truth for what gets built. _tag is
+#    provenance only (empty when cut from a bare commit). omarchy and
+#    omarchy-settings must always carry identical _tag/_commit/pkgver/sha256sums.
+pkgname='omarchy'
+_tag='v4.0.5'
+_commit='94a8fbc2d67eec5673c7f16b8c5e8a9c8452ffdc'
+pkgver=4.0.5
+pkgrel=1.1
+pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH'
+# The payload is architecture-independent, but the dependency set is not: the
+# boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
+# and makepkg only honours arch-suffixed arrays on arch-specific packages.
+arch=('x86_64' 'aarch64')
+url='https://github.com/basecamp/omarchy'
+license=('MIT')
+conflicts=('omarchy-dev')
+# Hard depends: only packages whose removal would brick the desktop. The ISO
+# pacstraps the full default install set from install/omarchy-base.packages.
+depends=(
+  # Omarchy meta
+  'omarchy-keyring'
+  # The theme intro videos ship on their own, so this package stays small.
+  'omarchy-themes-intros'
+  # Exact-version pin: omarchy-settings-dev `provides=omarchy-settings`
+  # (unversioned), and an unversioned dependency here would let the dev
+  # package satisfy it, leaving a mixed dev/stable install. A versioned
+  # dependency can only be satisfied by the real omarchy-settings built
+  # from the same _commit, and forces the pair to upgrade together.
+  "omarchy-settings=${pkgver}"
+
+  # Wayland / Hyprland core
+  'hyprland'
+  'quickshell'
+  'uwsm'
+  'sddm'
+  'xdg-desktop-portal-hyprland'
+
+  # Audio / auth / portal essentials
+  'wireplumber'
+  'pipewire'
+  'gnome-keyring'
+
+  # Required by omarchy-* scripts and omarchy-shell
+  'gum'
+  'jq'
+  'git'
+  'perl' # /usr/bin/omarchy-shell invokes perl directly
+
+  # Update availability checks (checkupdates from pacman-contrib uses fakeroot)
+  'fakeroot'
+  'pacman-contrib'
+
+  # System font (UI assumes it)
+  'ttf-jetbrains-mono-nerd-basic'
+)
+
+# Bootloader stack. Lives here rather than on omarchy-settings because
+# omarchy-settings is also installed into the live ISO env (for plymouth
+# / /etc/skel seeding), where the limine-mkinitcpio-hook would fail with
+# 'Cannot detect an ESP path' inside the chroot. The omarchy-settings
+# config drop-ins under /etc/mkinitcpio.conf.d/, /etc/limine-entry-tool.d/,
+# and /etc/snapper/config-templates/ only do anything when these are
+# installed alongside.
+depends_x86_64=(
+  'limine'
+  'limine-mkinitcpio-hook'
+  'limine-snapper-sync'
+  'snapper'
+)
+
+# Apple Silicon boots through m1n1 + GRUB from the Asahi packages and keeps
+# Arch Linux ARM's kernel and boot layout, so the Limine/Snapper stack does not
+# apply. Only Apple Silicon's Broadcom Wi-Fi needs iwd, and omarchy-mac depends
+# on it. Elsewhere the package only renames the Wi-Fi interface to wlan0
+# (80-iwd.link), and a saved connection tied to the old name stops connecting.
+depends_aarch64=(
+  'networkmanager'
+)
+
+makedepends=(
+  'git'
+)
+
+# Source: the pinned release commit; set OMARCHY_SRC=/path/to/checkout to
+# build from a local source tree instead (mirrors omarchy-zsh/omarchy-fish DX).
+if [[ -n "${OMARCHY_SRC:-}" ]]; then
+  source=()
+  sha256sums=()
+else
+  source=("omarchy::git+https://github.com/basecamp/omarchy.git#commit=${_commit}"
+        0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch
+        0002-Save-power-on-USB-C-chargers-on-ASUS-ROG-Zephyrus-la.patch
+        0003-Let-another-power-manager-own-the-profile-on-plug-an.patch
+        0004-Stop-the-idle-fans-on-battery-on-the-ROG-Zephyrus-G1.patch
+        0005-Use-a-software-cursor-while-a-monitor-on-the-NVIDIA-.patch
+        0006-Add-omarchy-hw-igpu-render-node-for-hybrid-NVIDIA-la.patch
+        0007-Decode-video-on-the-iGPU-when-it-is-a-non-VGA-displa.patch
+        0008-Keep-mpv-and-Chromium-video-decode-on-the-iGPU-of-hy.patch
+        0009-Set-the-ASUS-ROG-ALC285-Master-to-full-scale-under-t.patch
+        0010-Install-rtkit-so-PipeWire-gets-realtime-priority.patch
+        0011-Install-rtkit-on-fresh-installs-and-restart-the-port.patch
+        0012-Stop-early-loading-the-NVIDIA-driver-on-hybrid-GPU-m.patch
+        0013-Restore-the-drop-in-when-the-initramfs-rebuild-fails.patch
+        0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch
+        0015-Read-every-udev-record-before-asking-the-webcams.patch
+        0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch
+        0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch
+        0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch)
+  sha256sums=('ce413d3fb5b90fab5b2e5cec66552a0562bc1fa3503e3b02e6c067c9a7a7a687'
+              '13bad35cf1cc779ade5304debb026327026a3e165848aba62c6b3f3995562503'
+              '29c1d4fdf427d9c389d25228c07ca564271c140653b622cf1e760c93677454b0'
+              'e13e04227d4a63d8d1ea431a6864d438490740543bfe596f215f597fb764270d'
+              '14a109bed45c2e93cc0517e0c4bddb7400ba99ec9d11170f1054da00a9edee9c'
+              '7539cff1b5d2cab6485b012df8009465d8e521e10716eaaaf8b3ca675f48408a'
+              '776691c0fd21274c1dc09b836666f501dc7ba4b12ebc8d091ef9ed22bfe7ff3f'
+              '1f669d9384ecc084d23b6b7e70b9feddba400a65172041bd6dbefa340534e554'
+              'e0e26b272c64f91ce8559feadbb4a672e3601e65022559b748a023931384540f'
+              'b0812e8b40c7b26f3b6d74fc73b5f4620448d63a56d37af534752915d8996153'
+              '090ee53bf1cd890e1b36dae5edecdcf3203ed802199c23aa5375a8800cdef720'
+              '056fdabb2e2ba5aa4ad0123a4b10570225913cbd2ff04ce5a1792444fcb32289'
+              '525051cc78104b58b98087b298828b4e3104c60833ba0fadcb044bd17e94e3d8'
+              'bc2b050ab8b837399d5f0a9064abbaac05dc8f51305924aa0c2ff09e6adece03'
+              '858b59be4c6383a38211aecd30bcde3f4d9d32fca0e03d6d2d6b183355d7f4a8'
+              '57fec2dda1bf51bb985c431b15304c1a7077abf534e2fe1d6347cb10bf67dee0'
+              '105eef9c0431df70e0a1a80a739f7bb97ba91759bf8b028beb1f9c827ea54f6e'
+              '1ebd57eaec1d9ffdad97b24f50ae9be86ce79dd259ae2c29a0fd7580d6a2aeec'
+              '6468816ed154cf9eb6ae74f0e1af0a861346719b848f927336187fd8fa2db465')
+fi
+
+prepare() {
+  if [[ -n "${OMARCHY_SRC:-}" ]]; then
+    rm -rf "$srcdir/omarchy"
+    mkdir -p "$srcdir/omarchy"
+    cp -a "${OMARCHY_SRC}/." "$srcdir/omarchy/"
+  fi
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0002-Save-power-on-USB-C-chargers-on-ASUS-ROG-Zephyrus-la.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0003-Let-another-power-manager-own-the-profile-on-plug-an.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0004-Stop-the-idle-fans-on-battery-on-the-ROG-Zephyrus-G1.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0005-Use-a-software-cursor-while-a-monitor-on-the-NVIDIA-.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0006-Add-omarchy-hw-igpu-render-node-for-hybrid-NVIDIA-la.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0007-Decode-video-on-the-iGPU-when-it-is-a-non-VGA-displa.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0008-Keep-mpv-and-Chromium-video-decode-on-the-iGPU-of-hy.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0009-Set-the-ASUS-ROG-ALC285-Master-to-full-scale-under-t.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0010-Install-rtkit-so-PipeWire-gets-realtime-priority.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0011-Install-rtkit-on-fresh-installs-and-restart-the-port.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0012-Stop-early-loading-the-NVIDIA-driver-on-hybrid-GPU-m.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0013-Restore-the-drop-in-when-the-initramfs-rebuild-fails.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0015-Read-every-udev-record-before-asking-the-webcams.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch"
+}
+
+package() {
+  cd "$srcdir/omarchy"
+
+  # Runtime binaries — ship everything in bin/ except the debug helpers
+  # that ship from omarchy-settings (needed before omarchy is installed,
+  # e.g. on the ISO live env).
+  install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/omarchy/bin"
+  for bin in bin/*; do
+    [[ -f $bin ]] || continue
+    local base
+    base=$(basename "$bin")
+    case "$base" in
+      omarchy-debug|omarchy-debug-idle|omarchy-upload-log)
+        continue
+        ;;
+    esac
+    install -Dm755 "$bin" "$pkgdir/usr/bin/$base"
+    ln -s "/usr/bin/$base" "$pkgdir/usr/share/omarchy/bin/$base"
+  done
+
+  install -d "$pkgdir/usr/share/omarchy"
+
+  # Guard direct pacman upgrades from bypassing the Omarchy update pipeline,
+  # and pause Hyprland live config reloads while settings files are replaced.
+  # Ship hooks with their Exec targets so package skew cannot leave a broken
+  # hook pointing at a missing binary.
+  install -Dm644 default/libalpm/hooks/00-omarchy-update-guard.hook "$pkgdir/usr/share/libalpm/hooks/00-omarchy-update-guard.hook"
+  install -Dm644 default/libalpm/hooks/10-omarchy-hyprland-reload-pause.hook "$pkgdir/usr/share/libalpm/hooks/10-omarchy-hyprland-reload-pause.hook"
+  install -Dm644 default/libalpm/hooks/90-omarchy-hyprland-reload-resume.hook "$pkgdir/usr/share/libalpm/hooks/90-omarchy-hyprland-reload-resume.hook"
+
+  # Target-side setup scripts and package lists used by ISO finalization,
+  # first login, future users, migrations, and reinstall/reset commands.
+  cp -a install "$pkgdir/usr/share/omarchy/"
+
+  # Theme bundles for theme switching.
+  cp -a themes "$pkgdir/usr/share/omarchy/"
+  # Their intro videos ship from omarchy-themes-intros, into these same
+  # directories, so they are not downloaded again with every rebuild.
+  rm -rf "$pkgdir"/usr/share/omarchy/themes/*/backgrounds/intros
+
+  # Versioned migrations runner reads from this tree.
+  cp -a migrations "$pkgdir/usr/share/omarchy/"
+
+  # Fresh users created after install are already on the package layout in this
+  # build, so seed migration markers through /etc/skel. Existing users keep
+  # their own state and still run pending migrations on update.
+  if compgen -G 'migrations/*.sh' >/dev/null; then
+    install -d "$pkgdir/etc/skel/.local/state/omarchy/migrations"
+    for migration in migrations/*.sh; do
+      touch "$pkgdir/etc/skel/.local/state/omarchy/migrations/$(basename "$migration")"
+    done
+  fi
+  # Quickshell desktop shell tree.
+  cp -a shell "$pkgdir/usr/share/omarchy/"
+
+  # Runtime version file.
+  install -Dm644 version "$pkgdir/usr/share/omarchy/version"
+}

@@ -20,8 +20,10 @@ The delta: recipes/<name>/DELTA, one directive per line (# comments):
   take <glob>...                   overlay: upstream files to copy (default: all but
                                    .git, .SRCINFO, .nvchecker.toml)
   keep <file>...                   our own files carried over unchanged (NOTES.md, ...)
-  patch <file> prepare             add to source=() at the end and append
-                                   `patch -Np1 -i "$srcdir/<file>"` to the end of prepare()
+  patch <file> prepare [<dir>]     add to source=() at the end and append
+                                   `patch -Np1 -i "$srcdir/<file>"` to the end of prepare();
+                                   with <dir>, `patch -d "$srcdir/<dir>" ...` (for a
+                                   prepare() that doesn't cd into the source, like omarchy)
   patch <file> after <glob>        add to source=() after the last entry matching <glob>
                                    (for recipes whose prepare() applies every *.patch in
                                    source order, like linux-omarchy)
@@ -115,9 +117,10 @@ def parse_delta(path):
                 d["mode"] = a[0]
             elif k in ("take", "keep") and a:
                 d[k] += a
-            elif k == "patch" and len(a) >= 2 and a[1] in ("prepare", "end", "template") \
-                    or k == "patch" and len(a) == 3 and a[1] == "after":
+            elif k == "patch" and len(a) == 2 and a[1] in ("prepare", "end", "template") \
+                    or k == "patch" and len(a) == 3 and a[1] in ("after", "prepare"):
                 d["patches"].append({"file": a[0], "where": a[1], "glob": a[2] if a[1] == "after" else None,
+                                     "dir": a[2] if a[1] == "prepare" and len(a) == 3 else None,
                                      "comment": comment.strip() or None})
             elif k == "reference" and len(a) == 1:
                 d["reference"] = a[0]
@@ -204,16 +207,22 @@ def export_tree(repo, commit, path, dest):
 # ---------------------------------------------------------------- PKGBUILD editing
 
 def array_span(lines, name):
-    """(start, end) line indexes of `name=(...)` (end inclusive), or None."""
+    """(start, end) line indexes of the last `name=(...)` (end inclusive), or None.
+
+    The last one, indented or not: omarchy's PKGBUILD sets `source=()` for a local
+    OMARCHY_SRC tree inside an if, and the real source array in its else."""
+    found = None
     for i, l in enumerate(lines):
-        if re.match(rf"^{re.escape(name)}=\(", l):
+        if re.match(rf"^\s*{re.escape(name)}=\(", l):
             depth = 0
             for j in range(i, len(lines)):
                 depth += strip_comment(lines[j]).count("(") - strip_comment(lines[j]).count(")")
                 if depth <= 0:
-                    return i, j
-            raise Fail(4, "delta", f"unterminated {name}=( array")
-    return None
+                    found = (i, j)
+                    break
+            else:
+                raise Fail(4, "delta", f"unterminated {name}=( array")
+    return found
 
 
 def strip_comment(l):
@@ -384,10 +393,11 @@ def rewrite_sums(new_dir, up_dir, report):
                     local.add(fn)
                 else:
                     raise Fail(4, "sums", f"{fn}: not a local file and upstream publishes no {algo} for it")
-            pad = " " * (len(name) + 2)
-            body = [f"{name}=('{sums[0]}'"] + [f"{pad}'{x}'" for x in sums[1:]]
-            body[-1] += ")"
             s, e2 = span
+            lead = re.match(r"\s*", lines[s]).group(0)
+            pad = lead + " " * (len(name) + 2)
+            body = [f"{lead}{name}=('{sums[0]}'"] + [f"{pad}'{x}'" for x in sums[1:]]
+            body[-1] += ")"
             lines[s:e2 + 1] = body
     with open(path, "w") as f:
         f.write("\n".join(lines))
@@ -531,7 +541,8 @@ def main():
                     raise Fail(4, "delta", "'patch ... template' only belongs in mode template")
                 if p["where"] == "prepare":
                     insert_source(lines, p["file"], "end")
-                    append_prepare(lines, f'patch -Np1 -i "$srcdir/{p["file"]}"')
+                    cd = f'-d "$srcdir/{p["dir"]}" ' if p["dir"] else ""
+                    append_prepare(lines, f'patch {cd}-Np1 -i "$srcdir/{p["file"]}"')
                 else:
                     insert_source(lines, p["file"], p["where"], p["glob"], p["comment"])
         else:  # template
