@@ -65,7 +65,10 @@ same fix was made by hand they leave it alone (patches 0021-0023):
   (0020), so only those are ever repinned.
 - The others check before acting or only print a message.
 
-`HOLD` stays in both recipes; a human decides when to publish.
+Released (the HOLD came off once these migrations were made safe, by the maintainer's goal of
+shipping every fix through `omarchy update`). One overlap remains a choice: a machine running its
+own power daemon should set Omarchy's `powerprofiles-autoswitch-off` toggle (0003 honours it) or
+stop that daemon, so the two don't both switch profiles on plug and unplug.
 
 **Tests:** on the backport branch, every test file for a changed script passes. The full
 `test/shell` suite has no failure that plain v4.0.5 doesn't also have (those come from
