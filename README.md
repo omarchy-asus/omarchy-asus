@@ -7,7 +7,7 @@ dies silently. A GPU that never sleeps. A screen that goes blank after a replug.
 be fixed, so we fix them. Then we send every fix upstream to Omarchy, the kernel, NVIDIA and
 Hyprland, so the next person never needs this repo at all.
 
-What you get, and the numbers: **https://omarchy-asus.github.io**
+Project site: **https://omarchy-asus.github.io**
 
 This is an unofficial community project. It is not affiliated with Basecamp, Omacom or ASUS.
 
