@@ -19,11 +19,15 @@
 # PII guard: before anything is uploaded, the new packages and the db are scanned
 # (strings of every file in them, plus file names) against the denylist
 # ($PII_DENYLIST, default ~/.config/agent-pii/denylist), whole-word and
-# case-insensitive. A hit aborts the sync unless the package file matches a glob
-# in build/pii-allow-packages. Only denylist line numbers are printed, never the
-# entries or the matched text. A missing denylist, an invalid regex in it or a
-# failed scan aborts too, never reads as clean (PII_SCAN=off skips
-# the scan, for a machine without one).
+# case-insensitive. A hit aborts the sync unless build/pii-allow-packages has a rule
+# '<asset glob> <location glob>' for that asset AND every hit in it lies at an
+# allowed location: a hit in a file name is at that member path, a hit in contents
+# at '<member path>:<line>' (the strings line holding it). One hit anywhere else
+# (.PKGINFO, .BUILDINFO, another member) still blocks. Only denylist line numbers are
+# printed, never the entries, the matched text or its location. A missing denylist,
+# an invalid regex in it, a malformed allow rule, a hit the located pass cannot place
+# or a failed scan aborts too, never reads as clean (PII_SCAN=off skips the scan,
+# for a machine without one).
 # --pii-scan-text scans files as plain text, never as archives (bin/auto-update scans
 # its PR comments and replies with it; build/pii-allow-packages does not apply).
 set -euo pipefail
@@ -42,10 +46,20 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
     [[ ${PII_SCAN:-on} == off ]] && { echo "PII scan skipped (PII_SCAN=off)"; return 0; }
     local list=${PII_DENYLIST:-$HOME/.config/agent-pii/denylist}
     [[ -r $list ]] || { echo "PII denylist $list is missing; refusing to upload (PII_SCAN=off to skip)" >&2; return 1; }
-    local allow=$WORKSPACE/build/pii-allow-packages globs=() g
-    [[ -r $allow ]] && while IFS= read -r g; do
-        g=${g%%#*}; g=${g%"${g##*[![:space:]]}"}; [[ -n $g ]] && globs+=("$g")
-    done <"$allow"
+    local allow=$WORKSPACE/build/pii-allow-packages g ag pg extra n=0
+    local -a aglobs=() pglobs=()
+    if [[ -r $allow ]]; then
+        while IFS= read -r g; do
+            n=$((n + 1)); g=${g%%#*}; ag='' pg='' extra=''
+            read -r ag pg extra <<<"$g" || true
+            [[ -z $ag ]] && continue
+            if [[ -z $pg || -n $extra ]]; then  # a bare asset glob would allow the whole file
+                echo "build/pii-allow-packages line $n: want '<asset glob> <location glob>'; refusing to upload" >&2
+                return 1
+            fi
+            aglobs+=("$ag"); pglobs+=("$pg")
+        done <"$allow"
+    fi
     # Whole-word regex per denylist line (same rules as the publish guard's wrap()).
     local -a res=() nums=()
     local e pre post i=0 lineno=0
@@ -98,18 +112,115 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
                 shopt -u nocasematch
             done
         done < <(sort -u "$up/.hits")
-        rm -f "$up/.hits"
         hit="$(basename "$f"): denylist line(s) $(printf '%s\n' "${!seen[@]}" | sort -n | paste -sd, -)"
-        local ok=0
+        local ok=0 why=''
         if ((!as_text)); then  # the allow list names packages, never a comment
-            # shellcheck disable=SC2053 # $g is a glob on purpose
-            for g in "${globs[@]}"; do [[ $(basename "$f") == $g ]] && ok=1; done
+            # shellcheck disable=SC2053  # the rules are globs
+            for i in "${!aglobs[@]}"; do [[ $(basename "$f") == ${aglobs[$i]} ]] && ok=1; done
+            ((ok)) && { pii_located "$f" || { ok=0; why=$pii_why; }; }
         fi
+        rm -f "$up/.hits"
         if ((ok)); then echo "PII scan: allowed by build/pii-allow-packages: $hit"
-        else echo "PII scan: BLOCKED $hit" >&2; rc=1; fi
+        else echo "PII scan: BLOCKED $hit${why:+ ($why)}" >&2; rc=1; fi
         unset seen
     done
     return $rc
+}
+pii_place() {  # pii_place <location> <file of hit lines> [line]: append '<location>\t<match>' to
+    # $up/.loc per match; with 'line', the location is '<location>:<that line>'
+    local l m s
+    while IFS= read -r l; do
+        s=0; grep -oiE -- "$pattern" <<<"$l" >"$up/.m" || s=$?
+        ((s > 1)) && return 1
+        while IFS= read -r m; do printf '%s\t%s\n' "${1//$'\t'/ }${3:+:${l//$'\t'/ }}" "$m"; done <"$up/.m"
+    done <"$2" >>"$up/.loc"
+}
+# pii_located <asset>: second pass, only for an asset that has allow rules. Unpacks it
+# and places every hit (the member path for a name hit, '<member>:<line>' for a
+# content hit); returns 0 only if every hit lies at a location a rule for this asset
+# allows AND the placed hits cover every distinct hit of the first pass ($up/.hits).
+# Otherwise sets pii_why (a count, never a location or the text) and returns 1.
+pii_located() {
+    local f=$1 base x m loc i allowed nbad=0 d=$up/.x
+    base=$(basename "$f"); pii_why=''
+    rm -rf "$d"; mkdir -p "$d"
+    if ! bsdtar -xf "$f" -C "$d" 2>/dev/null; then
+        pii_why="could not unpack it to place the hits"; chmod -R u+rwX "$d"; rm -rf "$d"; return 1
+    fi
+    chmod -R u+rwX "$d"  # read every member, and let rm remove read-only dirs
+    # Every step is checked: a failed read must refuse the asset, not drop its hits.
+    local st=0 err=''
+    : >"$up/.loc"
+    # name hits: the member path itself (no leading ./ or trailing /)
+    bsdtar -tf "$f" >"$up/.names" 2>/dev/null || err="could not list it"
+    # The unpacked tree must be a 1:1 image of the archive, or a member the first pass
+    # streamed could go unread here (overwritten by a repeat or an alias like ././x, or
+    # a hardlink that duplicates data). So: canonical paths only, none repeated, no
+    # hardlinks, and as many regular files on disk as regular entries in the archive.
+    if [[ -z $err ]]; then
+        local canon nreg nfiles
+        if ! { bsdtar -tvf "$f" >"$up/.long" 2>/dev/null &&
+               canon=$(sed -e 's,^\./,,' -e 's,/$,,' "$up/.names" | grep -v '^\.\?$' | sort) &&
+               nreg=$(awk '/^-/ {n++} END {print n + 0}' "$up/.long") &&
+               nfiles=$(find "$d" -type f | wc -l); }; then
+            err="could not list it"
+        elif (($(wc -l <"$up/.long") != $(wc -l <"$up/.names"))); then err="its listing is ambiguous"
+        elif grep -qE '^/|//|(^|/)\.\.?(/|$)' <<<"$canon"; then err="it has a non-canonical member path"
+        elif [[ -n $(uniq -d <<<"$canon") ]]; then err="it repeats a member path"
+        elif grep -q ' link to ' "$up/.long"; then err="it has a hardlink"
+        elif ((nreg != nfiles)); then err="it did not unpack 1:1"
+        fi
+        rm -f "$up/.long"
+    fi
+    if [[ -z $err ]]; then
+        grep -iE -- "$pattern" "$up/.names" >"$up/.l" || st=$?
+        ((st > 1)) && err="name scan failed"
+    fi
+    if [[ -z $err ]]; then
+        while IFS= read -r x; do
+            x=${x#./}; x=${x%/}; printf '%s\n' "$x" >"$up/.one"
+            pii_place "$x" "$up/.one" || { err="name scan failed"; break; }
+        done <"$up/.l"
+    fi
+    # content hits, at '<member>:<line>'. Every regular member is read the way the first
+    # pass reads it (strings, then the same grep): a raw-byte prefilter would not match
+    # anchored entries the same way. A few seconds per thousand members.
+    if [[ -z $err ]]; then
+        find "$d" -type f -print0 >"$up/.files" || err="content scan failed"
+    fi
+    if [[ -z $err ]]; then
+        while IFS= read -r -d '' x; do
+            strings -n 4 "$x" >"$up/.s" || { err="content scan failed"; break; }
+            st=0; grep -iE -- "$pattern" "$up/.s" >"$up/.l" || st=$?
+            ((st > 1)) && { err="content scan failed"; break; }
+            pii_place "${x#"$d"/}" "$up/.l" line || { err="content scan failed"; break; }
+        done <"$up/.files"
+    fi
+    rm -rf "$d"; rm -f "$up/.names" "$up/.l" "$up/.one" "$up/.files" "$up/.s" "$up/.m"
+    if [[ -n $err ]]; then pii_why="$err; refusing"; rm -f "$up/.loc"; return 1; fi
+    # Fail closed: a first-pass hit this pass did not place (say, a string that spans
+    # two members) is not covered by any rule. Intermediate files, not process
+    # substitutions, so a failed sort or comm is seen (pipefail is on).
+    local uncovered
+    if ! { tr '[:upper:]' '[:lower:]' <"$up/.hits" | sort -u >"$up/.h1" &&
+           cut -f2- "$up/.loc" | tr '[:upper:]' '[:lower:]' | sort -u >"$up/.h2" &&
+           uncovered=$(comm -23 "$up/.h1" "$up/.h2"); }; then
+        pii_why="coverage check failed; refusing"; rm -f "$up/.loc" "$up/.h1" "$up/.h2"; return 1
+    fi
+    rm -f "$up/.h1" "$up/.h2"
+    if [[ -n $uncovered ]]; then
+        pii_why="a hit could not be placed"; rm -f "$up/.loc"; return 1
+    fi
+    while IFS=$'\t' read -r loc m; do   # read the file itself: no hidden exit status
+        allowed=0
+        for i in "${!aglobs[@]}"; do
+            # shellcheck disable=SC2053  # the rules are globs
+            [[ $base == ${aglobs[$i]} && $loc == ${pglobs[$i]} ]] && { allowed=1; break; }
+        done
+        ((allowed)) || nbad=$((nbad + 1))
+    done <"$up/.loc"
+    rm -f "$up/.loc"
+    ((nbad == 0)) || { pii_why="$nbad hit(s) outside its allowed locations"; return 1; }
 }
 if ((scan_only)); then pii_scan "$@"; exit; fi
 

@@ -5,7 +5,11 @@
 #   2. valid denylist, a hit in a file's contents or in a file name: blocked
 #   3. invalid regex in the denylist (an unmatched '('): fails closed, also on a clean
 #      package, and names the line, never the entry
-#   4. a hit allowed by build/pii-allow-packages: passes
+#   4. build/pii-allow-packages rules ('<asset glob> <location glob>'): a known hit at
+#      an allowed location passes; a different denylisted hit in the same package, the
+#      known word in another member, another line of a files-db list, or a hit the
+#      located pass cannot place is blocked
+#   5. a malformed rule (a bare asset glob) fails closed
 # No network, no gh; workspace and data dir are temp dirs.
 # Usage: tests/sync-release-pii-scan.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -46,8 +50,106 @@ expect $rc 1 "invalid denylist fails on a clean package"
 grep -q 'invalid regex (line(s) 3)' <<<"$out"; expect $? 0 "names the invalid line"
 grep -q 'foo(' <<<"$out"; expect $? 1 "does not print the entry"
 
-echo "== 4. allowed by build/pii-allow-packages"
-printf '# test\nhit.tar\n' >"$S/ws/build/pii-allow-packages"
-out=$(scan "$S/good" "$S/hit.tar"); expect $? 0 "allowed package passes"
-out=$(scan "$S/bad" "$S/hit.tar"); expect $? 1 "allow list does not excuse an invalid denylist"
+echo "== 4. allowed by build/pii-allow-packages, scoped to locations"
+# A stand-in kernel package: the known hit is a module name and its line in
+# modules.order. kern-pkginfo.tar is the same package with a different denylisted
+# word in .PKGINFO; kern-elsewhere.tar has the known word in another member.
+K=$S/pkg/kern/usr/lib/modules/1.0
+mkdir -p "$K/kernel/drivers/hid" "$K/build"
+printf 'module\n' >"$K/kernel/drivers/hid/hid-zorbleplex.ko"
+printf 'kernel/drivers/hid/hid-zorbleplex.ko\nkernel/drivers/hid/hid-generic.ko\n' >"$K/modules.order"
+printf 'pkgname = kern\n' >"$S/pkg/kern/.PKGINFO"
+bsdtar -cf "$S/kern.tar" -C "$S/pkg/kern" .
+cp -a "$S/pkg/kern" "$S/pkg/kern2"; printf 'pkgname = kern\npackager = quux-host\n' >"$S/pkg/kern2/.PKGINFO"
+bsdtar -cf "$S/kern-pkginfo.tar" -C "$S/pkg/kern2" .
+cp -a "$S/pkg/kern" "$S/pkg/kern3"; printf 'see zorbleplex\n' >"$S/pkg/kern3/usr/lib/modules/1.0/build/NOTES"
+bsdtar -cf "$S/kern-elsewhere.tar" -C "$S/pkg/kern3" .
+# A stand-in files db: the kernel's file list is allowed only on its module line.
+mkdir -p "$S/pkg/db/kern-1.0" "$S/pkg/db2/kern-1.0"
+printf '%%FILES%%\nusr/lib/modules/1.0/kernel/drivers/hid/hid-zorbleplex.ko\n' >"$S/pkg/db/kern-1.0/files"
+printf '%%FILES%%\nusr/lib/modules/1.0/kernel/drivers/hid/hid-zorbleplex.ko\nusr/share/doc/quux-host/x\n' \
+    >"$S/pkg/db2/kern-1.0/files"
+bsdtar -czf "$S/db.files" -C "$S/pkg/db" .
+bsdtar -czf "$S/db2.files" -C "$S/pkg/db2" .
+# A hit split across two members: the first pass sees it, the located pass cannot place it.
+mkdir -p "$S/pkg/span"; printf 'abc zorble' >"$S/pkg/span/a"; printf 'plex def\n' >"$S/pkg/span/b"
+bsdtar -cf "$S/span.tar" -C "$S/pkg/span" a b
+cat >"$S/ws/build/pii-allow-packages" <<'EOF'
+# test rules
+kern*.tar  usr/lib/modules/*/kernel/drivers/hid/*
+kern*.tar  usr/lib/modules/*/modules.order:*   # trailing comment
+db*.files  kern-*/files:usr/lib/modules/*/kernel/drivers/hid/*
+span.tar   *
+EOF
+out=$(scan "$S/good" "$S/kern.tar"); rc=$?
+expect $rc 0 "known hit at an allowed location passes"
+grep -q 'allowed by build/pii-allow-packages: kern.tar: denylist line(s) 2$' <<<"$out"; expect $? 0 "says it was allowed"
+out=$(scan "$S/good" "$S/kern-pkginfo.tar"); rc=$?
+expect $rc 1 "another denylisted word in .PKGINFO of the allowed package is blocked"
+grep -q 'BLOCKED kern-pkginfo.tar: denylist line(s) 2,3 (1 hit(s) outside its allowed locations)' <<<"$out"
+expect $? 0 "names both lines and counts the stray hit"
+grep -qiE 'zorbleplex|quux|\.PKGINFO|modules\.order' <<<"$out"; expect $? 1 "prints neither the entries nor the location"
+out=$(scan "$S/good" "$S/kern-elsewhere.tar"); expect $? 1 "the known word in another member is blocked"
+out=$(scan "$S/good" "$S/db.files"); expect $? 0 "files db: allowed line passes"
+out=$(scan "$S/good" "$S/db2.files"); expect $? 1 "files db: another line of the same file list is blocked"
+out=$(scan "$S/good" "$S/span.tar"); rc=$?
+expect $rc 1 "a hit the located pass cannot place is blocked, even under a catch-all rule"
+grep -q 'could not be placed' <<<"$out"; expect $? 0 "says why"
+# A read error in the located pass refuses the asset: the same word in an allowed and a
+# disallowed member, and a strings that fails on the disallowed one.
+mkdir -p "$S/pkg/rd" "$S/bin"
+printf 'zorbleplex\n' >"$S/pkg/rd/allowed"; printf 'zorbleplex\n' >"$S/pkg/rd/forbidden"
+bsdtar -cf "$S/rd.tar" -C "$S/pkg/rd" allowed forbidden
+printf 'rd.tar  allowed:*\n' >>"$S/ws/build/pii-allow-packages"
+printf '#!/bin/bash\n[[ ${*: -1} == */forbidden ]] && exit 2\nexec %q "$@"\n' "$(command -v strings)" >"$S/bin/strings"
+chmod +x "$S/bin/strings"
+out=$(PATH=$S/bin:$PATH scan "$S/good" "$S/rd.tar"); rc=$?
+expect $rc 1 "a failed read in the located pass is blocked"
+grep -q 'content scan failed' <<<"$out"; expect $? 0 "says why"
+# A repeated member path: extraction keeps only the last (clean) copy, so the asset is
+# refused rather than judged on what survived.
+mkdir -p "$S/pkg/dup1" "$S/pkg/dup2"
+printf 'zorbleplex\n' >"$S/pkg/dup1/allowed"; printf 'zorbleplex\n' >"$S/pkg/dup1/forbidden"
+printf 'clean\n' >"$S/pkg/dup2/forbidden"
+bsdtar -cf "$S/dup.tar" -C "$S/pkg/dup1" allowed forbidden -C "$S/pkg/dup2" forbidden
+printf 'dup.tar  allowed:*\n' >>"$S/ws/build/pii-allow-packages"
+out=$(scan "$S/good" "$S/dup.tar"); rc=$?
+expect $rc 1 "a repeated member path is blocked"
+grep -q 'repeats a member path' <<<"$out"; expect $? 0 "says why"
+# The same through an alias (././forbidden), and a hardlink that copies an allowed hit.
+bsdtar -cf "$S/alias.tar" -C "$S/pkg/dup1" allowed forbidden -C "$S/pkg/dup2" ././forbidden
+bsdtar -tf "$S/alias.tar" | grep -qx '\./\./forbidden'; expect $? 0 "fixture keeps the ././ alias"
+printf 'alias.tar  allowed:*\nhl.tar  allowed*\n' >>"$S/ws/build/pii-allow-packages"
+out=$(scan "$S/good" "$S/alias.tar"); rc=$?
+expect $rc 1 "an aliased member path is blocked"
+mkdir -p "$S/pkg/hl"; printf 'zorbleplex\n' >"$S/pkg/hl/allowed"; ln "$S/pkg/hl/allowed" "$S/pkg/hl/allowed2"
+bsdtar -cf "$S/hl.tar" -C "$S/pkg/hl" allowed allowed2
+out=$(scan "$S/good" "$S/hl.tar"); rc=$?
+expect $rc 1 "a hardlink in an allowed asset is blocked"
+grep -q 'has a hardlink' <<<"$out"; expect $? 0 "says why"
+# A sort that fails in the coverage check (only the stdin 'sort -u' it uses) refuses too,
+# on a package whose stray .PKGINFO hit would otherwise be counted.
+mkdir -p "$S/bin2"
+printf '#!/bin/bash\n[[ $* == -u ]] && exit 2\nexec %q "$@"\n' "$(command -v sort)" >"$S/bin2/sort"
+chmod +x "$S/bin2/sort"
+out=$(PATH=$S/bin2:$PATH scan "$S/good" "$S/kern-pkginfo.tar"); rc=$?
+expect $rc 1 "a failed sort in the located pass is blocked"
+grep -q 'coverage check failed' <<<"$out"; expect $? 0 "says why"
+# An anchored entry: raw bytes '\0word\0' are no line of their own, but strings makes
+# one, so the located pass must read members through strings too.
+mkdir -p "$S/pkg/anc"
+printf 'zorbleplex\n' >"$S/pkg/anc/allowed"; printf 'x\0zorbleplex\0y' >"$S/pkg/anc/forbidden"
+bsdtar -cf "$S/anc.tar" -C "$S/pkg/anc" allowed forbidden
+printf 'anc.tar  allowed:*\n' >>"$S/ws/build/pii-allow-packages"
+printf '^zorbleplex$\n' >"$S/anchored"
+out=$(scan "$S/anchored" "$S/anc.tar"); expect $? 1 "an anchored entry hit in a binary member is blocked"
+out=$(scan "$S/good" "$S/hit.tar"); expect $? 1 "a package without rules is still blocked"
+out=$(scan "$S/bad" "$S/kern.tar"); expect $? 1 "allow list does not excuse an invalid denylist"
+
+echo "== 5. malformed allow rule fails closed"
+printf '# a bare asset glob would allow the whole file\nkern.tar\n' >"$S/ws/build/pii-allow-packages"
+out=$(scan "$S/good" "$S/kern.tar"); rc=$?
+expect $rc 1 "bare asset glob is refused"
+grep -q 'pii-allow-packages line 2' <<<"$out"; expect $? 0 "names the rule line"
+out=$(scan "$S/good" "$S/clean.tar"); expect $? 1 "refused even when nothing hits"
 exit $fail
