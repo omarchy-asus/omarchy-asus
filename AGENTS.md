@@ -88,3 +88,16 @@ gh issue comment N -R $R --body-file comment.md
 ```
 
 End the body with `Filed by <agent role>`.
+
+## Code Review Rules
+
+`bin/ai-review` (codex, then a second model that tries to refute each finding) reviews every
+PR; a confirmed or unverified P0/P1 finding fails the required `ai-review` status.
+
+- Flag only what breaks: wrong behaviour with a concrete trigger, fail-open safety checks
+  (signing, checksums, the PII scan, merge/publish gates), privilege mistakes between root
+  and `BUILD_USER`, and packages that would conflict with or shadow stock Omarchy files.
+- Personal information in a tracked file or anything posted to GitHub is P1 (see rule 4).
+- Upstream content in a rebased recipe is upstream's: flag it only when it is unsafe to sign
+  and ship (new download hosts, disabled checksum or signature checks, new install scripts).
+- No style, naming or formatting findings; CI and shellcheck own those.
