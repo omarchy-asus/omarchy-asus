@@ -5,7 +5,7 @@
 # asus-rog-nkey-winlock: `g16-winlock`, which shows an Omarchy OSD when Fn+Super
 #   toggles the firmware Win-key lock and can clear the lock again (auto-unlock),
 #   plus one-shot lock/unlock/status/toggle over hidraw. Its udev rule and user
-#   unit come with it.
+#   unit come with it, and the unit is enabled on install (toast mode).
 # asus-zephyrus-g16-control: the "G16 Control" bar widget (keyboard and Slash
 #   LEDs, refresh rate, charge limit, Fn+Super mode). Plugin id omarchy-asus.g16.
 #
@@ -37,15 +37,16 @@ source=(
 )
 sha256sums=('01141d007fd09462c541069bc84e7f38e75d3b0b4a1a0b6a9d98488425d99195'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
-            'ae11adf8d3fa9a1f2a08cbd810dd524f2d6ac208762b2d1b6ef6efd9b027d9d6'
+            'c72bbf1adfef8dc1a1af68434315fa334dded3ff850f414572fbcb20911396da'
             '5cf036a8b150d79f0d8013e82f56396d9d58f0b1e5cf07677de45c613565f575'
             'e4e223beb516b778533b0972f0a417f9959a40e15f255c19de2c0d80ee7fcfd1'
             '4cfbb5e75ec11b6e8e8af8b04333890adb0ad8669e3810633066545ac1768532'
-            'ef07abb24a278e54bc28ad3036b91e6bdd20350efc1006c2cc3a494befa76fbd')
+            '8ce1bc5457eec7213dec8f0c876b2b83f18ea8ae846ac7f461f944c996eb787c')
 
 _plugin_id=omarchy-asus.g16
 
 package_asus-rog-nkey-winlock() {
+  install=asus-rog-nkey-winlock.install
   pkgdesc='Win-key lock OSD and auto-unlock helper (g16-winlock) for the ASUS ROG N-Key keyboard of the Zephyrus G16 GA605'
   depends=('python')
   optdepends=(
@@ -57,8 +58,11 @@ package_asus-rog-nkey-winlock() {
 
   install -Dm755 g16-winlock "$pkgdir/usr/bin/g16-winlock"
   install -Dm644 70-g16-winlock-hidraw.rules "$pkgdir/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules"
-  # Not enabled by the package: `systemctl --user enable --now g16-winlock.service`.
   install -Dm644 g16-winlock.service "$pkgdir/usr/lib/systemd/user/g16-winlock.service"
+  # Enabled for every user: it does nothing on machines without the 0b05:19b6
+  # keyboard. Opt out per user with `systemctl --user mask g16-winlock.service`.
+  install -dm755 "$pkgdir/usr/lib/systemd/user/default.target.wants"
+  ln -s ../g16-winlock.service "$pkgdir/usr/lib/systemd/user/default.target.wants/g16-winlock.service"
   install -Dm644 README.md "$pkgdir/usr/share/doc/asus-rog-nkey-winlock/README.md"
 }
 

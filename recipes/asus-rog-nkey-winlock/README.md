@@ -47,24 +47,32 @@ one-shot commands work with any kernel.
 
 ## Setup
 
-Neither package enables anything for you.
+`asus-rog-nkey-winlock` works on install. Nothing to enable:
 
-1. hidraw access: pacman reloads the udev rules on install, but the rule only
-   applies once the keyboard's hidraw nodes are created again. Reboot, or run
-   `sudo udevadm trigger --subsystem-match=hidraw`. Your user has to be in the
-   `input` group.
-2. The service:
-   ```bash
-   systemctl --user enable --now g16-winlock.service
-   ```
-   The unit sets `Environment=G16_WINLOCK_MODE=unlock` (auto-unlock). The bar
-   widget's "On Fn+Super" switch writes a drop-in that overrides it
-   (`~/.config/systemd/user/g16-winlock.service.d/mode.conf`), and enables and
-   restarts the service. You can write that drop-in by hand:
+- The package re-triggers the hidraw udev rules, so the keyboard node picks up
+  the `uaccess` ACL for whoever is logged in at the seat. No reboot, and no
+  `input` group.
+- `g16-winlock.service` ships enabled for every user
+  (`/usr/lib/systemd/user/default.target.wants/`). It starts at your next login,
+  or now with `systemctl --user start g16-winlock.service`.
+- The default mode is `toast`: Fn+Super locks Super in the keyboard firmware,
+  as designed, and you see an OSD saying so.
+
+To change that:
+
+1. Auto-unlock instead (Super can never stay locked): the bar widget's
+   "On Fn+Super" switch writes a drop-in, or write it yourself at
+   `~/.config/systemd/user/g16-winlock.service.d/mode.conf`:
    ```ini
    [Service]
-   Environment=G16_WINLOCK_MODE=toast
+   Environment=G16_WINLOCK_MODE=unlock
    ```
+   then `systemctl --user restart g16-winlock.service`.
+2. Turn it off for your user: `systemctl --user mask g16-winlock.service`.
+   (`disable` does not remove a vendor-enabled unit; `mask` does.)
+
+The bar widget (`asus-zephyrus-g16-control`) is separate and optional:
+
 3. The bar widget: Omarchy's shell loads third-party plugins only from
    `~/.config/omarchy/plugins/<id>/`, so link the packaged copy there and
    enable it:
@@ -103,7 +111,8 @@ To switch over:
    ```
    The rule and the script should be identical (only the rule's file name
    changed). The unit should differ only in
-   `ExecStart=` (`/usr/bin/g16-winlock watch`). The widget should differ only in
+   `ExecStart=` (`/usr/bin/g16-winlock watch`) and in the default mode, which
+   is now `toast` (keep a `mode.conf` drop-in if you want `unlock`). The widget should differ only in
    its id, its author, the way `Panel.qml` finds `g16ctl` (next to itself
    instead of a fixed path under the old id), and `g16ctl`'s fallback path for
    `g16-winlock`.
@@ -112,7 +121,7 @@ To switch over:
    sudo rm /etc/udev/rules.d/99-g16-winlock-hidraw.rules
    rm ~/.config/systemd/user/g16-winlock.service
    systemctl --user daemon-reload
-   systemctl --user reenable g16-winlock.service   # re-points default.target.wants at the packaged unit
+   systemctl --user disable g16-winlock.service    # drops your own link; the packaged unit stays enabled
    systemctl --user restart g16-winlock.service
    ```
 4. Swap the widget: disable the old id, move its directory out of
@@ -137,13 +146,15 @@ ones above it.
 2. Device and access:
    ```bash
    grep -l 0B05 /sys/class/hidraw/hidraw*/device/uevent | xargs grep -l 19B6
-   ls -l /dev/hidraw*                         # the 19b6 nodes: crw-rw---- root input
-   id -nG | tr ' ' '\n' | grep -x input
-   g16-winlock status                         # "Cannot open ..." = rule or group missing
+   ls -l /dev/hidraw*                         # the 19b6 nodes: crw-rw----+ root input (+ = ACL)
+   getfacl /dev/hidrawN                       # a user:<you>:rw- line from uaccess
+   g16-winlock status                         # "Cannot open ..." = rule not applied yet
    ```
+   No ACL line: re-run the rule with
+   `sudo udevadm trigger --action=change --subsystem-match=hidraw`.
 3. Service:
    ```bash
-   systemctl --user is-enabled g16-winlock.service
+   systemctl --user is-enabled g16-winlock.service   # enabled (vendor), or masked
    systemctl --user status g16-winlock.service
    systemctl --user cat g16-winlock.service   # which file wins, and does ExecStart exist?
    journalctl --user -u g16-winlock.service -b

@@ -21,3 +21,4 @@ REVIEW.md
 .claude/
 issues-pending/
 __pycache__/
+*.pyc
