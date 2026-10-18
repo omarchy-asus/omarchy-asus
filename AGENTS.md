@@ -102,6 +102,8 @@ and nothing goes to GitHub until you and the reviewer agree.**
    - fix it: commit (don't push), then run step 1 again (the new commit gets a fresh review);
    - or answer it: `--reply answers.json` with `{"<id>": "why this is not a defect"}`. The reviewer
      checks each answer against the code and withdraws the finding only if the code agrees.
+   Keep it short: at most 2-3 rounds. Fix every P0/P1. Fix a P2/P3 only when it's a one-liner;
+   otherwise file it (`bin/issue`) and move on. P2/P3 don't block the status.
 3. When you agree (no finding you still dispute; normally no blocking P0/P1 left), push once and
    post once: `git push`, then `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`. This puts one review
    (findings, your answers, the reviewer's checks) and the status on the head. PRs that

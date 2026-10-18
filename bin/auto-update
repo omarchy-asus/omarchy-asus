@@ -600,6 +600,8 @@ for p in sys.stdin.read().split():
             [[ -s $cr && $(as_user jq -r .reviewed "$cr" 2>/dev/null) == true && $(as_user jq -r '.head // ""' "$cr") == "$(ugit rev-parse HEAD)" ]] ||
                 reasons+=("ai-review has not reviewed the head")
             [[ ! -s $cr || $(as_user jq -r '.threads | length' "$cr") == 0 ]] || reasons+=("blocking ai-review findings")
+            [[ $(as_user jq -r '.off // false' "$cr" 2>/dev/null) == true || $(as_user jq -r '.posted // false' "$cr" 2>/dev/null) == true ]] ||
+                reasons+=("ai-review result not posted")
             # main requires every review thread resolved (admins included): P2/P3 comments and
             # threads from earlier heads would make the merge fail late, so gate on them here.
             local open_threads
