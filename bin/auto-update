@@ -259,16 +259,23 @@ revdep_checks() {  # revdep_checks <recipe> <version>: 0 if every reverse-dep ch
 # re-reviews) and rebuilt; at most MAX_FIX_ROUNDS rounds per run.
 cr_state() {  # cr_state <pr number> <out json>: CodeRabbit's state for the PR head
     local num=$1 out=$2 owner=${GH_REPO%/*} name=${GH_REPO#*/}
-    to_file "$out.raw" gh api graphql -F owner="$owner" -F name="$name" -F number="$num" -f query='
-query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
+    # --paginate follows reviewThreads' cursor ($endCursor) and prints one JSON document per page.
+    to_file "$out.raw" gh api graphql --paginate -F owner="$owner" -F name="$name" -F number="$num" -f query='
+query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){
   headRefOid
   commits(last:1){nodes{commit{oid status{contexts{context state description creator{__typename login}}}}}}
   reviews(last:30){nodes{author{__typename login} state commit{oid} body}}
-  reviewThreads(first:100){nodes{isResolved isOutdated
+  reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{isResolved isOutdated
     comments(first:1){nodes{databaseId author{__typename login} body path line url}}}}}}}' || return 1
     as_user python3 -c '
 import json, sys
-raw = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"]
+text, pos, pages, dec = open(sys.argv[1]).read(), 0, [], json.JSONDecoder()
+while True:  # concatenated page documents
+    while pos < len(text) and text[pos].isspace(): pos += 1
+    if pos >= len(text): break
+    doc, pos = dec.raw_decode(text, pos)
+    pages.append(doc["data"]["repository"]["pullRequest"])
+raw = pages[0]
 head = raw["headRefOid"]
 # Only the CodeRabbit GitHub App counts: REST shows it as user "coderabbitai[bot]" with
 # type "Bot"; GraphQL as a Bot actor with login "coderabbitai". A user account named
@@ -282,12 +289,12 @@ status_pending = any(c["state"] == "PENDING" for c in ctx)
 reviewed = status_done or any(bot(r["author"]) and (r.get("commit") or {}).get("oid") == head
                               for r in raw["reviews"]["nodes"])
 threads = []
-for t in raw["reviewThreads"]["nodes"]:
+for t in all_threads:
     c = (t["comments"]["nodes"] or [None])[0]
     if c and bot(c["author"]) and not t["isResolved"] and not t["isOutdated"]:
         threads.append({"id": c["databaseId"], "path": c["path"], "line": c["line"], "url": c["url"],
                         "body": c["body"][:4000]})
-json.dump({"head": head, "reviewed": reviewed and not status_pending, "seen": bool(ctx) or reviewed,
+json.dump({"head": head, "reviewed": reviewed and not status_pending and complete, "seen": bool(ctx) or reviewed,
            "threads": threads}, open(sys.argv[2], "w"), indent=2)' "$out.raw" "$out"
 }
 wait_coderabbit() {  # wait_coderabbit <pr number> <out json>: 0 when CodeRabbit finished on the head
@@ -302,6 +309,10 @@ wait_coderabbit() {  # wait_coderabbit <pr number> <out json>: 0 when CodeRabbit
 agent_round() {  # agent_round <recipe> <pr number> <cr json> <diff> <report> <build log>
     # sets agent_verdict (approve/reject/none), agent_notes; may leave edits in the clone
     local r=$1 num=$2 cr=$3 diff=$4 report=$5 blog=$6
+all_threads = [t for p in pages for t in p["reviewThreads"]["nodes"]]
+# fail closed: every page on the same head, and no page left unread
+complete = (all(p["headRefOid"] == head for p in pages)
+            and not pages[-1]["reviewThreads"]["pageInfo"]["hasNextPage"])
     agent_verdict=none agent_notes="agent step skipped (REVIEW_CMD empty or not found)"
     [[ -n $REVIEW_CMD ]] || return 0
     local cmd=($REVIEW_CMD)
