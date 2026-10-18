@@ -17,11 +17,16 @@ Plan actions:
   rebase     upstream moved past our base: rebase the recipe onto TARGET (= upstream)
   build      recipe on the base branch is not in the repo db, or the db holds another
              version (not-built / repo-stale): build and publish it as is
-  unpublish  stale and nothing to rebuild from (dep-mismatch, or a db entry with no
-             recipe): drop it so the stock build flows through
+  unpublish  stale and nothing to rebuild from (dep-mismatch), or a db entry with no
+             recipe whatever its status (the recipe was removed): drop it so the stock
+             build flows through
   attention  needs a human (upstream merged/closed one of our PRs, upstream older than
              our base, bad pkgrel, not in any upstream repo); no automatic change
-Config via env: SKIP_RECIPES (space separated), BUILD_NOT_BUILT (yes/no).
+Config via env: SKIP_RECIPES (space separated), BUILD_NOT_BUILT (yes/no),
+KEEP_PUBLISHED (space separated package names kept despite having no recipe).
+While check-upstream reports inventory_errors (or the check JSON has no inventory_errors
+key), a db entry with no recipe is unpublished only when it is stale (rebuild-needed,
+dep-mismatch, upstream-older), as before #82.
 A recipe with a HOLD file (first non-comment line: the reason) is never built or published;
 a stale published copy of it is unpublished.
 """
@@ -53,7 +58,11 @@ def save(path, data):
 
 def plan(check_path, status_path):
     check = json.load(open(check_path))
+    # The inventory is complete only when check-upstream says so with an empty list; a missing
+    # key (an old or hand-made JSON) counts as incomplete, so nothing is unpublished for it.
+    inv_errors = check.get("inventory_errors")
     skip = set(os.environ.get("SKIP_RECIPES", "").split())
+    keep = set(os.environ.get("KEEP_PUBLISHED", "").split())
     build_not_built = os.environ.get("BUILD_NOT_BUILT", "yes") == "yes"
     by_recipe = {}
     for row in check["packages"]:
@@ -88,12 +97,22 @@ def plan(check_path, status_path):
             action = "attention"
             notes.append(f"held, not built or published: {hold} ({', '.join(sorted(statuses))})")
         elif not rows[0]["recipe"]:
-            if statuses & {"rebuild-needed", "dep-mismatch", "upstream-older"}:
+            # The recipe was removed: withdraw what is still published, whatever its status,
+            # unless KEEP_PUBLISHED names it or the recipe inventory may be missing recipes.
+            if any(n in keep for n in names):
+                action = "attention"
+                notes.append("in the repo db without a recipe; kept by KEEP_PUBLISHED")
+            elif inv_errors != [] and statuses & {"rebuild-needed", "dep-mismatch", "upstream-older"}:
+                # Stale whatever the inventory says: a lagging pin blocks stock updates.
                 action = "unpublish"
                 notes.append("in the repo db without a recipe and no longer current")
-            else:
+            elif inv_errors != []:
                 action = "attention"
-                notes.append("in the repo db without a recipe")
+                why = ", ".join(map(str, inv_errors)) if inv_errors else "no inventory_errors in check"
+                notes.append(f"in the repo db without a recipe, but the recipe inventory is incomplete ({why}): not unpublished")
+            else:
+                action = "unpublish"
+                notes.append(f"in the repo db without a recipe: withdrawn (status: {', '.join(sorted(statuses))})")
         elif "rebuild-needed" in statuses:
             action = "rebase"
         elif "dep-mismatch" in statuses:

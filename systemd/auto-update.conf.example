@@ -44,6 +44,9 @@ BUILD_USER=
 #SKIP_RECIPES=
 # Build and publish recipes on BASE_BRANCH that are not in the repo db yet (yes/no).
 #BUILD_NOT_BUILT=yes
+# Repo-db packages with no recipe are unpublished (the recipe was removed). Package names
+# listed here (space separated) are kept and only reported for attention.
+#KEEP_PUBLISHED=
 # Unpublish after this many consecutive runs without access to the upstream recipe.
 #FETCH_FAIL_UNPUBLISH_AFTER=2
 # Also fail the unit (systemctl --failed) when something only needs attention.
