@@ -332,13 +332,14 @@ revdep_checks() {  # revdep_checks <recipe> <version>: 0 if every reverse-dep ch
 # (REVIEW_CMD), which fixes what belongs in the recipe and answers the rest; the answers go
 # back to the reviewer (ai-review --reply), which re-checks them in the code. Fixes are
 # pushed, rebuilt and reviewed again, at most MAX_FIX_ROUNDS rounds per run. When the rounds
-# end, the agreed result is posted once: one review plus the `ai-review` commit status.
-ai_review_state() {  # ai_review_state <pr number> <out json> [post | reply FILE]: 0 when reviewed
+# end, the agreed result is stamped once (the bot's own PRs: `ai-review --stamp`): the
+# `ai-review` commit status only, or the full review when blocking findings remain.
+ai_review_state() {  # ai_review_state <pr number> <out json> [stamp | reply FILE]: 0 when reviewed
     local num=$1 out=$2 extra=()
     if [[ $AI_REVIEW == off ]]; then
         as_user bash -c 'echo "{\"reviewed\": true, \"threads\": [], \"off\": true}" > "$1"' _ "$out"; return 0
     fi
-    case ${3:-} in post) extra=(--post) ;; reply) extra=(--reply "$4") ;; esac
+    case ${3:-} in stamp) extra=(--stamp) ;; reply) extra=(--reply "$4") ;; esac
     local post=("${extra[@]}")
     as_user env GH_REPO="$GH_REPO" AI_REVIEW_TIMEOUT="$AI_REVIEW_TIMEOUT" \
         ${AI_REVIEW_EFFORT:+AI_REVIEW_EFFORT=$AI_REVIEW_EFFORT} ${VERIFIER:+VERIFIER=$VERIFIER} \
@@ -564,10 +565,11 @@ drive_pr() {  # drive_pr <recipe> <target> <repo names> <note> <branch> <pr url>
         ugit checkout --quiet -- "recipes/$r" 2>/dev/null || true   # drop fixes past the round limit
         break
     done
-    # Rounds over: post the agreed review of the final head once (review + ai-review status).
+    # Rounds over: stamp the final head once (the ai-review status; the full review only
+    # when blocking findings remain: the bot's PRs are ours, see bin/ai-review --stamp).
     if [[ $build_ok == yes && $mode == full && $AI_REVIEW != off && -s $cr &&
           $(as_user jq -r '.head // ""' "$cr") == "$(ugit rev-parse HEAD)" ]]; then
-        ai_review_state "$num" "$cr" post || cr_note="$cr_note; posting the review failed"
+        ai_review_state "$num" "$cr" stamp || cr_note="$cr_note; posting the review failed"
     fi
 
     # Gates.

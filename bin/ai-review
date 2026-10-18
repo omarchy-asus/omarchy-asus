@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Verified AI review of GitHub pull requests (the CodeRabbit replacement).
 
-  bin/ai-review pr N [--repo OWNER/REPO] [--checkout DIR] [--reply FILE] [--post] [--force] [--json OUT]
+  bin/ai-review local [--base REF] [--effort E] [--repo OWNER/REPO] [--force] [--json OUT]
+  bin/ai-review pr N [--repo OWNER/REPO] [--checkout DIR] [--reply FILE] [--post | --stamp]
+                     [--effort E] [--force] [--json OUT]
   bin/ai-review sweep [--owner OWNER]... [--limit N] [--include-forks] [--post]
 
 Two stages, both by the reviewer family, never the author's (org rule: Opus writes,
@@ -13,7 +15,19 @@ Codex Sol reviews; for Codex-written contributor work, AI_REVIEWER=claude):
              code (VERIFIER=codex|claude, or openrouter:<model> with the cited code
              inlined). Refuted findings are listed but never block.
 
-Agents run it inline, in their own checkout. Nothing reaches GitHub until both agree:
+Our own agents review locally, with no GitHub traffic, and stamp once at the end:
+  bin/ai-review local              review HEAD of this clean checkout against its merge-base
+                                   with the hub's main (--base REF for another base); prints
+                                   the findings; exit 0 clean, 3 blocking (P0/P1 not refuted)
+  (fix and commit, run it again until it exits 0; batch the fixes: one round, one review)
+  git push; bin/ai-review pr N --stamp
+                                   reuse that local result (same head and merge-base; it
+                                   reviews again only when there is none) and post only the
+                                   `ai-review` status, plus a one-line comment when
+                                   non-blocking findings remain. Blocking findings get the
+                                   full review (--post) instead.
+
+Outside contributors' PRs get the full GitHub review, settled in rounds first:
   bin/ai-review pr N --checkout .                  review the head; findings come back to you
   bin/ai-review pr N --checkout . --reply F.json   answer findings ({"<id>": "why"}); the
                                                    reviewer re-checks each answer in the code
@@ -24,13 +38,17 @@ Agents run it inline, in their own checkout. Nothing reaches GitHub until both a
 --post gives the PR one review (inline comments where the line is in the diff) and an
 `ai-review` commit status on the head: failure while a P0/P1 finding is not withdrawn by
 the reviewer (confirmed, or unverified because verification failed: fail closed); success
-otherwise. It posts only a local review of that exact head.
+otherwise. It posts only a local review of that exact head (--force: reviews it again
+first). A new review or stamp comment minimizes the PR's earlier ai-review summaries as
+outdated, so only the latest shows.
 Results are cached per head under ~/.local/share/omarchy-asus/ai-review, so the
 pipeline (bin/auto-update) and the sweep never review the same commit twice.
 
 `sweep` reviews every open PR of the given owners (default: the authenticated user and
 its organisations) whose head has no `ai-review` status yet, to catch up on PRs nobody
-reviewed inline. Fork PRs are skipped unless --include-forks.
+reviewed inline. Fork PRs are skipped unless --include-forks. With --post, our PRs
+(author in AI_REVIEW_OURS, or a body signed "Filed by <agent>") are stamped and everyone
+else's get the full review.
 
 Everything posted (review body and comments) goes through bin/issue's PII scan
 (~/.config/agent-pii/denylist) first; a hit or a missing denylist posts nothing and
@@ -42,6 +60,7 @@ Environment (all optional):
   VERIFIER (default: the reviewer family), VERIFY_MODEL (default: AI_REVIEW_MODEL)
   OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE         for VERIFIER=openrouter:<model>
   AI_REVIEW_TIMEOUT (default 1800), VERIFY_TIMEOUT (default 900)   seconds
+  AI_REVIEW_OURS (default: the authenticated gh login)  comma-separated logins whose PRs are ours
 Only stdlib, git, gh and the codex/claude CLIs are used.
 """
 import argparse
@@ -457,6 +476,7 @@ def post(repo, num, res, roots):
     else:
         rv = submit_review(repo, num, review, comments)
         res["review_id"], res["review_url"], res["review_inline"] = rv["id"], rv.get("html_url"), review["comments"]
+    minimize_previous(repo, num, keep={rv["id"]})
     ids = []
     if review["comments"]:
         sent = {c["body"]: c["line"] for c in review["comments"]}
@@ -474,6 +494,82 @@ def post(repo, num, res, roots):
     set_status(repo, res["head"], state,
                f"{res['blocking']} blocking, {len(shown)} posted, {len(refuted)} refuted | mb {res['merge_base'][:12]} by {reviewer()}",
                rv.get("html_url"))
+    res["mode"] = "post"
+
+
+def stamp(repo, num, res, roots):
+    """Our own PRs after a clean local run: the `ai-review` status, plus one comment line when
+    non-blocking findings remain. Blocking findings get the full review (post) instead."""
+    if res["blocking"]:
+        log(f"{res['blocking']} blocking finding(s): posting the full review instead of a stamp")
+        return post(repo, num, res, roots)
+    shown = [f for f in res["findings"] if f["verdict"] != "refuted"]
+    refuted = len(res["findings"]) - len(shown)
+    if shown and not res.get("comment_id"):  # an earlier try posted it and failed after: not twice
+        items = "; ".join(f"[P{f['priority']}] {f['title']} (`{f['path']}:{f['start']}`)" for f in shown)
+        line = scrub(f"ai-review of `{res['head'][:12]}`: no blocking findings; {len(shown)} non-blocking: {items}",
+                     roots).replace("\r", " ").replace("\n", " ")
+        if len(line) > 600:
+            line = line[:597] + "..."
+        line = MARK.format(head=res["head"]) + " " + line
+        pii_check(line)
+        c = gh_json("api", "-X", "POST", f"repos/{repo}/issues/{num}/comments", "-f", f"body={line}")
+        res["comment_id"], res["comment_url"] = c["id"], c.get("html_url")
+    minimize_previous(repo, num, keep={res.get("comment_id")})
+    res["mode"] = "stamp"
+    if not res.get("default_base", True):  # as in post: no status for a non-default base
+        log("the PR does not target the default branch: no status (a retarget means a new review)")
+        return
+    desc = f"0 blocking, {len(shown)} non-blocking, {refuted} refuted (stamp) | mb {res['merge_base'][:12]} by {reviewer()}"
+    pii_check(desc)  # as --post always does: a missing or unreadable denylist fails closed
+    set_status(repo, res["head"], "success", desc, res.get("comment_url"))
+
+
+PREVIOUS = """query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
+  reviews(last:100){nodes{id databaseId body isMinimized viewerCanMinimize}}
+  comments(last:100){nodes{id databaseId body isMinimized viewerCanMinimize}}}}}"""
+MINIMIZE = """mutation($id:ID!){minimizeComment(input:{subjectId:$id,classifier:OUTDATED}){minimizedComment{isMinimized}}}"""
+
+
+def minimize_previous(repo, num, keep=()):
+    """Minimize the PR's earlier ai-review summaries (reviews and comments) as OUTDATED, so
+    only the latest shows. Best effort: a failure is logged, never fails the post."""
+    owner, name = repo.split("/", 1)
+    try:
+        data = gh_json("api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={num}",
+                       "-f", f"query={PREVIOUS}")
+        pr = data["data"]["repository"]["pullRequest"]
+        nodes = pr["reviews"]["nodes"] + pr["comments"]["nodes"]
+    except Exception as e:
+        log(f"could not list earlier ai-review summaries: {e}")
+        return []
+    done = []
+    for n in nodes:
+        if (MARK.split("{")[0] in (n.get("body") or "") and not n.get("isMinimized")
+                and n.get("viewerCanMinimize") and n.get("databaseId") not in keep):
+            p = run(["gh", "api", "graphql", "-f", f"query={MINIMIZE}", "-f", f"id={n['id']}"], check=False)
+            if p.returncode == 0:
+                done.append(n["id"])
+            else:
+                log(f"could not minimize an earlier ai-review summary: {(p.stdout or p.stderr).strip()[:200]}")
+    return done
+
+
+FILED_BY = re.compile(r"^[\W_]*Filed by \S", re.I | re.M)
+
+
+def ours_logins():
+    env = os.environ.get("AI_REVIEW_OURS")
+    if env:
+        return {x.strip().lower() for x in env.split(",") if x.strip()}
+    return {gh_json("api", "user")["login"].lower()}
+
+
+def is_ours(pr, ours):
+    """Our account's PRs, or our agents' (body signed "Filed by <agent>"): stamped, not threaded.
+    A spoofed signature gains nothing: blocking findings still get the full review."""
+    login = ((pr.get("author") or {}).get("login") or "").lower()
+    return login in ours or bool(FILED_BY.search(pr.get("body") or ""))
 
 
 # ---------------------------------------------------------------- one PR
@@ -512,23 +608,171 @@ def load_replies(path):
     return {int(k): str(v) for k, v in items if str(k).isdigit() and v}
 
 
-def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, review_missing=False):
-    """Review locally, answer findings (reply), or post the agreed result (do_post).
+def count_blocking(findings):
+    return sum(f["priority"] in BLOCKING and f["verdict"] != "refuted" for f in findings)
 
-    Nothing goes to GitHub until do_post, and do_post only posts a local review of this
-    exact head and merge-base (review_missing=True: review first, for the unattended sweep).
+
+def review_tree(root, base, title, diff):
+    """Both stages on a checkout at the head: codex finds, a fresh codex run verifies."""
+    t0 = time.time()
+    raw, findings = find(root, base, title, diff)
+    res = {"codex_raw": raw, "reviewer": f"{reviewer()} {model()}".strip(), "findings": findings,
+           "verifier": None, "_commentable": {k: sorted(v) for k, v in commentable(diff).items() if k}}
+    if findings:
+        try:
+            res["verifier"] = verify(root, findings, diff)
+        except Exception as e:  # fail closed: findings stay unverified
+            res["verify_error"] = str(e)
+            for f in findings:
+                f["verdict"], f["reason"] = "uncertain", "verification failed"
+    res["reviewed"], res["seconds"] = True, int(time.time() - t0)
+    res["blocking"] = count_blocking(res["findings"])
+    return res
+
+
+# ---------------------------------------------------------------- cache
+def slug(repo):
+    return repo.replace("/", "__")
+
+
+def local_cache_path(repo, head, mb):
+    """`local` results, keyed like the PR cache by head, merge-base and reviewer family, so
+    `pr N --stamp` (and the rounds) reuse a local review of the same diff."""
+    return os.path.join(DATA, f"{slug(repo)}-local-{head}-{mb[:12]}-{reviewer()}.json")
+
+
+def save_json(path, res):
+    """Atomic write, stamped with the save time: load_cache prefers the newest copy."""
+    res["saved_at"] = time.time()
+    with open(path + ".tmp", "w") as fh:
+        json.dump(res, fh, indent=1)
+    os.replace(path + ".tmp", path)
+
+
+def load_cache(cache):
+    """The current result for a cache key, or None.
+
+    A post that fails moves its result to <cache>.unposted. Whichever of the two was saved
+    last is the current one (#60: a forced re-review whose post failed must not lose to the
+    older posted cache); the other is dropped.
     """
+    unposted = cache + ".unposted"
+
+    def read(p):
+        try:
+            with open(p) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return None
+
+    cur, alt = read(cache), read(unposted)
+    if alt is not None and (cur is None or alt.get("saved_at", os.path.getmtime(unposted))
+                            >= cur.get("saved_at", os.path.getmtime(cache))):
+        os.replace(unposted, cache)
+        return alt
+    if os.path.exists(unposted):
+        os.remove(unposted)
+    return cur
+
+
+def forget(cache):
+    """--force: drop this key's results, and remember until a new review is saved that the
+    old one was discarded (a posted status of that old review must not stand in for it)."""
+    for p in (cache, cache + ".unposted"):
+        if os.path.exists(p):
+            os.remove(p)
+    open(cache + ".forced", "w").close()
+
+
+def git_clean_head(root, what):
+    if run(["git", "-C", root, "status", "--porcelain"]).stdout.strip():
+        raise RuntimeError(f"{what} {root} has uncommitted or untracked changes: "
+                           "commit them; the review must see exactly the commit it covers")
+    return run(["git", "-C", root, "rev-parse", "HEAD"]).stdout.strip()
+
+
+# ---------------------------------------------------------------- local
+def review_local(repo, root=".", base_ref=None, force=False):
+    """Review HEAD of a clean checkout against its merge-base with base_ref (default: the
+    hub's main, fetched by URL). Nothing is written to GitHub."""
+    root = os.path.realpath(root)
+    head = git_clean_head(root, "the checkout")
+    if base_ref:
+        base = run(["git", "-C", root, "rev-parse", "--verify", f"{base_ref}^{{commit}}"]).stdout.strip()
+    else:
+        branch = os.environ.get("AI_REVIEW_BASE_BRANCH", "main")
+        base_ref = f"{repo} {branch}"
+        # by URL: the checkout may call the hub remote anything (origin is often a fork)
+        run(git_cred("-C", root, "fetch", "--quiet", f"https://github.com/{repo}.git", f"refs/heads/{branch}"))
+        base = run(["git", "-C", root, "rev-parse", "FETCH_HEAD"]).stdout.strip()
+    mb = run(["git", "-C", root, "merge-base", base, head]).stdout.strip()
+    if mb == head:
+        raise RuntimeError(f"HEAD {head[:12]} is already in {base_ref}: nothing to review")
+    os.makedirs(DATA, exist_ok=True)
+    cache = local_cache_path(repo, head, mb)
+    lock = open(cache + ".lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if force:
+        forget(cache)
+    res = load_cache(cache)
+    if res is None:
+        diff = run(["git", "-C", root, "diff", "-U3", "--src-prefix=a/", "--dst-prefix=b/", f"{base}...{head}"]).stdout
+        title = run(["git", "-C", root, "log", "-1", "--format=%s", head]).stdout.strip()
+        res = review_tree(root, base, title, diff)
+        res.update({"repo": repo, "local": True, "head": head, "base": base, "base_ref": base_ref,
+                    "merge_base": mb, "title": title})
+        save_json(cache, res)
+        if os.path.exists(cache + ".forced"):
+            os.remove(cache + ".forced")
+    else:
+        log(f"cached review of {head[:12]} (--force to review again)")
+    return res
+
+
+def print_local(res, out=sys.stdout):
+    """Findings for the terminal."""
+    fs = res["findings"]
+    refuted = [f for f in fs if f["verdict"] == "refuted"]
+    p = lambda s="": print(s, file=out)
+    p(f"ai-review of {res['head'][:12]} ({res.get('title', '')})")
+    p(f"  against {res.get('base_ref')} (merge-base {res['merge_base'][:12]})")
+    p(f"  {res.get('reviewer')} found {len(fs)}, verifier confirmed {sum(f['verdict'] == 'confirmed' for f in fs)}, "
+      f"refuted {len(refuted)}" + (f" ({res['seconds']}s)" if res.get("seconds") is not None else ""))
+    if res.get("verify_error"):
+        p(f"  verification failed ({res['verify_error'][:200]}): findings are unverified")
+    for f in sorted(fs, key=lambda f: (f["verdict"] == "refuted", f["priority"])):
+        block = f["priority"] in BLOCKING and f["verdict"] != "refuted"
+        p()
+        p(f"{'BLOCKING ' if block else ''}[P{f['priority']}] {f['verdict']}  {f['path']}:{f['start']}-{f['end']}")
+        p(f"  {f['title']}")
+        for line in (f.get("body") or "").splitlines()[:12]:
+            p(f"    {line}")
+        p(f"  reviewer: {f.get('reason', '')}")
+    p()
+    if res["blocking"]:
+        p(f"BLOCKING: {res['blocking']} P0/P1 finding(s). Fix, commit, run `bin/ai-review local` again.")
+    else:
+        p("CLEAN: no blocking findings. Push, then `bin/ai-review pr N --stamp`.")
+
+
+def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, review_missing=False,
+              do_stamp=False):
+    """Review locally, answer findings (reply), or publish the agreed result.
+
+    Nothing goes to GitHub until do_post (the full review) or do_stamp (status only, our own
+    PRs). do_post only posts a local review of this exact head and merge-base (unless force or
+    review_missing, for the unattended sweep, which review first); do_stamp reviews when there
+    is no local result yet.
+    """
+    publish = do_post or do_stamp
     fields = "headRefOid,baseRefOid,baseRefName,title,isCrossRepository"
     pr = gh_json("pr", "view", str(num), "-R", repo, "--json", fields)
     head, base = pr["headRefOid"], pr["baseRefOid"]
     if checkout:
         # The rounds review the checkout's local commit: nothing has to be pushed until the
         # final --post, which needs that same commit to be the PR head.
-        if run(["git", "-C", checkout, "status", "--porcelain"]).stdout.strip():
-            raise RuntimeError(f"--checkout {checkout} has uncommitted or untracked changes: "
-                               "commit them; the review must see exactly the commit it covers")
-        local = run(["git", "-C", checkout, "rev-parse", "HEAD"]).stdout.strip()
-        if do_post:  # GitHub can lag a just-pushed head
+        local = git_clean_head(checkout, "--checkout")
+        if publish:  # GitHub can lag a just-pushed head
             for _ in range(6):
                 if pr["headRefOid"] == local:
                     break
@@ -548,21 +792,33 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
     os.makedirs(DATA, exist_ok=True)
     # keyed by reviewer too: AI_REVIEWER=claude must never reuse a Codex review
     target = re.sub(r"[^A-Za-z0-9._-]", "_", pr["baseRefName"])  # a retarget can keep the merge-base
-    cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}-{mb[:12]}-{target}-{reviewer()}.json")
+    cache = os.path.join(DATA, f"{slug(repo)}-{num}-{head}-{mb[:12]}-{target}-{reviewer()}.json")
     lock = open(cache + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
-    if force:  # a forced review replaces whatever this head had, posted or not
-        for f in (cache, cache + ".unposted"):
-            if os.path.exists(f):
-                os.remove(f)
-    if not os.path.exists(cache) and os.path.exists(cache + ".unposted"):
-        os.replace(cache + ".unposted", cache)  # agreed, posting failed: post it, don't review again
-    res = json.load(open(cache)) if os.path.exists(cache) else None
+    local_cache = local_cache_path(repo, head, mb)
+    # a forced review replaces whatever this head had, posted or not; so does a `local --force`
+    # of the same diff that has not completed yet
+    if force or os.path.exists(local_cache + ".forced"):
+        forget(cache)
+    forced = os.path.exists(cache + ".forced")  # a discarded review must not come back (#60)
+    res = load_cache(cache)
 
     def save():
-        json.dump(res, open(cache, "w"), indent=1)
+        save_json(cache, res)
 
-    if res is None and do_post and not review_missing:
+    if not forced:
+        # `bin/ai-review local` of this same diff, when it is newer than what the PR has (a
+        # `local --force` after a PR review supersedes it, posted or not: it gets published)
+        lres = load_cache(local_cache)
+        if (lres and lres.get("head") == head and lres.get("merge_base") == mb
+                and (res is None or lres.get("saved_at", 0) > res.get("saved_at", 0))):
+            log(f"reusing the local review of {head[:12]} (merge-base {mb[:12]})")
+            res = {k: v for k, v in lres.items() if k not in ("local", "saved_at")}
+            res.update({"pr": num, "base": base,
+                        "default_base": pr["baseRefName"] == gh_json("api", f"repos/{repo}")["default_branch"]})
+            save()
+
+    if res is None and publish and not forced:
         state = final_status(repo, head, mb)
         if state in ("success", "failure"):  # posted from another machine or HOME
             log(f"{repo}#{num} {head[:12]}: already posted (status {CONTEXT} is {state})")
@@ -571,30 +827,22 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
                     [{"priority": 1, "verdict": "confirmed", "path": "(see the PR)", "start": 0, "end": 0,
                       "title": f"{CONTEXT} already failed on this head", "body": "Read the posted review.",
                       "reason": "status posted by an earlier review"}]}
+    if res is None and do_post and not (force or review_missing or do_stamp):
         raise RuntimeError(f"no local review of {head[:12]}: run without --post first, settle the findings "
                            "(fix and push, or --reply), then post")
 
     if res is None:  # review: codex finds, a fresh codex run verifies
-        t0 = time.time()
         with Checkout(repo, num, head, base, checkout) as co:
-            raw, findings = find(co.root, base, pr["title"], co.diff)
-            res = {"repo": repo, "pr": num, "head": head, "base": base, "merge_base": mb, "codex_raw": raw,
-                   "default_base": pr["baseRefName"] == gh_json("api", f"repos/{repo}")["default_branch"],
-                   "reviewer": f"{reviewer()} {model()}".strip(), "findings": findings, "verifier": None,
-                   "_commentable": {k: sorted(v) for k, v in commentable(co.diff).items() if k}}
-            if findings:
-                try:
-                    res["verifier"] = verify(co.root, findings, co.diff)
-                except Exception as e:  # fail closed: findings stay unverified
-                    res["verify_error"] = str(e)
-                    for f in findings:
-                        f["verdict"], f["reason"] = "uncertain", "verification failed"
-        res["reviewed"], res["seconds"] = True, int(time.time() - t0)
-        res["blocking"] = sum(f["priority"] in BLOCKING and f["verdict"] != "refuted" for f in res["findings"])
+            res = review_tree(co.root, base, pr["title"], co.diff)
+        res.update({"repo": repo, "pr": num, "head": head, "base": base, "merge_base": mb,
+                    "default_base": pr["baseRefName"] == gh_json("api", f"repos/{repo}")["default_branch"]})
         save()
+        for marker in (cache + ".forced", local_cache + ".forced"):  # this fresh review completes them
+            if os.path.exists(marker):
+                os.remove(marker)
 
     if reply:  # the author answers findings; the reviewer family checks the answers against the code
-        if res.get("posted") or res.get("review_id"):  # what is on GitHub must stay the agreed result
+        if res.get("posted") or res.get("review_id") or res.get("comment_id"):  # GitHub keeps the agreed result
             raise RuntimeError("this head's review is already submitted; push a fix for a new review")
         answers = {i: a for i, a in load_replies(reply).items() if 0 <= i < len(res["findings"])}
         if answers:
@@ -603,17 +851,17 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
                 for i in sorted(answers):
                     res["findings"][i]["author_reply"] = answers[i][:4000]
                 verify(co.root, subset, co.diff)
-            res["blocking"] = sum(f["priority"] in BLOCKING and f["verdict"] != "refuted" for f in res["findings"])
+            res["blocking"] = count_blocking(res["findings"])
             save()
 
-    if do_post and not res.get("posted"):
+    if publish and not res.get("posted"):
         res["_commentable"] = {k: set(v) for k, v in res.get("_commentable", {}).items()}
         try:
-            post(repo, num, res, [checkout])
+            (stamp if do_stamp else post)(repo, num, res, [checkout])
         except Exception as e:
             log(f"posting failed: {e}")  # details stay local: statuses are public and unscanned
             res["_commentable"] = {k: sorted(v) for k, v in res["_commentable"].items()}
-            json.dump(res, open(cache + ".unposted", "w"), indent=1)  # keeps review_id: never post twice
+            save_json(cache + ".unposted", res)  # keeps review_id/comment_id: never post twice
             os.remove(cache)
             set_status(repo, head, "error", "posting the review failed; see the reviewer's log")
             raise
@@ -634,7 +882,7 @@ def pipeline_view(res):
                             "body": f"[P{f['priority']}] {f['title']} ({f['verdict']})\n{f['body']}\n"
                                     f"Verifier: {f.get('reason', '')}"[:4000]})
     return {"head": res["head"], "reviewed": bool(res.get("reviewed")), "posted": bool(res.get("posted")),
-            "blocking": res.get("blocking", 0), "threads": threads,
+            "mode": res.get("mode"), "blocking": res.get("blocking", 0), "threads": threads,
             "findings": len(res.get("findings", [])), "seconds": res.get("seconds"),
             # every finding, for the author to fix or answer (--reply uses these ids)
             "items": [{"id": i, "priority": f["priority"], "verdict": f["verdict"], "title": f["title"],
@@ -646,6 +894,8 @@ def pipeline_view(res):
 
 # ---------------------------------------------------------------- sweep
 def sweep(owners, limit, include_forks, do_post, dry=False):
+    """Review PRs with no ai-review status yet. With do_post our PRs (is_ours) are stamped and
+    outside contributors' get the full review."""
     if not owners:
         owners = [gh_json("api", "user")["login"]] + [o["login"] for o in gh_json("api", "user/orgs") or []]
     todo = []
@@ -656,22 +906,28 @@ def sweep(owners, limit, include_forks, do_post, dry=False):
         for p in prs or []:
             todo.append((p["repository"]["nameWithOwner"], p["number"]))
     rc = done = 0
+    ours = None
     for repo, num in todo:
         if done >= limit:
             log(f"stopped after {limit} reviews (--limit); the next sweep continues")
             break
         try:
-            pr = gh_json("pr", "view", str(num), "-R", repo, "--json", "headRefOid,baseRefOid,isCrossRepository")
+            pr = gh_json("pr", "view", str(num), "-R", repo, "--json",
+                         "headRefOid,baseRefOid,isCrossRepository,author,body")
             if pr["isCrossRepository"] and not include_forks:
                 continue
             if final_status(repo, pr["headRefOid"], merge_base(repo, pr["baseRefOid"], pr["headRefOid"])) in ("success", "failure"):
                 continue
             done += 1
+            if ours is None:
+                ours = ours_logins()
+            mine = is_ours(pr, ours)
+            how = "stamp" if mine else "full review"
             if dry:
-                log(f"would review {repo}#{num} {pr['headRefOid'][:12]}")
+                log(f"would review {repo}#{num} {pr['headRefOid'][:12]} ({how})")
                 continue
-            log(f"reviewing {repo}#{num} {pr['headRefOid'][:12]}")
-            res = review_pr(repo, num, do_post=do_post, review_missing=True)
+            log(f"reviewing {repo}#{num} {pr['headRefOid'][:12]}" + (f" ({how})" if do_post else ""))
+            res = review_pr(repo, num, do_post=do_post and not mine, do_stamp=do_post and mine, review_missing=True)
             log(f"{repo}#{num}: {len(res.get('findings', []))} found, {res.get('blocking', 0)} blocking, {res.get('seconds')}s")
         except Exception as e:
             log(f"{repo}#{num}: {e}")
@@ -682,26 +938,47 @@ def sweep(owners, limit, include_forks, do_post, dry=False):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    lo = sub.add_parser("local", help="review this clean checkout's HEAD locally (no GitHub writes)")
+    lo.add_argument("--base", help="base ref (default: the hub's main, fetched by URL)")
+    lo.add_argument("--effort", help="codex reasoning effort (AI_REVIEW_EFFORT; default medium)")
+    lo.add_argument("--repo", default=os.environ.get("GH_REPO") or "omarchy-asus/omarchy-asus")
+    lo.add_argument("--checkout", default=".", help="the checkout to review (default: .)")
+    lo.add_argument("--force", action="store_true", help="review again even if this head was reviewed")
+    lo.add_argument("--json", help="also write the pipeline view here")
     a = sub.add_parser("pr")
     a.add_argument("number", type=int)
     a.add_argument("--repo", default=os.environ.get("GH_REPO") or "omarchy-asus/omarchy-asus")
     a.add_argument("--checkout", help="use this checkout (at the PR head) instead of a cached clone")
-    a.add_argument("--post", action="store_true",
-                   help="post this head's agreed local review and the ai-review status (never reviews)")
+    pub = a.add_mutually_exclusive_group()
+    pub.add_argument("--post", action="store_true",
+                     help="post this head's agreed local review and the ai-review status (outside contributors)")
+    pub.add_argument("--stamp", action="store_true",
+                     help="our own PRs: post only the ai-review status (reusing the local review); "
+                          "blocking findings get the full review")
     a.add_argument("--reply", metavar="FILE",
                    help='answer findings: JSON {"<finding id>": "answer"}; the reviewer re-checks them')
+    a.add_argument("--effort", help="codex reasoning effort (AI_REVIEW_EFFORT; default medium)")
     a.add_argument("--force", action="store_true", help="review again even if this head was reviewed")
     a.add_argument("--json", help="write the pipeline view (head, reviewed, threads) here")
     s = sub.add_parser("sweep")
     s.add_argument("--owner", action="append", default=[])
     s.add_argument("--limit", type=int, default=30)
     s.add_argument("--include-forks", action="store_true")
-    s.add_argument("--post", action="store_true")
+    s.add_argument("--post", action="store_true", help="publish: stamp our PRs, full review for the rest")
     s.add_argument("--dry-run", action="store_true", help="list what would be reviewed")
     o = ap.parse_args()
     if o.cmd == "sweep":
         return sweep(o.owner, o.limit, o.include_forks, o.post and not o.dry_run, o.dry_run)
-    res = review_pr(o.repo, o.number, o.checkout, o.post, o.force, o.reply)
+    if o.effort:
+        os.environ["AI_REVIEW_EFFORT"] = o.effort
+    if o.cmd == "local":
+        res = review_local(o.repo, o.checkout, o.base, o.force)
+        if o.json:
+            with open(o.json, "w") as fh:
+                fh.write(json.dumps(pipeline_view(res), indent=2) + "\n")
+        print_local(res)
+        return 3 if res["blocking"] else 0
+    res = review_pr(o.repo, o.number, o.checkout, o.post, o.force, o.reply, do_stamp=o.stamp)
     view = pipeline_view(res) if "findings" in res and "head" in res else res
     text = json.dumps(view, indent=2)
     if o.json:
