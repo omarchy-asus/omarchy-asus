@@ -71,8 +71,9 @@ Panel {
   // 0 = keyboard, 1 = slash
 
   // Writes queued behind the running one, in order. A newer write to the same
-  // setting replaces the queued one, so a slider drag cannot outrun the daemon,
-  // but an unrelated action is never dropped.
+  // setting drops the queued one and goes to the back, so a slider drag cannot
+  // outrun the daemon, an unrelated action is never dropped, and overlapping
+  // writes always end on the last selection.
   property var pendingCmds: []
 
   readonly property var levelOptions: [
@@ -127,6 +128,7 @@ Panel {
     { value: "unlock", label: "Unlock" }
   ]
 
+  // queue-begin (pure helpers; exercised by an extracted-function test)
   // Identifies the setting a command writes: the verb, plus the scope/flag
   // argument for verbs that address one of several settings.
   function cmdKey(args) {
@@ -136,19 +138,33 @@ Panel {
     return verb
   }
 
+  // True when running newArgs makes a queued oldArgs pointless: same setting,
+  // or a kbd-level "both" that covers an earlier "ac"/"battery". A narrower
+  // write never drops a queued "both" (it would lose the other scope).
+  function supersedes(newArgs, oldArgs) {
+    if (cmdKey(newArgs) === cmdKey(oldArgs)) return true
+    return newArgs[1] === "kbd-level" && oldArgs[1] === "kbd-level"
+        && newArgs[2] === "both"
+  }
+
+  // Returns the queue with superseded entries removed and args appended last,
+  // so the final state is always the user's last selection.
+  function enqueue(queue, args) {
+    var q = []
+    for (var i = 0; i < queue.length; i++)
+      if (!supersedes(args, queue[i])) q.push(queue[i])
+    q.push(args)
+    return q
+  }
+  // queue-end
+
   function runCmd(args) {
     if (!actionProc.running) {
       actionProc.command = args
       actionProc.running = true
       return
     }
-    var q = root.pendingCmds.slice()
-    var key = cmdKey(args)
-    for (var i = 0; i < q.length; i++) {
-      if (cmdKey(q[i]) === key) { q[i] = args; root.pendingCmds = q; return }
-    }
-    q.push(args)
-    root.pendingCmds = q
+    root.pendingCmds = enqueue(root.pendingCmds, args)
   }
 
   function refresh() { if (!stateProc.running) stateProc.running = true }
