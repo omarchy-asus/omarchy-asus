@@ -251,11 +251,18 @@ Panel {
 
   // Optimistic local update: the restart-and-reapply round trip takes a moment,
   // and leaving the segmented control on its old value that whole time reads as
-  // a dropped click.
+  // a dropped click. A level for the active source (or both) is also the live
+  // brightness, so the keyboard toggle sees it before the next `get`.
   function setLevel(scope, value) {
     if (scope === "ac") root.kbdAC = value
     else if (scope === "battery") root.kbdBattery = value
     else { root.kbdAC = value; root.kbdBattery = value }
+    var active = !root.hasPowerTune || scope === "both"
+        || scope === (root.onBattery ? "battery" : "ac")
+    if (active) {
+      for (var i = 0; i < root.levelOptions.length; i++)
+        if (root.levelOptions[i].value === value) root.kbdBrightness = i
+    }
     runCmd([root.helper, "kbd-level", scope, value])
   }
 
