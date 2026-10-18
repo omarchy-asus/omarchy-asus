@@ -714,7 +714,12 @@ apply_initramfs_no_nvidia() {
     warn "could not back up $NVIDIA_CONF; nothing changed"
     return 1
   fi
-  sudo rm -f "$NVIDIA_CONF"
+  # No rebuild (and no marker) unless the file is gone.
+  if ! sudo rm -f "$NVIDIA_CONF" || [[ -e $NVIDIA_CONF ]]; then
+    rm -f "$backup"
+    warn "could not remove $NVIDIA_CONF; nothing changed"
+    return 1
+  fi
   if ! sudo limine-mkinitcpio; then
     sudo install -m644 "$backup" "$NVIDIA_CONF"
     rm -f "$backup"
