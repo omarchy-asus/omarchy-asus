@@ -333,6 +333,23 @@ class Sweep(unittest.TestCase):  # issue #62
         self.sweep(1, False)
         self.assertEqual(self.reviewed, [1])
 
+    def test_post_dry_run_previews_the_post_candidates(self):
+        seen = []
+        argv, sys.argv = sys.argv, ["ai-review", "sweep", "--post", "--dry-run", "--limit", "1"]
+        try:
+            with Patch(sweep=lambda *a, **k: seen.append(a) or 0):
+                ar.main()
+        finally:
+            sys.argv = argv
+        self.assertTrue(seen[0][3], "--post --dry-run filters the cache like --post")
+        ar.save_json(self.cache(1), result([], head=self.head(1), pr=1))
+        with Patch(gh_json=self.gh, merge_base=lambda *a: MB, final_status=lambda *a: None,
+                   ours_logins=lambda: {"me"}, review_pr=self.review_pr):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                ar.sweep(["owner"], 1, False, True, dry=True)
+        self.assertEqual(self.reviewed, [])
+        self.assertIn(f"would review {REPO}#1", err.getvalue())
+
     def test_peek_cache_does_not_move_files(self):
         cache = self.cache(1)
         with open(cache, "w") as fh:

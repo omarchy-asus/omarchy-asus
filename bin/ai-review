@@ -1020,7 +1020,7 @@ def main():
     s.add_argument("--dry-run", action="store_true", help="list what would be reviewed")
     o = ap.parse_args()
     if o.cmd == "sweep":
-        return sweep(o.owner, o.limit, o.include_forks, o.post and not o.dry_run, o.dry_run)
+        return sweep(o.owner, o.limit, o.include_forks, o.post, o.dry_run)  # dry: no writes, same candidates
     if o.effort:
         os.environ["AI_REVIEW_EFFORT"] = o.effort
     if o.cmd == "local":
