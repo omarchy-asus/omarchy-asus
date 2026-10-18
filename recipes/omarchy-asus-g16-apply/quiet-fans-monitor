@@ -1,0 +1,84 @@
+#!/bin/bash
+# omarchy-asus-g16-quiet-fans monitor (EXPERIMENTAL, opt-in): runs the
+# omarchy-asus fork's GA605KM quiet-fans helper (branch asus/ga605km-quiet-fans,
+# shipped unchanged next to this script) whenever the power source or the power
+# profile changes.
+#
+# In the fork, omarchy-powerprofiles-set calls the helper right after it sets a
+# profile: "on" when it set balanced for battery, "off" for anything else. Stock
+# Omarchy's script has no such call and this package doesn't change it, so this
+# service makes the same decision from the same inputs instead: the power
+# source (a Mains supply online, as the helper itself reads it) and the
+# power-profiles-daemon profile. It runs as root, so the fork's sudoers grant
+# isn't needed. The helper only writes when the state has to change: on puts
+# the ASUS handler on quiet while both handlers are balanced on battery; off
+# undoes exactly that mixed state and leaves any other state alone.
+
+set -uo pipefail
+
+helper=${QUIET_FANS_HELPER:-/usr/lib/omarchy-asus-g16-apply/omarchy-powerprofiles-asus-quiet-fans}
+sys=${OMARCHY_SYS_ROOT:-/sys}
+# Wait this long after the last event before deciding. Omarchy's shell sets the
+# remembered profile when the source changes; deciding after it has done so
+# saves a profile write, and each write wakes the RTX for about 20 s.
+settle=${QUIET_FANS_SETTLE:-3}
+
+on_battery() {
+  local supply online type
+  for supply in "$sys"/class/power_supply/*; do
+    type="" online=""
+    read -r type <"$supply/type" 2>/dev/null || true
+    [[ $type == "Mains" ]] || continue
+    read -r online <"$supply/online" 2>/dev/null || true
+    [[ $online == "1" ]] && return 1
+  done
+  return 0
+}
+
+decide() {
+  local profile
+  profile=$(powerprofilesctl get 2>/dev/null) || return 0
+  if on_battery && [[ $profile == "balanced" ]]; then
+    "$helper" on || true
+  else
+    "$helper" off || true
+  fi
+}
+
+consume_events() {
+  local line
+  decide
+  while IFS= read -r line; do
+    case $line in
+      *"(power_supply)"*)
+        # The battery reports every percent; only a charger changes the source.
+        [[ $line == *"/power_supply/BAT"* ]] && continue
+        ;;
+      *ActiveProfile*) ;;
+      *) continue ;;
+    esac
+    # One plug sends a burst of events; act once it has settled.
+    while IFS= read -r -t "$settle" line; do :; done
+    decide
+  done
+}
+
+case ${1:-} in
+  --consume)
+    consume_events
+    exit 0
+    ;;
+esac
+
+{
+  udevadm monitor --udev --subsystem-match=power_supply &
+  gdbus monitor --system --dest net.hadess.PowerProfiles --object-path /net/hadess/PowerProfiles &
+  wait -n
+  # shellcheck disable=SC2046 # one PID per word
+  kill $(jobs -p) 2>/dev/null
+} | consume_events
+
+# Either monitor ending means events are being missed. Exit non-zero so systemd
+# restarts the service.
+echo "event monitor ended; exiting so systemd restarts the service" >&2
+exit 1

@@ -54,6 +54,11 @@ real bugs on this hardware.
 - **Kernel 7.2.8-9.2:** an `i2c-designware` RX threshold backport (the touchpad fires about
   52 interrupts per report today) and GA605KM power limits for `asus-armoury`.
 - **Win-lock helper and G16 Control widget:** a toast when Fn+Super locks or unlocks the key.
+- **Fresh G16 coverage:** `omarchy-asus-g16-apply` (not published yet) reports every known
+  G16 fix on a stock install with `--check` and, when you run it, applies the ones that live in
+  your own config or `/etc` (iGPU video decode, HDMI cursor, speaker level, rtkit, asusd,
+  Win-lock). Settings you already have are left alone. See
+  [its README](recipes/omarchy-asus-g16-apply/README.md).
 - **Daily auto-update pipeline:** the code is in this repo (`bin/auto-update`, `systemd/`);
   it will be installed on the build host soon.
 
@@ -156,6 +161,8 @@ Where our fixes are headed:
   publish, or unpublish on failure).
 - `bin/install-auto-update` and `systemd/`: the service and timer units and their installer;
   [systemd/README.md](systemd/README.md) covers the design and the privilege model.
+- `recipes/omarchy-asus-g16-apply/`: the user-run command for the G16 fixes no package can
+  ship (they live in your config or `/etc`); `--check` is read-only.
 - `keys/`: the repo signing key.
 
 Maintained by [@rdoupe](https://github.com/rdoupe) and contributors.

@@ -1,0 +1,15 @@
+[Unit]
+Description=Quiet fans on battery for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)
+Documentation=file:///usr/share/doc/omarchy-asus-g16-apply/README.md
+# Not enabled by the package. `omarchy-asus-g16-apply quiet-fans` enables it.
+ConditionPathExists=/sys/class/platform-profile
+After=power-profiles-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/omarchy-asus-g16-apply/quiet-fans-monitor
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
