@@ -790,7 +790,7 @@ if [[ -r $PACMAN_LOG ]]; then
       tx_epoch=''
   fi
 fi
-snap_cmd=(snapper --utc --iso -c root --csvout list --columns number,date)
+snap_cmd=(snapper --utc --iso -c root --csvout list --columns "number,date")
 if ! have snapper; then
   warn "snapper not installed: no snapshots"
 elif ! snaps=$("${snap_cmd[@]}" 2>/dev/null) && ! snaps=$(try_root "${snap_cmd[@]}"); then
