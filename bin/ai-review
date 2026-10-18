@@ -569,18 +569,23 @@ def sweep(owners, limit, include_forks, do_post, dry=False):
         owners = [gh_json("api", "user")["login"]] + [o["login"] for o in gh_json("api", "user/orgs") or []]
     todo = []
     for owner in owners:
-        prs = gh_json("search", "prs", "--owner", owner, "--state", "open", "--limit", str(limit),
+        # every open PR of the owner (search caps at 1000): the limit counts reviews, not candidates
+        prs = gh_json("search", "prs", "--owner", owner, "--state", "open", "--limit", "1000",
                       "--json", "number,repository,url")
         for p in prs or []:
             todo.append((p["repository"]["nameWithOwner"], p["number"]))
-    rc = 0
-    for repo, num in todo[:limit]:
+    rc = done = 0
+    for repo, num in todo:
+        if done >= limit:
+            log(f"stopped after {limit} reviews (--limit); the next sweep continues")
+            break
         try:
             pr = gh_json("pr", "view", str(num), "-R", repo, "--json", "headRefOid,baseRefOid,isCrossRepository")
             if pr["isCrossRepository"] and not include_forks:
                 continue
             if final_status(repo, pr["headRefOid"], merge_base(repo, pr["baseRefOid"], pr["headRefOid"])) in ("success", "failure"):
                 continue
+            done += 1
             if dry:
                 log(f"would review {repo}#{num} {pr['headRefOid'][:12]}")
                 continue
