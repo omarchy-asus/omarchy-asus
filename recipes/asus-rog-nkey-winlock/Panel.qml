@@ -202,6 +202,8 @@ Panel {
     root.kbdShutdown = bool(m["KbdShutdown"])
 
     root.hasSlash = bool(m["HasSlash"])
+    if ((root.tab === 1 && !root.hasAura) || (root.tab === 2 && !root.hasSlash))
+      root.tab = 0
     if (root.hasSlash) {
       root.slashOn = bool(m["SlashEnabled"])
       // Do not yank the handle out from under a drag in progress.
@@ -248,8 +250,12 @@ Panel {
     runCmd([root.helper, "kbd-level", scope, value])
   }
 
+  // Flips kbdBrightness (0 off, 2 med) right away so a second click before the
+  // next `get` sees the new state instead of queueing the same write again.
   function toggleKeyboard() {
-    setLevel("both", root.kbdOn ? "off" : "med")
+    var on = !root.kbdOn
+    root.kbdBrightness = on ? 2 : 0
+    setLevel("both", on ? "med" : "off")
   }
 
   function setColor(hex) {
@@ -428,11 +434,14 @@ Panel {
             visible: root.hasAura || root.hasSlash
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
-            options: [
-              { value: "system",   label: "System"    },
-              { value: "keyboard", label: "Keyboard"  },
-              { value: "slash",    label: "Lid slash" }
-            ]
+            // Only pages that have content; parseState moves root.tab back to
+            // System if the selected page disappears.
+            options: {
+              var o = [{ value: "system", label: "System" }]
+              if (root.hasAura) o.push({ value: "keyboard", label: "Keyboard" })
+              if (root.hasSlash) o.push({ value: "slash", label: "Lid slash" })
+              return o
+            }
             value: root.tab === 0 ? "system" : (root.tab === 1 ? "keyboard" : "slash")
             onChanged: function(v) {
               root.tab = (v === "system") ? 0 : (v === "keyboard" ? 1 : 2)
