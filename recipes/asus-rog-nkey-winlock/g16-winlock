@@ -228,6 +228,12 @@ def watch(mode: str) -> None:
                 print(f"{e}; nothing to watch", flush=True)
                 return
             time.sleep(2)
+        except SystemExit as e:
+            # The keyboard is there but not yet ours (uaccess ACL not applied):
+            # keep retrying rather than exit into systemd's restart limit.
+            print(f"{e}; waiting for keyboard access", flush=True)
+            fd, path = _reopen_with_backoff()
+            break
     # Ignore the next N "off" lines after we ourselves unlock (SetFeature echoes).
     suppress_off = 0
     try:
