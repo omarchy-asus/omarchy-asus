@@ -11,6 +11,12 @@
 #   4. a package owns the path: nothing is taken over, the file is untouched
 #   5. no omarchy-update: pacman -Su gets --overwrite for the real path, nothing moves
 #   6. a bad signature: preview_repo stops
+# offer_g16_fixes installing a package that isn't installed yet (asus-rog-nkey-winlock, its
+# udev rule copied in by hand), the same rule:
+#   7. identical unowned rule: pacman -S gets --overwrite for the real path
+#   8. differing unowned rule: names the path, installs nothing, the file is unchanged,
+#      and the script goes on (exit 0)
+#   9. identical, under --dry-run: the printed pacman -S line has the --overwrite
 # Usage: tests/ci/omarchy-asus-setup-etc-takeover.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -20,6 +26,8 @@ export STUB_STATE=$S
 P=/etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf
 DROP=$S/root$P
 SAVED=$S/root/var/lib/omarchy-asus/replaced$P
+WP=/etc/udev/rules.d/70-g16-winlock-hidraw.rules
+WRULE=$S/root$WP
 fail=0
 expect() { if [[ $1 == "$2" ]]; then echo "ok: $3"; else printf 'FAIL: %s\n  got:  %s\n  want: %s\n' "$3" "$1" "$2"; fail=1; fi; }
 
@@ -28,7 +36,7 @@ grep -q OMARCHY_ASUS_SETUP_SOURCE_ONLY "$W/bin/omarchy-asus-setup" ||
     { echo "FAIL: bin/omarchy-asus-setup has no OMARCHY_ASUS_SETUP_SOURCE_ONLY guard"; exit 1; }
 
 mkdir -p "$S/bin" "$S/obin" "$S/fixtures" "$S/fx/db/omarchy-settings-4.0.5-1.1" \
-    "$S/fx/pkg${P%/*}"
+    "$S/fx/pkg${P%/*}" "$S/fx/db/asus-rog-nkey-winlock-1-1" "$S/fx/wpkg${WP%/*}" "$S/home"
 
 # The CI host has GNU tar and maybe no bsdtar; GNU tar needs --wildcards for '*/desc'.
 if ! command -v bsdtar >/dev/null; then
@@ -44,7 +52,10 @@ printf '%s\n' "$*" >>"$S/pacman.log"
 case $1 in
     -Q) grep -qxF "$2" "$S/installed" 2>/dev/null || exit 1; echo "$2 4.0.5-1" ;;
     -Qo) grep -qxF "$2" "$S/owned" 2>/dev/null || exit 1; echo "$2 is owned by omarchy-settings 4.0.5-1" ;;
+    -Qu) exit 0 ;;
     -Su) exit 0 ;;
+    -Si) [[ $2 == omarchy-asus/* ]] ;;
+    -S) exit 0 ;;
     -S*) exit 1 ;;
 esac
 STUB
@@ -113,10 +124,34 @@ etc/systemd/system/asusd.service.d/
 etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf
 usr/bin/x
 EOF
-tar -cf "$S/fixtures/omarchy-asus.files" -C "$S/fx/db" omarchy-settings-4.0.5-1.1
+# A G16 package that is not installed (never in $S/installed), for offer_g16_fixes.
+printf 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", MODE="0660"\n' >"$S/wpackaged.rules"
+printf 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", MODE="0666"\n' >"$S/wdifferent.rules"
+cp "$S/wpackaged.rules" "$S/fx/wpkg$WP"
+cat >"$S/fx/db/asus-rog-nkey-winlock-1-1/desc" <<'EOF'
+%NAME%
+asus-rog-nkey-winlock
+
+%VERSION%
+1-1
+
+%FILENAME%
+asus-rog-nkey-winlock-1-1-any.pkg.tar.zst
+EOF
+cat >"$S/fx/db/asus-rog-nkey-winlock-1-1/files" <<'EOF'
+%FILES%
+etc/
+etc/udev/
+etc/udev/rules.d/
+etc/udev/rules.d/70-g16-winlock-hidraw.rules
+usr/bin/g16-winlock
+EOF
+tar -cf "$S/fixtures/omarchy-asus.files" -C "$S/fx/db" omarchy-settings-4.0.5-1.1 asus-rog-nkey-winlock-1-1
 cp "$S/fixtures/omarchy-asus.files" "$S/fixtures/omarchy-asus.db"
 tar -cf "$S/fixtures/omarchy-settings-4.0.5-1.1-any.pkg.tar.zst" -C "$S/fx/pkg" "${P#/}"
-for f in omarchy-asus.db omarchy-asus.files omarchy-settings-4.0.5-1.1-any.pkg.tar.zst; do
+tar -cf "$S/fixtures/asus-rog-nkey-winlock-1-1-any.pkg.tar.zst" -C "$S/fx/wpkg" "${WP#/}"
+for f in omarchy-asus.db omarchy-asus.files omarchy-settings-4.0.5-1.1-any.pkg.tar.zst \
+    asus-rog-nkey-winlock-1-1-any.pkg.tar.zst; do
     echo signature >"$S/fixtures/$f.sig"
 done
 
@@ -143,6 +178,62 @@ run() {
         run_upgrade
     ) </dev/null >"$S/out" 2>&1
     rc=$?
+}
+# path_without TAG NAME...: $S/bin and BASE_PATH, without the stubs in $S/obin and without
+# any real NAME the host has. On an Omarchy host that is /usr/bin, so a directory holding
+# one is replaced by a copy of its links without them, rather than dropped with its tools.
+path_without() {
+    local tag=$1 out=$S/bin d e n=0 hide
+    local -a dirs
+    shift
+    IFS=: read -ra dirs <<<"$BASE_PATH"
+    for d in "${dirs[@]}"; do
+        [[ -n $d && -d $d ]] || continue
+        hide=0
+        for e in "$@"; do
+            if [[ -x $d/$e ]]; then hide=1; fi
+        done
+        if ((hide)); then
+            n=$((n + 1))
+            mkdir -p "$S/shim-$tag$n"
+            for e in "$d"/*; do
+                [[ " $* " == *" ${e##*/} "* ]] && continue
+                ln -s "$e" "$S/shim-$tag$n/${e##*/}"
+            done
+            out+=:$S/shim-$tag$n
+        else
+            out+=:$d
+        fi
+    done
+    echo "$out"
+}
+NO_APPLY=$(path_without apply omarchy-asus-g16-apply)
+# run_g16 [dry run 0|1]: source the script and run offer_g16_fixes for asus-rog-nkey-winlock
+# alone, with a 'yes' to every question and no omarchy-asus-g16-apply on PATH; sets rc.
+run_g16() {
+    local dry=${1:-0}
+    (
+        set --
+        export OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 OMARCHY_ASUS_SETUP_ROOT=$S/root OMARCHY_ASUS_SETUP_TTY=/dev/null
+        export HOME=$S/home PATH=$NO_APPLY
+        # shellcheck source=/dev/null
+        . "$W/bin/omarchy-asus-setup"
+        touch "$TMP/key.gpg"
+        # The --dry-run branch also runs retire_local_winlock: keep it off the host's /etc.
+        # shellcheck disable=SC2034 # read by the sourced functions
+        FORCE=1 DRY_RUN=$dry WINLOCK_UDEV_DIR=$S/no-udev-rules
+        # shellcheck disable=SC2034 # read by offer_g16_fixes
+        G16_PKGS=(asus-rog-nkey-winlock)
+        confirm() { return 0; }
+        preview_repo
+        offer_g16_fixes
+    ) </dev/null >"$S/out" 2>&1
+    rc=$?
+}
+# g16_rule <content file>: the hand-copied udev rule of asus-rog-nkey-winlock.
+g16_rule() {
+    mkdir -p "${WRULE%/*}"
+    cp "$1" "$WRULE"
 }
 has() { grep -qF -- "$1" "$2" 2>/dev/null; echo $?; }
 same() { cmp -s "$1" "$2"; echo $?; }
@@ -187,26 +278,8 @@ expect "$(same "$S/different.conf" "$DROP")" 0 "the file is untouched"
 expect "$(exists "$S/sudo.log")" 1 "nothing moved"
 
 echo "== 5. no omarchy-update"
-# A PATH without the stub, and without any real omarchy-update the host has. On an
-# Omarchy host that is /usr/bin, so a directory holding omarchy-update is replaced by a
-# copy of its links without omarchy-update and omarchy, rather than dropped with its tools.
-NO_UPDATE=$S/bin
-IFS=: read -ra dirs <<<"$BASE_PATH"
-n=0
-for d in "${dirs[@]}"; do
-    [[ -n $d && -d $d ]] || continue
-    if [[ -x $d/omarchy-update ]]; then
-        n=$((n + 1))
-        mkdir -p "$S/shim$n"
-        for e in "$d"/*; do
-            case ${e##*/} in omarchy-update | omarchy) continue ;; esac
-            ln -s "$e" "$S/shim$n/${e##*/}"
-        done
-        NO_UPDATE+=:$S/shim$n
-    else
-        NO_UPDATE+=:$d
-    fi
-done
+# A PATH without the stub, and without any real omarchy-update the host has.
+NO_UPDATE=$(path_without update omarchy-update omarchy)
 reset "$S/packaged.conf"
 PATH=$NO_UPDATE
 run
@@ -223,6 +296,36 @@ run
 expect "$((rc != 0))" 1 "exits non-zero"
 expect "$(has "does not verify" "$S/out")" 0 "says the signature does not verify"
 expect "$(exists "$S/omarchy.log")" 1 "omarchy update never ran"
+
+echo "== 7. G16 install, identical unowned udev rule"
+reset "$S/packaged.conf"
+g16_rule "$S/wpackaged.rules"
+run_g16
+expect "$rc" 0 "exits 0"
+expect "$(has "$WP: not owned by any package and identical" "$S/out")" 0 "check names the path"
+expect "$(has "pacman -S --needed --overwrite $WP asus-rog-nkey-winlock" "$S/sudo.log")" 0 \
+    "pacman -S overwrites the real path"
+expect "$(same "$S/wpackaged.rules" "$WRULE")" 0 "the file is in place"
+
+echo "== 8. G16 install, differing unowned udev rule"
+reset "$S/packaged.conf"
+g16_rule "$S/wdifferent.rules"
+run_g16
+expect "$rc" 0 "exits 0 (the upgrade already ran)"
+expect "$(has "$WP" "$S/out")" 0 "names the path"
+expect "$(has "were not installed" "$S/out")" 0 "says the G16 packages were not installed"
+expect "$(same "$S/wdifferent.rules" "$WRULE")" 0 "the file is unchanged"
+n=$(grep -cF 'pacman -S ' "$S/sudo.log" 2>/dev/null)
+expect "${n:-0}" 0 "nothing installed"
+
+echo "== 9. G16 install under --dry-run, identical unowned udev rule"
+reset "$S/packaged.conf"
+g16_rule "$S/wpackaged.rules"
+run_g16 1
+expect "$rc" 0 "exits 0"
+expect "$(has "[dry-run] sudo pacman -S --needed --overwrite $WP asus-rog-nkey-winlock" "$S/out")" 0 \
+    "prints pacman -S with the --overwrite"
+expect "$(exists "$S/sudo.log")" 1 "nothing ran through sudo"
 
 ((fail)) && { echo "FAILED"; cat "$S/out"; exit 1; }
 echo "all passed"
