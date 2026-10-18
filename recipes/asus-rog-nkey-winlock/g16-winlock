@@ -158,31 +158,38 @@ def get_status() -> bool | None:
         os.close(fd)
 
 
+NOTIFY_TIMEOUT_S = 5  # a stuck notifier must not stall the report loop
+
+
+def _run_notifier(cmd: list[str]) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=NOTIFY_TIMEOUT_S)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"notifier {cmd[0]} failed: {e}", flush=True)
+        return None
+
+
 def toast(message: str, *, icon: str = ICON_LOCKED, duration_ms: int = 2000) -> None:
     """Bottom-center Omarchy OSD (same channel as Pixel Buds volume), not top-right notifications."""
     osd = shutil.which("omarchy-osd")
     if osd:
-        r = subprocess.run(
-            [osd, "-i", icon, "-m", message, "-d", str(duration_ms)],
-            capture_output=True,
-            text=True,
-        )
+        r = _run_notifier([osd, "-i", icon, "-m", message, "-d", str(duration_ms)])
+        if r is None:
+            return
         print(f"osd rc={r.returncode} msg={message!r} err={r.stderr.strip()!r}", flush=True)
         return
     shell = shutil.which("omarchy-shell")
     if shell:
         payload = json.dumps({"icon": icon, "message": message, "duration": duration_ms})
-        r = subprocess.run(
-            [shell, "osd", "show", payload],
-            capture_output=True,
-            text=True,
-        )
+        r = _run_notifier([shell, "osd", "show", payload])
+        if r is None:
+            return
         print(f"osd-shell rc={r.returncode} msg={message!r} err={r.stderr.strip()!r}", flush=True)
         return
     # Last resort only — top-right notification, not the preferred toast.
     send = shutil.which("omarchy-notification-send") or shutil.which("notify-send")
     if send:
-        subprocess.run([send, message], check=False)
+        _run_notifier([send, message])
         print(f"toast FALLBACK notify msg={message!r}", flush=True)
     else:
         print(f"toast FAILED: no OSD/notifier for {message!r}", flush=True)
@@ -266,7 +273,7 @@ def _watch_node(fd: int, path: Path, mode: str, suppress_off: int) -> int:
                 toast("Super unlocked", icon=ICON_UNLOCKED)
         elif mode == "unlock":
             if locked:
-                toast("Super auto-unlocked", icon=ICON_AUTO_UNLOCK)
+                # Unlock first: a slow notifier must not keep Super locked.
                 try:
                     suppress_off += 1
                     set_lock(False)
@@ -274,6 +281,8 @@ def _watch_node(fd: int, path: Path, mode: str, suppress_off: int) -> int:
                     suppress_off = max(0, suppress_off - 1)
                     toast(f"Super unlock failed: {e}", icon=ICON_FAIL, duration_ms=4000)
                     print(e, file=sys.stderr)
+                else:
+                    toast("Super auto-unlocked", icon=ICON_AUTO_UNLOCK)
             else:
                 if suppress_off > 0:
                     suppress_off -= 1
