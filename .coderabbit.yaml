@@ -1,0 +1,8 @@
+# Review draft PRs too: the coordinator and the auto-update pipeline open
+# PRs as drafts until the clean-chroot build and checks pass.
+reviews:
+  auto_review:
+    enabled: true
+    drafts: true
+    base_branches:
+      - omarchy-asus-repo
