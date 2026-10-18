@@ -70,7 +70,9 @@ The pins are checked against the iGPU node every run. A pin this command
 wrote (the Chromium line under its marker, the `vaapi-device` line in the
 block under the mpv comment) that names another node, after a BIOS update
 moves the PCI address, shows `needs repair`, and applying repins it in place.
-After a MUX switch to the RTX (no iGPU node) those pins are removed instead.
+After a MUX switch to the RTX (no iGPU node) those pins are removed instead,
+with the Chromium marker and the mpv comment block, so a later switch back
+shows `missing` and pins again.
 A pin you wrote yourself is never changed.
 
 **Why:** stock 4.0.5 sets `LIBVA_DRIVER_NAME=nvidia` because its display check

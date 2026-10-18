@@ -270,6 +270,11 @@ hybrid_video_repair_pins() {
       fi
       continue
     fi
+    if [[ -z $node && $file == "$HYBRID_VIDEO_MPV_CONF" ]]; then
+      hybrid_video_mpv_drop_block
+      info "removed the pin from $(tilde "$file")"
+      continue
+    fi
     out=$(awk -v lines="${lines[$file]}" -v node="$node" -v m="$HYBRID_VIDEO_PIN_MARKER" '
       BEGIN { n = split(lines, a, " "); for (i = 1; i <= n; i++) fix[a[i]] = 1 }
       { buf[NR] = $0 }
@@ -286,6 +291,42 @@ hybrid_video_repair_pins() {
     printf '%s' "${out%x}" >"$file"
     if [[ -n $node ]]; then info "repinned $(tilde "$file") to $node"; else info "removed the pin from $(tilde "$file")"; fi
   done
+}
+
+# Removes the fork's mpv comment and the lines of its block this command
+# manages (hwdec=vaapi, vaapi-device=...), and the blank line after the block
+# when nothing else is left in it. Other lines in the block stay.
+hybrid_video_mpv_drop_block() {
+  local out
+  out=$(awk -v m="$HYBRID_VIDEO_MPV_COMMENT" '
+    !done && $0 == m { block = 1; kept = 0; next }
+    block && /^(hwdec=vaapi|vaapi-device=[^[:space:]]+)$/ { next }
+    block && (/^[[:space:]]*$/ || /^[[:space:]]*\[/) {
+      block = 0; done = 1
+      if (!kept && /^[[:space:]]*$/) next
+    }
+    block { kept = 1 }
+    { print }' "$HYBRID_VIDEO_MPV_CONF"; echo x)
+  printf '%s' "${out%x}" >"$HYBRID_VIDEO_MPV_CONF"
+}
+
+# Pins mpv to NODE. Without the fork's comment that is the fork's
+# hybrid_video_pin_mpv. With the comment already there (a block emptied by an
+# older cleanup), the options go inside its block, right under the comment, so
+# the pin is recognized as this command's later.
+hybrid_video_pin_mpv_in_block() {
+  local node=$1 out opts=""
+  if ! { [[ -f $HYBRID_VIDEO_MPV_CONF ]] && grep -qxF "$HYBRID_VIDEO_MPV_COMMENT" "$HYBRID_VIDEO_MPV_CONF"; }; then
+    hybrid_video_pin_mpv
+    return
+  fi
+  hybrid_video_mpv_sets hwdec || opts+="hwdec=vaapi"$'\n'
+  hybrid_video_mpv_sets vaapi-device || opts+="vaapi-device=$node"$'\n'
+  [[ -n $opts ]] || return 0
+  out=$(awk -v m="$HYBRID_VIDEO_MPV_COMMENT" -v opts="${opts%$'\n'}" '
+    { print }
+    !done && $0 == m { print opts; done = 1 }' "$HYBRID_VIDEO_MPV_CONF"; echo x)
+  printf '%s' "${out%x}" >"$HYBRID_VIDEO_MPV_CONF"
 }
 
 # The fork's hybrid_video_pin_chromium, with the marker line above the pin.
@@ -319,7 +360,13 @@ check_hybrid_video() {
   hypr_has_line hybrid-video-env.lua && env_ours=1
   if f=$(libva_set_by_user); then local_parts+=("LIBVA_DRIVER_NAME set in $(tilde "$f")"); fi
   if [[ -f $HYBRID_VIDEO_MPV_CONF ]] && grep -qxF "$HYBRID_VIDEO_MPV_COMMENT" "$HYBRID_VIDEO_MPV_CONF"; then
-    mpv_ours=1
+    # The comment alone proves nothing: the block must still hold this
+    # command's vaapi-device pin (which, past the stale check, names $node).
+    if [[ -n $(hybrid_video_managed_pins | awk -F '\t' -v f="$HYBRID_VIDEO_MPV_CONF" '$1 == f') ]]; then
+      mpv_ours=1
+    elif hybrid_video_mpv_sets vaapi-device; then
+      local_parts+=("vaapi-device set in $(tilde "$HYBRID_VIDEO_MPV_CONF")")
+    fi
   elif hybrid_video_mpv_sets hwdec || hybrid_video_mpv_sets vaapi-device; then
     local_parts+=("hwdec/vaapi-device set in $(tilde "$HYBRID_VIDEO_MPV_CONF")")
   fi
@@ -376,7 +423,7 @@ apply_hybrid_video() {
     return 0
   fi
   echo "    Detected a hybrid GPU with the display on the iGPU. Decoding video on $node."
-  hybrid_video_pin_mpv
+  hybrid_video_pin_mpv_in_block "$node"
   hybrid_video_pin_chromium_marked "$node"
   info "log out and back in for LIBVA_DRIVER_NAME; restart mpv and the browser for the pins"
   info "'omarchy refresh chromium' rewrites chromium-flags.conf; run this again after it"
