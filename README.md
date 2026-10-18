@@ -116,10 +116,10 @@ Where our fixes are headed:
   [#15668](https://github.com/basecamp/omarchy/pull/15668) save power on USB-C chargers on
   ROG laptops, [#15669](https://github.com/basecamp/omarchy/pull/15669) let another power
   manager own the profile on plug and unplug.
-- **NVIDIA:** [#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412),
-  [#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299),
-  [#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368) (carried here, written
-  by others).
+- **NVIDIA:** [#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412) and
+  [#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299) (carried here),
+  [#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368) (proposed in #2). All
+  three are written by others.
 - **Hyprland:** [#16140](https://github.com/hyprwm/Hyprland/pull/16140), merged, waiting on
   a release.
 - **Linux:** `hid-asus` Win-lock pass-through, on linux-input as patchwork 14804337.
