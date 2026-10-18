@@ -1,0 +1,66 @@
+#!/bin/bash
+# Find an earlier successful CI build of exactly this recipe tree, so a push
+# that doesn't touch a recipe doesn't rebuild it (linux-omarchy takes ~2.5 h).
+# Shaped after omarchy-pkgs' build-pr.yml, which labels each build artifact
+# <pkg>-<arch>-<git tree hash> and skips a package whose label already exists.
+#
+# The label here hashes everything the build depends on:
+#   - the recipe directory's git tree (PKGBUILD, patches, keys, config...)
+#   - build/pacman.conf (the pinned Omarchy snapshot the deps come from)
+#   - ci/build-recipe and ci/setup-arch (how the container builds it)
+#   - the builder image reference ($BUILDER_IMAGE) and a scheme version
+# Change any of them and the hash changes, so the recipe builds again.
+#
+# A label is uploaded only after a successful build (actions/upload-artifact
+# runs after the build step), so finding one means that tree built. Only
+# artifacts from runs on this repository's own branches count: a fork's PR
+# runs its own copy of the workflow and could upload any bytes under any
+# label.
+#
+# Usage: ci/find-build <recipe> [rev]   (rev defaults to HEAD)
+# Env: GH_TOKEN (actions: read), GITHUB_REPOSITORY, GITHUB_REPOSITORY_ID,
+#      BUILDER_IMAGE; FORCE_BUILD=true skips the lookup.
+# Prints GITHUB_OUTPUT lines:
+#   label=pkgs-<recipe>-<hash>   the artifact name to look up and upload
+#   run_id=<id>|""               the run whose artifact can be reused
+set -euo pipefail
+cd "$(dirname "$0")/.."
+recipe=${1:?usage: ci/find-build <recipe> [rev]} rev=${2:-HEAD}
+SCHEME=1
+
+inputs=$(
+    echo "scheme $SCHEME"
+    echo "image ${BUILDER_IMAGE:?}"
+    for p in "recipes/$recipe" build/pacman.conf ci/build-recipe ci/setup-arch; do
+        echo "$p $(git rev-parse --verify --quiet "$rev:$p" || echo missing)"
+    done
+)
+hash=$(sha256sum <<<"$inputs" | cut -c1-16)
+label=pkgs-$recipe-$hash
+echo "==> build inputs for $recipe:" >&2
+sed 's/^/    /' <<<"$inputs" >&2
+echo "==> artifact label: $label" >&2
+
+run_id=
+if [[ ${FORCE_BUILD:-false} == true ]]; then
+    echo "==> rebuild requested: not looking for an earlier build" >&2
+else
+    # A lookup failure (API error, rate limit) just means building again.
+    if run_id=$(gh api "repos/${GITHUB_REPOSITORY:?}/actions/artifacts?name=$label&per_page=100" \
+        --jq "[.artifacts[] | select((.expired | not)
+                and .workflow_run.head_repository_id == ${GITHUB_REPOSITORY_ID:?}
+                and .workflow_run.repository_id == ${GITHUB_REPOSITORY_ID:?})]
+              | sort_by(.created_at) | last | .workflow_run.id // empty"); then
+        :
+    else
+        echo "::warning::artifact lookup for $label failed; building" >&2
+        run_id=
+    fi
+    if [[ -n $run_id ]]; then
+        echo "==> $label was built by run $run_id: reusing its packages" >&2
+    else
+        echo "==> no earlier build of $label: building" >&2
+    fi
+fi
+echo "label=$label"
+echo "run_id=$run_id"
