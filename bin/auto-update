@@ -148,14 +148,43 @@ sync_now() {
     if as_user "$LIB/sync-release"; then as_user rm -f "$AU/sync-pending"
     else as_user touch "$AU/sync-pending"; note sync "sync-release failed; retried next run"; failed=1; fi
 }
-unpublish_now() {  # unpublish_now <comma names|-> <reason>
+# A failed bin/unpublish leaves the package published: its names go to unpublish-pending,
+# the caller records a failure, the next run retries the removal before anything else, and
+# the run fails while any name is still pending. A later publish of a name drops it.
+PENDING_UNPUB=$AU/unpublish-pending
+pending_edit() {  # pending_edit add|drop <name>...
+    local op=$1; shift
+    as_user bash -c 'f=$1 op=$2; shift 2; touch "$f"
+        { if [[ $op == add ]]; then cat "$f"; printf "%s\n" "$@"; else grep -vxF -f <(printf "%s\n" "$@") "$f"; fi; } |
+            awk "NF && !seen[\$0]++" > "$f.tmp"; mv "$f.tmp" "$f"' _ "$PENDING_UNPUB" "$op" "$@"
+}
+unpublish_now() {  # unpublish_now <comma names|-> <reason>: 1 if bin/unpublish failed
     local names=$1 reason=$2
     [[ $names != - ]] || return 0
     if [[ $mode != full ]]; then note dry "would unpublish ${names//,/ } ($reason) and sync"; return 0; fi
     note unpublish "${names//,/ }: $reason"
-    if as_user "$LIB/unpublish" ${names//,/ }; then sync_now
-    else note unpublish "bin/unpublish failed for ${names//,/ }"; as_user touch "$AU/sync-pending"; fi
-    return 0
+    # shellcheck disable=SC2086
+    if as_user "$LIB/unpublish" ${names//,/ }; then pending_edit drop ${names//,/ }; sync_now; return 0; fi
+    note unpublish "bin/unpublish FAILED for ${names//,/ }; still published, retried next run"
+    # shellcheck disable=SC2086
+    pending_edit add ${names//,/ }
+    return 1
+}
+retry_unpublish() {  # retry the removals a previous run could not do (names still in the db)
+    local want=() n
+    [[ -n $(as_user cat "$PENDING_UNPUB" 2>/dev/null) ]] || return 0
+    local in_db; in_db=$(as_user bash -c 'bsdtar -tf "$1" 2>/dev/null | sed -n "s#^\([^/]*\)-[^-/]*-[^-/]*/\$#\1#p"' \
+        _ "$REPO_DIR/$REPO_NAME.db.tar.gz")
+    while IFS= read -r n; do
+        [[ -n $n ]] && grep -qxF -- "$n" <<<"$in_db" && want+=("$n")
+    done < <(as_user cat "$PENDING_UNPUB")
+    if ((${#want[@]} == 0)); then as_user rm -f "$PENDING_UNPUB"; return 0; fi
+    note unpublish "retrying the removal of ${want[*]} (failed in an earlier run)"
+    if as_user "$LIB/unpublish" "${want[@]}"; then
+        as_user rm -f "$PENDING_UNPUB"; as_user touch "$AU/sync-pending"
+    else
+        note unpublish "bin/unpublish FAILED again for ${want[*]}"; failed=1
+    fi
 }
 publish_files() {  # publish_files <recipe dir> <version>: publish the staged packages of that recipe
     local dir=$1 ver=$2 files=() n
@@ -163,7 +192,10 @@ publish_files() {  # publish_files <recipe dir> <version>: publish the staged pa
         files+=($(as_user bash -c 'ls "$1"/"$2"-"$3"-*.pkg.tar.zst 2>/dev/null' _ "$STAGE_DIR" "$n" "$ver"))
     done
     ((${#files[@]})) || { note publish "no staged packages for $dir $ver"; return 1; }
-    as_user "$LIB/publish" "${files[@]}" && sync_now
+    as_user "$LIB/publish" "${files[@]}" || return 1
+    local names=() f; for f in "${files[@]}"; do f=${f##*/}; names+=("${f%-*-*-*}"); done
+    pending_edit drop "${names[@]}"
+    sync_now
 }
 recipe_version() {  # recipe_version <recipe dir>: [epoch:]pkgver-pkgrel
     as_user bash -c 'cd "$1" && makepkg --printsrcinfo' _ "$1" |
@@ -277,6 +309,10 @@ while True:  # concatenated page documents
     pages.append(doc["data"]["repository"]["pullRequest"])
 raw = pages[0]
 head = raw["headRefOid"]
+all_threads = [t for p in pages for t in p["reviewThreads"]["nodes"]]
+# fail closed: every page on the same head, and no page left unread
+complete = (all(p["headRefOid"] == head for p in pages)
+            and not pages[-1]["reviewThreads"]["pageInfo"]["hasNextPage"])
 # Only the CodeRabbit GitHub App counts: REST shows it as user "coderabbitai[bot]" with
 # type "Bot"; GraphQL as a Bot actor with login "coderabbitai". A user account named
 # coderabbit-something is not it.
@@ -309,10 +345,6 @@ wait_coderabbit() {  # wait_coderabbit <pr number> <out json>: 0 when CodeRabbit
 agent_round() {  # agent_round <recipe> <pr number> <cr json> <diff> <report> <build log>
     # sets agent_verdict (approve/reject/none), agent_notes; may leave edits in the clone
     local r=$1 num=$2 cr=$3 diff=$4 report=$5 blog=$6
-all_threads = [t for p in pages for t in p["reviewThreads"]["nodes"]]
-# fail closed: every page on the same head, and no page left unread
-complete = (all(p["headRefOid"] == head for p in pages)
-            and not pages[-1]["reviewThreads"]["pageInfo"]["hasNextPage"])
     agent_verdict=none agent_notes="agent step skipped (REVIEW_CMD empty or not found)"
     [[ -n $REVIEW_CMD ]] || return 0
     local cmd=($REVIEW_CMD)
@@ -430,10 +462,10 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
             local n; n=$(as_user "$LIB/auto-update-state" get "$STATUS" "$r" consecutive_fetch_failures)
             n=$(( ${n:-0} + 1 ))
             if (( n >= FETCH_FAIL_UNPUBLISH_AFTER )); then
-                unpublish_now "$in_repo" "upstream recipe unreachable $n runs in a row"
+                unpublish_now "$in_repo" "upstream recipe unreachable $n runs in a row" || true
             fi
         else
-            unpublish_now "$in_repo" "rebase onto $target failed ($cls)"
+            unpublish_now "$in_repo" "rebase onto $target failed ($cls)" || true
         fi
         record "$r" failed rebase class="${cls:-other}" version="$target" message="$msg"
         failed=1; return 0
@@ -582,18 +614,23 @@ EOF
             as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"
             record "$r" ok rebase version="$new_ver" pr="$pr" message="merged and published"
         else
-            unpublish_now "$in_repo" "merge or publish of $new_ver failed"
+            unpublish_now "$in_repo" "merge or publish of $new_ver failed" || true
             record "$r" failed rebase class=publish version="$new_ver" pr="$pr" message="merge/publish failed"
             failed=1
         fi
     elif [[ $build_ok != yes ]]; then
-        unpublish_now "$in_repo" "build of $new_ver failed"
+        unpublish_now "$in_repo" "build of $new_ver failed" || true
         record "$r" failed rebase class=build version="$new_ver" pr="$pr" message="chroot build failed: $build_log"
         failed=1
     else
-        unpublish_now "$in_repo" "upstream is at $target; rebased $new_ver awaits review"
-        record "$r" attention rebase version="$new_ver" pr="$pr" message="$(printf '%s; ' "${reasons[@]}")"
-        attention=1
+        if unpublish_now "$in_repo" "upstream is at $target; rebased $new_ver awaits review"; then
+            record "$r" attention rebase version="$new_ver" pr="$pr" message="$(printf '%s; ' "${reasons[@]}")"
+            attention=1
+        else
+            record "$r" failed rebase class=unpublish version="$new_ver" pr="$pr" \
+                message="stale ${in_repo//,/ } could not be unpublished (retried next run); $(printf '%s; ' "${reasons[@]}")"
+            failed=1
+        fi
     fi
     ugit checkout --quiet "$BASE_BRANCH"
 }
@@ -618,7 +655,7 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
         as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.built-$r" "$th"
         record "$r" ok build version="$ver" message="built and published"
     else
-        unpublish_now "$in_repo" "build of $ver failed"
+        unpublish_now "$in_repo" "build of $ver failed" || true
         record "$r" failed build class=build version="$ver" message="chroot build failed: $build_log"
         failed=1
     fi
@@ -637,6 +674,7 @@ if [[ -z $workspace_arg ]]; then
         git checkout --quiet -B "$3" "origin/$3"; git reset --quiet --hard "origin/$3"; git clean -qfdx' \
         _ "$CLONE" "$GIT_URL" "$BASE_BRANCH"
 fi
+[[ $mode == full ]] && retry_unpublish
 [[ $mode == full && -n $(as_user ls "$AU/sync-pending" 2>/dev/null) ]] && sync_now
 
 check=$RUN/check.json
@@ -668,8 +706,11 @@ while IFS=$'\t' read -r r action target in_repo names pnote; do
             rebase) handle_rebase "$r" "$target" "$in_repo" "$pnote" ;;
             build) handle_build "$r" "$in_repo" "$pnote" ;;
             unpublish)
-                unpublish_now "$in_repo" "$pnote"
-                record "${r#(db) }" ok unpublish message="$pnote"
+                if unpublish_now "$in_repo" "$pnote"; then
+                    record "${r#(db) }" ok unpublish message="$pnote"
+                else
+                    record "${r#(db) }" failed unpublish class=unpublish message="bin/unpublish failed (retried next run): $pnote"
+                fi
                 ;;
             attention)
                 note ATTENTION "$r: $pnote"
@@ -681,7 +722,7 @@ while IFS=$'\t' read -r r action target in_repo names pnote; do
     set -e
     if ((rc != 0)); then
         note "$r" "unexpected error (exit $rc) during $action; see $LOG"
-        [[ $action == rebase ]] && unpublish_now "$in_repo" "auto-update error while rebasing onto $target"
+        [[ $action == rebase ]] && { unpublish_now "$in_repo" "auto-update error while rebasing onto $target" || true; }
         ugit checkout --quiet --force "$BASE_BRANCH" 2>/dev/null || true
         record "${r#(db) }" failed "$action" class=internal message="unexpected error (exit $rc); see $LOG" || true
         failed=1
@@ -694,6 +735,8 @@ as_user find "$AU/runs" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/
 ((src == 1)) && failed=1
 ((src == 2)) && attention=1
 [[ $mode == full && -n $(as_user ls "$AU/sync-pending" 2>/dev/null) ]] && { note sync "release sync pending"; failed=1; }
+[[ $mode == full && -n $(as_user cat "$PENDING_UNPUB" 2>/dev/null) ]] &&
+    { note unpublish "still published, removal pending: $(as_user cat "$PENDING_UNPUB" | paste -sd' ')"; failed=1; }
 if ((failed)); then echo "auto-update: FAILED (see $SUMMARY)"; exit 1; fi
 if ((attention)) && [[ $FAIL_ON_ATTENTION == yes ]]; then echo "auto-update: attention needed (see $SUMMARY)"; exit 1; fi
 echo "auto-update: done"
