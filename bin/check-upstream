@@ -44,7 +44,21 @@ retires a db-only package only when it is stale.
 Testing: OMARCHY_ASUS_UPSTREAM_OVERRIDE="name=ver,name=ver" replaces the upstream
 version of those names (simulated upstream bumps).
 
-Exit: 0 all current, 10 something needs action, 1 error.
+Upstream db freshness: each db is cached for 1h. When a download fails the
+cached copy is still used, but the db is reported stale (text: a
+"db <repo> stale <age>s cached (<error>)" line before the packages) and the exit
+is 10. Past OMARCHY_ASUS_DB_MAX_STALE seconds (default 24h) a stale db is also
+flagged expired (" EXPIRED"), so bin/auto-update-state withdraws the packages
+that override it instead of trusting an old upstream version forever. A failed
+download with no cached copy at all is still an error (exit 1).
+--json adds, next to packages/prs/action_needed:
+  upstream_dbs   [{repo, age, stale, expired, error}] per upstream db (age in
+                 seconds since the cached copy was written; 0 after a download)
+  degraded       true when any db is stale (action_needed is then true too)
+  expired        [repo] of the stale dbs older than db_max_stale
+  db_max_stale   the OMARCHY_ASUS_DB_MAX_STALE in effect, in seconds
+
+Exit: 0 all current, 10 something needs action (including a stale db), 1 error.
 """
 import argparse
 import io
@@ -65,6 +79,7 @@ UPSTREAM_DBS = [  # pacman.conf order
     ("multilib", "https://stable-mirror.omarchy.org/multilib/os/x86_64/multilib.db"),
 ]
 DB_TTL = 3600          # upstream dbs: refetch after 1h
+DB_MAX_STALE_DEFAULT = 24 * 3600  # a cached db older than this (download failing) is "expired"
 PR_TTL = 24 * 3600     # GitHub PR state: refetch after 24h
 UA = "omarchy-asus-check-upstream"
 SANDBOX = os.path.join(os.path.dirname(os.path.realpath(__file__)), "recipe-sandbox")
@@ -107,26 +122,61 @@ def parse_db(data):
     return pkgs
 
 
-def fetch(url, cache_file, ttl, refresh):
-    fresh = os.path.exists(cache_file) and time.time() - os.path.getmtime(cache_file) < ttl
-    if fresh and not refresh:
+def db_max_stale():
+    """OMARCHY_ASUS_DB_MAX_STALE in seconds (unset or empty: DB_MAX_STALE_DEFAULT)."""
+    raw = os.environ.get("OMARCHY_ASUS_DB_MAX_STALE", "").strip()
+    if not raw:
+        return DB_MAX_STALE_DEFAULT
+    try:
+        val = int(raw)
+    except ValueError:
+        val = 0
+    if val <= 0:
+        raise SystemExit("error: OMARCHY_ASUS_DB_MAX_STALE must be a positive number of seconds")
+    return val
+
+
+def fetch(url, cache_file, ttl, refresh, max_stale=None):
+    """(data, info): info = {age, stale, expired, error}.
+
+    age: seconds since the cache file was written (0 right after a download);
+    stale: the download failed and the cached copy was used;
+    expired: stale and age > max_stale (never when max_stale is None);
+    error: the download error text, or None.
+    No cache and a failed download raises the OSError."""
+    info = {"age": 0, "stale": False, "expired": False, "error": None}
+    have = os.path.exists(cache_file)
+    age = int(max(0, time.time() - os.path.getmtime(cache_file))) if have else 0
+    if have and age < ttl and not refresh:
         with open(cache_file, "rb") as f:
-            return f.read()
+            info["age"] = age
+            return f.read(), info
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=60) as r:
             data = r.read()
     except OSError as e:
-        if os.path.exists(cache_file):  # stale beats nothing
-            print(f"warning: {url}: {e}; using cached copy", file=sys.stderr)
+        if have:  # stale beats nothing, but say how stale
+            expired = max_stale is not None and age > max_stale
+            info.update(age=age, stale=True, expired=expired, error=str(e))
+            print(f"warning: {url}: {e}; using cached copy ({age}s old{', EXPIRED' if expired else ''})",
+                  file=sys.stderr)
             with open(cache_file, "rb") as f:
-                return f.read()
+                return f.read(), info
         raise
     tmp = cache_file + ".tmp"
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, cache_file)
-    return data
+    return data, info
+
+
+def freshness_summary(upstream_dbs, max_stale):
+    """The --json freshness keys for the upstream db fetch results."""
+    return {"upstream_dbs": upstream_dbs,
+            "degraded": any(d["stale"] for d in upstream_dbs),
+            "expired": [d["repo"] for d in upstream_dbs if d["expired"]],
+            "db_max_stale": max_stale}
 
 
 def recipe_packages(only=None, paths=()):
@@ -222,7 +272,7 @@ def pr_states(cache_dir, refresh):
             repo, num = m.group(1), m.group(2)
             cache = os.path.join(cache_dir, f"pr-{repo.replace('/', '_')}-{num}.json")
             try:
-                pr = json.loads(fetch(f"https://api.github.com/repos/{repo}/pulls/{num}", cache, PR_TTL, refresh))
+                pr = json.loads(fetch(f"https://api.github.com/repos/{repo}/pulls/{num}", cache, PR_TTL, refresh)[0])
                 state = "merged" if pr.get("merged_at") else pr.get("state", "unknown")
                 res.append((d, f"{repo}#{num}", state, pr.get("merged_at")))
             except (OSError, ValueError) as e:
@@ -245,9 +295,14 @@ def main():
     cache_dir = os.path.join(data_dir, "cache")
     os.makedirs(cache_dir, exist_ok=True)
 
+    max_stale = db_max_stale()
     upstream = []  # [(repo, {name: ver})] in priority order
+    upstream_dbs = []  # [{repo, age, stale, expired, error}]
     for name, url in UPSTREAM_DBS:
-        upstream.append((name, parse_db(fetch(url, os.path.join(cache_dir, f"{name}.db"), DB_TTL, args.refresh))))
+        data, info = fetch(url, os.path.join(cache_dir, f"{name}.db"), DB_TTL, args.refresh, max_stale=max_stale)
+        upstream.append((name, parse_db(data)))
+        upstream_dbs.append({"repo": name, **info})
+    freshness = freshness_summary(upstream_dbs, max_stale)
     override = {}
     for item in filter(None, os.environ.get("OMARCHY_ASUS_UPSTREAM_OVERRIDE", "").split(",")):
         n, _, v = item.strip().partition("=")
@@ -313,16 +368,21 @@ def main():
                      "dep_mismatch": mismatches})
 
     prs = [] if args.no_prs else pr_states(cache_dir, args.refresh)
-    action = any(r["status"] not in ("current", "local") for r in rows) or any(p[2] in ("merged", "closed") for p in prs)
-    action = action or bool(inventory_errors)
+    action = (any(r["status"] not in ("current", "local") for r in rows)
+              or any(p[2] in ("merged", "closed") for p in prs)
+              or bool(inventory_errors)
+              or freshness["degraded"])
 
     if args.json:
         json.dump({"packages": rows,
                    "prs": [{"recipe": d, "pr": p, "state": s, "merged_at": m} for d, p, s, m in prs],
                    "inventory_errors": inventory_errors,
-                   "action_needed": action}, sys.stdout, indent=2)
+                   "action_needed": action, **freshness}, sys.stdout, indent=2)
         print()
     else:
+        for d in upstream_dbs:
+            if d["stale"]:
+                print(f"db {d['repo']} stale {d['age']}s cached ({d['error']}){' EXPIRED' if d['expired'] else ''}")
         for r in rows:
             extra = "".join(f" [{m['dep']}={m['want']} vs upstream {m['upstream'] or 'none'}]" for m in r["dep_mismatch"])
             print(r["name"], r["ours"], r["upstream"] or "-", r["status"] + extra)
