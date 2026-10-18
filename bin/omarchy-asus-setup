@@ -625,7 +625,7 @@ do_uninstall() {
   # `omarchy update` runs pacman -Syu, which never downgrades, so this one
   # transaction bypasses Omarchy's update guard with its documented override.
   step "Going back to the stock builds"
-  if ((DRY_RUN)) || [[ " ${snapshot[*]} " == *" nvidia-open-dkms "* ]]; then
+  if ((DRY_RUN)) || [[ " ${snapshot[*]} " == *" nvidia-open-dkms "* ]] || pacman -Q nvidia-open-dkms >/dev/null 2>&1; then
     warn "the stock nvidia-open-dkms lacks the NVIDIA/open-gpu-kernel-modules#1412 fix. On a GA605KM the"
     warn "machine can hang at power-off after writing the hibernate image (omarchy-asus #11)."
     warn "Suspend-then-hibernate is the default lid action, so the battery can drain overnight."
