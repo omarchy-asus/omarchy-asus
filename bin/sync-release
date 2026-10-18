@@ -1,0 +1,24 @@
+#!/bin/bash
+# Mirror $REPO_DIR to the GitHub release that pacman pulls from:
+#   Server = https://github.com/$GH_REPO/releases/download/$GH_TAG
+# Release assets can't be symlinks, so the db/files links are uploaded as real
+# files under the names pacman requests. Assets no longer in $REPO_DIR are deleted.
+set -euo pipefail
+source "$(dirname "$0")/env.sh"
+up=$(mktemp -d); trap 'rm -rf "$up"' EXIT
+for f in "$REPO_DIR"/*; do
+    case $(basename "$f") in *.tar.gz|*.tar.gz.sig|*.old|*.old.sig) continue ;; esac
+    cp -L "$f" "$up/$(basename "$f")"
+done
+if ! gh release view "$GH_TAG" -R "$GH_REPO" >/dev/null 2>&1; then
+    gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
+        --title "omarchy-asus pacman repo ($GH_TAG)" \
+        --notes "Signed pacman repo of ASUS-patched builds. Assets are replaced as packages are rebuilt. Setup: see LAPTOP-SETUP.md on the $GH_BRANCH branch."
+fi
+# packages first, db last, so the db never names a package that isn't uploaded yet
+gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "$up"/*.pkg.tar.zst "$up"/*.pkg.tar.zst.sig
+gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "$up/$REPO_NAME".{db,db.sig,files,files.sig}
+for a in $(gh release view "$GH_TAG" -R "$GH_REPO" --json assets --jq '.assets[].name'); do
+    [[ -e $up/$a ]] || gh release delete-asset "$GH_TAG" "$a" -R "$GH_REPO" --yes
+done
+gh release view "$GH_TAG" -R "$GH_REPO" --json assets --jq '.assets[] | "\(.name) \(.size)"'

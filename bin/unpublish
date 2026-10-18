@@ -1,0 +1,10 @@
+#!/bin/bash
+# Drop packages from the repo db so the stock build flows through again.
+# Usage: bin/unpublish pkgname ...   (record the reason in STATUS.md)
+set -euo pipefail
+source "$(dirname "$0")/env.sh"
+repo-remove --sign --key "$SIGN_KEY" --verify "$REPO_DIR/$REPO_NAME.db.tar.gz" "$@"
+for p in "$@"; do
+    find "$REPO_DIR" -maxdepth 1 -regextype posix-extended \
+        -regex ".*/$p-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst(\.sig)?" -print -delete
+done

@@ -1,0 +1,14 @@
+#!/bin/bash
+# Sign staged packages and add them to the repo db (signed). Removes superseded files.
+# Usage: bin/publish $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
+set -euo pipefail
+source "$(dirname "$0")/env.sh"
+mkdir -p "$REPO_DIR"
+added=()
+for f in "$@"; do
+    b=$(basename "$f")
+    cp -v "$f" "$REPO_DIR/$b"
+    gpg --batch --yes --local-user "$SIGN_KEY" --detach-sign --no-armor "$REPO_DIR/$b"
+    added+=("$REPO_DIR/$b")
+done
+repo-add --sign --key "$SIGN_KEY" --verify --remove "$REPO_DIR/$REPO_NAME.db.tar.gz" "${added[@]}"

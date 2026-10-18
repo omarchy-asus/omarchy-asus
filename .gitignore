@@ -1,0 +1,15 @@
+# build products and makepkg dirs
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.tar.xz
+src/
+pkg/
+logs/
+# upstream Arch hyprland checkout with its own .git (reference; patch copied into recipes/hyprland-4 when built)
+recipes/hyprland/
+
+# local-only: machine-specific brief and status report (read on the build host)
+BRIEF.md
+STATUS.md
+# unmodified upstream kernel sources the reference DKMS build compiles; fetch per its README
+recipes/hid-asus-winlock-dkms-reference/variants/

@@ -1,0 +1,11 @@
+#!/bin/bash
+# Create (or update) the clean build chroot. Needs sudo.
+set -euo pipefail
+source "$(dirname "$0")/env.sh"
+MAKEPKG_CONF=/usr/share/devtools/makepkg.conf.d/x86_64.conf
+if [[ -d $CHROOT/root ]]; then
+    sudo arch-nspawn -C "$WORKSPACE/build/pacman.conf" "$CHROOT/root" pacman -Syu --noconfirm
+else
+    sudo mkdir -p "$CHROOT"
+    sudo mkarchroot -C "$WORKSPACE/build/pacman.conf" -M "$MAKEPKG_CONF" "$CHROOT/root" base-devel
+fi

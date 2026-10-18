@@ -1,0 +1,20 @@
+#!/bin/bash
+# Build one recipe in a clean chroot copy at low priority; output lands in $STAGE_DIR.
+# Usage: bin/build-pkg recipes/<name> [extra makechrootpkg args]
+set -euo pipefail
+source "$(dirname "$0")/env.sh"
+recipe=$(realpath "$1"); shift
+name=$(basename "$recipe")
+mkdir -p "$STAGE_DIR" "$LOG_DIR"
+work=$(mktemp -d "$DATA/work-$name.XXXX")
+cp -a "$recipe"/. "$work"/
+rm -rf "$work"/{src,pkg} "$work"/*.pkg.tar.zst
+cd "$work"
+log=$LOG_DIR/$name-$(date +%Y%m%d-%H%M%S).log
+# -c: fresh copy of the root chroot; -u: update it first.
+# makechrootpkg needs root; run it via sudo directly (its own sudo re-exec
+# needs a tty; SUDO="sudo -S" reads the password from stdin). Builds as $SUDO_USER.
+${SUDO:-sudo} nice -n 19 ionice -c 3 makechrootpkg -c -u -r "$CHROOT" "$@" 2>&1 | tee "$log"
+mv -v "$work"/*.pkg.tar.zst "$STAGE_DIR"/
+rm -rf "$work"
+echo "log: $log"
