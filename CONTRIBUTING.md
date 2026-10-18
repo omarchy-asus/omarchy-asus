@@ -25,12 +25,18 @@ Things that already work on your model are worth reporting too. They tell us wha
 ## How a fix flows
 
 1. **Upstream's shape first.** Omarchy fixes are developed in `omarchy-asus/omarchy`, a fork
-   of [basecamp/omarchy](https://github.com/basecamp/omarchy), written the way Omarchy writes
+   of [omacom/omarchy](https://github.com/omacom/omarchy), written the way Omarchy writes
    hardware support:
    - a **detector** in `bin/omarchy-hw-*` that says whether this machine needs the fix,
    - a **leaf** under `install/` that only runs when the detector matches,
    - a **migration** in `migrations/` so existing installs get it on `omarchy update`,
    - a **test** under `test/`.
+
+   Each fix is developed on its own topic branch, rebased on the fork's `quattro`. `quattro`
+   mirrors upstream's `quattro` and nothing else is committed there; a daily workflow on the
+   fork's default branch `fork-tools` keeps it in sync. The topic branches are listed in the
+   [fork-tools README](https://github.com/omarchy-asus/omarchy/tree/fork-tools). The v4.0.5
+   backports the packages ship from are on `asus/v4-0-5`.
 
    Package changes follow [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs)
    conventions in `omarchy-asus/omarchy-pkgs`.

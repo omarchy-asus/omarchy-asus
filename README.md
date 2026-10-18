@@ -78,8 +78,11 @@ Signing key: [`keys/omarchy-asus.asc`](keys/omarchy-asus.asc), fingerprint
 
 1. **Fix it in upstream's shape.** Omarchy fixes are written in
    [`omarchy-asus/omarchy`](https://github.com/omarchy-asus/omarchy), a fork of
-   [basecamp/omarchy](https://github.com/basecamp/omarchy), the way Omarchy itself would
-   write them: a hardware detector, a leaf gated on it, a migration and a test. Package
+   [omacom/omarchy](https://github.com/omacom/omarchy), the way Omarchy itself would
+   write them: a hardware detector, a leaf gated on it, a migration and a test. Each fix is
+   one topic branch on top of `quattro`, a mirror of upstream's, listed in the
+   [fork-tools README](https://github.com/omarchy-asus/omarchy/tree/fork-tools); the
+   omarchy packages carry those fixes as patches from the v4.0.5 backport branch `asus/v4-0-5`. Package
    changes go through [`omarchy-asus/omarchy-pkgs`](https://github.com/omarchy-asus/omarchy-pkgs), a fork of
    [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs).
 2. **Package it.** When a fix needs a patched build (a kernel, a driver, a compositor), the
