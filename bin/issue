@@ -1,0 +1,592 @@
+#!/usr/bin/env python3
+"""Duplicate-aware issue helper for the omarchy-asus tracker.
+
+omarchy-asus/omarchy-asus (GH_REPO in bin/env.sh) is the one issue tracker for
+all omarchy-asus work. Agents file through this script so that every new issue is
+checked against the existing ones first and scanned for personal information.
+
+  bin/issue find <text...> [--all] [-n N]
+  bin/issue file --title T --label L [--label L2] (--body-file F | --body B)
+                 [--agent NAME] [--force] [--dry-run]
+  bin/issue comment N (--body-file F | --body B) [--agent NAME] [--dry-run]
+  bin/issue labels
+  bin/issue template [delta|bug|upstream-report]
+
+The issue and label lists are fetched with one gh call each and cached for
+five minutes under ~/.local/share/omarchy-asus/cache (--refresh forces a new
+fetch). Only stdlib and the gh CLI are used.
+"""
+import argparse
+import difflib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
+
+FALLBACK_REPO = "omarchy-asus/omarchy-asus"
+
+
+def _repo_from_env():
+    """GH_REPO from bin/env.sh next to this script (parsed, not sourced)."""
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "env.sh")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*GH_REPO=([\w.-]+/[\w.-]+)", line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return FALLBACK_REPO
+
+
+DEFAULT_REPO = _repo_from_env()
+DATA = os.path.join(os.path.expanduser("~"), ".local/share/omarchy-asus")
+CACHE_DIR = os.path.join(DATA, "cache")
+CACHE_TTL = 300  # seconds
+DENYLIST = os.path.join(os.path.expanduser("~"), ".config/agent-pii/denylist")
+
+DUP_THRESHOLD = 0.40      # refuse `file` when a live issue scores at least this
+RECENT_CLOSED_DAYS = 30   # closed issues this recent still block `file`
+
+ISSUE_FIELDS = "number,title,state,labels,body,updatedAt,closedAt,url"
+
+# Each required body section: any one of the names, as a markdown heading.
+REQUIRED_SECTIONS = [
+    ("What happened", "What it fixes"),
+    ("Evidence", "How to test"),
+    ("Upstream status",),
+]
+
+TEMPLATES = {
+    "delta": """## What it fixes
+<one paragraph: the symptom on the G16 and what the change does>
+
+## Evidence / How to test
+<commands, journal excerpts (scrubbed), before/after>
+
+## Upstream status
+<upstream PR/issue number and state, or "not submitted" and why>
+
+## Where it lives
+<package + recipe path, e.g. recipes/linux-omarchy/0568-....patch; PR/commit in this repo>
+""",
+    "bug": """## What happened
+<what you saw, what you expected; package versions from `pacman -Q`>
+
+## Evidence / How to test
+<steps to reproduce, scrubbed logs>
+
+## Upstream status
+<is this ours, or an upstream bug? link upstream issue numbers if any>
+""",
+    "upstream-report": """## What happened
+<the upstream bug, in upstream's terms>
+
+## Evidence / How to test
+<reproducer that does not depend on our patches>
+
+## Upstream status
+<target project and tracker; NOT filed yet - a human decides and files it>
+
+## Draft report
+<the text to post upstream>
+""",
+}
+
+STOPWORDS = set("""
+a an the and or of to in on for with from by at is are was were be been it its
+this that these those as not no into after before when while than then so
+delta fix fixes fixed issue bug add adds added use uses
+""".split())
+
+
+def die(msg, code=1):
+    print(f"issue: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# ---------------------------------------------------------------- gh + cache
+
+def check_repo(repo):
+    if repo != DEFAULT_REPO:
+        die(f"refusing to touch {repo}: this helper only works on {DEFAULT_REPO}. "
+            "Never file on upstream projects; propose the upstream report in an "
+            "issue here instead (bin/issue template upstream-report).")
+
+
+def gh(args, input_text=None):
+    try:
+        r = subprocess.run(["gh"] + args, input=input_text, capture_output=True,
+                           text=True)
+    except FileNotFoundError:
+        die("gh CLI not found")
+    if r.returncode != 0:
+        die(f"gh {' '.join(args[:2])} failed: {r.stderr.strip()}")
+    return r.stdout
+
+
+def cache_path(repo, kind):
+    return os.path.join(CACHE_DIR, f"{repo.replace('/', '__')}.{kind}.json")
+
+
+def cached(repo, kind, fetch, refresh=False):
+    path = cache_path(repo, kind)
+    if not refresh:
+        try:
+            if time.time() - os.path.getmtime(path) < CACHE_TTL:
+                with open(path) as f:
+                    return json.load(f)
+        except (OSError, ValueError):
+            pass
+    data = fetch()
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    # A temp file unique to this run, so concurrent runs never write into the
+    # same file; os.replace makes the swap atomic (last writer wins).
+    with tempfile.NamedTemporaryFile("w", dir=CACHE_DIR, prefix=os.path.basename(path) + ".",
+                                     suffix=".tmp", delete=False) as f:
+        tmp = f.name
+        try:
+            json.dump(data, f)
+        except BaseException:
+            f.close()
+            os.unlink(tmp)
+            raise
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        os.unlink(tmp)
+        raise
+    return data
+
+
+def invalidate(repo, kind):
+    try:
+        os.unlink(cache_path(repo, kind))
+    except OSError:
+        pass
+
+
+def get_issues(repo, refresh=False):
+    return cached(repo, "issues", lambda: json.loads(gh(
+        ["issue", "list", "-R", repo, "--state", "all", "--limit", "500",
+         "--json", ISSUE_FIELDS])), refresh)
+
+
+def get_labels(repo, refresh=False):
+    return cached(repo, "labels", lambda: json.loads(gh(
+        ["label", "list", "-R", repo, "--limit", "200",
+         "--json", "name,description"])), refresh)
+
+
+# ---------------------------------------------------------------- similarity
+
+TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9._/+-]*[a-z0-9]|[a-z0-9]")
+# Strong identifiers name one specific thing; a shared one is a good dup signal.
+STRONG_ID_PATTERNS = [
+    re.compile(r"#\d+"),                                  # PR/issue refs
+    re.compile(r"(?<![\w.#])\d{3,6}(?![\w.])"),          # patch numbers, PR ids
+    re.compile(r"[a-z0-9_.-]+/[a-z0-9_./-]*[a-z0-9_]"),   # paths, owner/repo
+]
+# Weak ones (package names, versions) are shared by many unrelated issues.
+WEAK_ID_PATTERNS = [
+    re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)+"),              # package names
+    re.compile(r"\d+\.\d+(?:\.\d+)*(?:-\d+(?:\.\d+)*)?"), # versions
+]
+
+
+def norm(text):
+    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+
+def tokens(text):
+    out = set()
+    for t in TOKEN_RE.findall(norm(text)):
+        out.add(t)
+        # also index the parts of compound tokens (hid-asus -> hid, asus)
+        parts = [p for p in re.split(r"[._/+-]", t) if p]
+        out.update(parts)
+        if len(parts) > 1:
+            out.add("".join(parts))   # win-lock == winlock
+    return {stem(t) for t in out if t not in STOPWORDS and len(t) > 1}
+
+
+def stem(t):
+    # crude plural/tense folding: wakes/waking/woken -> wake-ish; enough for titles
+    if t.isalpha() and len(t) > 4:
+        for suf in ("ing", "ed", "es", "s"):
+            if t.endswith(suf) and len(t) - len(suf) >= 4:
+                return t[: -len(suf)]
+    return t
+
+
+def identifiers(text):
+    """(strong, weak) identifier sets found in text."""
+    t = norm(text)
+    out = []
+    for pats in (STRONG_ID_PATTERNS, WEAK_ID_PATTERNS):
+        ids = set()
+        for p in pats:
+            ids.update(m.strip("./-") for m in p.findall(t))
+        out.append({i for i in ids if len(i) >= 3})
+    strong, weak = out
+    return strong, weak - strong
+
+
+def strong_ids(text):
+    """Identifiers from a body specific enough to count: #refs, 4-digit patch
+    numbers and *.patch file names (not versions or common package names)."""
+    t = norm(text)
+    ids = set(re.findall(r"#\d+", t))
+    ids.update(re.findall(r"(?<![\w.#])\d{4}(?![\w.])", t))
+    ids.update(m.rsplit("/", 1)[-1] for m in re.findall(r"[\w./-]+\.patch", t))
+    return ids
+
+
+def issue_text(i):
+    labels = " ".join(l["name"] for l in i.get("labels", []))
+    return i.get("title", ""), labels, i.get("body") or ""
+
+
+def _has(ident, hay):
+    return re.search(r"(?<![a-z0-9])" + re.escape(ident) + r"(?![a-z0-9])", hay)
+
+
+def _title_core(t):
+    return re.sub(r"^\s*(delta|upstream proposal)\s*:\s*", "", norm(t))
+
+
+def score(query, query_ids, issue):
+    """0..1 similarity of query (+ its identifiers) to an issue."""
+    strong, weak = query_ids
+    title, labels, body = issue_text(issue)
+    q = tokens(query)
+    if not q and not strong:
+        return 0.0
+    head = tokens(title) | tokens(labels.replace(":", " "))
+    jac = len(q & head) / len(q | head) if q and head else 0.0
+    # containment: how much of the query the title covers (short queries)
+    cover = len(q & tokens(title)) / len(q) if q else 0.0
+    ratio = difflib.SequenceMatcher(None, _title_core(query), _title_core(title)).ratio()
+    body_cov = len(q & tokens(body)) / len(q) if q else 0.0
+    s = 0.30 * jac + 0.25 * cover + 0.25 * ratio + 0.10 * body_cov
+    hay = norm(title + " " + body)
+    if strong:
+        hits = sum(1 for i in strong if _has(i, hay))
+        s += 0.35 * min(1.0, hits / min(len(strong), 3))
+    s += min(0.1, 0.05 * sum(1 for i in weak if _has(i, hay)))
+    return round(min(s, 1.0), 3)
+
+
+def rank(issues, query, extra_ids=(), include_closed=False):
+    strong, weak = identifiers(query)
+    qids = (strong | set(extra_ids), weak)
+    out = []
+    for i in issues:
+        if not include_closed and i["state"] != "OPEN":
+            continue
+        out.append((score(query, qids, i), i))
+    out.sort(key=lambda x: (-x[0], x[1]["state"] != "OPEN", -x[1]["number"]))
+    return out
+
+
+def print_ranked(ranked, n, min_score=0.1):
+    shown = 0
+    for s, i in ranked:
+        if s < min_score or shown >= n:
+            break
+        labels = ",".join(l["name"] for l in i.get("labels", [])) or "-"
+        print(f"#{i['number']:<5} {i['state'].lower():<6} {s:5.2f}  [{labels}]  {i['title']}")
+        print(f"       {i['url']}")
+        shown += 1
+    if not shown:
+        print("no similar issues found")
+    return shown
+
+
+def recently_closed(i):
+    ts = i.get("closedAt") or i.get("updatedAt")
+    if not ts:
+        return False
+    try:
+        t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) - t < timedelta(days=RECENT_CLOSED_DAYS)
+
+
+# ---------------------------------------------------------------- PII guard
+
+def _wrap(e):
+    # Same as wrap() in ~/.claude/hooks/pii-publish-guard.sh: an entry that
+    # starts (ends) with a letter or digit must not be preceded (followed) by one.
+    pre = "(^|[^[:alnum:]])" if re.match(r"^[A-Za-z0-9]", e) else ""
+    post = "([^[:alnum:]]|$)" if re.search(r"[A-Za-z0-9]$", e) else ""
+    return f"{pre}({e}){post}"
+
+
+def _entry_patterns(e):
+    # Simple a|b entries get whole-word matching per alternative, as in the hook.
+    if "|" in e and re.fullmatch(r"[A-Za-z0-9|._@-]+", e):
+        return "|".join(_wrap(a) for a in e.split("|"))
+    return _wrap(e)
+
+
+# C0 controls and DEL, except tab and newline. A NUL in particular makes grep
+# treat the text as binary; such text is refused before it is ever scanned.
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def control_char_lines(text):
+    """1-based line numbers of lines containing a disallowed control character."""
+    return [n for n, l in enumerate(text.split("\n"), 1) if CONTROL_RE.search(l)]
+
+
+def pii_scan(text, denylist=DENYLIST):
+    """Return [(denylist_line, text_line), ...]. Never returns the entries.
+
+    denylist_line 0 means a control character on text_line (refused outright);
+    text_line None means grep matched but did not say where (or a bad regex).
+    Uses grep -aiE so the regex dialect matches the publish hook exactly.
+    Raises FileNotFoundError when the denylist is missing or unreadable.
+    """
+    with open(denylist) as f:   # missing/unreadable -> exception -> abort
+        lines = f.read().splitlines()
+    bad = control_char_lines(text)
+    if bad:
+        return [(0, n) for n in bad]
+    hits = []
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+        tf.write(text)
+        tpath = tf.name
+    try:
+        for n, e in enumerate(lines, 1):
+            if re.match(r"^\s*(#|$)", e):
+                continue
+            # -a: never fall back to "binary file matches" with no lines.
+            r = subprocess.run(["grep", "-naiE", "-e", _entry_patterns(e), tpath],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
+            if r.returncode != 1 and r.returncode != 0:
+                hits.append((n, None))   # bad regex / grep error: fail closed
+                continue
+            found = []
+            for line in r.stdout.splitlines():
+                num = line.split(":", 1)[0]
+                if num.isdigit():
+                    found.append((n, int(num)))
+            if r.returncode == 0 and not found:
+                found.append((n, None))  # grep says match; count it anyway
+            hits.extend(found)
+    finally:
+        os.unlink(tpath)
+    return hits
+
+
+def _describe_hit(d, t):
+    if d == 0:
+        return f"control character on text line {t}"
+    if t is None:
+        return f"denylist line {d} (match at unknown line, or bad regex)"
+    return f"denylist line {d} -> text line {t}"
+
+
+def pii_guard(text, denylist=DENYLIST):
+    try:
+        hits = pii_scan(text, denylist)
+    except OSError:
+        die(f"PII denylist {denylist} is missing or unreadable; refusing to publish.")
+    if hits and all(d == 0 for d, _ in hits):
+        die("text contains NUL or other control characters (only newline and tab "
+            "are allowed); nothing was posted (" +
+            ", ".join(_describe_hit(d, t) for d, t in hits[:12]) + ").")
+    if hits:
+        where = ", ".join(_describe_hit(d, t) for d, t in hits[:12])
+        die("personal information found, nothing was posted (" + where + "). "
+            "Remove hostnames, usernames, home paths, emails, private IPs and "
+            "device names (write e.g. '<build dir>', 'the G16'), then retry.")
+
+
+# ---------------------------------------------------------------- body checks
+
+def read_body(args):
+    if args.body_file:
+        try:
+            with open(args.body_file) as f:
+                return f.read()
+        except OSError as e:
+            die(f"cannot read --body-file: {e}")
+    return args.body or ""
+
+
+def missing_sections(body):
+    heads = [norm(m) for m in re.findall(r"^\s*#{1,6}\s*(.+?)\s*#*\s*$", body, re.M)]
+    missing = []
+    for names in REQUIRED_SECTIONS:
+        if not any(any(norm(n) in h for n in names) for h in heads):
+            missing.append(" / ".join(names))
+    return missing
+
+
+def agent_name(args):
+    name = (args.agent or os.environ.get("AGENT_NAME") or "").strip()
+    if not name:
+        die("say who is filing: --agent NAME or AGENT_NAME=... "
+            "(a role like 'laptop-claude', not a hostname or username)")
+    return name
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_find(args):
+    issues = get_issues(args.repo, args.refresh)
+    print_ranked(rank(issues, " ".join(args.text), include_closed=args.all), args.n)
+
+
+def cmd_labels(args):
+    for l in sorted(get_labels(args.repo, args.refresh), key=lambda l: l["name"]):
+        print(f"{l['name']:<28} {l.get('description') or ''}")
+
+
+def cmd_template(args):
+    sys.stdout.write(TEMPLATES[args.kind])
+
+
+def cmd_file(args):
+    body = read_body(args)
+    if not args.title.strip():
+        die("--title is empty")
+    miss = missing_sections(body)
+    if miss:
+        die("body is missing section(s): " + "; ".join(miss) + ". Start from "
+            "`bin/issue template delta|bug|upstream-report` (sections are markdown "
+            "headings, e.g. '## Upstream status').")
+
+    known = {l["name"] for l in get_labels(args.repo, args.refresh)}
+    bad = [l for l in args.label if l not in known]
+    if bad:
+        die(f"unknown label(s): {', '.join(bad)}. See `bin/issue labels`; "
+            "labels are created by a human, not by this helper.")
+
+    agent = agent_name(args)
+    # Always re-fetch before creating (one call) so a just-filed duplicate from
+    # another agent is seen; dry runs use the cache.
+    issues = get_issues(args.repo, args.refresh or not args.dry_run)
+    ranked = rank(issues, args.title, strong_ids(body), include_closed=True)
+    blockers = [(s, i) for s, i in ranked if s >= DUP_THRESHOLD and
+                (i["state"] == "OPEN" or recently_closed(i))]
+    if blockers and not args.force:
+        print("possible duplicates (score >= %.2f):" % DUP_THRESHOLD)
+        print_ranked(blockers, 8, DUP_THRESHOLD)
+        print(f"\nnot filed. If one of these is the same thing, add to it:\n"
+              f"  bin/issue comment {blockers[0][1]['number']} --body-file F\n"
+              "If it really is different, rerun with --force (recorded in the body).")
+        sys.exit(3)
+
+    footer = "\n\n---\n"
+    if blockers:
+        footer += ("dup-check overridden (--force); candidates were: " +
+                   ", ".join(f"#{i['number']}" for _, i in blockers[:5]) + "\n")
+    footer += f"Filed by {agent} via bin/issue\n"
+    full = body.rstrip() + footer
+
+    pii_guard(args.title + "\n" + full + "\n" + "\n".join(args.label))
+
+    if args.dry_run:
+        print(f"DRY RUN: would create issue on {args.repo}")
+        print(f"  title:  {args.title}")
+        print(f"  labels: {', '.join(args.label) or '-'}")
+        if ranked and ranked[0][0] >= 0.1:
+            print("  closest existing (below threshold):")
+            for s, i in ranked[:3]:
+                print(f"    #{i['number']} {s:.2f} {i['title']}")
+        print("  body:\n" + "\n".join("    " + l for l in full.splitlines()))
+        return
+    cmd = ["issue", "create", "-R", args.repo, "--title", args.title,
+           "--body-file", "-"]
+    for l in args.label:
+        cmd += ["--label", l]
+    print(gh(cmd, input_text=full).strip())
+    invalidate(args.repo, "issues")
+
+
+def cmd_comment(args):
+    body = read_body(args)
+    if not body.strip():
+        die("empty comment")
+    agent = agent_name(args)
+    issues = {i["number"]: i for i in get_issues(args.repo, args.refresh)}
+    target = issues.get(args.number)
+    if target is None:
+        # cache may predate a just-filed issue; check once more
+        issues = {i["number"]: i for i in get_issues(args.repo, True)}
+        target = issues.get(args.number)
+    if target is None:
+        die(f"#{args.number} does not exist on {args.repo}")
+    if target["state"] != "OPEN":
+        print(f"note: #{args.number} is closed; commenting anyway", file=sys.stderr)
+    full = body.rstrip() + f"\n\n---\nPosted by {agent} via bin/issue\n"
+    pii_guard(full)
+    if args.dry_run:
+        print(f"DRY RUN: would comment on #{args.number} ({target['title']})")
+        print("\n".join("    " + l for l in full.splitlines()))
+        return
+    print(gh(["issue", "comment", str(args.number), "-R", args.repo,
+              "--body-file", "-"], input_text=full).strip())
+    invalidate(args.repo, "issues")
+
+
+def main():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--repo", default=DEFAULT_REPO,
+                        help=f"only {DEFAULT_REPO} is accepted")
+    common.add_argument("--refresh", action="store_true",
+                        help="ignore the 5-minute cache")
+
+    p = argparse.ArgumentParser(prog="bin/issue", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    f = sub.add_parser("find", parents=[common], help="rank existing issues by similarity")
+    f.add_argument("text", nargs="+")
+    f.add_argument("--all", action="store_true", help="include closed issues")
+    f.add_argument("-n", type=int, default=8, help="how many to show (default 8)")
+    f.set_defaults(fn=cmd_find)
+
+    def body_args(sp):
+        g = sp.add_mutually_exclusive_group(required=True)
+        g.add_argument("--body-file")
+        g.add_argument("--body")
+        sp.add_argument("--agent", help="who is posting (default $AGENT_NAME)")
+        sp.add_argument("--dry-run", action="store_true")
+
+    fl = sub.add_parser("file", parents=[common], help="file a new issue after a dup check")
+    fl.add_argument("--title", required=True)
+    fl.add_argument("--label", action="append", default=[], required=True)
+    fl.add_argument("--force", action="store_true", help="file despite likely duplicates")
+    body_args(fl)
+    fl.set_defaults(fn=cmd_file)
+
+    c = sub.add_parser("comment", parents=[common], help="comment on an existing issue")
+    c.add_argument("number", type=lambda s: int(s.lstrip("#")))
+    body_args(c)
+    c.set_defaults(fn=cmd_comment)
+
+    l = sub.add_parser("labels", parents=[common], help="list labels")
+    l.set_defaults(fn=cmd_labels)
+
+    t = sub.add_parser("template", help="print a body skeleton")
+    t.add_argument("kind", nargs="?", default="delta", choices=sorted(TEMPLATES))
+    t.set_defaults(fn=cmd_template, repo=DEFAULT_REPO)
+
+    args = p.parse_args()
+    check_repo(args.repo)
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()
