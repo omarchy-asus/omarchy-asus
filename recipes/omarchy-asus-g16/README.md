@@ -5,7 +5,7 @@
 > another machine prints a warning; the files still install.
 
 Static system files for G16 fixes that the
-[omarchy-asus fork](https://github.com/rdoupe-omarchy/omarchy-asus) otherwise
+[omarchy-asus fork](https://github.com/omarchy-asus/omarchy) otherwise
 sets up through an omarchy install leaf or migration. With this package a stock
 Omarchy 4.0.5 install gets them without rebuilding `omarchy` or
 `omarchy-settings`.
@@ -25,7 +25,7 @@ the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 |---|---|---|
 | `omarchy-asus-g16` | `/usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules` | [touchpad wake](#touchpad-doesnt-wake-the-laptop) |
 | `omarchy-asus-g16` | `/usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf` | [hibernate mode](#hibernatemodeshutdown) |
-| `omarchy-asus-g16-nvidia-powerd` (opt-in) | `/usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf` | [nvidia-powerd start limit](#nvidia-powerd-start-limit-opt-in) |
+| `omarchy-asus-g16` | `/usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf` | [nvidia-powerd start limit](#nvidia-powerd-start-limit) |
 
 ## Touchpad doesn't wake the laptop
 
@@ -95,12 +95,13 @@ in this repo's `nvidia-open-dkms`.
 **When to remove:** when Omarchy ships `HibernateMode=shutdown` for the GA605KM
 in a release, or when the NVIDIA driver survives the S4 rollback.
 
-## nvidia-powerd start limit (opt-in)
+## nvidia-powerd start limit
 
 > [!NOTE]
-> **Behaviour change: this isn't live on the laptop today.** It's in a separate
-> package, `omarchy-asus-g16-nvidia-powerd`, that nothing pulls in. Install it
-> on purpose.
+> This is a fix, not a restyle: without it, Dynamic Boost stays off from the
+> sixth charger plug-in of a boot (seen on a GA605KM). It was split into an
+> opt-in package at first. It now ships in the main package, because it's a
+> tested bug fix with a one-key change.
 
 **Fixes:** nvidia-utils caps `nvidia-powerd.service` at five starts with an
 unlimited window (`StartLimitIntervalSec=infinity`, `StartLimitBurst=5`). asusd
@@ -112,7 +113,7 @@ count against it.
 
 **Mirrors:** fork branch `asus/nvidia-powerd-start-limit` at `2cd582fb`
 (`default/systemd/system/nvidia-powerd.service.d/10-omarchy.conf`), shipped by
-the pkgs branch `omarchy-settings-nvidia-powerd` (`25c4f5a4`) to
+the [omarchy-asus/omarchy-pkgs](https://github.com/omarchy-asus/omarchy-pkgs) branch `omarchy-settings-nvidia-powerd` (`25c4f5a4`) to
 `/usr/lib/systemd/system/nvidia-powerd.service.d/10-omarchy.conf`.
 
 **Path:** same directory, renamed to `20-omarchy-asus.conf` so it can never
@@ -135,7 +136,7 @@ Not packaged, so stock behaviour stays unchanged. These fixes live in the fork
 and as upstream PRs only:
 
 - `asus/asusd-power-profiles`: asusd hands profile and EPP control to one owner. Writes an `/etc` drop-in through a migration; [omacom/omarchy#15667](https://github.com/omacom/omarchy/pull/15667).
-- `asus/usbc-power` and pkgs branch `omarchy-settings-source-monitor`: adapter-based power policy. Modifies the stock `omarchy-powerprofiles-set`; [#15668](https://github.com/omacom/omarchy/pull/15668).
+- `asus/usbc-power` and omarchy-asus/omarchy-pkgs branch `omarchy-settings-source-monitor`: adapter-based power policy. Modifies the stock `omarchy-powerprofiles-set`; [#15668](https://github.com/omacom/omarchy/pull/15668).
 - `asus/powerprofiles-external-owner`: a `powerprofiles-autoswitch-off` toggle in stock scripts; [#15669](https://github.com/omacom/omarchy/pull/15669).
 - `asus/ga605km-quiet-fans`: battery fan profile. Hooks the stock power-profile script and needs a sudoers grant; not proposed.
 - `asus/hdmi-cursor`: software cursor while HDMI runs on the RTX. Per-user Hyprland config; PR drafted.
@@ -155,7 +156,7 @@ leftover copies once the package is in.
 ## Removal
 
 ```bash
-sudo pacman -Rns omarchy-asus-g16 omarchy-asus-g16-nvidia-powerd
+sudo pacman -Rns omarchy-asus-g16
 ```
 
 Removal deletes the files. The touchpad stays disarmed until the next boot. A
