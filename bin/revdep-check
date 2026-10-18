@@ -21,7 +21,7 @@
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
-headers= dkms= log=/dev/null
+headers='' dkms='' log=/dev/null
 while (($#)); do
     case $1 in
         --headers) headers=$2; shift ;;
