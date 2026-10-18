@@ -31,6 +31,7 @@ VIDPID=00000B05:000019B6
 UDEV_RULE=/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules
 APPLY_SHARE=/usr/share/omarchy-asus-g16-apply
 PACMAN_CONF=/etc/pacman.conf
+SRC_ROOT=${G16_CHECK_SRC_ROOT:-/usr/src} # DKMS source root; the override is for tests only
 
 LIVE=0 REDACT=1 COLOR=1
 [[ -t 1 ]] || COLOR=0
@@ -93,6 +94,39 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Run a command as root without ever prompting; fails when sudo needs a password.
 try_root() {
   if ((EUID == 0)); then "$@"; else have sudo && sudo -n "$@" 2>/dev/null; fi
+}
+
+# DKMS source dirs for hid-asus, one per line: every $SRC_ROOT/* with a dkms.conf
+# whose name or dkms.conf mentions hid-asus/hid_asus. Arch's DKMS pacman hook
+# registers every /usr/src/*/dkms.conf again on each kernel transaction, so
+# such a dir brings the module back after `dkms remove`.
+hidasus_dkms_sources() {
+  local d
+  for d in "$SRC_ROOT"/*; do
+    [[ -f $d/dkms.conf ]] || continue
+    if grep -qiE 'hid[-_]asus' <<<"${d##*/}" || grep -qiE 'hid[-_]asus' "$d/dkms.conf" 2>/dev/null; then
+      printf '%s\n' "$d"
+    fi
+  done
+}
+
+# The package(s) owning a path, space-separated; nothing when unowned or no pacman.
+src_owner() {
+  have pacman || return 0
+  pacman -Qqo "$1" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# How to get rid of a DKMS source dir for good. Move it, never delete it (it may
+# be the only copy of a local patch), and move it out of $SRC_ROOT: the hook
+# globs usr/src/*/dkms.conf, so an in-place rename would still be picked up.
+src_hint() {
+  local dir=$1 pkg
+  pkg=$(src_owner "$dir")
+  if [[ -n $pkg ]]; then
+    info "source $dir is owned by package $pkg: remove that package (sudo pacman -Rns $pkg)"
+  else
+    info "source $dir is not owned by any package, so the DKMS hook adds it again on every kernel update: after dkms remove, move it out of $SRC_ROOT (sudo mkdir -p /usr/local/src/dkms-disabled && sudo mv $dir /usr/local/src/dkms-disabled/)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -210,10 +244,39 @@ if ((${#extra[@]})); then
 fi
 if have dkms; then
   dk=$(dkms status 2>/dev/null | grep -i 'hid.asus' || true)
+  declare -A dk_seen=()
   if [[ -n $dk ]]; then
-    fail "DKMS still registers a hid-asus module (remove it: sudo dkms remove <module>/<version> --all):"
+    fail "DKMS still registers a hid-asus module (remove it: sudo dkms remove <module>/<version> --all, and move an unowned source out of /usr/src; see below):"
     while IFS= read -r l; do info "$l"; done <<<"$dk"
-  else
+    # "hid-asus-winlock/1: added" or "hid-asus-winlock/1, 7.2.8-9.1-omarchy, x86_64: installed"
+    while IFS= read -r l; do
+      modver=${l%%[,:]*}
+      [[ $modver == */* ]] || continue
+      src=$SRC_ROOT/${modver%%/*}-${modver#*/}
+      [[ -n ${dk_seen[$src]:-} ]] && continue
+      dk_seen[$src]=1
+      if [[ -d $src ]]; then
+        src_hint "$src"
+      else
+        info "source $src not found"
+      fi
+    done <<<"$dk"
+  fi
+  dk_src=0
+  while IFS= read -r d; do
+    [[ -n $d ]] || continue
+    dk_src=1
+    [[ -n ${dk_seen[$d]:-} ]] && continue
+    dk_seen[$d]=1
+    pkg=$(src_owner "$d")
+    if [[ -n $pkg ]]; then
+      fail "DKMS source $d (package $pkg) registers hid-asus on every kernel update"
+    else
+      fail "DKMS source $d is not owned by any package: the next kernel update registers hid-asus again"
+    fi
+    src_hint "$d"
+  done < <(hidasus_dkms_sources)
+  if [[ -z $dk ]] && ((dk_src == 0)); then
     pass "no hid-asus module registered with DKMS"
   fi
 else
@@ -470,7 +533,11 @@ report "renamed NVIDIA mkinitcpio drop-in (#58's initramfs migration manages nvi
 
 hits=''
 ((${#extra[@]})) && hits+="${extra[*]} "
-have dkms && hits+=$(dkms status 2>/dev/null | grep -i 'hid.asus' | cut -d, -f1 | tr '\n' ' ')
+if have dkms; then
+  hits+=$(dkms status 2>/dev/null | grep -i 'hid.asus' | cut -d, -f1 | tr '\n' ' ')
+  # A leftover source dir comes back with the next kernel update.
+  while IFS= read -r d; do [[ -n $d ]] && hits+=" $d"; done < <(hidasus_dkms_sources)
+fi
 report "out-of-tree / DKMS hid-asus" "$hits"
 
 hits=$(grep -nE '^[[:space:]]*Ignore(Pkg|Group)[[:space:]]*=' "$PACMAN_CONF" 2>/dev/null | grep -E 'nvidia|hyprland|hyprpm|aquamarine|linux-omarchy|omarchy' || true)

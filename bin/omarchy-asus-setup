@@ -247,6 +247,23 @@ preflight_warnings() {
     warn "$CONF has IgnorePkg lines for packages this repo ships; remove them, or the repo builds won't install:"
     grep -nE '^[[:space:]]*IgnorePkg' "$CONF" | sed 's/^/        /' >&2
   fi
+  # An out-of-tree hid-asus DKMS source: Arch's DKMS hook adds every /usr/src/<name>-<version>
+  # with a dkms.conf again on each kernel transaction, so 'dkms remove' alone doesn't stick (#87).
+  local d base owner
+  for d in /usr/src/*; do
+    [[ -f $d/dkms.conf ]] || continue
+    base=${d##*/}
+    [[ ${base,,} == *hid[-_]asus* ]] || grep -qiE 'hid[-_]asus' "$d/dkms.conf" || continue
+    if owner=$(pacman -Qqo "$d" 2>/dev/null) && [[ -n $owner ]]; then
+      owner=${owner%%$'\n'*}
+      warn "$d (package $owner) is an out-of-tree hid-asus DKMS source; the patched kernel has the fix"
+      warn "built in: remove the package (sudo pacman -Rns $owner)."
+    else
+      warn "$d is an out-of-tree hid-asus DKMS source that no package owns. DKMS adds it again on every"
+      warn "kernel update, even after dkms remove. Run 'sudo dkms remove ${base%-*}/${base##*-} --all', then move it"
+      warn "out of /usr/src: 'sudo mkdir -p /usr/local/src/dkms-disabled && sudo mv $d /usr/local/src/dkms-disabled/'."
+    fi
+  done
 }
 
 install_key() {
