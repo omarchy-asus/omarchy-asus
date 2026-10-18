@@ -62,10 +62,13 @@ if [[ $EUID -eq 0 ]]; then
 else
     config=${config:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-asus/auto-update.conf}
 fi
-BUILD_USER= GIT_URL= BASE_BRANCH= MERGE_MODE=auto REVIEW_CMD= REVIEW_TIMEOUT=1200
+BUILD_USER= GIT_URL= BASE_BRANCH= MERGE_MODE=auto REVIEW_TIMEOUT=1200
 SKIP_RECIPES= BUILD_NOT_BUILT=yes FETCH_FAIL_UNPUBLISH_AFTER=2 EXTRA_PATH= GH_TOKEN_FILE=
 FAIL_ON_ATTENTION=no CODERABBIT=required CODERABBIT_WAIT=1800 MAX_FIX_ROUNDS=2 REPLY_LIMIT=10
 REQUIRE_AGENT_APPROVAL=yes
+# REVIEW_CMD stays unset unless the config sets it: unset -> the default below,
+# explicitly empty (REVIEW_CMD=) -> agent review disabled.
+unset REVIEW_CMD
 # shellcheck disable=SC1090
 [[ -f $config ]] && source "$config"
 if [[ $EUID -eq 0 ]]; then
