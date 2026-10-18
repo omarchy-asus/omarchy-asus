@@ -38,20 +38,18 @@ The signed `[omarchy-asus]` repo, served from the
 |---|---|---|---|
 | `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.1 | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
 | | | *Plus an **experimental, default-off** scheduler series (Zen 5c-first soft park) for GA605KM battery testing. Compile-tested only. Nothing enables it. Not meant for upstream.* | Local carry ([notes](recipes/linux-omarchy/NOTES.md)) |
-| `nvidia-open-dkms` | 615.78.08-1.1 | No hang at power-off after hibernate | [NVIDIA/open-gpu-kernel-modules#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412), open |
+| `nvidia-open-dkms` | 615.78.08-1.2 | No hang at power-off after hibernate | [NVIDIA/open-gpu-kernel-modules#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412), open |
 | | | The dGPU no longer wakes from D3cold on every battery change | [NVIDIA/open-gpu-kernel-modules#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299), open |
+| | | nvidia-modeset no longer leaks memory per composited frame (gigabytes over days) | [NVIDIA/open-gpu-kernel-modules#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368), open |
 | `hyprland`, `hyprpm` | 0.56.2-4.1 | Windows no longer render off-screen after an HDMI replug | Fixed on main by [hyprwm/Hyprland#16140](https://github.com/hyprwm/Hyprland/pull/16140), unreleased; dropped when 0.57 ships |
 
-The two NVIDIA fixes are open pull requests by other people (@expaso and @lars76). We carry
-them because they fix real bugs on this hardware.
+The three NVIDIA fixes are open pull requests by other people. We carry them because they fix
+real bugs on this hardware.
 
 ### In progress
 
 - **Kernel 7.2.8-9.2:** an `i2c-designware` RX threshold backport (the touchpad fires about
   52 interrupts per report today) and GA605KM power limits for `asus-armoury`.
-- **NVIDIA 615.78.08-1.2:** adds
-  [NVIDIA/open-gpu-kernel-modules#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368),
-  an nvkms leak that grows to gigabytes over a few days of uptime.
 - **G16 hardware package:** touchpad wake and hibernate settings for the GA605KM.
 - **Win-lock helper and G16 Control widget:** a toast when Fn+Super locks or unlocks the key.
 - **Keyring and one-step setup:** one package to trust the key and add the repo.
@@ -117,9 +115,9 @@ Where our fixes are headed:
   ROG laptops, [#15669](https://github.com/basecamp/omarchy/pull/15669) let another power
   manager own the profile on plug and unplug.
 - **NVIDIA:** [#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412) and
-  [#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299) (carried here),
-  [#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368) (proposed in #2). All
-  three are written by others.
+  [#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299) and
+  [#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368), all carried here and
+  all written by others.
 - **Hyprland:** [#16140](https://github.com/hyprwm/Hyprland/pull/16140), merged, waiting on
   a release.
 - **Linux:** `hid-asus` Win-lock pass-through, on linux-input as patchwork 14804337.

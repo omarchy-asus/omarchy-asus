@@ -1,9 +1,14 @@
-# nvidia-open-dkms with two NVIDIA/open-gpu-kernel-modules PRs applied:
-#   Both rebased onto 615.78.08 on 2026-10-16: same changes, regenerated without offsets.
+# nvidia-open-dkms with three NVIDIA/open-gpu-kernel-modules PRs applied:
+#   0001/0002 rebased onto 615.78.08 on 2026-10-16: same changes, regenerated without offsets.
 #   0001 PR #1412: no hang at power-off after a hibernation image is written.
 #   0002 PR #1299: defer the NVPCF notification while the GPU is runtime-suspended,
 #        so the RTX no longer wakes from D3cold on every 1% battery change
-#        (lars76's PR, tested on a ROG Zephyrus G16).
+#        (lars76's PR, tested on a ROG Zephyrus G16). Squashes both PR commits,
+#        including the os_unref_dynamic_power() refcount-underflow fix.
+#   0003 PR #1368 (added in 1.2): nvidia-modeset frees the semaphore-surface
+#        callback record when RM reports the waiter already signalled. Under
+#        explicit sync that is nearly every composited frame, so the 40-byte
+#        kmalloc-64 leak reached GBs of unreclaimable slab over days.
 # Trimmed from Arch's nvidia-utils 615.78.08-1 PKGBUILD (pkgbase nvidia-utils):
 # only the nvidia-open-dkms split, only the kernel-module-source tarball.
 #
@@ -11,13 +16,13 @@
 # -> device_shutdown() -> nv_pci_shutdown() tears the driver down against a GPU
 # that is still NV_FLAG_SUSPENDED (thaw is a no-op) and never returns: the G16
 # sits black with the image safely on disk until a long power press.
-# pkgrel 1.1 sorts above the repo's 615.78.08-1 and below any later driver or Arch rebuild (-2), so a future
+# pkgrel 1.2 sorts above the repo's 615.78.08-1 and below any later driver or Arch rebuild (-2), so a future
 # nvidia-open-dkms upgrade replaces this build (re-check the PR is merged first).
 
 pkgname=nvidia-open-dkms
 pkgver=615.78.08
-pkgrel=1.1
-pkgdesc="NVIDIA open kernel modules - module sources (PR #1412 hibernate power-off hang, PR #1299 NVPCF wake defer)"
+pkgrel=1.2
+pkgdesc="NVIDIA open kernel modules - module sources (PR #1412 hibernate power-off hang, PR #1299 NVPCF wake defer, PR #1368 nvkms semaphore leak)"
 arch=('x86_64')
 url="https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412"
 license=('MIT AND GPL-2.0-only')
@@ -29,15 +34,18 @@ options=('!strip')
 _pkg_open="NVIDIA-kernel-module-source-${pkgver}"
 source=("https://download.nvidia.com/XFree86/NVIDIA-kernel-module-source/${_pkg_open}.tar.xz"
         '0001-nvidia-skip-teardown-in-nv_pci_shutdown-while-hibernate-suspended.patch'
-        '0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.patch')
+        '0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.patch'
+        '0003-nvidia-modeset-free-semaphore-surface-callback-when-already-signalled.patch')
 sha512sums=('5ced2c7e3e9df21f8494ea439ac2103307fcbcb295a3f11e5fdf4f1dbeda3f0b13800a06f8147ebd064f98897c24e92f5de82023a8ca43a582694d951c9620c9'
-            'SKIP'
-            'SKIP')
+            'ea0134078b7903355fe9c252918746ea48ce3276d1a198b71401642a6f3b5b99fcd9fb27b9bb198b52df652f3b7461da0f1f5584ce2df5607471171e83379d6e'
+            '7a7592ea919f53656ef2891f6d8b299957abdbd2207396729ba5ba7651118083a3cb420111c9ea8d301339541db59fd830951f76286747c2a94ed6595bde18c2'
+            'a191ae3dac1c85e608f38eefbbc9e00b4b6ed7423682e11f79d585a233e7fc372ca54aff20f11feedacff89d08438253ae6c6369a58614d4e12b6e90bc50f275')
 
 prepare() {
     cd "${_pkg_open}"
     patch -Np1 -i "${srcdir}/0001-nvidia-skip-teardown-in-nv_pci_shutdown-while-hibernate-suspended.patch"
     patch -Np1 -i "${srcdir}/0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.patch"
+    patch -Np1 -i "${srcdir}/0003-nvidia-modeset-free-semaphore-surface-callback-when-already-signalled.patch"
 
     # Attempt to make builds reproducible (as Arch does)
     sed -i "s/^  HOSTNAME.*/  HOSTNAME = echo archlinux/" utils.mk

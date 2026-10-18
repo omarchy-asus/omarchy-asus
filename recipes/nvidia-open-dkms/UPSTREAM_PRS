@@ -1,3 +1,4 @@
 # PRs whose changes our patches carry; bin/check-upstream reports their state.
 NVIDIA/open-gpu-kernel-modules#1412  0001 hibernate power-off hang
 NVIDIA/open-gpu-kernel-modules#1299  0002 NVPCF notify while runtime-suspended
+NVIDIA/open-gpu-kernel-modules#1368  0003 nvkms semaphore-surface callback leak
