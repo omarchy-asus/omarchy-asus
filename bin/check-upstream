@@ -3,8 +3,9 @@
 
 Usage: bin/check-upstream [--json] [--refresh] [--no-prs] [--recipe DIR]... [--recipe-path PATH]...
 
-Our packages: every recipes/<dir>/PKGBUILD (via `makepkg --printsrcinfo`, one
-entry per split package) plus anything in the local repo db ($REPO_DIR).
+Our packages: every recipes/<dir>/PKGBUILD (via `makepkg --printsrcinfo`, run in
+bin/recipe-sandbox without network or credentials; one entry per split package)
+plus anything in the local repo db ($REPO_DIR).
 Upstream: the repos the laptop uses, in pacman.conf order, first match wins:
 [omarchy] pkgs.omarchy.org/stable, then core/extra/multilib from the Omarchy
 stable mirror.
@@ -66,6 +67,7 @@ UPSTREAM_DBS = [  # pacman.conf order
 DB_TTL = 3600          # upstream dbs: refetch after 1h
 PR_TTL = 24 * 3600     # GitHub PR state: refetch after 24h
 UA = "omarchy-asus-check-upstream"
+SANDBOX = os.path.join(os.path.dirname(os.path.realpath(__file__)), "recipe-sandbox")
 
 
 def env_from_sh():
@@ -142,7 +144,16 @@ def recipe_packages(only=None, paths=()):
             continue
         if only and d not in only:
             continue
-        r = subprocess.run(["makepkg", "--printsrcinfo"], cwd=path, capture_output=True, text=True)
+        real = os.path.realpath(path)
+        # makepkg needs a writable BUILDDIR/PKGDEST/SRCDEST (default: the read-only recipe dir)
+        r = subprocess.run([SANDBOX, "--ro", real, "--setenv", "BUILDDIR", "/tmp/makepkg",
+                            "--setenv", "PKGDEST", "/tmp/makepkg", "--setenv", "SRCDEST", "/tmp/makepkg",
+                            "--chdir", real, "--", "makepkg", "--printsrcinfo"],
+                           capture_output=True, text=True)
+        if r.returncode == 125:  # never skip a recipe silently, never run it unsandboxed
+            print("error: bin/recipe-sandbox: bubblewrap (bwrap) is missing; "
+                  "recipe code is never run outside the sandbox", file=sys.stderr)
+            sys.exit(1)
         if r.returncode != 0:
             print(f"warning: recipes/{d}: makepkg --printsrcinfo failed: {r.stderr.strip()}", file=sys.stderr)
             errors.append(d)

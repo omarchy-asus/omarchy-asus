@@ -31,9 +31,15 @@
 #   While the journal $DATA/sync-pending exists (written by bin/publish and bin/unpublish
 #   before the local repo changes, removed by bin/sync-release once the release is verified)
 #   the release may lag: the next run syncs before planning, and the run fails until it clears.
+#   Before the first push or GitHub write, every commit (messages, author/committer, paths,
+#   patch text) and the PR title/body pass the PII scan and a local-path check; a hit
+#   pushes nothing and records class=pii.
 #
 # Root vs user: run as root (systemd), only the chroot build runs as root; every other
 # step runs as BUILD_USER via runuser. Run as a normal user, the build uses sudo.
+# Recipe code (makepkg --printsrcinfo here, makepkg --nobuild and --verifysource in
+# bin/rebase-recipe) only runs in bin/recipe-sandbox (bubblewrap: cleared environment, no
+# home dirs, no GH_TOKEN), so the run refuses to start without bwrap.
 set -euo pipefail
 LIB=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
 
@@ -46,7 +52,7 @@ while (($#)); do
         --recipe) recipes+=("$2"); shift ;;
         --workspace) workspace_arg=$(realpath "$2"); shift ;;
         --config) config=$2; shift ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
     shift
@@ -103,6 +109,9 @@ STATUS=$DATA/status.json
 SUMMARY=$DATA/status.md
 LOG=$DATA/logs/auto-update-$run_id.log
 GH_TOKEN=
+# Token files outside /home: bin/recipe-sandbox hides these too (as_user, and the root
+# build-pkg call, whose runuser keeps the environment).
+sandbox_hide=$GH_TOKEN_FILE${GH_TOKEN_FILE:+${OPENROUTER_API_KEY_FILE:+:}}$OPENROUTER_API_KEY_FILE
 
 # Run a command as the build user, with a fixed environment (root: runuser; user: direct).
 pass_env=(OMARCHY_ASUS_UPSTREAM_OVERRIDE OMARCHY_ASUS_ARCH_GIT_URL OMARCHY_ASUS_OMARCHY_PKGS_GIT_URL
@@ -113,6 +122,7 @@ as_user() {
              OMARCHY_ASUS_WORKSPACE="$CLONE" OMARCHY_ASUS_DATA="$DATA" GNUPGHOME="$DATA/gnupg"
              GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1)
     [[ -n $GH_TOKEN ]] && e+=(GH_TOKEN="$GH_TOKEN")
+    [[ -n $sandbox_hide ]] && e+=(OMARCHY_ASUS_SANDBOX_HIDE="$sandbox_hide")
     local v; for v in "${pass_env[@]}"; do [[ -n ${!v:-} ]] && e+=("$v=${!v}"); done
     if [[ $EUID -eq 0 ]]; then
         runuser -u "$BUILD_USER" -- env -i "${e[@]}" "$@"
@@ -122,6 +132,13 @@ as_user() {
 }
 to_file() { local f=$1; shift; as_user bash -c 'f=$1; shift; "$@" > "$f"' _ "$f" "$@"; }  # to_file FILE cmd...
 ugit() { as_user git -C "$CLONE" -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
+# Fail closed: recipe code never runs outside the sandbox. Run it once, so a missing bwrap
+# or disabled user namespaces stop the run here instead of making check-upstream skip
+# every recipe (it only warns on a recipe whose makepkg --printsrcinfo fails).
+if [[ $mode != crstate ]] && ! as_user "$LIB/recipe-sandbox" -- /usr/bin/true; then
+    echo "bin/recipe-sandbox cannot run (needs bubblewrap and unprivileged user namespaces): recipe code only runs there" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------- lock + log
 as_user mkdir -p "$DATA/logs" "$AU/runs"
@@ -205,19 +222,26 @@ retry_unpublish() {  # retry the removals a previous run could not do (names sti
         note unpublish "bin/unpublish FAILED again for ${want[*]}"; failed=1
     fi
 }
+srcinfo() {  # srcinfo <recipe dir>: makepkg --printsrcinfo in bin/recipe-sandbox (no network)
+    # makepkg needs a writable BUILDDIR/PKGDEST/SRCDEST (default: the read-only recipe dir)
+    as_user "$LIB/recipe-sandbox" --ro "$1" --setenv BUILDDIR /tmp/makepkg --setenv PKGDEST /tmp/makepkg \
+        --setenv SRCDEST /tmp/makepkg --chdir "$1" -- makepkg --printsrcinfo
+}
 publish_files() {  # publish_files <recipe dir> <version>: publish the staged packages of that recipe
     # Right after drive_pr's merge, its locals merged_pr and built_tree are set (bash scoping
     # is dynamic): then publish only if the merge commit holds the tree that was built, and
     # set merge_mismatch=yes otherwise. --match-head-commit pins the head, not the base: a
     # base-branch commit to the same recipe during the build and review would otherwise ship
     # a recipe that was never built.
-    local dir=$1 ver=$2 files=() n
+    local dir=$1 ver=$2 files=() n info
     if [[ -n ${merged_pr:-} && $(merged_tree "$merged_pr" "${dir##*/}") != "${built_tree:-}" ]]; then
         merge_mismatch=yes
         note publish "the merge commit of $merged_pr does not hold the built recipes/${dir##*/} (or is unknown): not publishing"
         return 1
     fi
-    for n in $(as_user bash -c 'cd "$1" && makepkg --printsrcinfo' _ "$dir" | sed -n 's/^pkgname = //p'); do
+    info=$(srcinfo "$dir") ||
+        { note publish "makepkg --printsrcinfo failed in bin/recipe-sandbox for $dir"; return 1; }
+    for n in $(sed -n 's/^pkgname = //p' <<<"$info"); do
         mapfile -t -O "${#files[@]}" files < <(as_user bash -c 'ls "$1"/"$2"-"$3"-*.pkg.tar.zst 2>/dev/null' _ "$STAGE_DIR" "$n" "$ver")
     done
     ((${#files[@]})) || { note publish "no staged packages for $dir $ver"; return 1; }
@@ -226,9 +250,10 @@ publish_files() {  # publish_files <recipe dir> <version>: publish the staged pa
     pending_edit drop "${names[@]}"
     sync_now
 }
-recipe_version() {  # recipe_version <recipe dir>: [epoch:]pkgver-pkgrel
-    as_user bash -c 'cd "$1" && makepkg --printsrcinfo' _ "$1" |
-        awk '/^\tepoch = /{e=$3":"} /^\tpkgver = /{v=$3} /^\tpkgrel = /{r=$3} END{print e v "-" r}'
+recipe_version() {  # recipe_version <recipe dir>: [epoch:]pkgver-pkgrel; 1 (and no output) if the sandbox fails
+    local info
+    info=$(srcinfo "$1") || return 1
+    awk '/^\tepoch = /{e=$3":"} /^\tpkgver = /{v=$3} /^\tpkgrel = /{r=$3} END{print e v "-" r}' <<<"$info"
 }
 tree_hash() { ugit rev-parse "HEAD:recipes/$1" 2>/dev/null || echo none; }
 merged_tree() {  # merged_tree <pr url> <recipe>: recipes/<recipe>'s tree in the PR's merge commit, or "none"
@@ -263,15 +288,32 @@ pii_ok() {  # pii_ok <file> [<text>] <what>: 0 if <text> (if given) was written 
     note pii "${!#} withheld from the PR: failed the PII scan (the original is run $run_id: ${f##*/})"
     return 1
 }
+outgoing_ok() {  # outgoing_ok <recipe> <base rev> <what> [<title> <body>]: 0 if the commits in
+                 # <base>..HEAD (messages, author/committer, paths, patch text) and the text are clean
+    local f=$RUN/$1.outgoing.txt base=$2 what=$3 pats=() p rc=0
+    as_user bash -c 'f=$1 clone=$2 base=$3; shift 3
+        { git -C "$clone" log --no-color --no-ext-diff --no-textconv --text --patch --stat \
+              --format="commit %H%nAuthor: %an <%ae>%nCommitter: %cn <%ce>%n%n%B" "$base..HEAD" &&
+          if (($#)); then printf "%s\n" "$@"; fi; } > "$f"' _ "$f" "$CLONE" "$base" "${@:4}" ||
+        { note pii "$what not pushed: cannot write run $run_id: ${f##*/}"; return 1; }
+    for p in "$user_home/" "$DATA" "$CLONE"; do [[ -n $p && $p != / ]] && pats+=(-e "$p"); done
+    as_user grep -qF "${pats[@]}" -- "$f" || rc=$?
+    if ((rc != 1)); then   # 0: a hit; 2: the check failed
+        note pii "$what carries an absolute local path, or the check failed (run $run_id: ${f##*/})"
+        return 1
+    fi
+    pii_ok "$f" "$what"
+}
 build_recipe() {  # build_recipe <recipe>: chroot build of $CLONE/recipes/<recipe> + reverse-dep checks
     local r=$1 ver
     build_log=$RUN/$r.build.log
     if [[ $EUID -eq 0 ]]; then
-        "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 | as_user tee "$build_log" >/dev/null || return 1
+        OMARCHY_ASUS_SANDBOX_HIDE=$sandbox_hide "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 |
+            as_user tee "$build_log" >/dev/null || return 1
     else
         as_user "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 | as_user tee "$build_log" >/dev/null || return 1
     fi
-    ver=$(recipe_version "$CLONE/recipes/$r")
+    ver=$(recipe_version "$CLONE/recipes/$r") || return 1
     revdep_checks "$r" "$ver"
 }
 
@@ -316,12 +358,13 @@ revdep_plan() {  # revdep_plan <recipe>: one line per check that a build of <rec
     done < <(revdep_lines "$1")
 }
 revdep_checks() {  # revdep_checks <recipe> <version>: 0 if every reverse-dep check passes
-    local r=$1 ver=$2 role d h hfile dfile rc=0 one
+    local r=$1 ver=$2 role d h hfile dfile dver rc=0 one
     while read -r role _ d h; do
         if [[ $role == kernel ]]; then
             hfile=$(pkg_file "$STAGE_DIR" "$h" "$ver")
             dfile=$(pkg_file "$REPO_DIR" "$d")
-            [[ -n $dfile ]] || dfile=$(pkg_file "$STAGE_DIR" "$d" "$(recipe_version "$CLONE/recipes/$d")")
+            # No version (the sandbox failed): no file, rather than any staged version.
+            [[ -n $dfile ]] || { dver=$(recipe_version "$CLONE/recipes/$d") && dfile=$(pkg_file "$STAGE_DIR" "$d" "$dver"); } || true
             [[ -n $hfile ]] || { note "$r" "revdep: no staged $h $ver"; rc=1; continue; }
             [[ -n $dfile ]] || { note "$r" "revdep: no package of $d to test (not in the repo, not staged)"; rc=1; continue; }
         else
@@ -516,20 +559,29 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
         return 0
     fi
 
-    # Commit, push, open the PR (ready for review; bin/ai-review reviews it below).
+    # Commit, scan, push, open the PR (ready for review; bin/ai-review reviews it below).
     local body; body=$(as_user jq -r '"Upstream: \(.upstream_source.url) \(.upstream_source.ref)\nFrom \(.from) to \(.to)\nFiles added: \(.files_added|join(", "))\nFiles removed: \(.files_removed|join(", "))\nPatches re-applied: \(.patches|join(", "))\nPatch fuzz: \(if .fuzz then "YES" else "none" end); offset hunks: \(.verify_offset_hunks)\nFlags: \(.flags|join("; "))"' "$report")
+    local title="$r: rebase onto upstream $target ($new_ver)" prbody
+    prbody="Automated rebase by \`bin/auto-update\` (run $run_id). The chroot build, the Codex ai-review (the review gate) and the Claude fixer are reported in one comment per run; it merges itself only when every gate passes.
+
+$body"
     ugit checkout --quiet -B "$branch" "origin/$BASE_BRANCH"
     as_user bash -c 'rm -rf "$1/recipes/$2" && cp -a "$3" "$1/recipes/$2"' _ "$CLONE" "$r" "$out"
     ugit add -A "recipes/$r"
-    ugit commit --quiet -m "$r: rebase onto upstream ${target} (${new_ver})" -m "Automated by bin/auto-update." -m "$body"
+    ugit commit --quiet -m "$title" -m "Automated by bin/auto-update." -m "$body"
+    # Nothing leaves the host before the commit and the PR text pass the scan.
+    if ! outgoing_ok "$r" "origin/$BASE_BRANCH" "the rebase commit" "$title" "$prbody"; then
+        ugit checkout --quiet --force "$BASE_BRANCH"
+        unpublish_now "$in_repo" "rebased $new_ver withheld: failed the PII scan before push" || true
+        record "$r" failed rebase class=pii version="$new_ver" \
+            message="not pushed: the rebase commit or PR text failed the PII scan (run $run_id: $r.outgoing.txt)"
+        failed=1; return 0
+    fi
     ugit push --quiet --force origin "HEAD:refs/heads/$branch"
     local pr; pr=$(as_user gh pr list -R "$GH_REPO" --head "$branch" --state open --json url --jq '.[0].url // ""')
     if [[ -z $pr ]]; then
         pr=$(as_user gh pr create -R "$GH_REPO" --base "$BASE_BRANCH" --head "$branch" \
-            --title "$r: rebase onto upstream $target ($new_ver)" \
-            --body "Automated rebase by \`bin/auto-update\` (run $run_id). The chroot build, the Codex ai-review (the review gate) and the Claude fixer are reported in one comment per run; it merges itself only when every gate passes.
-
-$body" | tail -1)
+            --title "$title" --body "$prbody" | tail -1)
     fi
     note "$r" "PR: $pr"
     as_user mkdir -p "$AU/state"
@@ -540,7 +592,7 @@ $body" | tail -1)
 
 drive_pr() {  # drive_pr <recipe> <target> <repo names> <note> <branch> <pr url> <report>
     local r=$1 target=$2 in_repo=$3 pnote=$4 branch=$5 pr=$6 report=$7 num=${6##*/}
-    local new_ver flags round=0 build_ok=no head built_sha cr=$RUN/$1.ai-review.json
+    local new_ver flags round=0 build_ok=no head built_sha cr=$RUN/$1.ai-review.json fix_withheld=no
     new_ver=$(as_user jq -r .to "$report")
     flags=$(as_user cat "$AU/state/$r.flags" 2>/dev/null || true)   # the rebase report's flags
     local tail_log=$RUN/$r.build-tail.log diff=$RUN/$r.pr.diff
@@ -576,6 +628,13 @@ drive_pr() {  # drive_pr <recipe> <target> <repo names> <note> <branch> <pr url>
             round=$((round + 1))
             ugit add -A "recipes/$r"
             ugit commit --quiet -m "$r: address review comments (auto-update fixer, round $round)"
+            if ! outgoing_ok "$r" "HEAD~1" "the fixer's commit"; then
+                ugit reset --quiet --hard HEAD~1
+                note "$r" "fixer round $round withheld: failed the PII scan; not pushed"
+                cr_note="$cr_note; fixer edits withheld (PII scan)"
+                fix_withheld=yes   # its answers to ai-review may rest on the dropped edits
+                break   # the gates run on the unchanged head
+            fi
             ugit push --quiet origin "HEAD:refs/heads/$branch"
             note "$r" "pushed review fixes (round $round); rebuilding and reviewing again"
             continue
@@ -613,6 +672,7 @@ for p in sys.stdin.read().split():
     [[ -z $rebase_commit ]] || agent_files=$(ugit diff --name-only "$rebase_commit" HEAD -- "recipes/$r" |
         grep -vxF "recipes/$r/NOTES.md" || true)
     [[ -z $agent_files ]] || reasons+=("review fixes changed recipe files (a human merges): $(echo $agent_files)")
+    [[ $fix_withheld == no ]] || reasons+=("the fixer's edits failed the PII scan and were not pushed (a human merges)")
     flags=$(current_flags "$flags" "$pnote" "$CLONE/recipes/$r")
     [[ -z $flags ]] || reasons+=("flags: $flags")
     if [[ $build_ok == yes ]]; then
