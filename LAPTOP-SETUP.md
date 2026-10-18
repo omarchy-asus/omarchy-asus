@@ -315,7 +315,7 @@ same.
 Read this before the final `pacman -Syuu` line. Going back downgrades `nvidia-open-dkms` to the
 stock build, and the stock build lacks the NVIDIA/open-gpu-kernel-modules#1412 fix. On a GA605KM
 the machine can then hang at power-off after it writes the hibernate image (#11).
-suspend-then-hibernate is the default lid action, so the battery can drain overnight. You have two
+Suspend-then-hibernate is the default lid action, so the battery can drain overnight. You have two
 options. Keep a locally patched driver: for example, add `nvidia-open-dkms` to `IgnorePkg` in
 `/etc/pacman.conf` before you run `-Syuu`. Or disable hibernation until NVIDIA/open-gpu-kernel-modules#1412 lands.
 `omarchy-asus-setup --uninstall` prints this warning before its `-Syuu` prompt.
