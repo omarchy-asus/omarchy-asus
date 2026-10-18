@@ -795,7 +795,10 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
     cache = os.path.join(DATA, f"{slug(repo)}-{num}-{head}-{mb[:12]}-{target}-{reviewer()}.json")
     lock = open(cache + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
-    if force:  # a forced review replaces whatever this head had, posted or not
+    local_cache = local_cache_path(repo, head, mb)
+    # a forced review replaces whatever this head had, posted or not; so does a `local --force`
+    # of the same diff that has not completed yet
+    if force or os.path.exists(local_cache + ".forced"):
         forget(cache)
     forced = os.path.exists(cache + ".forced")  # a discarded review must not come back (#60)
     res = load_cache(cache)
@@ -806,7 +809,7 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
     if not forced:
         # `bin/ai-review local` of this same diff, when it is newer than what the PR has (a
         # `local --force` after a PR review supersedes it, posted or not: it gets published)
-        lres = load_cache(local_cache_path(repo, head, mb))
+        lres = load_cache(local_cache)
         if (lres and lres.get("head") == head and lres.get("merge_base") == mb
                 and (res is None or lres.get("saved_at", 0) > res.get("saved_at", 0))):
             log(f"reusing the local review of {head[:12]} (merge-base {mb[:12]})")
@@ -834,8 +837,9 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
         res.update({"repo": repo, "pr": num, "head": head, "base": base, "merge_base": mb,
                     "default_base": pr["baseRefName"] == gh_json("api", f"repos/{repo}")["default_branch"]})
         save()
-        if forced:
-            os.remove(cache + ".forced")
+        for marker in (cache + ".forced", local_cache + ".forced"):  # this fresh review completes them
+            if os.path.exists(marker):
+                os.remove(marker)
 
     if reply:  # the author answers findings; the reviewer family checks the answers against the code
         if res.get("posted") or res.get("review_id") or res.get("comment_id"):  # GitHub keeps the agreed result

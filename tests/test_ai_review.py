@@ -245,6 +245,23 @@ class ReviewPR(unittest.TestCase):
                 res = ar.review_pr(REPO, NUM)
         self.assertTrue(res.get("replied"))
 
+    def test_failed_local_force_is_honoured_by_stamp(self):
+        gh = FakeGH(status={"context": "ai-review", "state": "success",
+                            "description": f"0 blocking | mb {MB[:12]} by codex"})
+        cache = os.path.join(ar.DATA, f"{ar.slug(REPO)}-{NUM}-{HEAD}-{MB[:12]}-main-codex.json")
+        local = ar.local_cache_path(REPO, HEAD, MB)
+        ar.save_json(cache, result([], posted=True))
+        ar.save_json(local, result([]))
+        ar.forget(local)  # `local --force` whose review then crashed
+        with self.patches(gh, findings=[finding(1, "confirmed", "fresh")],
+                          extra={"stamp": lambda *a: None}):
+            with contextlib.redirect_stderr(io.StringIO()):
+                res = ar.review_pr(REPO, NUM, do_stamp=True)
+        self.assertEqual(len(self.reviews), 1, "neither the old PR result nor the old status stands in")
+        self.assertEqual(res["findings"][0]["title"], "fresh")
+        self.assertFalse(os.path.exists(local + ".forced"))
+        self.assertFalse(os.path.exists(cache + ".forced"))
+
     def test_local_review_of_other_merge_base_is_not_reused(self):
         gh = FakeGH()
         ar.save_json(ar.local_cache_path(REPO, HEAD, "c" * 40), {**result([]), "merge_base": "c" * 40})
