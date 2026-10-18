@@ -106,6 +106,14 @@ chmod +x "$S/bin/strings"
 out=$(PATH=$S/bin:$PATH scan "$S/good" "$S/rd.tar"); rc=$?
 expect $rc 1 "a failed read in the located pass is blocked"
 grep -q 'content scan failed' <<<"$out"; expect $? 0 "says why"
+# An anchored entry: raw bytes '\0word\0' are no line of their own, but strings makes
+# one, so the located pass must read members through strings too.
+mkdir -p "$S/pkg/anc"
+printf 'zorbleplex\n' >"$S/pkg/anc/allowed"; printf 'x\0zorbleplex\0y' >"$S/pkg/anc/forbidden"
+bsdtar -cf "$S/anc.tar" -C "$S/pkg/anc" allowed forbidden
+printf 'anc.tar  allowed:*\n' >>"$S/ws/build/pii-allow-packages"
+printf '^zorbleplex$\n' >"$S/anchored"
+out=$(scan "$S/anchored" "$S/anc.tar"); expect $? 1 "an anchored entry hit in a binary member is blocked"
 out=$(scan "$S/good" "$S/hit.tar"); expect $? 1 "a package without rules is still blocked"
 out=$(scan "$S/bad" "$S/kern.tar"); expect $? 1 "allow list does not excuse an invalid denylist"
 

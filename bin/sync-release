@@ -163,10 +163,11 @@ pii_located() {
             pii_place "$x" "$up/.one" || { err="name scan failed"; break; }
         done <"$up/.l"
     fi
-    # content hits, at '<member>:<line>'; the C-locale grep -l only narrows which files get read
+    # content hits, at '<member>:<line>'. Every regular member is read the way the first
+    # pass reads it (strings, then the same grep): a raw-byte prefilter would not match
+    # anchored entries the same way. A few seconds per thousand members.
     if [[ -z $err ]]; then
-        st=0; LC_ALL=C grep -rlaiZE -- "$pattern" "$d" >"$up/.files" || st=$?
-        ((st > 1)) && err="content scan failed"
+        find "$d" -type f -print0 >"$up/.files" || err="content scan failed"
     fi
     if [[ -z $err ]]; then
         while IFS= read -r -d '' x; do
