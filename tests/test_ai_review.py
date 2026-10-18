@@ -227,6 +227,24 @@ class ReviewPR(unittest.TestCase):
         self.assertTrue(res["posted"])
         self.assertNotIn("local", res)
 
+    def test_newer_local_review_supersedes_pr_cache(self):
+        stamped = []
+        cache = os.path.join(ar.DATA, f"{ar.slug(REPO)}-{NUM}-{HEAD}-{MB[:12]}-main-codex.json")
+        ar.save_json(cache, result([], posted=True))  # clean, already stamped
+        ar.save_json(ar.local_cache_path(REPO, HEAD, MB), result([finding(1, "confirmed", "late")]))  # local --force
+        with self.patches(FakeGH(), extra={"stamp": lambda repo, num, res, roots: stamped.append(res)}):
+            with contextlib.redirect_stderr(io.StringIO()):
+                res = ar.review_pr(REPO, NUM, do_stamp=True)
+        self.assertEqual(res["findings"][0]["title"], "late")
+        self.assertEqual(len(stamped), 1, "the newer result is published")
+        self.assertEqual(self.reviews, [])
+        # and an older local result never replaces a newer PR result (e.g. one with replies)
+        ar.save_json(cache, result([], replied=True))
+        with self.patches(FakeGH()):
+            with contextlib.redirect_stderr(io.StringIO()):
+                res = ar.review_pr(REPO, NUM)
+        self.assertTrue(res.get("replied"))
+
     def test_local_review_of_other_merge_base_is_not_reused(self):
         gh = FakeGH()
         ar.save_json(ar.local_cache_path(REPO, HEAD, "c" * 40), {**result([]), "merge_base": "c" * 40})

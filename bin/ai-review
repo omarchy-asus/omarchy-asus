@@ -803,9 +803,12 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
     def save():
         save_json(cache, res)
 
-    if res is None and not forced:
-        lres = load_cache(local_cache_path(repo, head, mb))  # `bin/ai-review local` of this same diff
-        if lres and lres.get("head") == head and lres.get("merge_base") == mb:
+    if not forced:
+        # `bin/ai-review local` of this same diff, when it is newer than what the PR has (a
+        # `local --force` after a PR review supersedes it, posted or not: it gets published)
+        lres = load_cache(local_cache_path(repo, head, mb))
+        if (lres and lres.get("head") == head and lres.get("merge_base") == mb
+                and (res is None or lres.get("saved_at", 0) > res.get("saved_at", 0))):
             log(f"reusing the local review of {head[:12]} (merge-base {mb[:12]})")
             res = {k: v for k, v in lres.items() if k not in ("local", "saved_at")}
             res.update({"pr": num, "base": base,
