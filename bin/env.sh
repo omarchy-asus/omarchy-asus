@@ -7,7 +7,8 @@
 REPO_NAME=omarchy-asus
 WORKSPACE=${OMARCHY_ASUS_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 if [[ -z ${OMARCHY_ASUS_DATA:-} ]]; then
-    _home=$HOME
+    # system services start without HOME: fall back to the passwd entry
+    _home=${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}
     [[ $EUID -eq 0 && -n ${BUILD_USER:-} ]] && _home=$(getent passwd "$BUILD_USER" | cut -d: -f6)
     OMARCHY_ASUS_DATA=$_home/.local/share/omarchy-asus
     unset _home
