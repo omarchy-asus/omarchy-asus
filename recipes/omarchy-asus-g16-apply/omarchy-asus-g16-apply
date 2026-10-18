@@ -14,6 +14,12 @@
 # already have in your own form (any setting of your own for the same thing) is
 # reported as "present (local)" and left alone; nothing is overwritten. Run it as
 # your normal user; it calls sudo for the system steps.
+#
+# With the patched omarchy and omarchy-settings from the omarchy-asus repo
+# (4.0.5-1.1 or later), their migrations and default files apply hybrid-video,
+# hdmi-cursor, rtkit and the asusd drop-in during 'omarchy update', and --check
+# reports them as present. This command is then for stock Omarchy, for
+# audio-master (the migration only tells you about it) and for the opt-ins.
 # check_<fix> and apply_<fix> run by name (check_fix, the apply loop).
 # shellcheck disable=SC2329
 set -uo pipefail
@@ -44,7 +50,7 @@ declare -A DESC=(
 DRY_RUN=0 CHECK=0 YES=0 FORCE=0
 SELECTED=()
 
-usage() { sed -n '2,16s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,22s/^# \{0,1\}//p' "$0"; }
 
 is_fix() {
   local f
@@ -145,6 +151,14 @@ power_owner() {
   return 1
 }
 
+# The omarchy-asus patched omarchy and omarchy-settings (4.0.5-1.1 or later):
+# their migrations ship to /usr/share/omarchy/migrations/<id>.sh and their
+# default files to /usr/share/omarchy/default/.
+PATCHED_OMARCHY_MIGRATIONS=/usr/share/omarchy/migrations
+PATCHED_HYBRID_CURSOR=/usr/share/omarchy/default/hypr/hybrid-cursor.lua
+omarchy_has_migration() { [[ -f $(r "$PATCHED_OMARCHY_MIGRATIONS/$1.sh") ]]; }
+patched_omarchy() { omarchy_has_migration 1792123636 || [[ -f $(r "$PATCHED_HYBRID_CURSOR") ]]; }
+
 # Non-comment lines of the user's Hyprland config matching an ERE, not counting
 # the lines this command adds. Prints the first file. Follows symlinks: dotfile
 # managers often link hyprland.lua, or the whole hypr directory, from elsewhere.
@@ -239,6 +253,10 @@ hybrid_video_managed_pins() {
       { prev = $0 }' "$f"
   done
   [[ -f $HYBRID_VIDEO_MPV_CONF ]] || return 0
+  # The patched omarchy's migration 1792123636 writes the same mpv comment, and
+  # its omarchy-refresh-hybrid-video keeps that block up to date: Omarchy's, not
+  # this command's.
+  omarchy_has_migration 1792123636 && return 0
   # The fork's hybrid_video_pin_mpv writes its comment, then the options, then a
   # blank line ahead of what was there before.
   awk -v m="$HYBRID_VIDEO_MPV_COMMENT" -v f="$HYBRID_VIDEO_MPV_CONF" '
@@ -361,6 +379,13 @@ check_hybrid_video() {
     ST=repair DETAIL="this command's pins name an old render node (${stale[*]}); applying repins them to $node"
     return
   fi
+  if omarchy_has_migration 1792123636; then
+    ST=present DETAIL="the patched omarchy's migration 1792123636 and omarchy-refresh-hybrid-video pin decode to $node"
+    if hypr_has_line hybrid-video-env.lua; then
+      DETAIL+="; this command's hybrid-video lines in $(tilde "$HYPR_CONF") are now redundant: delete them"
+    fi
+    return
+  fi
   hypr_has_line hybrid-video-env.lua && env_ours=1
   if f=$(libva_set_by_user); then local_parts+=("LIBVA_DRIVER_NAME set in $(tilde "$f")"); fi
   if [[ -f $HYBRID_VIDEO_MPV_CONF ]] && grep -qxF "$HYBRID_VIDEO_MPV_COMMENT" "$HYBRID_VIDEO_MPV_CONF"; then
@@ -405,6 +430,8 @@ apply_hybrid_video() {
   mapfile -t stale < <(hybrid_video_stale_pins "$node")
   hybrid_video_repair_pins "$node"
   [[ -n $node ]] || return 0
+  # The patched omarchy pins mpv and Chromium itself and stops forcing VA-API.
+  omarchy_has_migration 1792123636 && return 0
   # Then the rest of the fix, unless it is in place or a setting of yours is.
   if ((DRY_RUN)); then
     ((${#stale[@]} == 0)) || return 0
@@ -440,6 +467,13 @@ check_hdmi_cursor() {
   local f
   if [[ ! -f $HYPR_CONF ]]; then ST=n/a DETAIL="no $(tilde "$HYPR_CONF")"; return; fi
   if ! drm_hybrid; then ST=n/a DETAIL="not a hybrid NVIDIA laptop (DRM sysfs)"; return; fi
+  if [[ -f $(r "$PATCHED_HYBRID_CURSOR") ]]; then
+    ST=present DETAIL="the patched omarchy loads hybrid-cursor.lua from default/hypr/nvidia.lua"
+    if hypr_has_line hybrid-cursor.lua; then
+      DETAIL+="; this command's hdmi-cursor lines in $(tilde "$HYPR_CONF") are now redundant: delete them"
+    fi
+    return
+  fi
   if hypr_has_line hybrid-cursor.lua; then
     ST=applied DETAIL="hybrid-cursor.lua loaded from $(tilde "$HYPR_CONF")"
   elif f=$(hypr_sets 'no_hardware_cursors'); then
@@ -471,7 +505,12 @@ check_audio_master() {
   level=$(amixer -c "$card" sget Master 2>/dev/null | grep -o '\[[0-9]*%\]' | head -1 | tr -d '[]%')
   case $level in
     100) ST=present DETAIL="Master at 100 % on card $card" ;;
-    80) ST=missing DETAIL="Master at 80 % (Omarchy's install value): the slider's 100 % is 12.75 dB below full scale" ;;
+    80)
+      ST=missing DETAIL="Master at 80 % (Omarchy's install value): the slider's 100 % is 12.75 dB below full scale"
+      if omarchy_has_migration 1792162887; then
+        DETAIL+="; the patched omarchy's migration only tells you (it never raises the level during an update): run this command to raise it"
+      fi
+      ;;
     '') ST=n/a DETAIL="card $card has no Master control" ;;
     *) ST=local DETAIL="Master at $level % on card $card (your setting); left alone" ;;
   esac
@@ -492,6 +531,8 @@ apply_audio_master() {
 check_rtkit() {
   if pacman -Q rtkit >/dev/null 2>&1; then
     ST=present DETAIL="rtkit $(pacman -Q rtkit | cut -d' ' -f2) installed"
+  elif omarchy_has_migration 1789747667; then
+    ST=missing DETAIL="not installed yet; the patched omarchy's migration 1789747667 installs it at the next 'omarchy update'"
   else
     ST=missing DETAIL="nothing pulls rtkit in on x86_64; PipeWire runs without realtime threads"
   fi
@@ -534,7 +575,11 @@ check_asusd_power_profiles() {
   fi
   if [[ -f $(r "$ASUSD_DROPIN") ]]; then
     if cmp -s "$(r "$ASUSD_DROPIN")" "$SHARE/system/asusd-power-profiles.conf"; then
-      ST=applied DETAIL="$ASUSD_DROPIN"
+      if [[ -f $(r /etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf) ]]; then
+        ST=present DETAIL="omarchy-settings ships /etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf; this command's $ASUSD_DROPIN is now redundant (sudo rm it, then sudo systemctl daemon-reload)"
+      else
+        ST=applied DETAIL="$ASUSD_DROPIN"
+      fi
     else
       ST=local DETAIL="$ASUSD_DROPIN differs from the packaged copy; left alone"
     fi
@@ -871,7 +916,7 @@ if ((CHECK)); then
   step "Packages ('omarchy update' with the omarchy-asus repo; report only)"
   info_rows
   step "Fixes this command applies"
-  missing_default=0
+  missing_default=0 any_redundant=0
   for fix in "${DEFAULT_FIXES[@]}" "${OPTIN_FIXES[@]}"; do
     check_fix "$fix"
     status=$ST
@@ -881,7 +926,15 @@ if ((CHECK)); then
     fi
     row "$fix" "$status" "$DETAIL"
     [[ $status == missing || $status == repair ]] && missing_default=1
+    [[ $DETAIL == *redundant* ]] && any_redundant=1
   done
+  if patched_omarchy; then
+    step "Patched omarchy installed"
+    info "its migrations apply hybrid-video, hdmi-cursor, rtkit and the asusd drop-in on 'omarchy update';"
+    info "no login service is needed. audio-master is only notified by its migration: run this command"
+    info "to raise it."
+    if ((any_redundant)); then info "Lines this command added earlier show as redundant above: delete them."; fi
+  fi
   ((DRY_RUN)) || exit $((missing_default ? 10 : 0))
 fi
 

@@ -55,11 +55,12 @@ real bugs on this hardware.
 
 - **Kernel 7.2.8-9.2:** an `i2c-designware` RX threshold backport (the touchpad fires about
   52 interrupts per report today) and GA605KM power limits for `asus-armoury`.
-- **Fresh G16 coverage:** `omarchy-asus-g16-apply` (not published yet) reports every known
-  G16 fix on a stock install with `--check` and, when you run it, applies the ones that live in
-  your own config or `/etc` (iGPU video decode, HDMI cursor, speaker level, rtkit, asusd,
-  Win-lock). Settings you already have are left alone. See
-  [its README](recipes/omarchy-asus-g16-apply/README.md).
+- **Fresh G16 coverage:** with the patched `omarchy` and `omarchy-settings` from this repo
+  (#58), their migrations apply the G16 fixes that live in your own config or `/etc` (iGPU
+  video decode, HDMI cursor, rtkit, asusd) on `omarchy update`. `omarchy-asus-g16-apply` (not
+  published yet) reports every known G16 fix with `--check`, and is the manual path on a stock
+  install and for the speaker level, which no migration raises. Settings you already have are
+  left alone. See [its README](recipes/omarchy-asus-g16-apply/README.md).
 - **Daily auto-update pipeline:** the code is in this repo (`bin/auto-update`, `systemd/`);
   it will be installed on the build host soon.
 
