@@ -159,6 +159,7 @@ Panel {
   // queue-end
 
   function runCmd(args) {
+    root.writeGen++
     if (!actionProc.running) {
       actionProc.command = args
       actionProc.running = true
@@ -170,16 +171,24 @@ Panel {
   // A read taken while writes are queued would put the old values back over the
   // optimistic ones. Skip it: actionProc refreshes once the queue drains. A
   // request that arrives mid-read reruns the read when it finishes.
+  // writeGen counts writes; a read remembers the count it started at, and
+  // parseState drops a read that a write overtook (the drain's refresh() then
+  // sets refreshAgain, so a fresh read always follows).
   property bool refreshAgain: false
+  property int writeGen: 0
+  property int readGen: -1
   function refresh() {
     if (actionProc.running || root.pendingCmds.length > 0) return
     if (stateProc.running) { root.refreshAgain = true; return }
+    root.readGen = root.writeGen
     stateProc.running = true
   }
 
   function bool(v) { return String(v) === "true" }
 
   function parseState(raw) {
+    if (root.readGen !== root.writeGen || actionProc.running || root.pendingCmds.length > 0)
+      return
     var lines = String(raw).trim().split("\n")
     var m = ({})
     for (var i = 0; i < lines.length; i++) {
