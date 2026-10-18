@@ -39,20 +39,73 @@ ICON_AUTO_UNLOCK = "󰕥"  # shield-check — unlock mode blocked Fn+Super
 ICON_FAIL = "󰀦"
 
 
+WINLOCK_REPORT_ID = 0x5D
+
+
+def _hidraw_sort_key(path: str) -> int:
+    digits = "".join(ch for ch in Path(path).parts[-3] if ch.isdigit())
+    return int(digits or 0)
+
+
+def _matching_nodes() -> list[Path]:
+    """sysfs dirs (/sys/class/hidraw/hidrawN) of every 0b05:19b6 hidraw node."""
+    nodes = []
+    for uevent in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent"), key=_hidraw_sort_key):
+        try:
+            text = Path(uevent).read_text(errors="replace").upper()
+        except OSError:
+            continue
+        # HID_ID=0003:00000B05:000019B6
+        if f"{VID:08X}:{PID:08X}" in text:
+            nodes.append(Path(uevent).parents[1])
+    return nodes
+
+
+def report_ids(descriptor: bytes) -> set[int] | None:
+    """Report IDs declared by a HID report descriptor, or None if it does not parse.
+
+    Walks the items properly (short items: prefix + 0/1/2/4 data bytes; long
+    items: 0xFE size tag data) so a 0x85 that is merely a data byte is not
+    mistaken for a Report ID item.
+    """
+    ids: set[int] = set()
+    i, n = 0, len(descriptor)
+    while i < n:
+        prefix = descriptor[i]
+        if prefix == 0xFE:  # long item
+            if i + 2 >= n:
+                return None
+            i += 3 + descriptor[i + 1]
+            continue
+        size = (0, 1, 2, 4)[prefix & 0x03]
+        if i + 1 + size > n:
+            return None
+        if prefix & 0xFC == 0x84 and size >= 1:  # Global, Report ID
+            ids.add(descriptor[i + 1])
+        i += 1 + size
+    return ids
+
+
 def find_hidraw() -> Path:
-    for uevent in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
-        text = Path(uevent).read_text(errors="replace")
-        if f"{VID:08X}:{PID:08X}" in text.upper().replace("0000", "0000") or (
-            "00000B05" in text.upper() and "000019B6" in text.upper()
-        ):
-            name = Path(uevent).parts[-3]  # hidrawN
-            return Path("/dev") / name
-    # Fallback: match HID_ID line loosely
-    for uevent in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
-        text = Path(uevent).read_text(errors="replace").upper()
-        if "0B05" in text and "19B6" in text:
-            return Path("/dev") / Path(uevent).parts[-3]
-    raise FileNotFoundError("No hidraw for ASUS 0b05:19b6 (ITE N-Key)")
+    """The 0b05:19b6 hidraw node that carries the 5D (Win-lock / Aura) reports.
+
+    The keyboard exposes several HID interfaces, each with its own hidraw node;
+    only the one whose report descriptor declares report ID 0x5D sees the
+    5D BF notifications and accepts the 5D BF SetFeature. If no descriptor can
+    be read or parsed, fall back to the first matching node.
+    """
+    nodes = _matching_nodes()
+    if not nodes:
+        raise FileNotFoundError("No hidraw for ASUS 0b05:19b6 (ITE N-Key)")
+    for node in nodes:
+        try:
+            desc = (node / "device" / "report_descriptor").read_bytes()
+        except OSError:
+            continue
+        ids = report_ids(desc)
+        if ids and WINLOCK_REPORT_ID in ids:
+            return Path("/dev") / node.name
+    return Path("/dev") / nodes[0].name
 
 
 def open_hidraw(*, writable: bool = True) -> tuple[int, Path]:
