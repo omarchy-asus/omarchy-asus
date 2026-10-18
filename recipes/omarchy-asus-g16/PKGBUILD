@@ -1,0 +1,65 @@
+# EXPERIMENTAL: ASUS ROG Zephyrus G16 GA605KM only.
+#
+# Static system files for two G16 sleep fixes, so a stock Omarchy install
+# gets them without rebuilding omarchy. Each file is byte-identical to what
+# the omarchy-asus fork's install leaf and migration write; only the path
+# differs: vendor directories under /usr/lib instead of /etc, with basenames
+# no omarchy package or migration uses, so pacman never meets a file it does
+# not own. See README.md for what each file fixes and when to remove it.
+#
+# omarchy-asus-g16-nvidia-powerd is split out and opt-in: that drop-in is a
+# behaviour change, not something the laptop runs today.
+
+pkgbase=omarchy-asus-g16
+pkgname=(omarchy-asus-g16 omarchy-asus-g16-nvidia-powerd)
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='System fixes for the ASUS ROG Zephyrus G16 GA605KM on Omarchy (EXPERIMENTAL)'
+arch=('x86_64')
+url='https://github.com/rdoupe-omarchy/omarchy-asus-pkgs'
+license=('MIT')
+options=('!debug' '!strip')
+source=('99-omarchy-asus-g16-touchpad-wake.rules'
+        'omarchy-asus-g16-hibernate-mode.conf'
+        'nvidia-powerd-20-omarchy-asus.conf'
+        'omarchy-asus-g16.install'
+        'README.md'
+        'LICENSE')
+sha256sums=('48c521b2ebdc5840f21d6e90931c7fc5b302d14837de5e2039852e308ba7579f'
+            'b8c50997a4d90145dd403fc5fdeae6cf8e98b71eee80cfbe1b716d6e1fc3e3f6'
+            '10bc994e5e8e9eec01fc5ebb4270fba13af672c6d5d0e3b1a63ab6f812517a91'
+            '0693d3f87238fca46b97da8ab63c12f9e2b85cc59adca3bf34d306cebec9dbfb'
+            '70725c61bb6a1d4348885e56e4008f38b06673dca1522002b9edd4e1541ce826'
+            '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
+
+package_omarchy-asus-g16() {
+  pkgdesc='Touchpad wake and hibernate mode fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
+  depends=('systemd')
+  optdepends=('omarchy-asus-g16-nvidia-powerd: keep Dynamic Boost startable after five charger plug-ins (opt-in)')
+  install=omarchy-asus-g16.install
+
+  # asus/touchpad-wake: disarm the ASUF1209 touchpad as a wake source.
+  install -Dm644 99-omarchy-asus-g16-touchpad-wake.rules \
+    "$pkgdir/usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules"
+  # asus/hibernate-mode: HibernateMode=shutdown.
+  install -Dm644 omarchy-asus-g16-hibernate-mode.conf \
+    "$pkgdir/usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf"
+
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_omarchy-asus-g16-nvidia-powerd() {
+  pkgdesc='nvidia-powerd start-limit window for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL, opt-in)'
+  depends=('systemd')
+  optdepends=('nvidia-utils: provides nvidia-powerd.service'
+              'asusctl: asusd starts nvidia-powerd on charger plug-in')
+  install=omarchy-asus-g16.install
+
+  # asus/nvidia-powerd-start-limit: StartLimitIntervalSec=60.
+  install -Dm644 nvidia-powerd-20-omarchy-asus.conf \
+    "$pkgdir/usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf"
+
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -1,0 +1,4 @@
+# ASUS ROG Zephyrus G16 GA605KM: the armed ASUF1209 touchpad counts every touch
+# as a wakeup event, which can abort suspend and hibernate, so disarm it; see
+# install/hardware/asus/fix-asus-ga605km-touchpad-wake.sh.
+ACTION=="add|bind", SUBSYSTEM=="i2c", KERNEL=="i2c-ASUF1209:*", ATTR{power/wakeup}="disabled"
