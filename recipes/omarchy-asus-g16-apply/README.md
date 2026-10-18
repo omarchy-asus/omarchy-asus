@@ -278,6 +278,12 @@ Omarchy:
 - Hyprland: delete the `omarchy-asus-g16-apply` comment line and the line after it from `~/.config/hypr/hyprland.lua`.
 - mpv/Chromium: delete the `vaapi-device`, `hwdec` and `--render-node-override` lines (and the mpv comment above them).
 - asusd: `sudo rm /etc/systemd/system/asusd.service.d/20-omarchy-asus-power-profiles.conf && sudo systemctl daemon-reload`.
-  asusd keeps the settings in `/etc/asusd/asusd.ron`; turn them back on with `busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform <property> b true`.
+  asusd keeps the settings in `/etc/asusd/asusd.ron`; turn them back on with:
+
+  ```sh
+  busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnAc b true
+  busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnBattery b true
+  busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform PlatformProfileLinkedEpp b true
+  ```
 - winlock: `systemctl --user disable --now g16-winlock.service`.
 - audio-master, rtkit, initramfs-no-nvidia: no undo needed; set Master, remove rtkit, or restore `nvidia.conf` by hand if you want the old state.
