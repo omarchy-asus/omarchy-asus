@@ -10,9 +10,9 @@ BUILD_USER=
 #GIT_URL=https://github.com/omarchy-asus/omarchy-asus.git
 #BASE_BRANCH=main
 
-# auto: merge + publish when every gate passes (build ok, fuzz 0, recipe bump only, no
-#       flags, bin/ai-review reviewed the head with no blocking finding, agent approves
-#       only with REQUIRE_AGENT_APPROVAL=yes)
+# auto: merge + publish when every gate passes: build ok, fuzz 0, recipe bump only, no
+#       flags, and bin/ai-review reviewed the head with no blocking finding. The fixer's
+#       own verdict (approve) is an extra gate only with REQUIRE_AGENT_APPROVAL=yes.
 # pr:   never merge; every rebase waits for a human (stale packages are still unpublished)
 #MERGE_MODE=auto
 
@@ -56,5 +56,11 @@ BUILD_USER=
 # Upstream dbs that cannot be fetched are used from cache for at most this many seconds;
 # past it, every package overriding upstream is withdrawn so stock flows.
 #DB_MAX_STALE=86400
+# Hours a release asset the db no longer names is kept before bin/sync-release deletes it
+# (a whole number; 0 deletes at once). Unset: bin/sync-release's default, 72.
+#PRUNE_GRACE_HOURS=72
+# Seconds bin/publish, bin/unpublish and bin/sync-release wait for the publication lock
+# before giving up with exit 75 (the next run retries). Unset: their default, 600.
+#PUBLISH_LOCK_WAIT=600
 # Also fail the unit (systemctl --failed) when something only needs attention.
 #FAIL_ON_ATTENTION=no
