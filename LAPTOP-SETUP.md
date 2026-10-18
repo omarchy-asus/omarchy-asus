@@ -55,6 +55,18 @@ The script:
    upgrades only if you say yes. The upgrade runs through `omarchy update`, which asks once more,
    takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
    `pacman -Syu`, so the script doesn't run one.
+
+   Before the upgrade, the script checks every `/etc` file that the repo's upgraded packages install
+   against the repo's signed files database. A file that no package owns stops pacman's upgrade with
+   an `exists in filesystem` conflict, and `omarchy update` passes `--overwrite` only for
+   `/usr/share/omarchy`. An example is the asusd drop-in
+   `/etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf`, installed by hand for #21,
+   which `omarchy-settings 4.0.5-1.1` now ships.
+   - If the file is byte-identical to the packaged copy, the script says so. During `omarchy update`
+     it moves the file to `/var/lib/omarchy-asus/replaced/`, so the package installs the same bytes,
+     and it names each path it took over. If the upgrade doesn't install the file, it goes back.
+   - If the file differs, the script shows the diff and stops before the upgrade. Nothing is
+     overwritten. Decide yourself (move the file aside or make it match), then run the script again.
 9. Optional, and only if the system is fully upgraded: offers to install `omarchy-asus-g16`,
    `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`. If you have your own
    `~/.config/systemd/user/g16-winlock.service`, which would shadow the packaged unit, it offers to
@@ -106,6 +118,13 @@ before you run the script. The script only warns about them.
 3. **Remove the `IgnorePkg` entries** for `nvidia*`, `hyprland` and `aquamarine`, then upgrade with
    `omarchy update`, or say yes to the script's prompt. nvidia, hyprland/hyprpm and
    linux-omarchy with its headers update in one transaction, and DKMS rebuilds nvidia for the new kernel.
+
+   Before you upgrade by hand, check for `/etc` files that the repo packages but no package owns
+   (section 2 of [`bin/g16-check`](bin/g16-check) lists them). If you upgrade without the script and
+   pacman reports `<path> exists in filesystem` for one of them, compare it with the packaged copy
+   first. Only if they are identical, run
+   `sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syu --overwrite <that path>` (one path, never a
+   glob). `omarchy update` can't do it for you: it passes `--overwrite` only for `/usr/share/omarchy`.
 4. **Out-of-tree hid-asus module.** If you used an out-of-tree hid-asus DKMS module for Win-lock, it
    no longer builds against the patched kernel, so expect one DKMS error. The patched kernel has
    the fix built in, so removing the module first makes no difference to how the laptop behaves:

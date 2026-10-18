@@ -18,7 +18,8 @@
 #   1. Win-lock: kernel with patch 0568, in-tree hid-asus, the hidraw node, its
 #      access, the g16-winlock service and udev rule.
 #   2. Local workarounds that must be off before the patched omarchy (4.0.5-1.1)
-#      is installed: each is "present (turn off before omarchy 1.1)" or "clear".
+#      is installed: each is "present (turn off before omarchy 1.1)" or "clear";
+#      and unowned /etc files a repo package would install.
 #   3. Repo state: [omarchy-asus] order, signing key, which packages come from it,
 #      and omarchy-asus-g16-apply --check.
 #
@@ -44,7 +45,7 @@ for arg in "$@"; do
       ;;
     --no-redact) REDACT=0 ;;
     --no-color) COLOR=0 ;;
-    -h | --help) sed -n '2,25s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,26s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -542,6 +543,55 @@ report "out-of-tree / DKMS hid-asus" "$hits"
 
 hits=$(grep -nE '^[[:space:]]*Ignore(Pkg|Group)[[:space:]]*=' "$PACMAN_CONF" 2>/dev/null | grep -E 'nvidia|hyprland|hyprpm|aquamarine|linux-omarchy|omarchy' || true)
 report "IgnorePkg for nvidia/hyprland/aquamarine/linux-omarchy/omarchy in $PACMAN_CONF" "$hits"
+
+# /etc files a repo package installs that no package owns: pacman stops the
+# upgrade with "exists in filesystem" on each (#86). Uses the repo's file lists:
+# pacman's synced copy (pacman -Fy), else the release's, checked against
+# pacman's (world-readable) keyring and the repo key.
+ftmp=$(mktemp -d 2>/dev/null) || ftmp=''
+[[ -n $ftmp ]] && trap 'rm -rf "$ftmp"' EXIT
+fdb='' fdb_bad=0
+if [[ -r /var/lib/pacman/sync/$REPO.files ]]; then
+  fdb=/var/lib/pacman/sync/$REPO.files
+elif [[ -n $ftmp ]] && have curl && have gpgv; then
+  url=https://github.com/omarchy-asus/omarchy-asus/releases/download/x86_64/$REPO.files
+  if curl -fsSL --proto '=https' -o "$ftmp/$REPO.files" "$url" 2>/dev/null &&
+    curl -fsSL --proto '=https' -o "$ftmp/$REPO.files.sig" "$url.sig" 2>/dev/null; then
+    ring=/etc/pacman.d/gnupg/pubring.gpg
+    [[ -r $ring ]] || ring=/etc/pacman.d/gnupg/pubring.kbx
+    # gpgv trusts every key in the keyring; require a good signature by ours.
+    if gpgv --status-fd 1 --keyring "$ring" "$ftmp/$REPO.files.sig" "$ftmp/$REPO.files" 2>/dev/null |
+      grep -E '^\[GNUPG:\] VALIDSIG ' | grep -qF "$FPR"; then
+      fdb=$ftmp/$REPO.files
+    else
+      fdb_bad=1
+    fi
+  fi
+fi
+if ((fdb_bad)); then
+  fail "[$REPO] files database signature does not verify"
+elif [[ -z $fdb || -z $ftmp ]] || ! have bsdtar || ! have pacman ||
+  ! { mkdir -p "$ftmp/db" && bsdtar -xf "$fdb" -C "$ftmp/db"; } 2>/dev/null; then
+  warn "unowned /etc files: could not read [$REPO]'s file lists (sudo pacman -Fy, or network)"
+else
+  hits=''
+  for d in "$ftmp"/db/*/; do
+    [[ -f $d/files ]] || continue
+    name=$(awk '/^%NAME%$/ { getline; print; exit }' "$d/desc" 2>/dev/null)
+    [[ -n $name ]] || name=$(basename "$d")
+    while IFS= read -r p; do
+      [[ $p == etc/* && $p != */ ]] || continue
+      f=/$p
+      if [[ -e $f || -L $f ]] && ! pacman -Qo "$f" >/dev/null 2>&1; then
+        hits+="$f ($name)"$'\n'
+      fi
+    done < <(awk '/^%FILES%$/ { on = 1; next } /^%/ { on = 0 } on && NF' "$d/files" 2>/dev/null)
+  done
+  report "unowned /etc files that [$REPO] packages install (the upgrade stops on them; omarchy-asus-setup takes over byte-identical ones, #86)" "${hits%$'\n'}"
+  [[ -n $hits ]] &&
+    info "check each with: pacman -Qo <path>; if it matches the packaged copy, omarchy-asus-setup takes it over, otherwise move it aside before 'omarchy update'"
+fi
+[[ -n $ftmp ]] && rm -rf "$ftmp"
 
 # ---------------------------------------------------------------------------
 section "3. Repo state"
