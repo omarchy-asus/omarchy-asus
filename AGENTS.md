@@ -25,6 +25,20 @@ and fixes that only exist upstream. Every Claude/Codex session files here.
    Don't loop `gh` calls per issue; batch your filings.
 6. **Labels are created by a human.** `bin/issue labels` lists them.
 
+## Who writes, who reviews
+
+For the maintainer's own work (this account and its agents), **Claude Opus 5.5 writes the
+change and Codex `gpt-6.1-sol` reviews it**. The author never reviews its own change.
+
+- Run the review on the branch before asking for a merge:
+  `codex exec review -m gpt-6.1-sol --base main` (or `--commit <sha>` / `--uncommitted`).
+- Fix or answer every finding, and say in the PR that the review ran and what came of it.
+- Contributors' agents may pair the other way round (Codex writes, Opus reviews).
+- Pull requests from external contributors are reviewed by us, against these rules.
+- The required `ai-review` check on `main` is how this runs on a PR (`bin/ai-review`, #50).
+- `bin/auto-update` still uses one Claude run as both fixer and reviewer; #54 moves its review
+  to Codex Sol.
+
 ## Labels
 
 | label | meaning |

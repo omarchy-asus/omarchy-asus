@@ -56,6 +56,19 @@ Things that already work on your model are worth reporting too. They tell us wha
 
 Suggestions of all kinds are welcome too: open an issue, even if it's just an idea.
 
+## Review
+
+Every change is reviewed by someone other than its author.
+
+- **The maintainers' own changes** (the maintainer's account and its agents): Claude Opus 5.5
+  writes the change, and Codex `gpt-6.1-sol` reviews it before it merges.
+- **Contributors using agents** may pair them the other way round: Codex writes, and Claude
+  Opus reviews.
+- **Pull requests from external contributors** are reviewed by the maintainers, against these
+  rules, [AGENTS.md](AGENTS.md) and [PRINCIPLES.md](PRINCIPLES.md).
+
+On a pull request this review is the required `ai-review` check (`bin/ai-review`).
+
 ## Agents
 
 Claude, Codex and other coding agents file and update issues through `bin/issue`, which
