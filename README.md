@@ -45,6 +45,7 @@ The signed `[omarchy-asus]` repo, served from the
 | | | nvidia-modeset no longer leaks memory per composited frame (gigabytes over days) | [NVIDIA/open-gpu-kernel-modules#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368), open |
 | `hyprland`, `hyprpm` | 0.56.2-4.1 | Windows no longer render off-screen after an HDMI replug | Fixed on main by [hyprwm/Hyprland#16140](https://github.com/hyprwm/Hyprland/pull/16140), unreleased; dropped when 0.57 ships |
 | `omarchy-asus-g16` | 1.0.0-1 | GA605KM: the touchpad no longer wakes the laptop; hibernate powers off cleanly (`HibernateMode=shutdown`); Dynamic Boost keeps working after many charger plug-ins (nvidia-powerd start limit) | Not yet proposed upstream; files are byte-identical to the [omarchy fork](https://github.com/omarchy-asus/omarchy)'s, under `/usr/lib` ([notes](recipes/omarchy-asus-g16/README.md)) |
+| `asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` | 0.1.0-1 | A toast when Fn+Super locks or unlocks the Windows key (needs the kernel's Win-lock patch); the G16 Control widget holds the switch | Userspace for the kernel patch; the widget needs Omarchy to load system-wide plugins ([notes](recipes/asus-rog-nkey-winlock/README.md)) |
 
 The three NVIDIA fixes are open pull requests by other people. We carry them because they fix
 real bugs on this hardware.
@@ -53,7 +54,6 @@ real bugs on this hardware.
 
 - **Kernel 7.2.8-9.2:** an `i2c-designware` RX threshold backport (the touchpad fires about
   52 interrupts per report today) and GA605KM power limits for `asus-armoury`.
-- **Win-lock helper and G16 Control widget:** a toast when Fn+Super locks or unlocks the key.
 - **Fresh G16 coverage:** `omarchy-asus-g16-apply` (not published yet) reports every known
   G16 fix on a stock install with `--check` and, when you run it, applies the ones that live in
   your own config or `/etc` (iGPU video decode, HDMI cursor, speaker level, rtkit, asusd,
