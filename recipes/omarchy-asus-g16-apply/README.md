@@ -31,8 +31,12 @@ fork's fixes. Their migrations and default files apply these during
 - initramfs-no-nvidia: migration `1787683023`.
 
 Nothing needs to run at login, and there is no login service (#45). This
-command reports those fixes as `present`. If rtkit isn't installed yet,
-`--check` notes that its migration installs it at the next `omarchy update`.
+command reports those fixes as `present` once they're in place. If rtkit isn't
+installed yet, `--check` notes that its migration installs it at the next
+`omarchy update`. hybrid-video is the same: it's `present` only once
+`omarchy update` has run migration `1792123636` (its marker is under
+`~/.local/state/omarchy/migrations`). Until then it's `missing`, and applying
+it writes the pins in Omarchy's marked form, which the migration then leaves.
 
 - **audio-master:** the migration only notifies, on purpose: raising the level
   during an update would make the speakers jump. Run
@@ -43,9 +47,11 @@ If this command added its Hyprland lines or asusd drop-in before you installed
 the patched omarchy, `--check` says they're now redundant. Delete the
 `omarchy-asus-g16-apply` lines from `hyprland.lua`, and the
 `20-omarchy-asus-power-profiles.conf` drop-in followed by
-`sudo systemctl daemon-reload` (see [Undo](#undo)). Keep the mpv and Chromium
-pins, which Omarchy now keeps up to date, and don't turn asusd's settings back
-on: the patched omarchy's drop-in wants them off.
+`sudo systemctl daemon-reload` (see [Undo](#undo)). Don't turn asusd's
+settings back on: the patched omarchy's drop-in wants them off. Keep the mpv
+and Chromium pins: `--check` shows this command's older ones as `needs repair`,
+and applying hybrid-video hands them over to Omarchy (see
+[hybrid-video](#hybrid-video-video-decode-on-the-igpu)).
 
 The command remains for stock Omarchy 4.0.5.
 
@@ -107,8 +113,28 @@ with the Chromium marker and the mpv comment block, so a later switch back
 shows `missing` and pins again.
 A pin you wrote yourself is never changed.
 
-With the patched omarchy: reported as present (migration `1792123636`,
-`omarchy-refresh-hybrid-video`).
+With the patched omarchy, Omarchy owns the pins. It repins or removes only a
+pin right under its marker comment
+(`# Omarchy repins the next line if the iGPU moves. ...`), at Hyprland start
+and in `omarchy-refresh-hybrid-video`. So each pin has one owner:
+
+- Reported as present once `omarchy update` has run migration `1792123636`
+  (its marker is `~/.local/state/omarchy/migrations/1792123636.sh`). Pins
+  already in Omarchy's marked form are Omarchy's, so they're never listed or
+  touched here, even when they name an old node.
+- Before that (pacman installed the patched omarchy, `omarchy update` hasn't
+  run yet, or the migration was skipped), it's `missing` unless the pins are
+  already in Omarchy's form or a setting of yours is there. Applying writes
+  them in Omarchy's form (`hwdec=vaapi`, then the marker above
+  `vaapi-device=<iGPU node>` under the mpv comment, and the marker above each
+  `--render-node-override`). Nothing is added to `hyprland.lua`, because the
+  patched omarchy's default files handle `LIBVA_DRIVER_NAME`.
+- Pins this command wrote earlier (under its own Chromium marker, or the
+  unmarked `vaapi-device` in the mpv comment's block) show `needs repair`.
+  Applying repins them first if they're stale, then hands them over: in the
+  Chromium files this command's marker is replaced with Omarchy's, and in
+  `mpv.conf` Omarchy's marker goes above the `vaapi-device` line. From then
+  on, `omarchy-refresh-hybrid-video` keeps them up to date.
 
 **Why:** stock 4.0.5 sets `LIBVA_DRIVER_NAME=nvidia` because its display check
 misses the Krackan iGPU (a non-VGA display controller with no `boot_vga`), and
