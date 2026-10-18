@@ -167,7 +167,15 @@ Panel {
     root.pendingCmds = enqueue(root.pendingCmds, args)
   }
 
-  function refresh() { if (!stateProc.running) stateProc.running = true }
+  // A read taken while writes are queued would put the old values back over the
+  // optimistic ones. Skip it: actionProc refreshes once the queue drains. A
+  // request that arrives mid-read reruns the read when it finishes.
+  property bool refreshAgain: false
+  function refresh() {
+    if (actionProc.running || root.pendingCmds.length > 0) return
+    if (stateProc.running) { root.refreshAgain = true; return }
+    stateProc.running = true
+  }
 
   function bool(v) { return String(v) === "true" }
 
@@ -295,6 +303,7 @@ Panel {
     id: stateProc
     command: [root.helper, "get"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.parseState(text) }
+    onExited: if (root.refreshAgain) { root.refreshAgain = false; root.refresh() }
   }
 
   Process {
