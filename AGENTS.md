@@ -91,21 +91,28 @@ End the body with `Filed by <agent role>`.
 ## Code Review Rules
 
 Every PR on every omarchy-asus repo needs the `ai-review` commit status (required check, admins
-included; it replaced CodeRabbit). Nobody runs it for you: **the agent that pushes reviews inline.**
+included; it replaced CodeRabbit). Nobody runs it for you: **the agent that pushes reviews inline,
+and nothing goes to GitHub until you and the reviewer agree.**
 
-1. Push the branch, open the PR, then from the checkout at the PR head:
-   `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`
-   Codex `gpt-6.1-sol` finds issues, a fresh Codex Sol run tries to refute each one, and only
-   what survives is posted. A confirmed or unverified P0/P1 fails the status. It takes 1-5 min.
-2. Fix the findings and push (the next run reviews the new head), or answer the thread when no
-   change is right. Every review thread must be resolved before merging.
-3. For Codex-written work, review with Claude instead (`AI_REVIEWER=claude`): the author never
+1. Push the branch and open the PR, then review locally from the checkout at the PR head (clean,
+   committed): `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout .`
+   Codex `gpt-6.1-sol` finds issues, and a fresh Codex Sol run tries to refute each one. The
+   findings come back to you (`items`, each with an `id`); nothing is posted. This takes 1-5 min.
+2. Settle every finding with the reviewer, still locally:
+   - fix it: commit and push, then run step 1 again (the new head gets a fresh review);
+   - or answer it: `--reply answers.json` with `{"<id>": "why this is not a defect"}`. The reviewer
+     checks each answer against the code and withdraws the finding only if the code agrees.
+3. When you agree (no finding you still dispute; normally no blocking P0/P1 left), post once:
+   `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`. This puts one review
+   (findings, your answers, the reviewer's checks) and the status on the head. It never reviews
+   again, and it refuses a head that has no local review.
+4. For Codex-written work, review with Claude instead (`AI_REVIEWER=claude`): the author never
    reviews its own change.
-4. Your own account's PRs merge with `gh pr merge N --squash --admin`. `--admin` only bypasses the
-   approval ruleset. Without it, the merge is refused, and nothing bypasses `ai-review`.
-   PRs from any other account need the maintainer's approving review.
-5. Everything ai-review posts goes through the PII scan first. A hit posts nothing and sets the
-   status to `error`; fix the text it came from (usually your code), not the scan.
+5. Your own account's PRs merge with `gh pr merge N --squash --admin`. `--admin` only bypasses the
+   approval ruleset. Without it, the merge is refused, and nothing bypasses `ai-review`. Every review
+   thread must be resolved. PRs from any other account need the maintainer's approving review.
+6. Everything ai-review posts goes through the secret and PII scan first. A hit posts nothing and
+   sets the status to `error`; fix the text it came from (usually your code), not the scan.
 
 What reviewers flag:
 
