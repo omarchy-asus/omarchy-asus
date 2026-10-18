@@ -179,29 +179,30 @@ def _run_notifier(cmd: list[str]) -> subprocess.CompletedProcess | None:
 
 
 def toast(message: str, *, icon: str = ICON_LOCKED, duration_ms: int = 2000) -> None:
-    """Bottom-center Omarchy OSD (same channel as Pixel Buds volume), not top-right notifications."""
-    osd = shutil.which("omarchy-osd")
-    if osd:
-        r = _run_notifier([osd, "-i", icon, "-m", message, "-d", str(duration_ms)])
+    """Bottom-center Omarchy OSD, not top-right notifications.
+
+    Tries omarchy-osd, then omarchy-shell, then a desktop notification, moving
+    on whenever one is missing, exits nonzero or times out.
+    """
+    payload = json.dumps({"icon": icon, "message": message, "duration": duration_ms})
+    backends = [
+        ("osd", "omarchy-osd", ["-i", icon, "-m", message, "-d", str(duration_ms)]),
+        ("osd-shell", "omarchy-shell", ["osd", "show", payload]),
+        # Last resort only — top-right notification, not the preferred toast.
+        ("notify", "omarchy-notification-send", [message]),
+        ("notify", "notify-send", [message]),
+    ]
+    for label, name, extra in backends:
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        r = _run_notifier([exe, *extra])
         if r is None:
+            continue
+        print(f"{label} rc={r.returncode} msg={message!r} err={r.stderr.strip()!r}", flush=True)
+        if r.returncode == 0:
             return
-        print(f"osd rc={r.returncode} msg={message!r} err={r.stderr.strip()!r}", flush=True)
-        return
-    shell = shutil.which("omarchy-shell")
-    if shell:
-        payload = json.dumps({"icon": icon, "message": message, "duration": duration_ms})
-        r = _run_notifier([shell, "osd", "show", payload])
-        if r is None:
-            return
-        print(f"osd-shell rc={r.returncode} msg={message!r} err={r.stderr.strip()!r}", flush=True)
-        return
-    # Last resort only — top-right notification, not the preferred toast.
-    send = shutil.which("omarchy-notification-send") or shutil.which("notify-send")
-    if send:
-        _run_notifier([send, message])
-        print(f"toast FALLBACK notify msg={message!r}", flush=True)
-    else:
-        print(f"toast FAILED: no OSD/notifier for {message!r}", flush=True)
+    print(f"toast FAILED: no OSD/notifier delivered {message!r}", flush=True)
 
 
 class _DeviceLost(Exception):
