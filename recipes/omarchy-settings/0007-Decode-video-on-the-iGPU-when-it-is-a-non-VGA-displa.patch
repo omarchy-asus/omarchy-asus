@@ -1,0 +1,131 @@
+From 57bd9950650fa798ea21197469546f490b8bd376 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:27:05 -0400
+Subject: [PATCH 07/18] Decode video on the iGPU when it is a non-VGA display
+ controller
+
+AMD Krackan (Zephyrus G16 GA605) presents its iGPU as a non-VGA display
+controller without boot_vga, so omarchy-hw-nvidia-display still answers
+NVIDIA and Hyprland forced LIBVA_DRIVER_NAME=nvidia on the iGPU session:
+every video woke the runtime-suspended RTX. Skip that override when
+omarchy-hw-igpu-render-node finds the iGPU. __GLX_VENDOR_LIBRARY_NAME
+stays nvidia, so OpenGL games keep running on the dGPU with no setup.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: 322012fd1e47bfc73f5d79cd4449ac31ced565eb
+
+(cherry picked from commit 322012fd1e47bfc73f5d79cd4449ac31ced565eb)
+---
+ default/hypr/nvidia.lua        |  9 ++++++++-
+ migrations/1792143709.sh       | 10 ++++++++++
+ test/shell.d/hw-nvidia-test.sh | 35 +++++++++++++++++++++++++++++++---
+ 3 files changed, 50 insertions(+), 4 deletions(-)
+ create mode 100644 migrations/1792143709.sh
+
+diff --git a/default/hypr/nvidia.lua b/default/hypr/nvidia.lua
+index 10abeeeb..b2199a82 100644
+--- a/default/hypr/nvidia.lua
++++ b/default/hypr/nvidia.lua
+@@ -4,6 +4,7 @@ local nvidia = paths.omarchy_path .. "/bin/omarchy-hw-nvidia"
+ local nvidia_display = paths.omarchy_path .. "/bin/omarchy-hw-nvidia-display"
+ local nvidia_gsp = paths.omarchy_path .. "/bin/omarchy-hw-nvidia-gsp"
+ local nvidia_without_gsp = paths.omarchy_path .. "/bin/omarchy-hw-nvidia-without-gsp"
++local igpu_render_node = paths.omarchy_path .. "/bin/omarchy-hw-igpu-render-node"
+ 
+ -- These detectors read cached sysfs IDs rather than shelling out to lspci.
+ -- lspci reads PCI config space, which resumes a runtime-suspended GPU, and on a
+@@ -16,7 +17,13 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+   if o.shell_succeeds(o.shell_quote(nvidia_gsp)) then
+     hl.env("NVD_BACKEND", "direct")
+     if nvidia_is_display then
+-      hl.env("LIBVA_DRIVER_NAME", "nvidia")
++      -- An iGPU that is a non-VGA display controller (AMD Krackan) has no
++      -- boot_vga, so the display check still answers NVIDIA and GLX stays on
++      -- it for OpenGL games. Video decode belongs on that iGPU, though: forcing
++      -- NVIDIA's VA-API there wakes the dGPU for every video.
++      if not o.shell_succeeds(o.shell_quote(igpu_render_node)) then
++        hl.env("LIBVA_DRIVER_NAME", "nvidia")
++      end
+       hl.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+     end
+   elseif o.shell_succeeds(o.shell_quote(nvidia_without_gsp)) then
+diff --git a/migrations/1792143709.sh b/migrations/1792143709.sh
+new file mode 100644
+index 00000000..4099e0fc
+--- /dev/null
++++ b/migrations/1792143709.sh
+@@ -0,0 +1,10 @@
++echo "Stop forcing NVIDIA VA-API on hybrids whose iGPU is not VGA class"
++
++# On a hybrid whose iGPU is a non-VGA display controller (AMD Krackan), Hyprland
++# no longer sets LIBVA_DRIVER_NAME=nvidia; NVIDIA's GLX stays for OpenGL games.
++# Hyprland applies env at startup, so a session that still carries the old
++# override needs a reboot to drop it.
++if [[ ${LIBVA_DRIVER_NAME:-} == "nvidia" ]] && omarchy-hw-igpu-render-node >/dev/null; then
++  omarchy-state set reboot-required
++  echo "Reboot to decode video on the integrated GPU instead of NVIDIA."
++fi
+diff --git a/test/shell.d/hw-nvidia-test.sh b/test/shell.d/hw-nvidia-test.sh
+index f0ec8e20..bb52b9ee 100755
+--- a/test/shell.d/hw-nvidia-test.sh
++++ b/test/shell.d/hw-nvidia-test.sh
+@@ -7,12 +7,12 @@ require_command lua
+ 
+ tmp_dir=$(mktemp -d)
+ trap 'rm -rf "$tmp_dir"' EXIT
+-export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_DRM_PATH="$tmp_dir/drm" OMARCHY_PATH="$ROOT" PATH="$ROOT/bin:$PATH"
++export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_DRM_PATH="$tmp_dir/drm" OMARCHY_DRI_BY_PATH="$tmp_dir/by-path" OMARCHY_PATH="$ROOT" PATH="$ROOT/bin:$PATH"
+ 
+ # Exit statuses, expected NVD_BACKEND/LIBVA/GLX values, then vendor:device:class[:boot_vga].
+ while IFS='|' read -r description nvidia gsp without_gsp display expected_env devices; do
+-  rm -rf "$tmp_dir/devices"
+-  mkdir -p "$tmp_dir/devices"
++  rm -rf "$tmp_dir/devices" "$tmp_dir/by-path"
++  mkdir -p "$tmp_dir/devices" "$tmp_dir/by-path"
+   slot=0
+   for spec in $devices; do
+     IFS=: read -r vendor device class boot_vga <<<"$spec"
+@@ -21,6 +21,7 @@ while IFS='|' read -r description nvidia gsp without_gsp display expected_env de
+     printf '%s\n' "$vendor" >"$device_dir/vendor"
+     printf '%s\n' "$device" >"$device_dir/device"
+     printf '%s\n' "$class" >"$device_dir/class"
++    : >"$tmp_dir/by-path/pci-$slot-render"
+     if [[ -n $boot_vga ]]; then
+       printf '%s\n' "$boot_vga" >"$device_dir/boot_vga"
+     fi
+@@ -57,4 +58,32 @@ AMD display with Ampere offload|0|0|1|1|direct - -|0x1002:0x15bf:0x030000:1 0x10
+ Intel display with Maxwell offload|0|1|0|1|egl - -|0x8086:0x46a6:0x030000:1 0x10de:0x1340:0x030000:0
+ NVIDIA display with inactive iGPU|0|0|1|0|direct nvidia nvidia|0x1002:0x15bf:0x030000:0 0x10de:0x2c02:0x030000:1
+ Hybrid without boot_vga|0|0|1|0|direct nvidia nvidia|0x1002:0x15e7:0x030000 0x10de:0x2560:0x030200
++Non-VGA AMD display with Blackwell VGA offload|0|0|1|0|direct - nvidia|0x1002:0x1114:0x038000 0x10de:0x2d59:0x030000:0
++Non-VGA AMD display with Ampere 3D offload|0|0|1|0|direct nvidia nvidia|0x1002:0x1114:0x038000 0x10de:0x25ac:0x030200
+ CASES
++
++# A session started before this change still carries LIBVA_DRIVER_NAME=nvidia
++# on a hybrid whose iGPU has no boot_vga; only a reboot clears Hyprland's env.
++rm -rf "$tmp_dir/devices" "$tmp_dir/by-path"
++mkdir -p "$tmp_dir/devices/0000:64:00.0" "$tmp_dir/devices/0000:65:00.0" "$tmp_dir/by-path"
++printf '0x10de\n' >"$tmp_dir/devices/0000:64:00.0/vendor"
++printf '0x030000\n' >"$tmp_dir/devices/0000:64:00.0/class"
++printf '0\n' >"$tmp_dir/devices/0000:64:00.0/boot_vga"
++printf '0x1002\n' >"$tmp_dir/devices/0000:65:00.0/vendor"
++printf '0x038000\n' >"$tmp_dir/devices/0000:65:00.0/class"
++: >"$tmp_dir/by-path/pci-0000:65:00.0-render"
++
++migration=$(grep -l 'Stop forcing NVIDIA VA-API on hybrids whose iGPU' "$ROOT"/migrations/*.sh)
++for libva in nvidia ""; do
++  rm -rf "$tmp_dir/home"
++  mkdir -p "$tmp_dir/home"
++  HOME="$tmp_dir/home" LIBVA_DRIVER_NAME=$libva bash -euo pipefail "$migration" >/dev/null
++  if [[ $libva == "nvidia" ]]; then
++    [[ -f $tmp_dir/home/.local/state/omarchy/reboot-required ]] ||
++      fail "the migration asks for a reboot while the session still forces NVIDIA VA-API"
++  else
++    [[ ! -e $tmp_dir/home/.local/state/omarchy/reboot-required ]] ||
++      fail "the migration leaves a session without the NVIDIA override alone"
++  fi
++done
++pass "the migration asks for a reboot only while the old NVIDIA override is live"
+-- 
+2.55.0
+

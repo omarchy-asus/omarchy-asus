@@ -59,6 +59,11 @@ real bugs on this hardware.
   your own config or `/etc` (iGPU video decode, HDMI cursor, speaker level, rtkit, asusd,
   Win-lock). Settings you already have are left alone. See
   [its README](recipes/omarchy-asus-g16-apply/README.md).
+- **Patched `omarchy` + `omarchy-settings` 4.0.5-1.1 (experimental):** stock 4.0.5 plus the
+  fork's fixes that live in Omarchy's own scripts, config and migrations. These cover ROG
+  power-profile ownership, USB-C power policy, quiet fans on battery, the HDMI cursor, iGPU
+  video decode, ALC285 volume, rtkit, NVIDIA initramfs and four perf fixes. They arrive with
+  `omarchy update`. Staged only, not published yet ([notes](recipes/omarchy/NOTES.md)).
 - **Daily auto-update pipeline:** the code is in this repo (`bin/auto-update`, `systemd/`);
   it will be installed on the build host soon.
 
@@ -135,7 +140,8 @@ Where our fixes are headed:
 
 - `recipes/<pkg>/`: PKGBUILDs, patches and a `NOTES.md` for each package (base, changes,
   upstream status, how to rebase). `DELTA` declares how the recipe differs from upstream;
-  `LOCAL_ONLY` marks a package with no upstream build.
+  `LOCAL_ONLY` marks a package with no upstream build; `HOLD` (its first line is the reason)
+  keeps `bin/auto-update` from building or publishing a recipe.
 - `recipes/omarchy-asus-keyring/`: keyring package (`pacman-key --populate omarchy-asus`),
   packaged like omarchy-keyring. Its `omarchy-asus.gpg` is a copy of `keys/omarchy-asus.asc`.
 - `bin/omarchy-asus-setup`: the one-step setup a user runs on a G16. See LAPTOP-SETUP.md.

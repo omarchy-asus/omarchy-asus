@@ -1,0 +1,164 @@
+From 84f62c5ff1925d917c367121df416ff6ccaa6cea Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:26:59 -0400
+Subject: [PATCH 06/18] Add omarchy-hw-igpu-render-node for hybrid NVIDIA
+ laptops
+
+Prints the stable /dev/dri/by-path render node of the iGPU that drives
+the display next to an NVIDIA GPU, from cached sysfs only, so video
+decode can be pinned to it. Also recognizes an iGPU that is a non-VGA
+display controller without boot_vga (AMD Krackan) next to an NVIDIA GPU
+that reports boot_vga=0.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: d51d397be47d4e2abf14c3471080add118e48570
+
+(cherry picked from commit d51d397be47d4e2abf14c3471080add118e48570)
+---
+ bin/omarchy-hw-igpu-render-node          | 66 ++++++++++++++++++++++++
+ test/shell.d/hw-igpu-render-node-test.sh | 60 +++++++++++++++++++++
+ 2 files changed, 126 insertions(+)
+ create mode 100755 bin/omarchy-hw-igpu-render-node
+ create mode 100755 test/shell.d/hw-igpu-render-node-test.sh
+
+diff --git a/bin/omarchy-hw-igpu-render-node b/bin/omarchy-hw-igpu-render-node
+new file mode 100755
+index 00000000..8d02dc01
+--- /dev/null
++++ b/bin/omarchy-hw-igpu-render-node
+@@ -0,0 +1,66 @@
++#!/bin/bash
++
++# omarchy:summary=Print the render node of the integrated GPU that drives the display next to an NVIDIA GPU.
++
++# On hybrid laptops the kernel numbers render nodes in PCI order, which puts
++# the NVIDIA GPU first on some machines (renderD128 is the RTX on the Zephyrus
++# G16), and the numbers can change between boots. Apps that open the first node
++# or let libva pick one then wake the runtime-suspended dGPU to decode video the
++# iGPU handles at a fraction of the power. Print the iGPU's stable
++# /dev/dri/by-path name so video decode can be pinned to it. Exits 1 on any
++# machine where that does not apply: no NVIDIA GPU, NVIDIA drives the display,
++# or the iGPU has no render node.
++#
++# The iGPU is the one that claims boot_vga. Some APUs (AMD Krackan, on the
++# Zephyrus G16 GA605) present their iGPU as a non-VGA display controller (class
++# 0x0380), which has no boot_vga at all; when the NVIDIA GPU next to it reports
++# boot_vga=0, the firmware did not boot on NVIDIA, so that iGPU drives the
++# panel. omarchy-hw-nvidia-display does not read that case as a hybrid, which
++# keeps NVIDIA's GLX for OpenGL games there; only video decode moves.
++#
++# Read the cached sysfs IDs rather than lspci, which reads PCI config space and
++# resumes runtime-suspended GPUs.
++pci_devices_path="${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}"
++dri_by_path="${OMARCHY_DRI_BY_PATH:-/dev/dri/by-path}"
++
++shopt -s nullglob
++
++nvidia_seen=0
++nvidia_boot=0
++nvidia_not_boot=0
++display_gpu=""
++without_boot_vga=()
++
++for device in "$pci_devices_path"/*; do
++  [[ $(< "$device/class") == 0x03* ]] || continue
++  boot_vga=""
++  if [[ -f $device/boot_vga ]]; then
++    boot_vga=$(< "$device/boot_vga")
++  fi
++  if [[ $(< "$device/vendor") == "0x10de" ]]; then
++    nvidia_seen=1
++    if [[ $boot_vga == "1" ]]; then
++      nvidia_boot=1
++    elif [[ $boot_vga == "0" ]]; then
++      nvidia_not_boot=1
++    fi
++  else
++    if [[ $boot_vga == "1" ]]; then
++      display_gpu=$device
++    elif [[ -z $boot_vga ]]; then
++      without_boot_vga+=("$device")
++    fi
++  fi
++done
++
++if [[ -z $display_gpu ]] && (( nvidia_not_boot == 1 && ${#without_boot_vga[@]} == 1 )); then
++  display_gpu=${without_boot_vga[0]}
++fi
++
++render_node="$dri_by_path/pci-${display_gpu##*/}-render"
++
++if (( nvidia_seen == 1 && nvidia_boot == 0 )) && [[ -n $display_gpu && -e $render_node ]]; then
++  echo "$render_node"
++else
++  exit 1
++fi
+diff --git a/test/shell.d/hw-igpu-render-node-test.sh b/test/shell.d/hw-igpu-render-node-test.sh
+new file mode 100755
+index 00000000..3e07b26d
+--- /dev/null
++++ b/test/shell.d/hw-igpu-render-node-test.sh
+@@ -0,0 +1,60 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++tmp_dir=$(mktemp -d)
++trap 'rm -rf "$tmp_dir"' EXIT
++mkdir -p "$tmp_dir/bin"
++
++# lspci reads config space and wakes a runtime-suspended dGPU, so the answer
++# must come from sysfs alone: a stub that fails loudly proves it is never run.
++printf '#!/bin/bash\necho "lspci ran" >>"%s/lspci.log"\nexit 1\n' "$tmp_dir" >"$tmp_dir/bin/lspci"
++chmod +x "$tmp_dir/bin/lspci"
++
++export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_DRI_BY_PATH="$tmp_dir/by-path"
++export PATH="$tmp_dir/bin:$ROOT/bin:$PATH"
++
++# Expected output ("-" for exit 1), render nodes present, then
++# address=vendor:class[:boot_vga] for each display device.
++while IFS='|' read -r description expected nodes devices; do
++  rm -rf "$tmp_dir/devices" "$tmp_dir/by-path"
++  mkdir -p "$tmp_dir/devices" "$tmp_dir/by-path"
++  for address in $nodes; do
++    : >"$tmp_dir/by-path/pci-$address-render"
++  done
++  for spec in $devices; do
++    IFS=: read -r vendor class boot_vga <<<"${spec#*=}"
++    device_dir="$tmp_dir/devices/${spec%%=*}"
++    mkdir -p "$device_dir"
++    printf '%s\n' "$vendor" >"$device_dir/vendor"
++    printf '%s\n' "$class" >"$device_dir/class"
++    if [[ -n $boot_vga ]]; then
++      printf '%s\n' "$boot_vga" >"$device_dir/boot_vga"
++    fi
++  done
++
++  status=0
++  actual=$(omarchy-hw-igpu-render-node) || status=$?
++  if [[ $expected == "-" ]]; then
++    (( status == 1 )) && [[ -z $actual ]] || fail "$description" "expected exit 1, got $status: $actual"
++  else
++    [[ $actual == "$tmp_dir/by-path/pci-$expected-render" ]] || fail "$description" "expected $expected, got $status: $actual"
++  fi
++  pass "$description"
++done <<'CASES'
++Zephyrus G16: non-VGA AMD iGPU sorts after the RTX|0000:65:00.0|0000:64:00.0 0000:65:00.0|0000:64:00.0=0x10de:0x030000:0 0000:65:00.0=0x1002:0x038000
++Intel iGPU claims boot_vga next to a 3D controller|0000:00:02.0|0000:00:02.0 0000:01:00.0|0000:00:02.0=0x8086:0x030000:1 0000:01:00.0=0x10de:0x030200
++AMD iGPU claims boot_vga next to a VGA dGPU|0000:06:00.0|0000:01:00.0 0000:06:00.0|0000:01:00.0=0x10de:0x030000:0 0000:06:00.0=0x1002:0x030000:1
++NVIDIA drives the display next to an inactive iGPU|-|0000:00:02.0 0000:01:00.0|0000:00:02.0=0x8086:0x030000:0 0000:01:00.0=0x10de:0x030000:1
++No device claims boot_vga|-|0000:05:00.0 0000:01:00.0|0000:05:00.0=0x1002:0x030000 0000:01:00.0=0x10de:0x030200
++AMD only|-|0000:65:00.0|0000:65:00.0=0x1002:0x038000
++Intel only|-|0000:00:02.0|0000:00:02.0=0x8086:0x030000:1
++NVIDIA only|-|0000:01:00.0|0000:01:00.0=0x10de:0x030000:1
++Non-VGA AMD iGPU next to an NVIDIA 3D controller without boot_vga|-|0000:01:00.0 0000:65:00.0|0000:01:00.0=0x10de:0x030200 0000:65:00.0=0x1002:0x038000
++iGPU without a render node|-|0000:64:00.0|0000:64:00.0=0x10de:0x030000:0 0000:65:00.0=0x1002:0x038000
++CASES
++
++[[ ! -e $tmp_dir/lspci.log ]] || fail "the render node comes from sysfs, never lspci"
++pass "the render node comes from sysfs, never lspci"
+-- 
+2.55.0
+

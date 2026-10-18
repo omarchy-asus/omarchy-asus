@@ -1,0 +1,538 @@
+From c34b4496c125845818737d06f1e114c2f364bf32 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:27:50 -0400
+Subject: [PATCH 08/18] Keep mpv and Chromium video decode on the iGPU of
+ hybrid laptops
+
+Render nodes follow PCI order, so on some hybrids the NVIDIA GPU is
+renderD128 and video decode wakes it. Pin mpv (hwdec=vaapi plus
+vaapi-device) and Chromium-family browsers (--render-node-override) to
+the display iGPU's by-path node, for new users, browser installs,
+Chromium refreshes and existing installs. Settings the user already
+has are kept, and other machines are untouched.
+
+Backport to v4.0.5: v4.0.5 has no brave-widevine, default-apps or
+platform-app-hooks tests, so their stub updates are dropped;
+install/user/all.sh there has no qualcomm/vm-no-animations steps, so the new
+step follows fix-nouveau-cursor.sh; nvidia.lua keeps the hybrid-cursor require
+after the stale-pin check.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: 44a952a3bf3e34417b2c1120ecc15c494c0e38fb
+Backport-of: ed59a8b7b22e80bba000abcf55f2eca7343141b8 (fixup)
+Backport-of: 8c59ae0fa1c09599f66a1ef051845906d25c8639 (fixup)
+
+(cherry picked from commit 44a952a3bf3e34417b2c1120ecc15c494c0e38fb)
+---
+ bin/omarchy-cmd-browser-handoff              |   2 +-
+ bin/omarchy-install-browser                  |   2 +
+ bin/omarchy-refresh-chromium                 |   5 +
+ bin/omarchy-refresh-hybrid-video             |   7 +
+ default/hypr/nvidia.lua                      |  42 +++++
+ install/helpers/hybrid-video-decode.sh       | 122 ++++++++++++++
+ install/user/all.sh                          |   1 +
+ install/user/hardware/hybrid-video-decode.sh |  10 ++
+ migrations/1792123636.sh                     |   6 +
+ test/shell.d/browser-handoff-test.sh         |   2 +
+ test/shell.d/hw-nvidia-test.sh               |   3 +
+ test/shell.d/hybrid-video-decode-test.sh     | 161 +++++++++++++++++++
+ 12 files changed, 362 insertions(+), 1 deletion(-)
+ create mode 100755 bin/omarchy-refresh-hybrid-video
+ create mode 100644 install/helpers/hybrid-video-decode.sh
+ create mode 100644 install/user/hardware/hybrid-video-decode.sh
+ create mode 100644 migrations/1792123636.sh
+ create mode 100755 test/shell.d/hybrid-video-decode-test.sh
+
+diff --git a/bin/omarchy-cmd-browser-handoff b/bin/omarchy-cmd-browser-handoff
+index a5ec506c..737e40d5 100755
+--- a/bin/omarchy-cmd-browser-handoff
++++ b/bin/omarchy-cmd-browser-handoff
+@@ -27,7 +27,7 @@ shift
+ # from the environment is another browser, so leave those to the launcher.
+ if [[ -n ${CHROME_USER_DATA_DIR:-}${CHROME_CONFIG_HOME:-} ]] ||
+   cat "/etc/$flags" "$config/$flags" 2>/dev/null | sed 's/#.*//' | tr -s '[:space:]' '\n' |
+-    grep -vE '^(--(ozone-platform|ozone-platform-hint|password-store|enable-features|load-extension)=.*|--no-default-browser-check)?$' | grep -q .; then
++    grep -vE '^(--(ozone-platform|ozone-platform-hint|password-store|enable-features|load-extension|render-node-override)=.*|--no-default-browser-check)?$' | grep -q .; then
+   exit 1
+ fi
+ 
+diff --git a/bin/omarchy-install-browser b/bin/omarchy-install-browser
+index f332ce77..f041c56c 100755
+--- a/bin/omarchy-install-browser
++++ b/bin/omarchy-install-browser
+@@ -5,6 +5,7 @@
+ # omarchy:examples=omarchy install browser firefox | omarchy install browser brave
+ 
+ source "$OMARCHY_PATH/install/helpers/browser-policy.sh"
++source "$OMARCHY_PATH/install/helpers/hybrid-video-decode.sh"
+ 
+ setup_chromium_policy_directory() {
+   browser_policy_setup_dir "$1"
+@@ -18,6 +19,7 @@ announce_browser_installed() {
+ copy_chromium_flags() {
+   mkdir -p ~/.config
+   cp -f "$OMARCHY_PATH/config/chromium-flags.conf" "$1"
++  hybrid_video_pin_chromium "$1"
+   omarchy-install-chromium-copy-url
+   omarchy-install-chromium-ytdlp
+ }
+diff --git a/bin/omarchy-refresh-chromium b/bin/omarchy-refresh-chromium
+index 368373f4..d03f9760 100755
+--- a/bin/omarchy-refresh-chromium
++++ b/bin/omarchy-refresh-chromium
+@@ -2,6 +2,8 @@
+ 
+ # omarchy:summary=Refresh the ~/.config/chromium-flags.conf file from the Omarchy defaults.
+ 
++source "$OMARCHY_PATH/install/helpers/hybrid-video-decode.sh"
++
+ CONFIG_FILE="$HOME/.config/chromium-flags.conf"
+ INSTALL_GOOGLE_ACCOUNTS=false
+ 
+@@ -15,6 +17,9 @@ fi
+ # Refresh the Chromium configuration
+ omarchy-refresh-config chromium-flags.conf
+ 
++# Keep video decode on the iGPU of a hybrid laptop
++hybrid_video_pin_chromium "$CONFIG_FILE"
++
+ # Install/refresh the native messaging hosts used by the bundled extensions
+ omarchy-install-chromium-copy-url
+ omarchy-install-chromium-ytdlp
+diff --git a/bin/omarchy-refresh-hybrid-video b/bin/omarchy-refresh-hybrid-video
+new file mode 100755
+index 00000000..4741e8f7
+--- /dev/null
++++ b/bin/omarchy-refresh-hybrid-video
+@@ -0,0 +1,7 @@
++#!/bin/bash
++
++# omarchy:summary=Re-pin video decode to the iGPU of a hybrid laptop, dropping pins to a GPU that is gone
++
++source "$OMARCHY_PATH/install/helpers/hybrid-video-decode.sh"
++
++hybrid_video_refresh
+diff --git a/default/hypr/nvidia.lua b/default/hypr/nvidia.lua
+index b2199a82..1e30f9c2 100644
+--- a/default/hypr/nvidia.lua
++++ b/default/hypr/nvidia.lua
+@@ -6,6 +6,44 @@ local nvidia_gsp = paths.omarchy_path .. "/bin/omarchy-hw-nvidia-gsp"
+ local nvidia_without_gsp = paths.omarchy_path .. "/bin/omarchy-hw-nvidia-without-gsp"
+ local igpu_render_node = paths.omarchy_path .. "/bin/omarchy-hw-igpu-render-node"
+ 
++-- Video decode pins (install/helpers/hybrid-video-decode.sh) name the iGPU's
++-- render node by PCI path. True when one names a device that is gone or is not
++-- a non-NVIDIA display device any more: a MUX switch, an iGPU turned off in
++-- firmware, a BIOS update that moved the address. Reads the config files and
++-- cached sysfs IDs only, never a device node.
++local function hybrid_video_pin_stale()
++  local home = os.getenv("HOME") or ""
++  local devices = os.getenv("OMARCHY_PCI_DEVICES_PATH") or "/sys/bus/pci/devices"
++  local function first_line(path)
++    local file = io.open(path, "r")
++    if not file then return nil end
++    local line = file:read("*l")
++    file:close()
++    return line
++  end
++  local files = { "/.config/mpv/mpv.conf", "/.config/chromium-flags.conf", "/.config/chrome-flags.conf",
++    "/.config/microsoft-edge-stable-flags.conf", "/.config/brave-flags.conf", "/.config/brave-origin-flags.conf" }
++  for _, name in ipairs(files) do
++    local file = io.open(home .. name, "r")
++    if file then
++      for line in file:lines() do
++        local address = line:match("^%s*%-%-render%-node%-override=%S*/by%-path/pci%-(.-)%-render%s*$")
++          or line:match("^%s*%-?%-?vaapi%-device%s*=%s*%S*/by%-path/pci%-(.-)%-render%s*$")
++        if address then
++          local vendor = first_line(devices .. "/" .. address .. "/vendor")
++          local class = first_line(devices .. "/" .. address .. "/class")
++          if not vendor or vendor == "0x10de" or not class or not class:match("^0x03") then
++            file:close()
++            return true
++          end
++        end
++      end
++      file:close()
++    end
++  end
++  return false
++end
++
+ -- These detectors read cached sysfs IDs rather than shelling out to lspci.
+ -- lspci reads PCI config space, which resumes a runtime-suspended GPU, and on a
+ -- hybrid laptop that wake alone outlasts Hyprland's 1.5s config reload budget.
+@@ -33,5 +71,9 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+     end
+   end
+ 
++  if hybrid_video_pin_stale() then
++    o.exec_on_start("omarchy-refresh-hybrid-video")
++  end
++
+   require("default.hypr.hybrid-cursor")
+ end
+diff --git a/install/helpers/hybrid-video-decode.sh b/install/helpers/hybrid-video-decode.sh
+new file mode 100644
+index 00000000..c01834b8
+--- /dev/null
++++ b/install/helpers/hybrid-video-decode.sh
+@@ -0,0 +1,122 @@
++# On a hybrid laptop whose iGPU drives the display, video players and browsers
++# that let libva or Chromium choose a render node can decode on the NVIDIA GPU
++# instead: render nodes are numbered in PCI order, which puts the dGPU first on
++# some machines, and the numbers can change between boots. Each video then
++# wakes the runtime-suspended dGPU for work the iGPU's video engine does at a
++# fraction of the power. Pin mpv and Chromium-family browsers to the iGPU by
++# the stable path omarchy-hw-igpu-render-node prints. Every other machine is
++# left alone, and so is any setting the user already has.
++
++HYBRID_VIDEO_CHROMIUM_FLAGS_FILES=(
++  "$HOME/.config/chromium-flags.conf"
++  "$HOME/.config/chrome-flags.conf"
++  "$HOME/.config/microsoft-edge-stable-flags.conf"
++  "$HOME/.config/brave-flags.conf"
++  "$HOME/.config/brave-origin-flags.conf"
++)
++
++HYBRID_VIDEO_MPV_CONF="$HOME/.config/mpv/mpv.conf"
++
++# Appends --render-node-override to the flags files given, or to every
++# Chromium-family flags file Omarchy seeds. Only files the user already has.
++hybrid_video_pin_chromium() {
++  local node conf
++  local -a confs=("$@")
++
++  (( ${#confs[@]} )) || confs=("${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}")
++
++  node=$(omarchy-hw-igpu-render-node) || return 0
++
++  for conf in "${confs[@]}"; do
++    [[ -f $conf ]] || continue
++    grep -q -- '^[[:space:]]*--render-node-override=' "$conf" && continue
++    [[ -s $conf && -n $(tail -c1 "$conf") ]] && echo >>"$conf"
++    echo "--render-node-override=$node" >>"$conf"
++  done
++}
++
++# Whether mpv.conf sets an option outside any [profile] section.
++hybrid_video_mpv_sets() {
++  [[ -f $HYBRID_VIDEO_MPV_CONF ]] &&
++    awk -v option="$1" '
++      /^[[:space:]]*\[/ { exit }
++      $0 ~ "^[[:space:]]*(--)?" option "[[:space:]]*=" { found = 1; exit }
++      END { exit !found }
++    ' "$HYBRID_VIDEO_MPV_CONF"
++}
++
++# Decodes through VA-API on the iGPU. hwdec=auto-safe from /etc/mpv/mpv.conf
++# can settle on NVDEC, which loads CUDA and wakes the dGPU. The options go at
++# the top of ~/.config/mpv/mpv.conf, ahead of any [profile] section, and only
++# those the user has not set.
++hybrid_video_pin_mpv() {
++  local node existing=""
++  local -a options=()
++
++  node=$(omarchy-hw-igpu-render-node) || return 0
++
++  hybrid_video_mpv_sets hwdec || options+=("hwdec=vaapi")
++  hybrid_video_mpv_sets vaapi-device || options+=("vaapi-device=$node")
++  (( ${#options[@]} )) || return 0
++
++  mkdir -p "$(dirname "$HYBRID_VIDEO_MPV_CONF")"
++  if [[ -f $HYBRID_VIDEO_MPV_CONF ]]; then
++    existing=$(<"$HYBRID_VIDEO_MPV_CONF")
++  fi
++
++  # Rewrite in place, which keeps a symlinked config pointing where it did.
++  local comment="# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."
++  {
++    [[ $existing == *"$comment"* ]] || echo "$comment"
++    printf '%s\n' "${options[@]}"
++    if [[ -n $existing ]]; then
++      printf '\n%s\n' "$existing"
++    fi
++  } >"$HYBRID_VIDEO_MPV_CONF"
++}
++
++# Whether a pinned /dev/dri/by-path/pci-<address>-render node still belongs to
++# a display device that is not the NVIDIA GPU. A MUX switch to the dGPU, an
++# iGPU turned off in firmware or a BIOS update that moves the PCI address
++# leaves a pin pointing at nothing, and decode silently falls back to software.
++# Reads only cached sysfs IDs, never the device.
++hybrid_video_node_valid() {
++  local name=${1##*/} vendor="" class="" dev
++  [[ $name == pci-*-render ]] || return 0
++  name=${name#pci-}
++  dev="${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}/${name%-render}"
++  read -r vendor 2>/dev/null <"$dev/vendor" || return 1
++  read -r class 2>/dev/null <"$dev/class" || return 1
++  [[ $vendor != "0x10de" && $class == 0x03* ]]
++}
++
++# Drops render node pins (by-path only) that no longer name the iGPU, from the
++# Chromium-family flags files and from the top of mpv.conf. Pins the user set to
++# any other path are left alone.
++hybrid_video_unpin_stale() {
++  local conf line node changed out
++  for conf in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}" "$HYBRID_VIDEO_MPV_CONF"; do
++    [[ -f $conf ]] || continue
++    changed=0 out=""
++    while IFS= read -r line || [[ -n $line ]]; do
++      if [[ $line =~ ^[[:space:]]*(--render-node-override=|(--)?vaapi-device[[:space:]]*=[[:space:]]*)([^[:space:]]*/by-path/pci-[^[:space:]]+-render) ]]; then
++        node=${BASH_REMATCH[3]}
++        if ! hybrid_video_node_valid "$node"; then
++          changed=1
++          continue
++        fi
++      fi
++      out+="$line"$'\n'
++    done <"$conf"
++    # Rewrite in place, which keeps a symlinked config pointing where it did.
++    (( changed )) && printf '%s' "$out" >"$conf"
++  done
++  return 0
++}
++
++# Drops stale pins, then pins again where an iGPU is found.
++hybrid_video_refresh() {
++  hybrid_video_unpin_stale
++  hybrid_video_pin_mpv
++  hybrid_video_pin_chromium
++}
+diff --git a/install/user/all.sh b/install/user/all.sh
+index 39d98ea5..d41883a6 100644
+--- a/install/user/all.sh
++++ b/install/user/all.sh
+@@ -9,6 +9,7 @@ run_logged "$OMARCHY_INSTALL/user/hardware/asus/fix-mic.sh"
+ run_logged "$OMARCHY_INSTALL/user/hardware/framework/fix-f13-amd-audio-input.sh"
+ run_logged "$OMARCHY_INSTALL/user/hardware/dell/xps13-text-scaling.sh"
+ run_logged "$OMARCHY_INSTALL/user/hardware/fix-nouveau-cursor.sh"
++run_logged "$OMARCHY_INSTALL/user/hardware/hybrid-video-decode.sh"
+ 
+ run_logged "$OMARCHY_INSTALL/user/default-keyring.sh"
+ run_logged "$OMARCHY_INSTALL/user/mise.sh"
+diff --git a/install/user/hardware/hybrid-video-decode.sh b/install/user/hardware/hybrid-video-decode.sh
+new file mode 100644
+index 00000000..316640f0
+--- /dev/null
++++ b/install/user/hardware/hybrid-video-decode.sh
+@@ -0,0 +1,10 @@
++# On a hybrid laptop whose iGPU drives the display, pin mpv and the
++# Chromium-family flags files this user already has to the iGPU's render node,
++# so playing video does not wake the NVIDIA GPU.
++source "$OMARCHY_INSTALL/helpers/hybrid-video-decode.sh"
++
++if render_node=$(omarchy-hw-igpu-render-node); then
++  echo "Detected a hybrid GPU with the display on the iGPU. Decoding video on $render_node."
++  hybrid_video_pin_mpv
++  hybrid_video_pin_chromium
++fi
+diff --git a/migrations/1792123636.sh b/migrations/1792123636.sh
+new file mode 100644
+index 00000000..612a68a8
+--- /dev/null
++++ b/migrations/1792123636.sh
+@@ -0,0 +1,6 @@
++echo "Decode video on the integrated GPU of hybrid NVIDIA laptops"
++
++source "$OMARCHY_PATH/install/helpers/hybrid-video-decode.sh"
++
++hybrid_video_pin_mpv
++hybrid_video_pin_chromium
+diff --git a/test/shell.d/browser-handoff-test.sh b/test/shell.d/browser-handoff-test.sh
+index c188399d..b7af3d51 100644
+--- a/test/shell.d/browser-handoff-test.sh
++++ b/test/shell.d/browser-handoff-test.sh
+@@ -23,6 +23,8 @@ mkdir -p "${socket%/*}"
+ flags_file="$XDG_CONFIG_HOME/chromium-flags.conf"
+ cp "$ROOT/config/chromium-flags.conf" "$flags_file"
+ echo "# A comment of the user's" >>"$flags_file"
++# Omarchy pins hybrid laptops to the iGPU, a process flag the running browser has.
++echo "--render-node-override=/dev/dri/by-path/pci-0000:65:00.0-render" >>"$flags_file"
+ 
+ # A running browser's side of the singleton socket: take each command line and
+ # acknowledge it, as Chromium does.
+diff --git a/test/shell.d/hw-nvidia-test.sh b/test/shell.d/hw-nvidia-test.sh
+index bb52b9ee..154c46f8 100755
+--- a/test/shell.d/hw-nvidia-test.sh
++++ b/test/shell.d/hw-nvidia-test.sh
+@@ -8,6 +8,9 @@ require_command lua
+ tmp_dir=$(mktemp -d)
+ trap 'rm -rf "$tmp_dir"' EXIT
+ export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_DRM_PATH="$tmp_dir/drm" OMARCHY_DRI_BY_PATH="$tmp_dir/by-path" OMARCHY_PATH="$ROOT" PATH="$ROOT/bin:$PATH"
++# nvidia.lua reads the video decode pins in ~/.config; keep the developer's own out of the test.
++export HOME="$tmp_dir/home"
++mkdir -p "$HOME"
+ 
+ # Exit statuses, expected NVD_BACKEND/LIBVA/GLX values, then vendor:device:class[:boot_vga].
+ while IFS='|' read -r description nvidia gsp without_gsp display expected_env devices; do
+diff --git a/test/shell.d/hybrid-video-decode-test.sh b/test/shell.d/hybrid-video-decode-test.sh
+new file mode 100755
+index 00000000..f821352e
+--- /dev/null
++++ b/test/shell.d/hybrid-video-decode-test.sh
+@@ -0,0 +1,161 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++test_tmp=$(mktemp -d)
++trap 'rm -rf "$test_tmp"' EXIT
++
++migration=$(grep -l 'Decode video on the integrated GPU of hybrid NVIDIA laptops' "$ROOT"/migrations/*.sh)
++home="$test_tmp/home"
++node="$test_tmp/by-path/pci-0000:65:00.0-render"
++stub_bin="$test_tmp/bin"
++mkdir -p "$stub_bin"
++
++# The refresh copies the shipped default over the user's file; the rest of what
++# it installs is out of scope here.
++cat >"$stub_bin/omarchy-refresh-config" <<'SH'
++#!/bin/bash
++cp -f "$OMARCHY_PATH/config/$1" "$HOME/.config/$1"
++SH
++printf '#!/bin/bash\nexit 0\n' >"$stub_bin/omarchy-install-chromium-copy-url"
++printf '#!/bin/bash\nexit 0\n' >"$stub_bin/omarchy-install-chromium-ytdlp"
++chmod +x "$stub_bin"/*
++
++export OMARCHY_PATH="$ROOT" OMARCHY_INSTALL="$ROOT/install"
++export OMARCHY_PCI_DEVICES_PATH="$test_tmp/devices" OMARCHY_DRI_BY_PATH="$test_tmp/by-path"
++export PATH="$stub_bin:$ROOT/bin:$PATH"
++
++# address=vendor:class[:boot_vga] for each display device.
++machine() {
++  local spec vendor class boot_vga device_dir
++  rm -rf "$test_tmp/devices" "$test_tmp/by-path"
++  mkdir -p "$test_tmp/devices" "$test_tmp/by-path"
++  for spec in "$@"; do
++    IFS=: read -r vendor class boot_vga <<<"${spec#*=}"
++    device_dir="$test_tmp/devices/${spec%%=*}"
++    mkdir -p "$device_dir"
++    printf '%s\n' "$vendor" >"$device_dir/vendor"
++    printf '%s\n' "$class" >"$device_dir/class"
++    if [[ -n $boot_vga ]]; then
++      printf '%s\n' "$boot_vga" >"$device_dir/boot_vga"
++    fi
++    : >"$test_tmp/by-path/pci-${spec%%=*}-render"
++  done
++}
++
++reset_home() {
++  rm -rf "$home" "$test_tmp/targets"
++  mkdir -p "$home/.config" "$test_tmp/targets"
++  cp "$ROOT/config/chromium-flags.conf" "$home/.config/chromium-flags.conf"
++}
++
++run_migration() {
++  HOME="$home" bash -euo pipefail "$migration" >/dev/null
++}
++
++g16=(0000:64:00.0=0x10de:0x030000:0 0000:65:00.0=0x1002:0x038000)
++
++# Zephyrus G16: the RTX sorts first, so decode must be pinned to the Radeon iGPU.
++machine "${g16[@]}"
++reset_home
++cp "$ROOT/config/chromium-flags.conf" "$test_tmp/targets/chrome-flags.conf"
++printf '%s' '--ozone-platform=wayland' >>"$test_tmp/targets/chrome-flags.conf"
++ln -s "$test_tmp/targets/chrome-flags.conf" "$home/.config/chrome-flags.conf"
++run_migration
++run_migration
++
++for flags in chromium-flags.conf chrome-flags.conf; do
++  count=$(grep -cFx -- "--render-node-override=$node" "$home/.config/$flags" || true)
++  (( count == 1 )) || fail "the migration pins $flags to the iGPU once" "$(cat "$home/.config/$flags")"
++done
++grep -qx -- '--ozone-platform=wayland--render-node-override=.*' "$home/.config/chrome-flags.conf" &&
++  fail "the pin starts a line of its own after a missing trailing newline"
++[[ -L $home/.config/chrome-flags.conf ]] || fail "a symlinked flags file stays a symlink"
++[[ ! -e $home/.config/brave-flags.conf ]] || fail "flags files the user does not have stay absent"
++pass "the migration pins existing Chromium-family flags files to the iGPU, once"
++
++[[ $(cat "$home/.config/mpv/mpv.conf") == "# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."$'\n'"hwdec=vaapi"$'\n'"vaapi-device=$node" ]] ||
++  fail "the migration creates an mpv config that decodes through VA-API on the iGPU" "$(cat "$home/.config/mpv/mpv.conf")"
++pass "the migration creates an mpv config that decodes through VA-API on the iGPU, once"
++
++# A user's own choices win, and a [profile] section keeps its options.
++reset_home
++mkdir -p "$home/.config/mpv"
++printf '%s\n' '--render-node-override=/dev/dri/renderD128' >>"$home/.config/chromium-flags.conf"
++printf '%s\n' 'hwdec = auto-copy' 'volume=80' '' '[big]' 'vaapi-device=/dev/dri/renderD128' >"$home/.config/mpv/mpv.conf"
++run_migration
++
++grep -c -- '--render-node-override=' "$home/.config/chromium-flags.conf" | grep -qx 1 ||
++  fail "a render node the user chose is kept" "$(cat "$home/.config/chromium-flags.conf")"
++expected=$(printf '%s\n' "# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep." "vaapi-device=$node" '' 'hwdec = auto-copy' 'volume=80' '' '[big]' 'vaapi-device=/dev/dri/renderD128')
++[[ $(cat "$home/.config/mpv/mpv.conf") == "$expected" ]] ||
++  fail "the mpv pin keeps the user's hwdec and lands ahead of their profiles" "$(cat "$home/.config/mpv/mpv.conf")"
++pass "settings the user already has are kept"
++
++# Machines where the pin does not apply are left exactly as they were.
++for description in "AMD only" "NVIDIA drives the display" "No device claims boot_vga"; do
++  case $description in
++  "AMD only") machine 0000:65:00.0=0x1002:0x038000 ;;
++  "NVIDIA drives the display") machine 0000:00:02.0=0x8086:0x030000:0 0000:01:00.0=0x10de:0x030000:1 ;;
++  "No device claims boot_vga") machine 0000:05:00.0=0x1002:0x030000 0000:01:00.0=0x10de:0x030200 ;;
++  esac
++  reset_home
++  run_migration
++  cmp -s "$ROOT/config/chromium-flags.conf" "$home/.config/chromium-flags.conf" ||
++    fail "$description: the Chromium flags are untouched"
++  [[ ! -e $home/.config/mpv ]] || fail "$description: no mpv config is created"
++  pass "$description: nothing is written"
++done
++
++# New users get the pin from the per-user hardware leaf.
++machine "${g16[@]}"
++reset_home
++HOME="$home" bash -euo pipefail "$ROOT/install/user/hardware/hybrid-video-decode.sh" >/dev/null
++grep -qFx -- "--render-node-override=$node" "$home/.config/chromium-flags.conf" ||
++  fail "the per-user leaf pins Chromium"
++grep -qFx -- "vaapi-device=$node" "$home/.config/mpv/mpv.conf" || fail "the per-user leaf pins mpv"
++pass "the per-user hardware leaf pins mpv and Chromium"
++
++# Refreshing Chromium's flags from the default keeps the pin.
++HOME="$home" bash "$ROOT/bin/omarchy-refresh-chromium" >/dev/null
++count=$(grep -cFx -- "--render-node-override=$node" "$home/.config/chromium-flags.conf" || true)
++(( count == 1 )) || fail "omarchy-refresh-chromium keeps the pin" "$(cat "$home/.config/chromium-flags.conf")"
++pass "omarchy-refresh-chromium keeps the pin"
++
++# A pin to an iGPU that is gone (a MUX switch, a BIOS update that moved its PCI
++# address) is dropped and pinned again to the iGPU that is there now; with no
++# iGPU at all the pins go. A user's own non-by-path setting stays.
++stale_check() { # prints yes when nvidia.lua would schedule a refresh at start
++  HOME="$home" lua <<'LUA'
++package.path = os.getenv("ROOT") .. "/?.lua;" .. package.path
++require("default.hypr.helpers")
++local started = {}
++hl = { env = function() end, on = function(event, fn) if event == "hyprland.start" then started[#started + 1] = fn end end,
++  exec_cmd = function(command) io.write(command, "\n") end }
++require("default.hypr.nvidia")
++-- Other modules register start handlers too; only the commands matter here.
++for _, fn in ipairs(started) do pcall(fn) end
++LUA
++}
++machine "${g16[@]}"
++reset_home
++HOME="$home" bash -euo pipefail "$ROOT/install/user/hardware/hybrid-video-decode.sh" >/dev/null
++[[ -z $(stale_check) ]] || fail "valid pins schedule no refresh at start"
++machine 0000:64:00.0=0x10de:0x030000:0 0000:66:00.0=0x1002:0x038000
++moved="$test_tmp/by-path/pci-0000:66:00.0-render"
++[[ $(stale_check) == *omarchy-refresh-hybrid-video* ]] || fail "a pin to a gone iGPU schedules a refresh at start"
++HOME="$home" bash "$ROOT/bin/omarchy-refresh-hybrid-video"
++! grep -qF "pci-0000:65:00.0" "$home/.config/chromium-flags.conf" "$home/.config/mpv/mpv.conf" ||
++  fail "the stale pins are dropped"
++grep -qFx -- "--render-node-override=$moved" "$home/.config/chromium-flags.conf" || fail "Chromium is pinned to the iGPU's new address"
++grep -qFx -- "vaapi-device=$moved" "$home/.config/mpv/mpv.conf" || fail "mpv is pinned to the iGPU's new address"
++(( $(grep -c '^# Decode video on the integrated GPU' "$home/.config/mpv/mpv.conf") == 1 )) || fail "the mpv note is written once"
++[[ -z $(stale_check) ]] || fail "refreshed pins schedule no refresh at start"
++machine 0000:64:00.0=0x10de:0x030000:1
++printf 'vaapi-device=/dev/dri/renderD129\n' >>"$home/.config/mpv/mpv.conf"
++HOME="$home" bash "$ROOT/bin/omarchy-refresh-hybrid-video"
++! grep -qF "by-path" "$home/.config/chromium-flags.conf" "$home/.config/mpv/mpv.conf" || fail "with no iGPU the pins go"
++grep -qFx 'vaapi-device=/dev/dri/renderD129' "$home/.config/mpv/mpv.conf" || fail "a pin the user set by device number stays"
++pass "stale render node pins are dropped and re-pinned, at Hyprland start only when needed"
+-- 
+2.55.0
+

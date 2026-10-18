@@ -1,0 +1,118 @@
+From fd79e555f0b0d02ebe1299cfbd2130f6aa7adf23 Mon Sep 17 00:00:00 2001
+From: edbron
+Date: Tue, 25 Aug 2026 18:38:56 +0000
+Subject: [PATCH 12/18] Stop early-loading the NVIDIA driver on hybrid GPU
+ machines
+
+install/hardware/nvidia.sh wrote MODULES+=(nvidia ...) into the initramfs on
+every NVIDIA machine. On a hybrid laptop that breaks resume from hibernation:
+the kernel freezes devices to restore the image while the driver is already
+loaded but its procfs suspend interface was never called (nvidia-hibernate
+.service only runs from the real root), so nv_pmops_freeze returns -5 and
+the machine boots fresh. The iGPU already provides early KMS there, and udev
+loads nvidia once root is mounted, so the early load buys nothing.
+
+Add omarchy-hw-nvidia-only-display (the sysfs scan omarchy_hooks.conf already
+does inline), early-load only when it says NVIDIA owns every display
+controller, and migrate existing hybrid installs with a one-time rebuild.
+
+Upstream: omacom/omarchy#8263
+Backport-of: aa9f2808555bdb94e65373f2093764bc7a9b89f9
+
+(cherry picked from commit aa9f2808555bdb94e65373f2093764bc7a9b89f9)
+---
+ bin/omarchy-hw-nvidia-only-display | 21 +++++++++++++++++++++
+ install/hardware/nvidia.sh         | 19 +++++++++++++++++--
+ migrations/1787683023.sh           | 21 +++++++++++++++++++++
+ 3 files changed, 59 insertions(+), 2 deletions(-)
+ create mode 100755 bin/omarchy-hw-nvidia-only-display
+ create mode 100644 migrations/1787683023.sh
+
+diff --git a/bin/omarchy-hw-nvidia-only-display b/bin/omarchy-hw-nvidia-only-display
+new file mode 100755
+index 00000000..32eb166a
+--- /dev/null
++++ b/bin/omarchy-hw-nvidia-only-display
+@@ -0,0 +1,21 @@
++#!/bin/bash
++
++# omarchy:summary=Detect whether NVIDIA owns every display controller (no iGPU or other GPU).
++
++# Read the cached sysfs IDs rather than lspci, which reads PCI config space and
++# resumes runtime-suspended GPUs. Anything unreadable could be another GPU, so
++# it counts as one: callers use a "yes" to early-load nvidia and to drop the
++# kms hook from the initramfs, so the answer must err towards "no".
++pci_devices_path="${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}"
++
++shopt -s nullglob
++
++nvidia=0
++for device in "$pci_devices_path"/*; do
++  [[ -r $device/class && -r $device/vendor ]] || exit 1
++  [[ $(< "$device/class") == 0x03* ]] || continue
++  [[ $(< "$device/vendor") == "0x10de" ]] || exit 1
++  nvidia=1
++done
++
++((nvidia))
+diff --git a/install/hardware/nvidia.sh b/install/hardware/nvidia.sh
+index 1c36787b..704c15eb 100644
+--- a/install/hardware/nvidia.sh
++++ b/install/hardware/nvidia.sh
+@@ -21,9 +21,24 @@ if lspci | grep -qi 'nvidia'; then
+ options nvidia_drm modeset=1
+ EOF
+ 
+-  # Configure mkinitcpio for early loading
++  # Early-load the driver in the initramfs only when NVIDIA owns every display
++  # controller. That is the one case that needs it: without it an NVIDIA-only
++  # machine has no KMS at the LUKS prompt.
++  #
++  # A hybrid machine gets early KMS from its iGPU, and early-loading nvidia
++  # there breaks resume from hibernation: the kernel freezes devices to restore
++  # the image while the driver is already loaded but nothing has called its
++  # procfs suspend interface (nvidia-hibernate.service only runs from the real
++  # root), so nv_pmops_freeze returns -5 and the machine boots fresh instead.
++  # udev still loads the driver once the root is mounted.
++  #
++  # Same scan omarchy_hooks.conf uses to decide whether to drop the kms hook.
+   mkdir -p /etc/mkinitcpio.conf.d
+-  cat > /etc/mkinitcpio.conf.d/nvidia.conf <<'EOF'
++  if omarchy-hw-nvidia-only-display; then
++    cat > /etc/mkinitcpio.conf.d/nvidia.conf <<'EOF'
+ MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)
+ EOF
++  else
++    rm -f /etc/mkinitcpio.conf.d/nvidia.conf
++  fi
+ fi
+diff --git a/migrations/1787683023.sh b/migrations/1787683023.sh
+new file mode 100644
+index 00000000..1293d11a
+--- /dev/null
++++ b/migrations/1787683023.sh
+@@ -0,0 +1,21 @@
++echo "Stop early-loading the NVIDIA driver on hybrid GPU systems so hibernation can resume"
++
++# install/hardware/nvidia.sh used to write nvidia.conf on every NVIDIA machine.
++# On a hybrid laptop the iGPU provides early KMS, and having nvidia already
++# loaded inside the initramfs makes resume from hibernation fail with
++# "nv_pmops_freeze returns -5" / "PM: hibernation: resume failed (-5)".
++# Drop the drop-in on those machines and rebuild the initramfs once. A marker
++# records completion so another user's run does not repeat the rebuild.
++
++nvidia_conf="${OMARCHY_MKINITCPIO_NVIDIA_CONF:-/etc/mkinitcpio.conf.d/nvidia.conf}"
++rebuild_marker="${OMARCHY_NVIDIA_REBUILD_MARKER:-/var/lib/omarchy/migrations/1787683023}"
++
++omarchy-cmd-present limine-mkinitcpio || exit 0
++[[ -f $nvidia_conf ]] || exit 0
++[[ ! -e $rebuild_marker ]] || exit 0
++omarchy-hw-nvidia-only-display && exit 0
++
++echo "This is a hybrid GPU machine; removing nvidia from the initramfs and rebuilding it"
++sudo rm -f "$nvidia_conf"
++sudo limine-mkinitcpio
++sudo install -Dm644 /dev/null "$rebuild_marker"
+-- 
+2.55.0
+

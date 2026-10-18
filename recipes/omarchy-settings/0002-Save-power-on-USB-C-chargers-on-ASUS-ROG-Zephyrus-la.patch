@@ -1,0 +1,544 @@
+From 0f73e205d5b746c528391084044b79a2f0db7364 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:24:26 -0400
+Subject: [PATCH 02/18] Save power on USB-C chargers on ASUS ROG Zephyrus
+ laptops
+
+The ACPI adapter reads online for the barrel and for a USB-C charger
+alike, so a 100 W USB-C charger got the AC profile, performance. Read the
+firmware's charge_mode (asus-armoury, or asus-nb-wmi on older kernels)
+and treat USB-C as its own source: balanced by default, with the profile
+picked there remembered apart from the barrel's.
+
+Backport to v4.0.5: install/user/first-run/enable-user-units.sh there is a single
+`systemctl --user enable --now` list, not quattro's per-unit loop; the new unit
+is appended to that list.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: 3ce148092cfb586660879ece87315e4b82c32770
+Backport-of: c2d2efffece6603a8f60cc7e752c142fcc1a6b74 (fixup)
+Backport-of: b3d4fdef268fa713a0964c45f6e9c21d2040d246 (fixup)
+Backport-of: b237f1ad6e2e8992be12ea296d7d2f784cf558ac (fixup)
+Backport-of: 681d4a177e92d0143a6a591d4db70f2721ada09b (fixup)
+Backport-of: 8685f47bc5cb9c12b25006da662c92ece8e5a5b7 (fixup)
+
+(cherry picked from commit 3ce148092cfb586660879ece87315e4b82c32770)
+---
+ bin/omarchy-hw-asus-rog-usbc-power            |  50 +++++++
+ bin/omarchy-powerprofiles-set                 |  19 ++-
+ bin/omarchy-powerprofiles-source-monitor      |  56 ++++++++
+ ...archy-powerprofiles-source-monitor.service |  18 +++
+ install/user/first-run/enable-user-units.sh   |   3 +-
+ manual/36-system-sleep.md                     |   2 +-
+ migrations/1792174852.sh                      |  18 +++
+ shell/plugins/panels/power/Panel.qml          |   2 +-
+ test/shell.d/asus-rog-usbc-power-test.sh      | 135 ++++++++++++++++++
+ test/shell.d/powerprofiles-set-test.sh        |   3 +
+ .../powerprofiles-source-monitor-test.sh      |  80 +++++++++++
+ 11 files changed, 380 insertions(+), 6 deletions(-)
+ create mode 100755 bin/omarchy-hw-asus-rog-usbc-power
+ create mode 100755 bin/omarchy-powerprofiles-source-monitor
+ create mode 100644 default/systemd/user/omarchy-powerprofiles-source-monitor.service
+ create mode 100644 migrations/1792174852.sh
+ create mode 100755 test/shell.d/asus-rog-usbc-power-test.sh
+ create mode 100755 test/shell.d/powerprofiles-source-monitor-test.sh
+
+diff --git a/bin/omarchy-hw-asus-rog-usbc-power b/bin/omarchy-hw-asus-rog-usbc-power
+new file mode 100755
+index 00000000..5e422c4c
+--- /dev/null
++++ b/bin/omarchy-hw-asus-rog-usbc-power
+@@ -0,0 +1,50 @@
++#!/bin/bash
++
++# omarchy:summary=Detect whether an ASUS ROG laptop runs from a USB-C charger rather than its barrel adapter.
++
++# The firmware reports which input it charges from (WMI DSTS 0x0012006C):
++# 0 for none, bit 0 for the barrel adapter, bit 1 for a USB-C PD charger, and 3
++# when both are plugged in and it charges from the barrel. Other bits can be set
++# too: a 60 W PD charger reads 18 (0x12, bit 4 as well), so only bits 0 and 1
++# are tested. The kernel publishes
++# it read-only as the asus-armoury charge_mode attribute, or as asus-nb-wmi's
++# charge_mode on kernels without asus-armoury. UPower can't tell the two apart:
++# the ACPI adapter reads online for either.
++sys="${OMARCHY_SYS_ROOT:-/sys}"
++charge_mode_files=(
++  "$sys/class/firmware-attributes/asus-armoury/attributes/charge_mode/current_value"
++  "$sys/devices/platform/asus-nb-wmi/charge_mode"
++)
++
++charge_mode_file=""
++for file in "${charge_mode_files[@]}"; do
++  if [[ -r $file ]]; then
++    charge_mode_file=$file
++    break
++  fi
++done
++
++[[ -n $charge_mode_file ]] || exit 1
++omarchy-hw-asus-rog || exit 1
++
++read_charge_mode() {
++  local value=""
++  read -r value <"$charge_mode_file" 2>/dev/null || true
++  [[ $value =~ ^[0-9]+$ ]] || value=0
++  charge_mode=$((10#$value))
++}
++
++read_charge_mode
++
++# The firmware sets the bits a moment after the adapter comes online, so a
++# charger plugged in just now can still read 0. Give it up to two seconds, and
++# only while external power is present: on battery 0 is the answer.
++if (( charge_mode == 0 )) && omarchy-power-present; then
++  for _ in {1..8}; do
++    sleep 0.25
++    read_charge_mode
++    (( charge_mode == 0 )) || break
++  done
++fi
++
++(( !(charge_mode & 1) && (charge_mode & 2) ))
+diff --git a/bin/omarchy-powerprofiles-set b/bin/omarchy-powerprofiles-set
+index 1135e4d5..0698d559 100755
+--- a/bin/omarchy-powerprofiles-set
++++ b/bin/omarchy-powerprofiles-set
+@@ -1,20 +1,22 @@
+ #!/bin/bash
+ 
+ # omarchy:summary=Set and remember the power profile for AC or battery use
+-# omarchy:args=[autodetect|ac|battery] [power-saver|balanced|performance]
++# omarchy:args=[autodetect|ac|battery|usb-c] [power-saver|balanced|performance]
+ 
+ action="${1:-autodetect}"
+ requested_profile="${2:-}"
+ 
+ usage() {
+-  echo "Usage: omarchy-powerprofiles-set [autodetect|ac|battery] [power-saver|balanced|performance]" >&2
++  echo "Usage: omarchy-powerprofiles-set [autodetect|ac|battery|usb-c] [power-saver|balanced|performance]" >&2
+   exit 1
+ }
+ 
+ (( $# <= 2 )) || usage
+ 
++detected=0
+ case "$action" in
+   autodetect)
++    detected=1
+     # Use the same signal as the shell (UPower.onBattery) so every entry point
+     # saves and restores the profile under the same ac/battery key.
+     if [[ $(busctl get-property org.freedesktop.UPower /org/freedesktop/UPower org.freedesktop.UPower OnBattery 2>/dev/null) == "b true" ]]; then
+@@ -23,10 +25,21 @@ case "$action" in
+       action=ac
+     fi
+     ;;
+-  ac | battery) ;;
++  ac | battery | usb-c) ;;
+   *) usage ;;
+ esac
+ 
++# An ASUS ROG laptop runs at full power only from its own barrel adapter. A
++# USB-C charger delivers far less (100 W, against 200-330 W from the
++# barrel), so there it saves power as on battery: balanced unless a profile was
++# picked while on USB-C, which is remembered apart from the barrel's. Only the
++# current source is resolved this way (autodetect, or a power-source change
++# naming ac without a profile); `ac <profile>` names the barrel explicitly, as
++# `battery <profile>` names battery, and `usb-c <profile>` names USB-C.
++if [[ $action == "ac" ]] && { (( detected )) || [[ -z $requested_profile ]]; } && omarchy-hw-asus-rog-usbc-power; then
++  action=usb-c
++fi
++
+ mapfile -t profiles < <(omarchy-powerprofiles-list)
+ 
+ profile_available() {
+diff --git a/bin/omarchy-powerprofiles-source-monitor b/bin/omarchy-powerprofiles-source-monitor
+new file mode 100755
+index 00000000..abf8934a
+--- /dev/null
++++ b/bin/omarchy-powerprofiles-source-monitor
+@@ -0,0 +1,56 @@
++#!/bin/bash
++
++# omarchy:summary=Re-apply the power profile when an ASUS ROG laptop swaps between its barrel adapter and a USB-C charger
++# omarchy:hidden=true
++
++# The battery service applies the profile when UPower's OnBattery changes, which
++# covers plugging in and unplugging. Swapping one charger for another while the
++# laptop stays powered (USB-C in, then the barrel out) leaves OnBattery alone,
++# and UPower does not track the USB-C supply, so nothing else notices. The kernel
++# sends a power_supply uevent for each charger either way; follow those and act
++# only on a move between two chargers, so a plug or unplug is never applied
++# twice. Each platform-profile write can wake the NVIDIA GPU, so that matters.
++
++power_source() {
++  if ! omarchy-power-present; then
++    echo battery
++  elif omarchy-hw-asus-rog-usbc-power; then
++    echo usb-c
++  else
++    echo ac
++  fi
++}
++
++consume_power_events() {
++  local line last current
++  last=$(power_source)
++
++  while IFS= read -r line; do
++    [[ $line == *"(power_supply)"* ]] || continue
++    # The battery reports every percent; only a charger can change the source.
++    [[ $line == *"/power_supply/BAT"* ]] && continue
++
++    # One plug sends a burst of events; act once it has settled.
++    while IFS= read -r -t 1 line; do :; done
++
++    current=$(power_source)
++    if [[ $last != battery && $current != battery && $current != "$last" ]]; then
++      omarchy-powerprofiles-set ac || true
++    fi
++    last=$current
++  done
++}
++
++case ${1:-} in
++  --consume)
++    consume_power_events
++    exit 0
++    ;;
++esac
++
++udevadm monitor --udev --subsystem-match=power_supply | consume_power_events
++
++# udevadm monitor runs until it is stopped, so reaching here means it failed or
++# went away. Exit non-zero so systemd restarts the monitor.
++echo "udevadm monitor ended; exiting so systemd restarts the monitor" >&2
++exit 1
+diff --git a/default/systemd/user/omarchy-powerprofiles-source-monitor.service b/default/systemd/user/omarchy-powerprofiles-source-monitor.service
+new file mode 100644
+index 00000000..4630839a
+--- /dev/null
++++ b/default/systemd/user/omarchy-powerprofiles-source-monitor.service
+@@ -0,0 +1,18 @@
++[Unit]
++Description=Re-apply the power profile when an ASUS ROG laptop swaps chargers
++# Only ASUS laptops whose firmware says which charger is in use, through
++# asus-armoury's charge_mode (or asus-nb-wmi's on older kernels), can tell a
++# USB-C charger from the barrel adapter. Everywhere else the unit stays inert.
++ConditionPathExists=|/sys/class/firmware-attributes/asus-armoury/attributes/charge_mode/current_value
++ConditionPathExists=|/sys/devices/platform/asus-nb-wmi/charge_mode
++After=graphical-session.target
++PartOf=graphical-session.target
++
++[Service]
++Type=simple
++ExecStart=/usr/bin/omarchy-powerprofiles-source-monitor
++Restart=on-failure
++RestartSec=5
++
++[Install]
++WantedBy=graphical-session.target
+diff --git a/install/user/first-run/enable-user-units.sh b/install/user/first-run/enable-user-units.sh
+index 9865fc20..9b301437 100755
+--- a/install/user/first-run/enable-user-units.sh
++++ b/install/user/first-run/enable-user-units.sh
+@@ -18,4 +18,5 @@ systemctl --user enable --now \
+   omarchy-sleep-lock.service \
+   omarchy-migrate-notify.service \
+   omarchy-fcitx5.service \
+-  omarchy-crash-watch.service
++  omarchy-crash-watch.service \
++  omarchy-powerprofiles-source-monitor.service
+diff --git a/manual/36-system-sleep.md b/manual/36-system-sleep.md
+index df6c8174..59eea46d 100644
+--- a/manual/36-system-sleep.md
++++ b/manual/36-system-sleep.md
+@@ -6,7 +6,7 @@ Omarchy enables suspend and hibernation by default, but if you're having issues
+ 
+ On a laptop, Omarchy remembers your power profile separately for plugged in and running on battery, and switches between the two as you plug and unplug. Out of the box that means performance on AC and balanced on battery.
+ 
+-You can see what your machine offers with `omarchy powerprofiles list`, and set the one you want for the state you're currently in with `omarchy powerprofiles set autodetect power-saver`. To set the other state without unplugging anything, name it directly: `omarchy powerprofiles set battery power-saver`. Whatever you pick is what you'll get back the next time you're in that state.
++You can see what your machine offers with `omarchy powerprofiles list`, and set the one you want for the state you're currently in with `omarchy powerprofiles set autodetect power-saver`. To set the other state without unplugging anything, name it directly: `omarchy powerprofiles set battery power-saver`. Whatever you pick is what you'll get back the next time you're in that state. On an ASUS ROG laptop, a USB-C charger is a state of its own, `usb-c`, apart from the barrel adapter's `ac`: it defaults to balanced, and `omarchy powerprofiles set usb-c performance` sets it from anywhere.
+ 
+ ### Toggle suspend
+ 
+diff --git a/migrations/1792174852.sh b/migrations/1792174852.sh
+new file mode 100644
+index 00000000..f1c9ebc6
+--- /dev/null
++++ b/migrations/1792174852.sh
+@@ -0,0 +1,18 @@
++echo "Re-apply the power profile when an ASUS ROG laptop swaps chargers"
++
++# The unit's ConditionPathExists keeps it inert on machines without ASUS
++# charge_mode, so it is enabled everywhere, the same as at first run.
++systemctl --user daemon-reload >/dev/null 2>&1 || true
++
++# `systemctl enable` needs a live user manager, which an `omarchy update` from a
++# TTY does not have; then write the symlink it would have written.
++if ! systemctl --user enable omarchy-powerprofiles-source-monitor.service >/dev/null 2>&1; then
++  wants_dir="$HOME/.config/systemd/user/graphical-session.target.wants"
++  mkdir -p "$wants_dir"
++  ln -sfn /usr/lib/systemd/user/omarchy-powerprofiles-source-monitor.service \
++    "$wants_dir/omarchy-powerprofiles-source-monitor.service"
++fi
++
++if systemctl --user is-active --quiet graphical-session.target; then
++  systemctl --user start omarchy-powerprofiles-source-monitor.service >/dev/null 2>&1 || true
++fi
+diff --git a/shell/plugins/panels/power/Panel.qml b/shell/plugins/panels/power/Panel.qml
+index 4628f8af..d1dd810a 100644
+--- a/shell/plugins/panels/power/Panel.qml
++++ b/shell/plugins/panels/power/Panel.qml
+@@ -166,7 +166,7 @@ Panel {
+ 
+   function setProfile(profile) {
+     if (!profile || actionProc.running) return
+-    actionProc.command = ["omarchy-powerprofiles-set", root.discharging ? "battery" : "ac", profile]
++    actionProc.command = ["omarchy-powerprofiles-set", root.discharging ? "battery" : "autodetect", profile]
+     actionProc.running = true
+   }
+ 
+diff --git a/test/shell.d/asus-rog-usbc-power-test.sh b/test/shell.d/asus-rog-usbc-power-test.sh
+new file mode 100755
+index 00000000..8676f80e
+--- /dev/null
++++ b/test/shell.d/asus-rog-usbc-power-test.sh
+@@ -0,0 +1,135 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++tmp_dir=$(mktemp -d)
++trap 'rm -rf "$tmp_dir"' EXIT
++
++sys="$tmp_dir/sys"
++armoury="$sys/class/firmware-attributes/asus-armoury/attributes/charge_mode"
++legacy="$sys/devices/platform/asus-nb-wmi"
++power="$tmp_dir/power"
++mkdir -p "$tmp_dir/bin" "$tmp_dir/state" "$armoury" "$legacy" "$power/ACAD"
++printf 'Mains\n' >"$power/ACAD/type"
++printf '1\n' >"$power/ACAD/online"
++
++# The machine is a ROG laptop unless a test says otherwise.
++cat >"$tmp_dir/bin/omarchy-hw-asus-rog" <<'EOF'
++#!/bin/bash
++[[ ${STUB_ROG:-1} == "1" ]]
++EOF
++# Any model check would narrow USB-C detection below "every ROG laptop"; this
++# stub refuses every model and records being asked, so a test can prove none runs.
++cat >"$tmp_dir/bin/omarchy-hw-match" <<'EOF'
++#!/bin/bash
++printf '%s\n' "$1" >>"$HW_MATCH_LOG"
++exit 1
++EOF
++cat >"$tmp_dir/bin/powerprofilesctl" <<'EOF'
++#!/bin/bash
++if [[ $1 == "list" ]]; then
++  printf '  power-saver:\n* balanced:\n  performance:\n'
++elif [[ $1 == "set" ]]; then
++  printf '%s\n' "$2" >>"$POWERPROFILES_LOG"
++fi
++EOF
++cat >"$tmp_dir/bin/busctl" <<'EOF'
++#!/bin/bash
++echo "b false"
++EOF
++chmod +x "$tmp_dir/bin/"*
++
++export PATH="$tmp_dir/bin:$ROOT/bin:$PATH"
++export OMARCHY_SYS_ROOT="$sys"
++export OMARCHY_POWER_SUPPLY_PATH="$power"
++export OMARCHY_POWERPROFILES_STATE_DIR="$tmp_dir/state"
++export POWERPROFILES_LOG="$tmp_dir/calls"
++export HW_MATCH_LOG="$tmp_dir/hw-match-calls"
++# Toggle flags live under $HOME; keep the developer's own out of the test.
++export HOME="$tmp_dir/home"
++mkdir -p "$HOME"
++
++usbc() {
++  "$ROOT/bin/omarchy-hw-asus-rog-usbc-power"
++}
++
++charge_mode() {
++  printf '%s\n' "$1" >"$armoury/current_value"
++}
++
++charge_mode 2
++usbc || fail "a USB-C charger reads as USB-C power"
++charge_mode 1
++! usbc || fail "the barrel adapter is not USB-C power"
++charge_mode 3
++! usbc || fail "barrel and USB-C together charge from the barrel"
++charge_mode 18
++usbc || fail "a 60 W PD charger (18, bit 4 set as well) reads as USB-C power"
++charge_mode 17
++! usbc || fail "the barrel with bit 4 set is not USB-C power"
++pass "charge_mode tells a USB-C charger from the barrel adapter"
++
++rm "$armoury/current_value"
++printf '2\n' >"$legacy/charge_mode"
++usbc || fail "asus-nb-wmi charge_mode serves kernels without asus-armoury"
++rm "$legacy/charge_mode"
++! usbc || fail "a machine without charge_mode has no USB-C power"
++pass "the older asus-nb-wmi attribute is read when asus-armoury is missing"
++
++charge_mode 2
++! STUB_ROG=0 usbc || fail "a non-ROG ASUS machine is left alone"
++: >"$HW_MATCH_LOG"
++usbc || fail "a ROG laptop on USB-C reads as USB-C power whatever its model"
++[[ ! -s $HW_MATCH_LOG ]] || fail "USB-C detection checks no model name" "$(cat "$HW_MATCH_LOG")"
++pass "USB-C detection is gated on omarchy-hw-asus-rog alone, with no model check"
++
++# On battery 0 is the answer at once; with power present the firmware gets a
++# moment to report the adapter.
++charge_mode 0
++printf '0\n' >"$power/ACAD/online"
++start=$SECONDS
++! usbc || fail "battery is not USB-C power"
++(( SECONDS - start < 1 )) || fail "battery is answered without waiting"
++printf '1\n' >"$power/ACAD/online"
++(sleep 0.5 && charge_mode 2) &
++usbc || fail "a charger the firmware reports a moment late still reads as USB-C"
++wait
++pass "a just-plugged charger is given time to show up in charge_mode"
++
++charge_mode 2
++"$ROOT/bin/omarchy-powerprofiles-set" ac
++[[ $(tail -n 1 "$POWERPROFILES_LOG") == "balanced" ]] || fail "USB-C defaults to balanced"
++charge_mode 1
++"$ROOT/bin/omarchy-powerprofiles-set" ac
++[[ $(tail -n 1 "$POWERPROFILES_LOG") == "performance" ]] || fail "the barrel keeps performance"
++pass "USB-C saves power while the barrel adapter keeps full power"
++
++charge_mode 2
++"$ROOT/bin/omarchy-powerprofiles-set" autodetect power-saver
++[[ $(<"$tmp_dir/state/usb-c") == "power-saver" ]] || fail "a profile picked on USB-C is remembered for USB-C"
++[[ ! -e $tmp_dir/state/ac ]] || fail "a profile picked on USB-C leaves the barrel's alone"
++charge_mode 1
++"$ROOT/bin/omarchy-powerprofiles-set" autodetect
++[[ $(tail -n 1 "$POWERPROFILES_LOG") == "performance" ]] || fail "the barrel restores its own profile"
++charge_mode 2
++"$ROOT/bin/omarchy-powerprofiles-set" autodetect
++[[ $(tail -n 1 "$POWERPROFILES_LOG") == "power-saver" ]] || fail "USB-C restores its own profile"
++pass "USB-C remembers its profile apart from the barrel adapter"
++
++"$ROOT/bin/omarchy-powerprofiles-set" battery
++[[ $(tail -n 1 "$POWERPROFILES_LOG") == "balanced" ]] || fail "battery is unaffected by charge_mode"
++STUB_ROG=0 "$ROOT/bin/omarchy-powerprofiles-set" ac
++[[ $(tail -n 1 "$POWERPROFILES_LOG") == "performance" ]] || fail "other machines keep performance on AC"
++pass "battery and other machines behave as before"
++
++charge_mode 18
++"$ROOT/bin/omarchy-powerprofiles-set" ac balanced
++[[ $(<"$tmp_dir/state/ac") == "balanced" ]] || fail "ac <profile> on USB-C sets the barrel's profile"
++[[ $(<"$tmp_dir/state/usb-c") == "power-saver" ]] || fail "ac <profile> on USB-C leaves USB-C's profile alone"
++charge_mode 1
++"$ROOT/bin/omarchy-powerprofiles-set" usb-c performance
++[[ $(<"$tmp_dir/state/usb-c") == "performance" ]] || fail "usb-c <profile> on the barrel sets USB-C's profile"
++[[ $(<"$tmp_dir/state/ac") == "balanced" ]] || fail "usb-c <profile> leaves the barrel's profile alone"
++pass "naming ac or usb-c sets that source's profile from anywhere"
+diff --git a/test/shell.d/powerprofiles-set-test.sh b/test/shell.d/powerprofiles-set-test.sh
+index e71de864..b3c1a2ca 100755
+--- a/test/shell.d/powerprofiles-set-test.sh
++++ b/test/shell.d/powerprofiles-set-test.sh
+@@ -35,6 +35,9 @@ chmod +x "$tmp_dir/bin/busctl"
+ export PATH="$tmp_dir/bin:$ROOT/bin:$PATH"
+ export POWERPROFILES_LOG="$tmp_dir/calls"
+ export OMARCHY_POWERPROFILES_STATE_DIR="$tmp_dir/state"
++# No ASUS charge_mode here, so an ASUS ROG laptop running this on USB-C power gets the
++# same results as any other machine.
++export OMARCHY_SYS_ROOT="$tmp_dir/sys"
+ 
+ "$ROOT/bin/omarchy-powerprofiles-set" ac balanced
+ [[ $(<"$tmp_dir/state/ac") == "balanced" ]] || fail "power profile stores AC preference"
+diff --git a/test/shell.d/powerprofiles-source-monitor-test.sh b/test/shell.d/powerprofiles-source-monitor-test.sh
+new file mode 100755
+index 00000000..0569ae4f
+--- /dev/null
++++ b/test/shell.d/powerprofiles-source-monitor-test.sh
+@@ -0,0 +1,80 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++tmp_dir=$(mktemp -d)
++trap 'rm -rf "$tmp_dir"' EXIT
++
++# The power source is whatever $tmp_dir/source says: battery, usb-c or ac.
++mkdir -p "$tmp_dir/bin"
++cat >"$tmp_dir/bin/omarchy-power-present" <<EOF
++#!/bin/bash
++[[ \$(<"$tmp_dir/source") != battery ]]
++EOF
++cat >"$tmp_dir/bin/omarchy-hw-asus-rog-usbc-power" <<EOF
++#!/bin/bash
++[[ \$(<"$tmp_dir/source") == usb-c ]]
++EOF
++cat >"$tmp_dir/bin/omarchy-powerprofiles-set" <<EOF
++#!/bin/bash
++printf '%s\n' "\$*" >>"$tmp_dir/calls"
++EOF
++chmod +x "$tmp_dir/bin/"*
++export PATH="$tmp_dir/bin:$PATH"
++
++monitor="$ROOT/bin/omarchy-powerprofiles-source-monitor"
++acad='UDEV  [100.1] change   /devices/LNXSYSTM:00/LNXSYBUS:00/ACPI0003:00/power_supply/ACAD (power_supply)'
++usbc='UDEV  [100.2] change   /devices/platform/USBC000:00/power_supply/ucsi-source-psy-USBC000:001 (power_supply)'
++bat='UDEV  [100.3] change   /devices/LNXSYSTM:00/LNXSYBUS:00/PNP0C0A:00/power_supply/BAT1 (power_supply)'
++
++# run <source at start> <source after the events> <event lines...>
++run() {
++  local start=$1 after=$2
++  shift 2
++  printf '%s\n' "$start" >"$tmp_dir/source"
++  : >"$tmp_dir/calls"
++  {
++    sleep 0.3
++    printf '%s\n' "$after" >"$tmp_dir/source"
++    printf '%s\n' "$@"
++    sleep 1.5
++  } | "$monitor" --consume
++}
++
++run ac usb-c "$acad" "$usbc"
++[[ $(<"$tmp_dir/calls") == "ac" ]] || fail "unplugging the barrel with USB-C in re-applies the profile once" "$(cat "$tmp_dir/calls")"
++run usb-c ac "$acad" "$usbc"
++[[ $(<"$tmp_dir/calls") == "ac" ]] || fail "plugging the barrel in on USB-C re-applies the profile once" "$(cat "$tmp_dir/calls")"
++pass "a swap between the barrel and USB-C re-applies the profile once"
++
++run battery ac "$acad"
++[[ ! -s $tmp_dir/calls ]] || fail "plugging in is left to the battery service" "$(cat "$tmp_dir/calls")"
++run usb-c battery "$usbc"
++[[ ! -s $tmp_dir/calls ]] || fail "unplugging is left to the battery service" "$(cat "$tmp_dir/calls")"
++run ac ac "$acad"
++[[ ! -s $tmp_dir/calls ]] || fail "an event that changes no source does nothing" "$(cat "$tmp_dir/calls")"
++run usb-c ac "$bat"
++[[ ! -s $tmp_dir/calls ]] || fail "battery uevents are ignored" "$(cat "$tmp_dir/calls")"
++pass "plug, unplug, battery and no-change events are left alone"
++
++# If udevadm monitor dies, the monitor must exit non-zero so systemd restarts it.
++cat >"$tmp_dir/bin/udevadm" <<'EOF2'
++#!/bin/bash
++exit 1
++EOF2
++chmod +x "$tmp_dir/bin/udevadm"
++printf 'ac\n' >"$tmp_dir/source"
++if "$monitor" 2>/dev/null; then
++  fail "the monitor exits non-zero when udevadm monitor ends"
++fi
++pass "the monitor exits non-zero when udevadm monitor ends, so systemd restarts it"
++
++unit="$ROOT/default/systemd/user/omarchy-powerprofiles-source-monitor.service"
++grep -Fx 'ConditionPathExists=|/sys/class/firmware-attributes/asus-armoury/attributes/charge_mode/current_value' "$unit" >/dev/null &&
++  grep -Fx 'ConditionPathExists=|/sys/devices/platform/asus-nb-wmi/charge_mode' "$unit" >/dev/null ||
++  fail "the source monitor runs only where charge_mode exists"
++grep -F 'omarchy-powerprofiles-source-monitor.service' "$ROOT/install/user/first-run/enable-user-units.sh" >/dev/null ||
++  fail "first run enables the source monitor"
++pass "the source monitor is enabled everywhere and runs only on ASUS charge_mode hardware"
+-- 
+2.55.0
+

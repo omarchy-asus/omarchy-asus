@@ -1,0 +1,64 @@
+From 4b55126c436b6a11a7f4a2aa615ffd30737b7d3c Mon Sep 17 00:00:00 2001
+From: Omarchybot
+Date: Thu, 1 Oct 2026 10:00:24 +0200
+Subject: [PATCH 11/18] Install rtkit on fresh installs and restart the portal
+ before PipeWire
+
+omarchy-other.packages only seeds the ISO's offline mirror; the installer pacstraps omarchy-base.packages, so rtkit listed only in the other list never reaches a fresh install, and fresh installs mark this migration done.
+
+xdg-desktop-portal reads rtkit's RTTimeUSecMax once, at startup. Restarting the audio units while it still reports 0 gave WirePlumber, and the shell as it reconnected, a hard RLIMIT_RTTIME of 0 with SCHED_RR data loops. Restarting the portal first gives them 200000 us like the daemon.
+
+Upstream: omacom/omarchy#12428
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: dac602f5f30f451dca5ac04da02fd89fd3fe5a35
+
+(cherry picked from commit dac602f5f30f451dca5ac04da02fd89fd3fe5a35)
+---
+ install/omarchy-base.packages  | 1 +
+ install/omarchy-other.packages | 1 -
+ migrations/1789747667.sh       | 4 ++++
+ 3 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/install/omarchy-base.packages b/install/omarchy-base.packages
+index c5013ba6..83c0e48c 100644
+--- a/install/omarchy-base.packages
++++ b/install/omarchy-base.packages
+@@ -110,6 +110,7 @@ qrencode
+ qt6-imageformats
+ quickshell
+ ripgrep
++rtkit
+ ruby
+ tensaku
+ sddm
+diff --git a/install/omarchy-other.packages b/install/omarchy-other.packages
+index cdc848ea..d859fca8 100644
+--- a/install/omarchy-other.packages
++++ b/install/omarchy-other.packages
+@@ -36,7 +36,6 @@ pipewire-alsa
+ pipewire-jack
+ pipewire-pulse
+ qt6-wayland
+-rtkit
+ snapper
+ sof-firmware
+ thermald
+diff --git a/migrations/1789747667.sh b/migrations/1789747667.sh
+index dac3cfca..47e979b3 100644
+--- a/migrations/1789747667.sh
++++ b/migrations/1789747667.sh
+@@ -7,6 +7,10 @@ echo "Install rtkit so PipeWire gets realtime priority"
+ # sustained load.
+ omarchy-pkg-add rtkit
+ 
++# The portal reads rtkit's realtime budget once, so restart it first: PipeWire
++# clients that reconnect to a stale portal take a hard RLIMIT_RTTIME of 0.
++systemctl --user try-restart xdg-desktop-portal.service 2>/dev/null || true
++
+ # rtkit only takes effect when PipeWire re-requests priority at startup.
+ # Restart the audio units if they are running; harmless when idle or as root.
+ systemctl --user try-restart pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null || true
+-- 
+2.55.0
+

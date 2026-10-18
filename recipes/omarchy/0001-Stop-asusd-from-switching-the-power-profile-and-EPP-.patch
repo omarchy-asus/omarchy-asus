@@ -1,0 +1,214 @@
+From 72ffb6c92eb4b3e15da993554db189b47e755f45 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 03:23:55 -0400
+Subject: [PATCH 01/18] Stop asusd from switching the power profile and EPP on
+ ROG laptops
+
+asusd switches the platform profile on plug and unplug and rewrites the
+CPU EPP from its own table after every profile change, racing
+omarchy-powerprofiles-set and power-profiles-daemon. Turn those three
+settings off whenever asusd starts.
+
+Co-Authored-By: Claude Opus 5.5
+Backport-of: faf6db4d72706e7026d48f4373a39a01f3fcde41
+Backport-of: 24211666bec358453d09c697b93cdfd63775ed2f (fixup)
+
+(cherry picked from commit faf6db4d72706e7026d48f4373a39a01f3fcde41)
+---
+ .../10-omarchy-power-profiles.conf            |  13 ++
+ migrations/1792122579.sh                      |  18 +++
+ test/shell.d/asusd-power-profiles-test.sh     | 137 ++++++++++++++++++
+ 3 files changed, 168 insertions(+)
+ create mode 100644 etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf
+ create mode 100644 migrations/1792122579.sh
+ create mode 100755 test/shell.d/asusd-power-profiles-test.sh
+
+diff --git a/etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf b/etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf
+new file mode 100644
+index 00000000..22a41c3d
+--- /dev/null
++++ b/etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf
+@@ -0,0 +1,13 @@
++# Omarchy owns the power profile: omarchy-powerprofiles-set restores the
++# profile remembered for AC or battery through power-profiles-daemon, which
++# also sets the CPU energy performance preference (EPP) for that profile. By
++# default asusd does the same jobs on its own: it switches the platform profile
++# when the charger is plugged in or out, and after every profile change, by
++# whoever made it, it rewrites the EPP from its own table. The two then race on
++# every plug, and asusd's EPP replaces the one power-profiles-daemon chose.
++# Turn those three asusd settings off whenever it starts (asusd saves them in
++# /etc/asusd/asusd.ron); everything else asusd does is unchanged.
++[Service]
++ExecStartPost=-/usr/bin/busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnAc b false
++ExecStartPost=-/usr/bin/busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnBattery b false
++ExecStartPost=-/usr/bin/busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform PlatformProfileLinkedEpp b false
+diff --git a/migrations/1792122579.sh b/migrations/1792122579.sh
+new file mode 100644
+index 00000000..9063fc75
+--- /dev/null
++++ b/migrations/1792122579.sh
+@@ -0,0 +1,18 @@
++echo "Stop asusd from switching the power profile and EPP on ASUS ROG laptops"
++
++# etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf turns these
++# off at every asusd start. Apply them to the running asusd too, so the fix does
++# not wait for a reboot. asusd's D-Bus policy lets wheel and users members set
++# them without root, and asusd saves them in /etc/asusd/asusd.ron.
++omarchy-hw-asus-rog || exit 0
++systemctl is-active --quiet asusd.service || exit 0
++
++asusd_platform=(xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform)
++
++for property in ChangePlatformProfileOnAc ChangePlatformProfileOnBattery PlatformProfileLinkedEpp; do
++  value=$(busctl --system get-property "${asusd_platform[@]}" "$property" 2>/dev/null || true)
++  if [[ $value == "b true" ]]; then
++    busctl --system set-property "${asusd_platform[@]}" "$property" b false ||
++      echo "Could not turn off asusd $property now; it is turned off when asusd next starts"
++  fi
++done
+diff --git a/test/shell.d/asusd-power-profiles-test.sh b/test/shell.d/asusd-power-profiles-test.sh
+new file mode 100755
+index 00000000..8d91ba80
+--- /dev/null
++++ b/test/shell.d/asusd-power-profiles-test.sh
+@@ -0,0 +1,137 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++test_dir=$(mktemp -d)
++trap 'rm -rf "$test_dir" "${unit_dir:-}"' EXIT
++
++dropin="$ROOT/etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf"
++[[ -f $dropin ]] || fail "the asusd drop-in exists at $dropin"
++
++mapfile -t lines < <(grep -vE '^[[:space:]]*(#|$)' "$dropin")
++expected=(
++  "[Service]"
++  "ExecStartPost=-/usr/bin/busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnAc b false"
++  "ExecStartPost=-/usr/bin/busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnBattery b false"
++  "ExecStartPost=-/usr/bin/busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform PlatformProfileLinkedEpp b false"
++)
++[[ ${lines[*]} == "${expected[*]}" ]] ||
++  fail "the asusd drop-in turns off exactly profile switching on AC and battery and linked EPP" "got: ${lines[*]}"
++pass "the asusd drop-in turns off profile switching on AC and battery and linked EPP"
++
++# A failed property write (a model without platform profiles, an older asusd)
++# must not fail asusd's start.
++if grep -E '^ExecStartPost=[^-]' "$dropin" >/dev/null; then
++  fail "every asusd ExecStartPost ignores failure"
++fi
++pass "a refused asusd property write does not fail asusd's start"
++
++if command -v systemd-analyze >/dev/null; then
++  unit_dir=$(mktemp -d)
++  mkdir -p "$unit_dir/asusd.service.d"
++  printf '[Service]\nType=simple\nExecStart=/usr/bin/true\n' >"$unit_dir/asusd.service"
++  cp "$dropin" "$unit_dir/asusd.service.d/"
++  # asusd is a system unit; verifying in system scope needs no running user
++  # manager, so this also runs headless and in CI.
++  if output=$(SYSTEMD_UNIT_PATH="$unit_dir:" systemd-analyze verify --man=no "$unit_dir/asusd.service" 2>&1); then
++    [[ $output != *"Unknown"* && $output != *"Invalid"* ]] || fail "the asusd drop-in parses cleanly" "$output"
++    pass "the asusd drop-in parses"
++  elif [[ $output == *"Failed to initialize manager"* || $output == *"Access denied"* ]]; then
++    printf 'ok - the asusd drop-in parses # SKIP systemd-analyze cannot run here: %s\n' "${output%%$'\n'*}"
++  else
++    fail "the asusd drop-in parses" "$output"
++  fi
++fi
++
++# The migration applies the same three settings to a running asusd, only on
++# ROG hardware, only where a property is still on, and keeps going if asusd
++# refuses a write. busctl, systemctl and the ROG check are stubbed, so nothing
++# reaches the real system bus.
++migration="$ROOT/migrations/1792122579.sh"
++[[ $(stat -c %a "$migration") == 644 ]] || fail "the asusd migration is mode 0644"
++[[ $(head -c 2 "$migration") != "#!" ]] || fail "the asusd migration has no shebang"
++pass "the asusd migration has the migration file format"
++
++stub_bin="$test_dir/bin"
++mkdir -p "$stub_bin"
++cat >"$stub_bin/omarchy-hw-asus-rog" <<'STUB'
++#!/bin/bash
++[[ ${STUB_ROG:-1} == 1 ]]
++STUB
++cat >"$stub_bin/systemctl" <<'STUB'
++#!/bin/bash
++[[ $* == "is-active --quiet asusd.service" && ${STUB_ASUSD_ACTIVE:-1} == 1 ]]
++STUB
++cat >"$stub_bin/busctl" <<'STUB'
++#!/bin/bash
++state="${STUB_STATE:?}"
++case "$2" in
++  get-property)
++    [[ -f $state/$6 ]] || exit 1
++    printf 'b %s\n' "$(<"$state/$6")"
++    ;;
++  set-property)
++    echo "$6 $7 $8" >>"$state/calls"
++    [[ ${STUB_REFUSE:-} == "$6" ]] && exit 1
++    printf '%s\n' "$8" >"$state/$6"
++    ;;
++  *) exit 2 ;;
++esac
++STUB
++chmod +x "$stub_bin"/*
++
++properties=(ChangePlatformProfileOnAc ChangePlatformProfileOnBattery PlatformProfileLinkedEpp)
++
++reset_state() {
++  rm -rf "$test_dir/state"
++  mkdir -p "$test_dir/state"
++  local property
++  for property in "${properties[@]}"; do
++    printf '%s\n' "$1" >"$test_dir/state/$property"
++  done
++}
++
++run_migration() {
++  HOME="$test_dir/home" OMARCHY_PATH="$ROOT" STUB_STATE="$test_dir/state" \
++    PATH="$stub_bin:$PATH" "$@" bash -euo pipefail "$migration" 2>&1
++}
++
++calls() {
++  cat "$test_dir/state/calls" 2>/dev/null || true
++}
++
++reset_state true
++output=$(run_migration env) || fail "the asusd migration succeeds with asusd defaults" "$output"
++for property in "${properties[@]}"; do
++  [[ $(<"$test_dir/state/$property") == false ]] || fail "the asusd migration turns off $property" "$(calls)"
++done
++pass "the asusd migration turns off all three settings on a running asusd"
++
++rm -f "$test_dir/state/calls"
++output=$(run_migration env) || fail "the asusd migration reruns cleanly" "$output"
++[[ -z $(calls) ]] || fail "a rerun of the asusd migration writes nothing" "$(calls)"
++pass "the asusd migration is idempotent"
++
++reset_state true
++output=$(run_migration env STUB_ROG=0) || fail "the asusd migration succeeds on other hardware" "$output"
++[[ -z $(calls) ]] || fail "the asusd migration does nothing on non-ROG hardware" "$(calls)"
++output=$(run_migration env STUB_ASUSD_ACTIVE=0) || fail "the asusd migration succeeds without asusd running" "$output"
++[[ -z $(calls) ]] || fail "the asusd migration does nothing when asusd is not running" "$(calls)"
++pass "the asusd migration does nothing off ROG hardware or without a running asusd"
++
++reset_state true
++output=$(run_migration env STUB_REFUSE=ChangePlatformProfileOnAc) ||
++  fail "a refused asusd write does not fail the migration" "$output"
++[[ $output == *"Could not turn off asusd ChangePlatformProfileOnAc now"* ]] ||
++  fail "a refused asusd write is reported" "$output"
++[[ $(<"$test_dir/state/PlatformProfileLinkedEpp") == false ]] ||
++  fail "the asusd migration keeps going after a refused write" "$(calls)"
++pass "a refused asusd write is reported and the rest still apply"
++
++reset_state true
++rm "$test_dir/state/PlatformProfileLinkedEpp"
++output=$(run_migration env) || fail "an asusd without a property does not fail the migration" "$output"
++[[ $(calls) != *PlatformProfileLinkedEpp* ]] || fail "the asusd migration skips a property asusd lacks" "$(calls)"
++pass "the asusd migration skips properties an older asusd lacks"
+-- 
+2.55.0
+
