@@ -107,10 +107,6 @@ Everyone is welcome. Hardware reports, bug fixes, testing, suggestions, new mode
 helps. Keep pull requests small, test them on real hardware, and explain the bug. See
 [CONTRIBUTING.md](CONTRIBUTING.md) and [PRINCIPLES.md](PRINCIPLES.md).
 
-**Rule 1:** Help make the software better.
-
-**Rule 2:** Don't be a dick.
-
 ## Upstream
 
 Where our fixes are headed:

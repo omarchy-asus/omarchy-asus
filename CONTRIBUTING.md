@@ -1,11 +1,8 @@
 # Contributing
 
 Everyone is welcome. You don't need permission, a big patch or a lot of Linux experience.
-A good hardware report is as useful as a pull request.
-
-**Rule 1:** Help make the software better.
-
-**Rule 2:** Don't be a dick.
+A good hardware report is as useful as a pull request. The house rules are in
+[PRINCIPLES.md](PRINCIPLES.md).
 
 ## Report your hardware
 
