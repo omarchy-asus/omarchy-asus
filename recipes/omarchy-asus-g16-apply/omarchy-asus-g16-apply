@@ -707,8 +707,13 @@ apply_initramfs_no_nvidia() {
       "$NVIDIA_CONF" "$NVIDIA_CONF" "$NVIDIA_REBUILD_MARKER"
     return 0
   fi
-  backup=$(mktemp)
-  cp "$NVIDIA_CONF" "$backup"
+  # Nothing is removed unless the backup is complete.
+  backup=$(mktemp) || { warn "could not create a backup of $NVIDIA_CONF; nothing changed"; return 1; }
+  if ! cp "$NVIDIA_CONF" "$backup" || ! cmp -s "$NVIDIA_CONF" "$backup"; then
+    rm -f "$backup"
+    warn "could not back up $NVIDIA_CONF; nothing changed"
+    return 1
+  fi
   sudo rm -f "$NVIDIA_CONF"
   if ! sudo limine-mkinitcpio; then
     sudo install -m644 "$backup" "$NVIDIA_CONF"
