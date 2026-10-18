@@ -14,6 +14,14 @@
 #   6. the user says no: everything stays, a 'kept' warning
 #   7. only a drop-in for the packaged unit (as the G16 Control widget writes): left alone
 #   8. a new widget drop-in after an earlier full retire: left alone
+#   9. only ~/.local/bin/g16-winlock: the warning, no list, no prompt, nothing moved
+#  10. an older run moved only the unit, and the drop-in holds g16ctl's mode.conf: it stays
+#  11. an older run moved only the unit, and the hand-made drop-in changed since: it stays
+#  12. a hand-made unit, and a drop-in with g16ctl's mode.conf and a hand override: both
+#      are moved aside, and g16ctl's mode.conf is put back
+#  13. an older run moved only the unit (no links left), and the hand-made drop-in predates
+#      that move: it is retired
+# Before the cases: sourcing the script leaves the caller's B R Y G N alone.
 # Usage: tests/ci/setup-retire-winlock.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -96,19 +104,31 @@ fixture() {
 
 # run <confirm return code> <dry run 0|1>
 run() {
-    local rc=$1 dry=$2 st=0 udev_dir=$R # the sourced script sets its own R (a colour)
+    local rc=$1 dry=$2 st=0
     (
         set --
         export HOME=$H
         # shellcheck source=/dev/null
         OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 source "$LIB"
         # shellcheck disable=SC2034 # read by the sourced functions
-        WINLOCK_UDEV_DIR=$udev_dir WINLOCK_LOCAL_BIN=$HOME/.local/bin/g16-winlock DRY_RUN=$dry
+        WINLOCK_UDEV_DIR=$R WINLOCK_LOCAL_BIN=$HOME/.local/bin/g16-winlock DRY_RUN=$dry
         confirm() { return "$rc"; }
         retire_local_winlock
     ) >"$OUT" 2>&1 || st=$?
     check "retire_local_winlock exits 0" [ "$st" -eq 0 ]
 }
+
+echo "== 0. sourcing the script keeps the caller's one-letter variables"
+mkdir -p "$S/c0/home"
+colours=$(
+    set --
+    B=keep-b R=keep-r Y=keep-y G=keep-g N=keep-n
+    export HOME=$S/c0/home
+    # shellcheck source=/dev/null
+    OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 source "$LIB" >/dev/null 2>&1
+    printf '%s ' "$B" "$R" "$Y" "$G" "$N"
+)
+check "B R Y G N unchanged (got: $colours)" [ "$colours" = "keep-b keep-r keep-y keep-g keep-n " ]
 
 echo "== 1. full retire"
 setup_case c1
@@ -222,6 +242,67 @@ printf '[Service]\nEnvironment=G16_WINLOCK_MODE=unlock\n' >"$U/g16-winlock.servi
 run 0 0
 check "drop-in stays" [ -f "$U/g16-winlock.service.d/mode.conf" ]
 check "no numbered backup" none "$U"/*.before-omarchy-asus.1
+
+echo "== 9. only ~/.local/bin/g16-winlock"
+setup_case c9
+mkdir -p "$H/.local/bin"
+printf '#!/bin/bash\n' >"$H/.local/bin/g16-winlock"
+chmod +x "$H/.local/bin/g16-winlock"
+run 1 0 # a 'no' would print a 'kept' warning if anything asked
+check "warns about ~/.local/bin/g16-winlock" grep -q 'warning:.*~/.local/bin/g16-winlock' "$OUT"
+check "no list of local pieces" not grep -q 'These shadow or duplicate' "$OUT"
+check "no prompt" not grep -q 'warning:.*kept' "$OUT"
+check "the local bin/g16-winlock stays executable" [ -x "$H/.local/bin/g16-winlock" ]
+check "no backups" none "$U"/*.before-omarchy-asus* "$R"/*.before-omarchy-asus* "$H"/.local/bin/*.before-omarchy-asus*
+check "no systemctl/udevadm/sudo runs" not grep -qE '^(systemctl|udevadm|sudo) ' "$LOG"
+
+echo "== 10. g16ctl's mode.conf after an older run moved only the unit stays"
+setup_case c10
+mkdir -p "$U/g16-winlock.service.d"
+printf '[Service]\n' >"$U/g16-winlock.service.before-omarchy-asus"
+printf '[Service]\nEnvironment=G16_WINLOCK_MODE=unlock\n' >"$U/g16-winlock.service.d/mode.conf"
+run 0 0
+check "drop-in stays" [ -f "$U/g16-winlock.service.d/mode.conf" ]
+check "no drop-in backup" none "$U"/g16-winlock.service.d.before-omarchy-asus*
+check "no second unit backup" none "$U"/g16-winlock.service.before-omarchy-asus.*
+check "no output" [ ! -s "$OUT" ]
+
+echo "== 11. a hand-made drop-in changed after an older run moved the unit stays"
+setup_case c11
+printf '[Service]\n' >"$U/g16-winlock.service.before-omarchy-asus"
+mkdir -p "$U/g16-winlock.service.d"
+printf '# set by hand\n[Service]\nEnvironment=G16_WINLOCK_MODE=unlock\n' >"$U/g16-winlock.service.d/mode.conf"
+touch -d '+1 hour' "$U/g16-winlock.service.d/mode.conf"
+run 0 0
+check "drop-in stays" [ -f "$U/g16-winlock.service.d/mode.conf" ]
+check "no drop-in backup" none "$U"/g16-winlock.service.d.before-omarchy-asus*
+
+echo "== 12. g16ctl's mode.conf in a retired hand-made drop-in is put back"
+setup_case c12
+mkdir -p "$U/g16-winlock.service.d"
+printf '%s\n' '[Unit]' 'Description=G16 Win-lock' '[Service]' \
+    'ExecStart=%h/.local/bin/g16-winlock' >"$U/g16-winlock.service"
+printf '[Service]\nEnvironment=G16_WINLOCK_MODE=unlock\n' >"$U/g16-winlock.service.d/mode.conf"
+printf '# set by hand\n[Service]\nRestart=always\n' >"$U/g16-winlock.service.d/override.conf"
+cp "$U/g16-winlock.service.d/mode.conf" "$C/mode.conf"
+run 0 0
+check "unit moved away" [ ! -e "$U/g16-winlock.service" ]
+check "unit backup" [ -f "$U/g16-winlock.service.before-omarchy-asus" ]
+check "drop-in backup has override.conf" [ -f "$U/g16-winlock.service.d.before-omarchy-asus/override.conf" ]
+check "override.conf not put back" [ ! -e "$U/g16-winlock.service.d/override.conf" ]
+check "g16ctl's mode.conf put back unchanged" cmp -s "$C/mode.conf" "$U/g16-winlock.service.d/mode.conf"
+check "says the G16 Control mode was kept" grep -qF 'kept the Win-lock mode set in G16 Control' "$OUT"
+
+echo "== 13. a hand-made drop-in older than the unit an older run moved is retired"
+setup_case c13
+mkdir -p "$U/g16-winlock.service.d"
+printf '# set by hand\n[Service]\nEnvironment=G16_WINLOCK_MODE=unlock\n' >"$U/g16-winlock.service.d/mode.conf"
+touch -d '-1 hour' "$U/g16-winlock.service.d/mode.conf" "$U/g16-winlock.service.d"
+printf '[Service]\n' >"$U/g16-winlock.service.before-omarchy-asus"
+run 0 0
+check "drop-in moved away" [ ! -e "$U/g16-winlock.service.d" ]
+check "drop-in backup" [ -f "$U/g16-winlock.service.d.before-omarchy-asus/mode.conf" ]
+check "earlier unit backup untouched" [ -f "$U/g16-winlock.service.before-omarchy-asus" ]
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"

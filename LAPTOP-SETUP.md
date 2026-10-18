@@ -68,18 +68,30 @@ The script:
    - If the file differs, the script shows the diff and stops before the upgrade. Nothing is
      overwritten. Decide yourself (move the file aside or make it match), then run the script again.
 9. Optional, and only if the system is fully upgraded: offers to install `omarchy-asus-g16`,
-   `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`. If you have your own Win-lock setup, it
-   offers to move it aside:
+   `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`.
+
+   Before it installs them, the script checks their `/etc` files against the signed files database,
+   with the same rule as the upgrade in item 8.
+   - If a file that no package owns is byte-identical to the packaged copy, the script hands it to
+     the package with `pacman --overwrite <that path>`.
+   - If the file differs, the script shows the diff and doesn't install the G16 packages. Nothing
+     changes. Move the file aside or make it match, then run the script again.
+
+   If you have your own Win-lock setup, it offers to move it aside:
    - Your own `~/.config/systemd/user/g16-winlock.service`, which would shadow the packaged unit.
      It runs `systemctl --user disable` first, so the old `default.target.wants` link goes away,
      then moves the unit to `g16-winlock.service.before-omarchy-asus`.
    - That unit's `g16-winlock.service.d/` drop-in. It shows the settings in it, then moves it to
      `g16-winlock.service.d.before-omarchy-asus`. A drop-in with no hand-made unit behind it (the
-     G16 Control widget writes one for the packaged unit) stays.
+     G16 Control widget writes one for the packaged unit) stays. A `mode.conf` written by
+     `g16ctl winlock-mode` (the G16 Control widget's Win-lock mode) is never moved aside. If an
+     older run of the script already moved the unit, a drop-in is moved only if it predates that
+     move. If a hand-made drop-in that gets moved also holds a G16 Control `mode.conf`, that
+     `mode.conf` is put back, so the mode you chose stays.
    - An `/etc/udev/rules.d/*g16-winlock*.rules` file. With sudo, it moves it aside with the same
      suffix and reloads udev.
-   - A `~/.local/bin/g16-winlock` that shadows `/usr/bin/g16-winlock`. It only warns about this
-     one; it doesn't move it.
+   - A `~/.local/bin/g16-winlock` that shadows `/usr/bin/g16-winlock`. It warns about this one
+     even when it is the only local Win-lock piece left. It only warns; it doesn't move it.
 
    Nothing is deleted except the old unit's dangling links. An existing backup is never overwritten: a numbered
    `.before-omarchy-asus.N` name is used instead. Each piece it moves is listed with the command
@@ -108,6 +120,9 @@ The script applies the hook itself and does not run `omarchy refresh pacman`. Th
 You can run the script again safely: steps that are already done are left alone.
 
 To undo everything (the same steps as section 5), run `bash omarchy-asus-setup --uninstall`.
+Before its `-Syuu` prompt it prints the NVIDIA/open-gpu-kernel-modules#1412 hibernate warning
+from section 5. After the `-Syuu` it offers to remove the packages that only this repo ships. The
+default is no.
 
 ## Switching an existing install
 
@@ -285,10 +300,12 @@ sudo pacman-key --delete 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
 sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu   # -uu downgrades the omarchy-asus builds back to stock
 ```
 
+The `-Syuu` returns `hyprland` and `hyprpm` to the stock builds.
+
 Packages that only this repo ships stay installed, and they stop getting updates. These are
 `omarchy-asus-g16` (it sets `HibernateMode=shutdown`, #16), `omarchy-asus-g16-apply`,
-`asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` and `hyprpm`. List what is left, then remove
-what you don't want:
+`asus-rog-nkey-winlock` and `asus-zephyrus-g16-control`. Removing `omarchy-asus-g16` restores the
+stock hibernate mode. List what is left, then remove what you don't want:
 
 ```bash
 pacman -Qm

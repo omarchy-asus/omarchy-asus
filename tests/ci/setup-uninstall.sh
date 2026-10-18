@@ -2,7 +2,8 @@
 # bin/omarchy-asus-setup --dry-run --uninstall, offline (#84): pacman and the other
 # commands it checks for are stubs, HOME and the pacman config are temp files.
 # The stub pacman has the repo builds and the optional G16 packages installed;
-# linux-omarchy and nvidia-open-dkms also have a stock build in core/extra.
+# linux-omarchy, nvidia-open-dkms and hyprpm (a split package of hyprland) also have a
+# stock build in core/extra.
 #   a. it exits 0
 #   b. it warns about the stock driver's hibernate hang (#1412) before the -Syuu prompt
 #   c. a leftover step lists the installed repo-only packages, and only those
@@ -24,7 +25,7 @@ case ${1:-} in
     -Slq) printf '%s\n' "${repo[@]}" ;;
     -Sl)
         printf 'omarchy-asus %s 1-1.1\n' "${repo[@]}"
-        printf '%s\n' 'core linux-omarchy 1-1' 'extra nvidia-open-dkms 1-1'
+        printf '%s\n' 'core linux-omarchy 1-1' 'extra nvidia-open-dkms 1-1' 'extra hyprpm 1-1'
         ;;
     -Qq) printf '%s\n' "${installed[@]}" ;;
     -Qmq) ;;
@@ -67,20 +68,20 @@ expect "$([[ -n $warn_line && -n $prompt_line ]] && ((warn_line < prompt_line)) 
 echo "== c. leftover step"
 sed -n '/==> Packages only the omarchy-asus repo had/,$p' "$S/out" >"$S/left"
 if [[ -s $S/left ]]; then r=0; else r=1; fi; expect "$r" 0 "has a leftover step"
-for p in omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock hyprpm; do
+for p in omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock; do
     grep -qxE " +$p" "$S/left"; expect $? 0 "lists $p"
 done
-for p in linux-omarchy nvidia-open-dkms bash asus-zephyrus-g16-control omarchy-asus-keyring; do
+for p in linux-omarchy nvidia-open-dkms hyprpm bash asus-zephyrus-g16-control omarchy-asus-keyring; do
     grep -qxE " +$p" "$S/left"; expect $? 1 "does not list $p"
 done
 
 echo "== d. pacman -Rns offer"
 rns=$(grep -F '[dry-run] sudo' "$S/out" | grep -F 'pacman -Rns' | head -n1)
 [[ -n $rns ]]; r=$?; expect "$r" 0 "prints a [dry-run] sudo ... pacman -Rns line"
-for p in omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock hyprpm; do
+for p in omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock; do
     [[ "$rns " == *" $p "* ]]; r=$?; expect "$r" 0 "-Rns names $p"
 done
-for p in linux-omarchy nvidia-open-dkms bash asus-zephyrus-g16-control; do
+for p in linux-omarchy nvidia-open-dkms hyprpm bash asus-zephyrus-g16-control; do
     [[ "$rns " == *" $p "* ]]; r=$?; expect "$r" 1 "-Rns leaves out $p"
 done
 
