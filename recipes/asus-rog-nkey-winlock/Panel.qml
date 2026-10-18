@@ -70,8 +70,10 @@ Panel {
 
   // 0 = keyboard, 1 = slash
 
-  // Coalesces writes so a slider drag cannot outrun the daemon.
-  property var pendingCmd: null
+  // Writes queued behind the running one, in order. A newer write to the same
+  // setting replaces the queued one, so a slider drag cannot outrun the daemon,
+  // but an unrelated action is never dropped.
+  property var pendingCmds: []
 
   readonly property var levelOptions: [
     { value: "off",  label: "Off"  },
@@ -125,10 +127,28 @@ Panel {
     { value: "unlock", label: "Unlock" }
   ]
 
+  // Identifies the setting a command writes: the verb, plus the scope/flag
+  // argument for verbs that address one of several settings.
+  function cmdKey(args) {
+    var verb = args[1]
+    if (verb === "kbd-level" || verb === "kbd-power" || verb === "slash-flag")
+      return verb + " " + args[2]
+    return verb
+  }
+
   function runCmd(args) {
-    if (actionProc.running) { root.pendingCmd = args; return }
-    actionProc.command = args
-    actionProc.running = true
+    if (!actionProc.running) {
+      actionProc.command = args
+      actionProc.running = true
+      return
+    }
+    var q = root.pendingCmds.slice()
+    var key = cmdKey(args)
+    for (var i = 0; i < q.length; i++) {
+      if (cmdKey(q[i]) === key) { q[i] = args; root.pendingCmds = q; return }
+    }
+    q.push(args)
+    root.pendingCmds = q
   }
 
   function refresh() { if (!stateProc.running) stateProc.running = true }
@@ -271,9 +291,10 @@ Panel {
   Process {
     id: actionProc
     onExited: {
-      if (root.pendingCmd) {
-        var next = root.pendingCmd
-        root.pendingCmd = null
+      if (root.pendingCmds.length > 0) {
+        var q = root.pendingCmds.slice()
+        var next = q.shift()
+        root.pendingCmds = q
         actionProc.command = next
         actionProc.running = true
       } else {
