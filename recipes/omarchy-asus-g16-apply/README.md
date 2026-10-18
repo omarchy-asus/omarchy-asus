@@ -148,12 +148,19 @@ only tells existing installs about it; this command runs only when you ask.)
 
 ### rtkit
 
-**What:** `omarchy-pkg-add rtkit`.
+**What:** `omarchy-pkg-add rtkit`. When that run installs it, the command then runs
+`systemctl --user try-restart xdg-desktop-portal.service`, then
+`systemctl --user try-restart pipewire.service pipewire-pulse.service wireplumber.service`
+(errors ignored). If rtkit was already installed, nothing is restarted.
 
 **Why:** nothing pulls rtkit in on x86_64, so PipeWire runs with no realtime
 threads.
 
 **Mirrors:** fork branch `asus/rtkit` (`ed04dd1c`), migration `1792162892`.
+The restarts aren't in the fork's migration. They come from #12428's head
+(`dac602f5`): the portal reads rtkit's realtime budget only once, so until it
+restarts, PipeWire clients get a hard `RLIMIT_RTTIME` of 0
+([omacom/omarchy#12443](https://github.com/omacom/omarchy/issues/12443)).
 It isn't a dependency of any omarchy-asus package on purpose: a dependency
 would install it on every machine that installs the package, with no choice
 and no check.

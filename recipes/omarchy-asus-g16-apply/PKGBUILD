@@ -40,7 +40,7 @@ source=('omarchy-asus-g16-apply'
         'omarchy-powerprofiles-asus-quiet-fans'
         'README.md'
         'LICENSE')
-sha256sums=('2a8967407019044db992fc8773de57f8c37646e17b70a3ab3577294192198089'
+sha256sums=('a47e6c728cd3f9073aac45fe1849eee150ed5a0faf9ffb94e9d8523ff171c365'
             '1c02bdc6b3055649bd8bee1394c68cd26af05a0fefefcd6190f164cd8fc0ab13'
             'eadf7a74b73aec5c63fb2164908dc0f0f28a40411f9c696761265a96c76e6fc9'
             '54997bee5a950335bb8ce471c72c79923133dc777a1ea61f7a311540582e0be5'
@@ -50,7 +50,7 @@ sha256sums=('2a8967407019044db992fc8773de57f8c37646e17b70a3ab3577294192198089'
             '1f5f1b0f51d2a12db84e2125ca56b704a41ce78d8a4787d862bdbaae4aa0404b'
             'e781d8e218dcb06ab49627ab567fafbad652a45f706ad65e7a8f728429c8915a'
             '336a30e3ca249944448ac35ffe45154f1bd83f81c4bfa34fa7b489ff152d3e00'
-            'bc4032adc993992ba54f00f53f4ca954df1d52b490abe7e1fcac4f6e8b2c8114'
+            'd754bee5425b27bd225f678dbec8f7ed1245aaa8f4faf57da39058668a9e6114'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 package() {
