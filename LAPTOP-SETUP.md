@@ -43,8 +43,10 @@ The script:
 6. Installs `omarchy-asus-keyring`, which ships the key in `/usr/share/pacman/keyrings/` so that
    `pacman-key --populate omarchy-asus` works, like `archlinux-keyring` and `omarchy-keyring`.
    This step runs `pacman -Sy`.
-7. Lists what `pacman -Su` would change, marking the packages from `[omarchy-asus]`, and upgrades
-   only if you say yes. pacman then shows its own summary and asks once more.
+7. Lists what the system upgrade would change, marking the packages from `[omarchy-asus]`, and
+   upgrades only if you say yes. The upgrade runs through `omarchy update`, which asks once more,
+   takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
+   `pacman -Syu`, so the script doesn't run one.
 
 > [!IMPORTANT]
 > The fingerprint check is trust on first use. The script, the key and this page all come from
@@ -62,8 +64,9 @@ To undo everything (the same steps as section 5), run `bash omarchy-asus-setup -
 
 ## Switching an existing install
 
-Do it in this order on a G16 that already runs stock Omarchy. The script does steps 2 and 3. Do the
-others by hand.
+Do it in this order on a G16 that already runs stock Omarchy. The script does step 2 and the upgrade
+at the end of step 3. Do the rest by hand: in particular, remove the `IgnorePkg` entries yourself
+before you run the script. The script only warns about them.
 
 0. **Make sure you can boot if this fails.** Keep a fallback kernel installed (`sudo pacman -S linux`).
    Check that the Limine boot menu lists snapshot entries; `sudo snapper list` shows the snapshots.
@@ -181,9 +184,9 @@ file and its `Include` line. `omarchy-asus-setup --uninstall` handles this for y
 
 ```bash
 rm ~/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo
-sudo sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{N;/\n$/d;s|.*\n||}' /etc/pacman.conf   # or: omarchy refresh pacman
+sudo sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{$d;N;/\n$/d;D}' /etc/pacman.conf   # or: omarchy refresh pacman
 sudo rm /etc/pacman.d/custom-repos.conf
 pacman -Q omarchy-asus-keyring && sudo pacman -R omarchy-asus-keyring   # if installed
 sudo pacman-key --delete 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
-sudo pacman -Syuu        # -uu downgrades the omarchy-asus builds back to stock
+sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu   # -uu downgrades the omarchy-asus builds back to stock
 ```

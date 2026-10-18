@@ -282,7 +282,7 @@ apply_hook() {
   if [[ -n $inc ]]; then
     warn "the Include line is at line $inc, below [omarchy]/[core]; moving it up"
     # shellcheck disable=SC2016 # sed program, same as LAPTOP-SETUP.md section 5
-    as_root sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{N;/\n$/d;s|.*\n||}' "$CONF"
+    as_root sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{$d;N;/\n$/d;D}' "$CONF"
   fi
   if ((DRY_RUN)); then
     as_root sed -i -E "0,/^\[(omarchy|core)\]$/s||$MARKER\n\n&|" "$CONF"
@@ -302,12 +302,29 @@ install_keyring() {
   as_root pacman -Sy --needed --noconfirm "$KEYRING_PKG"
 }
 
+# The upgrade goes through `omarchy update`, not a bare `pacman -Su`: since
+# Omarchy 4.0.5 a pacman hook (omarchy-update-pacman-guard) aborts direct system
+# upgrades, and `omarchy update` also takes the snapshot, updates the keyrings
+# and runs the migrations. It asks for its own confirmation. Without Omarchy's
+# updater, fall back to pacman with the guard's documented override.
+run_upgrade() {
+  if command -v omarchy-update >/dev/null; then
+    if ((DRY_RUN)); then
+      info "[dry-run] omarchy update"
+    else
+      omarchy update </dev/tty
+    fi
+  else
+    as_root env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Su
+  fi
+}
+
 offer_upgrade() {
-  step "What a system upgrade (pacman -Su) would change"
+  step "What the system upgrade would change"
   if ((DRY_RUN)); then
     info "[dry-run] would list: pacman -Qu, with the packages coming from [$REPO] marked"
     confirm "Upgrade now?"
-    as_root pacman -Su
+    run_upgrade
     return 0
   fi
   local repo_pkgs updates name
@@ -324,11 +341,11 @@ offer_upgrade() {
       printf '                   %s\n' "$(grep -m1 "^$name " <<<"$updates")"
     fi
   done <<<"$updates"
-  if confirm "Upgrade now? (pacman shows its own summary and asks once more)"; then
-    as_root pacman -Su
+  if confirm "Upgrade now with 'omarchy update'? (it asks once more before it starts)"; then
+    run_upgrade
   else
     warn "not upgraded. The package databases are synced but the system is not upgraded:"
-    warn "run 'omarchy update' (or 'sudo pacman -Su') before you install anything else."
+    warn "run 'omarchy update' before you install anything else."
   fi
 }
 
@@ -374,7 +391,7 @@ do_uninstall() {
   else
     if grep -qxF "$MARKER" "$CONF"; then
       # shellcheck disable=SC2016 # sed program, same as LAPTOP-SETUP.md section 5
-      as_root sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{N;/\n$/d;s|.*\n||}' "$CONF"
+      as_root sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{$d;N;/\n$/d;D}' "$CONF"
     fi
     if [[ -e $SNIPPET ]]; then as_root rm -f "$SNIPPET"; else ok "$SNIPPET not present"; fi
   fi
@@ -385,11 +402,13 @@ do_uninstall() {
   fi
   as_root pacman-key --delete "$FPR" || warn "key $FPR was not in pacman's keyring"
 
+  # `omarchy update` runs pacman -Syu, which never downgrades, so this one
+  # transaction bypasses Omarchy's update guard with its documented override.
   step "Going back to the stock builds"
   if confirm "Run 'pacman -Syuu' now? (-uu downgrades the omarchy-asus builds to stock)"; then
-    as_root pacman -Syuu
+    as_root env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu
   else
-    warn "skipped. Run 'sudo pacman -Syuu' to go back to the stock builds."
+    warn "skipped. Run 'sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu' to go back to the stock builds."
   fi
 }
 
