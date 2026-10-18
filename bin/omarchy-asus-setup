@@ -481,6 +481,10 @@ install_keyring() {
 # One field (%NAME%, %VERSION%, %FILENAME%) of a package's desc file in the files database.
 desc_field() { awk -v key="%$2%" '$0 == key { getline v; print v; exit }' "$1/desc"; }
 
+# Every line of a multi-line section (%DEPENDS%, %PROVIDES%) of a package's desc file in the
+# files database, up to the blank line that ends it.
+desc_list() { awk -v key="%$2%" '$0 == key { on = 1; next } on && $0 == "" { exit } on { print }' "$1/desc"; }
+
 # True when the /etc file at PATH is a regular file with the same bytes as PKG's copy.
 same_as_packaged() {
   local pkg=$1 path=$2
@@ -605,10 +609,53 @@ $(printf '         %s\n' "${different[@]}")
   ((found)) || ok "no unowned /etc files in the way of the upgrade"
 }
 
+# The packages pacman -S installs for the names given: each one that isn't installed, and
+# the packages of this repo it depends on that aren't installed either, recursively. A
+# dependency is found in the files database by %NAME%, or else by %PROVIDES%, with any
+# version constraint (name>=1.2, name=1, name<2) stripped. Prints "NAME DIR" per package,
+# NAME its real %NAME%. Dependencies from other repos are left out: the check covers only
+# this repo's signed packages.
+install_closure() {
+  local dir name want entry
+  local -A by_name=() by_provides=() seen=()
+  local -a queue=("$@")
+  for dir in "$FILES_DB"/*/; do
+    dir=${dir%/}
+    [[ -f $dir/desc && -f $dir/files ]] || continue
+    name=$(desc_field "$dir" NAME)
+    [[ -n $name ]] || continue
+    by_name[$name]=$dir
+    while IFS= read -r entry; do
+      entry=${entry%%[<>=]*}
+      if [[ -n $entry && -z ${by_provides[$entry]:-} ]]; then by_provides[$entry]=$name; fi
+    done < <(desc_list "$dir" PROVIDES)
+  done
+  while ((${#queue[@]})); do
+    want=${queue[0]}
+    queue=("${queue[@]:1}")
+    [[ -n $want ]] || continue
+    # Installed already (pacman -Q also matches what an installed package provides).
+    pacman -Q "$want" >/dev/null 2>&1 && continue
+    name=$want
+    [[ -n ${by_name[$name]:-} ]] || name=${by_provides[$want]:-}
+    [[ -n $name && -z ${seen[$name]:-} ]] || continue
+    # The visited set: a dependency cycle ends here.
+    seen[$name]=1
+    pacman -Q "$name" >/dev/null 2>&1 && continue
+    dir=${by_name[$name]}
+    printf '%s %s\n' "$name" "$dir"
+    while IFS= read -r entry; do
+      queue+=("${entry%%[<>=]*}")
+    done < <(desc_list "$dir" DEPENDS)
+  done
+}
+
 # The same check for the packages offer_g16_fixes installs that aren't installed yet: pacman
 # refuses an unowned /etc file there too. A file identical to the signed package's copy goes
 # into INSTALL_OVERWRITE, which offer_g16_fixes passes to pacman as one --overwrite each.
 # Any other file, or a package that can't be checked, returns 1 before anything changes.
+# The packages pacman -S pulls in as dependencies are checked too (install_closure): they
+# go in the same transaction, so their identical files join the same --overwrite list.
 INSTALL_OVERWRITE=()
 check_unowned_etc_install() {
   step "Checking /etc for unowned files the G16 packages would install"
@@ -617,23 +664,18 @@ check_unowned_etc_install() {
     warn "could not check /etc files against the repo; if the install stops on a file conflict, see LAPTOP-SETUP.md"
     return 0
   fi
-  local want dir rc found=0
-  local -a identical=() different=()
-  for want in "$@"; do
-    pacman -Q "$want" >/dev/null 2>&1 && continue
-    for dir in "$FILES_DB"/*/; do
-      dir=${dir%/}
-      [[ -f $dir/desc && -f $dir/files ]] || continue
-      [[ $(desc_field "$dir" NAME) == "$want" ]] || continue
-      rc=0
-      unowned_etc_of "$dir" "$want" "the install overwrites it" || rc=$?
-      if ((rc == 2)); then
-        warn "$UNOWNED_ERR"
-        return 1
-      fi
-      if ((rc == 0)); then found=1; fi
-      break
-    done
+  local entry name dir rc found=0
+  local -a identical=() different=() pkgs=()
+  mapfile -t pkgs < <(install_closure "$@")
+  for entry in "${pkgs[@]}"; do
+    name=${entry%% *} dir=${entry#* }
+    rc=0
+    unowned_etc_of "$dir" "$name" "the install overwrites it" || rc=$?
+    if ((rc == 2)); then
+      warn "$UNOWNED_ERR"
+      return 1
+    fi
+    if ((rc == 0)); then found=1; fi
   done
   if ((${#different[@]})); then
     warn "these files are not owned by any package, differ from the packaged copies and would stop the install:
@@ -742,12 +784,14 @@ prepare_power_owner() {
 }
 
 # A hand-made Win-lock setup has up to four local pieces next to what asus-rog-nkey-winlock
-# installs: a unit in ~/.config/systemd/user that shadows the packaged one in
+# installs: a unit in the user unit dir that shadows the packaged one in
 # /usr/lib/systemd/user, its drop-in dir (which still applies to the packaged unit), the
 # <target>.wants link that enabled it (dangling once the unit moves), and a udev rule in
 # /etc/udev/rules.d next to the packaged 70-g16-winlock-hidraw.rules. Once the package is
 # installed, offer to move them aside. Nothing is deleted except a dangling link.
-WINLOCK_LOCAL=$HOME/.config/systemd/user/g16-winlock.service
+# The user unit dir follows XDG_CONFIG_HOME (~/.config by default), like systemd and g16ctl.
+WINLOCK_USER_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+WINLOCK_LOCAL=$WINLOCK_USER_DIR/g16-winlock.service
 WINLOCK_DROPIN=$WINLOCK_LOCAL.d
 WINLOCK_UDEV_DIR=/etc/udev/rules.d
 WINLOCK_LOCAL_BIN=$HOME/.local/bin/g16-winlock
@@ -810,7 +854,7 @@ retire_local_winlock() {
   if [[ -f $WINLOCK_LOCAL && ! -L $WINLOCK_LOCAL ]]; then unit=$WINLOCK_LOCAL; fi
   # Links that enabled the local unit: dangling ones, or ones that resolve to it. A link to
   # the packaged unit is the package's own enablement and stays.
-  for l in "$HOME"/.config/systemd/user/*.wants/g16-winlock.service; do
+  for l in "$WINLOCK_USER_DIR"/*.wants/g16-winlock.service; do
     [[ -L $l ]] || continue
     if [[ ! -e $l ]] || [[ -n $unit && $l -ef $unit ]]; then links+=("$l"); fi
   done

@@ -18,10 +18,10 @@
 # With the patched omarchy and omarchy-settings from the omarchy-asus repo
 # (4.0.5-1.1 or later), their migrations and default files apply hybrid-video,
 # hdmi-cursor, rtkit and the asusd drop-in during 'omarchy update', and --check
-# reports them as present once they have (hybrid-video: once 'omarchy update' has
-# run its migration; this command's older pins are handed over to Omarchy). This
-# command is then for stock Omarchy, for audio-master (the migration only tells
-# you about it) and for the opt-ins.
+# reports them as present once they have (hybrid-video: once its pins are in
+# place, not on its migration's marker alone; this command's older pins are
+# handed over to Omarchy). This command is then for stock Omarchy, for
+# audio-master (the migration only tells you about it) and for the opt-ins.
 # check_<fix> and apply_<fix> run by name (check_fix, the apply loop).
 # shellcheck disable=SC2329
 set -uo pipefail
@@ -434,9 +434,11 @@ hybrid_video_pin_chromium_marked() {
   done
 }
 
-# The patched omarchy installed, its migration 1792123636 not run yet (pacman
-# upgraded it, and 'omarchy update' hasn't run since) or skipped: checks the
-# files as they are. Sets ST and DETAIL for check_hybrid_video.
+# The patched omarchy installed, with no pins of this command's left: checks the
+# files as they are, whether its migration 1792123636 has run, not run yet
+# (pacman upgraded it, and 'omarchy update' hasn't run since) or been skipped.
+# Sets ST and DETAIL for check_hybrid_video, which rewords DETAIL when the
+# migration is recorded as run.
 hybrid_video_check_pending() {
   local node=$1 f mpv_pinned=0 chromium_pinned=1 local_parts=() joined
   if [[ -f $HYBRID_VIDEO_MPV_CONF ]] && awk -v om="$OMARCHY_HYBRID_VIDEO_PIN_MARKER" '
@@ -507,8 +509,10 @@ check_hybrid_video() {
     return
   fi
   # The patched omarchy owns the pins: this command's older ones are handed
-  # over to it, and hybrid-video is present once 'omarchy update' has run its
-  # migration (pacman alone only installs it).
+  # over to it, and hybrid-video is present once the pins are actually in place.
+  # The migration's marker alone proves nothing: pacman alone only installs the
+  # migration, and the patched omarchy seeds every marker into /etc/skel, so a
+  # user created after install has it although nothing pinned their configs.
   if omarchy_has_migration 1792123636; then
     local file line managed=() redundant=""
     if hypr_has_line hybrid-video-env.lua; then
@@ -525,10 +529,14 @@ check_hybrid_video() {
         DETAIL+="; applying hands them over"
       fi
       DETAIL+=" to the patched omarchy (rewritten under its marker), so omarchy-refresh-hybrid-video keeps them up to date$redundant"
-    elif omarchy_ran_migration 1792123636; then
-      ST=present DETAIL="the patched omarchy's migration 1792123636 and omarchy-refresh-hybrid-video pin decode to $node$redundant"
     else
       hybrid_video_check_pending "$node"
+      if omarchy_ran_migration 1792123636; then
+        case $ST in
+          present) DETAIL="the patched omarchy's migration 1792123636 and omarchy-refresh-hybrid-video pin decode to $node" ;;
+          missing) DETAIL="the patched omarchy's migration 1792123636 is recorded as run, but decode isn't pinned (as for a user created after install, whose marker comes from /etc/skel); applying pins it to $node now, in Omarchy's form" ;;
+        esac
+      fi
       DETAIL+=$redundant
     fi
     return
@@ -576,21 +584,22 @@ apply_hybrid_video() {
   node=$(omarchy-hw-igpu-render-node 2>/dev/null) || node=""
   # The patched omarchy pins mpv and Chromium itself and stops forcing VA-API.
   # This command's older pins are handed over to it (repinned or removed first
-  # when stale), so each pin has one owner. Until 'omarchy update' has run the
-  # migration, a missing pin is written in Omarchy's form, which the migration
-  # leaves and omarchy-refresh-hybrid-video keeps up to date.
+  # when stale), so each pin has one owner. A pin that is missing (the
+  # migration hasn't run yet, was skipped, or is recorded as run only through
+  # the marker /etc/skel gives a new user) is written in Omarchy's form, which
+  # the migration leaves and omarchy-refresh-hybrid-video keeps up to date.
   if omarchy_has_migration 1792123636; then
     local handed=0
     [[ -z $(hybrid_video_managed_pins) ]] || handed=1
     hybrid_video_hand_over_pins "$node"
     [[ -n $node ]] || return 0
-    omarchy_ran_migration 1792123636 && return 0
+    # A dry run hasn't handed anything over, so the check would still see
+    # those pins: after a hand-over, only the hand-over is shown.
     if ((DRY_RUN)); then
       ((handed == 0)) || return 0
-    else
-      check_fix hybrid-video
-      [[ $ST == missing ]] || return 0
     fi
+    check_fix hybrid-video
+    [[ $ST == missing ]] || return 0
     hybrid_video_pin_omarchy_form "$node"
     return
   fi
@@ -1100,8 +1109,9 @@ if ((CHECK)); then
   if patched_omarchy; then
     step "Patched omarchy installed"
     info "its migrations apply hybrid-video, hdmi-cursor, rtkit and the asusd drop-in on 'omarchy update';"
-    info "no login service is needed. hybrid-video is present once 'omarchy update' has run its migration,"
-    info "and this command hands its older mpv and Chromium pins over to it. audio-master is only notified"
+    info "no login service is needed. hybrid-video is present once its mpv and Chromium pins are in place"
+    info "(the migration's marker alone isn't enough), and this command hands its older pins over to Omarchy."
+    info "audio-master is only notified"
     info "by its migration: run this command to raise it."
     if ((any_redundant)); then info "Lines this command added earlier show as redundant above: delete them."; fi
   fi

@@ -21,6 +21,9 @@
 #      are moved aside, and g16ctl's mode.conf is put back
 #  13. an older run moved only the unit (no links left), and the hand-made drop-in predates
 #      that move: it is retired
+#  14. XDG_CONFIG_HOME set to a dir other than ~/.config (#111): the hand-made unit, its link
+#      and its drop-in there are retired and g16ctl's mode.conf put back, as in 1 and 12
+# Cases 0-13 run with XDG_CONFIG_HOME unset, whatever the host exports.
 # Before the cases: sourcing the script leaves the caller's B R Y G N alone.
 # Usage: tests/ci/setup-retire-winlock.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -40,7 +43,7 @@ cat >"$S/bin/systemctl" <<'STUB'
 #!/bin/bash
 printf 'systemctl %s\n' "$*" >>"$LOG"
 if [[ ${1:-} == --user && ${2:-} == disable ]]; then
-    if [[ -e $HOME/.config/systemd/user/g16-winlock.service ]]; then
+    if [[ -e ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/g16-winlock.service ]]; then
         echo unit-present-at-disable=yes >>"$LOG"
     else
         echo unit-present-at-disable=no >>"$LOG"
@@ -59,6 +62,8 @@ exec "$@"
 STUB
 chmod +x "$S/bin/pacman" "$S/bin/systemctl" "$S/bin/udevadm" "$S/bin/sudo"
 export PATH=$S/bin:$PATH
+# The user unit dir follows XDG_CONFIG_HOME: only case 14 sets it (through X).
+unset XDG_CONFIG_HOME
 
 # Never run the installer itself: without the guard, load only the functions.
 LIB=$W/bin/omarchy-asus-setup
@@ -82,9 +87,9 @@ none() { # true when none of the paths exists (unmatched globs stay literal and 
 }
 
 # Per case: C (case dir), H (its HOME), U (its user unit dir), R (its udev rules dir),
-# LOG (stub calls) and OUT (the function's output).
+# X (its XDG_CONFIG_HOME, empty for unset), LOG (stub calls) and OUT (the function's output).
 setup_case() {
-    C=$S/$1 H=$S/$1/home U=$S/$1/home/.config/systemd/user R=$S/$1/etc/udev/rules.d
+    C=$S/$1 H=$S/$1/home U=$S/$1/home/.config/systemd/user R=$S/$1/etc/udev/rules.d X=''
     LOG=$C/log OUT=$C/out
     export LOG
     mkdir -p "$U" "$R"
@@ -108,6 +113,7 @@ run() {
     (
         set --
         export HOME=$H
+        if [[ -n $X ]]; then export XDG_CONFIG_HOME=$X; fi
         # shellcheck source=/dev/null
         OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 source "$LIB"
         # shellcheck disable=SC2034 # read by the sourced functions
@@ -303,6 +309,29 @@ run 0 0
 check "drop-in moved away" [ ! -e "$U/g16-winlock.service.d" ]
 check "drop-in backup" [ -f "$U/g16-winlock.service.d.before-omarchy-asus/mode.conf" ]
 check "earlier unit backup untouched" [ -f "$U/g16-winlock.service.before-omarchy-asus" ]
+
+echo "== 14. XDG_CONFIG_HOME outside ~/.config: the setup there is retired"
+setup_case c14
+X=$C/xdg U=$C/xdg/systemd/user
+mkdir -p "$U/g16-winlock.service.d" "$U/default.target.wants"
+printf '%s\n' '[Unit]' 'Description=G16 Win-lock' '[Service]' \
+    'ExecStart=%h/.local/bin/g16-winlock' '[Install]' 'WantedBy=default.target' >"$U/g16-winlock.service"
+ln -s ../g16-winlock.service "$U/default.target.wants/g16-winlock.service"
+printf '[Service]\nEnvironment=G16_WINLOCK_MODE=unlock\n' >"$U/g16-winlock.service.d/mode.conf"
+printf '# set by hand\n[Service]\nRestart=always\n' >"$U/g16-winlock.service.d/override.conf"
+cp "$U/g16-winlock.service.d/mode.conf" "$C/mode.conf"
+run 0 0
+check "unit moved away" [ ! -e "$U/g16-winlock.service" ]
+check "unit backup" [ -f "$U/g16-winlock.service.before-omarchy-asus" ]
+check "wants link removed" not [ -L "$U/default.target.wants/g16-winlock.service" ]
+check "disable ran before the move" grep -qx 'unit-present-at-disable=yes' "$LOG"
+check "drop-in backup has override.conf" [ -f "$U/g16-winlock.service.d.before-omarchy-asus/override.conf" ]
+check "override.conf not put back" [ ! -e "$U/g16-winlock.service.d/override.conf" ]
+check "g16ctl's mode.conf put back unchanged" cmp -s "$C/mode.conf" "$U/g16-winlock.service.d/mode.conf"
+check "says the G16 Control mode was kept" grep -qF 'kept the Win-lock mode set in G16 Control' "$OUT"
+check "undo for the unit names the XDG_CONFIG_HOME path" grep -qF \
+    "undo: mv $U/g16-winlock.service.before-omarchy-asus $U/g16-winlock.service" "$OUT"
+check "nothing written under ~/.config/systemd/user" none "$H/.config/systemd/user"/*
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"

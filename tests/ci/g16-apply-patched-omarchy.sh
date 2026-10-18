@@ -5,8 +5,8 @@
 # pacman, aplay, amixer, busctl, systemctl and sudo stubbed. The patched omarchy is stood in
 # for by its migrations (/usr/share/omarchy/migrations/<id>.sh) and its hybrid-cursor.lua.
 #   a. stock Omarchy: hdmi-cursor is missing
-#   b. patched, migration 1792123636 run: hdmi-cursor and hybrid-video are present, a
-#      "Patched omarchy installed" note, the rtkit row names migration 1789747667
+#   b. patched, migration 1792123636 run and its pins in place: hdmi-cursor and hybrid-video
+#      are present, a "Patched omarchy installed" note, the rtkit row names migration 1789747667
 #   c. patched, with this command's hdmi-cursor lines already in hyprland.lua: present and
 #      the lines are called redundant
 #   d. patched, --check --dry-run: nothing would be appended to hyprland.lua
@@ -18,6 +18,10 @@
 #      files unchanged
 #   h. patched, migration run, pins already in Omarchy's marked form (even stale): present,
 #      and --dry-run neither repins nor hands over (one owner: Omarchy)
+#   i. patched, migration 1792123636's marker present but no pins (a user created after
+#      install, whose marker comes from /etc/skel; #111): hybrid-video is missing, not
+#      present; --dry-run pins mpv and Chromium under Omarchy's marker; with the pins
+#      written in that form, it is present
 # Usage: tests/ci/g16-apply-patched-omarchy.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -129,6 +133,9 @@ echo "== b. patched omarchy"
 setup_case b
 patched
 migration_ran 1792123636
+# What the migration wrote: the marker alone no longer makes hybrid-video present.
+mkdir -p "$H/.config/mpv"
+printf '%s\n%s\n%s\n%s\n' "$MPV_COMMENT" 'hwdec=vaapi' "$OMARCHY_MARKER" "vaapi-device=$NODE" >"$H/.config/mpv/mpv.conf"
 run --check
 check "hdmi-cursor is present" row_is hdmi-cursor present
 check "hybrid-video is present" row_is hybrid-video present
@@ -219,6 +226,39 @@ check "hybrid-video is present" row_is hybrid-video present
 run --dry-run hybrid-video
 check "no pin would be repinned" not grep -qF 'repin' "$OUT"
 check "no pin would be handed over" not grep -qF 'hand over' "$OUT"
+check "no pin would be written" not grep -qF '[dry-run] prepend to' "$OUT"
+
+echo "== i. patched, migration 1792123636's marker present but no pins (new user, #111)"
+setup_case i
+patched
+# The marker /etc/skel gives a user created after install: the migration never ran for them.
+migration_ran 1792123636
+mkdir -p "$H/.config/mpv"
+printf 'volume=80\n' >"$H/.config/mpv/mpv.conf"
+printf -- '--ozone-platform=wayland\n' >"$H/.config/chromium-flags.conf"
+cp "$H/.config/mpv/mpv.conf" "$C/mpv.conf.before"
+cp "$H/.config/chromium-flags.conf" "$C/chromium-flags.conf.before"
+run --check
+check "hybrid-video is missing, not present" row_is hybrid-video missing
+check "hybrid-video says the marker is there but decode isn't pinned" row_has hybrid-video 'recorded as run'
+# A run with OMARCHY_ASUS_G16_ROOT can only dry-run, so the apply is checked through its plan.
+run --dry-run hybrid-video
+check "the run reached the apply step" grep -qF 'Would apply: hybrid-video' "$OUT"
+check "mpv would be pinned under Omarchy's marker" \
+    grep -qF "[dry-run] prepend to ~/.config/mpv/mpv.conf: hwdec=vaapi vaapi-device=$NODE (vaapi-device under Omarchy's marker comment)" "$OUT"
+check "Chromium would be pinned under Omarchy's marker" \
+    grep -qF "[dry-run] append to ~/.config/chromium-flags.conf, under Omarchy's marker comment: --render-node-override=$NODE" "$OUT"
+check "nothing would be appended to hyprland.lua" not grep -qE '\[dry-run\] append to .*hyprland\.lua' "$OUT"
+check "mpv.conf unchanged" cmp -s "$H/.config/mpv/mpv.conf" "$C/mpv.conf.before"
+check "chromium-flags.conf unchanged" cmp -s "$H/.config/chromium-flags.conf" "$C/chromium-flags.conf.before"
+# The pins as applying writes them (hybrid_video_pin_omarchy_form): then it is present.
+printf '%s\n%s\n%s\n%s\n\n%s\n' "$MPV_COMMENT" 'hwdec=vaapi' "$OMARCHY_MARKER" "vaapi-device=$NODE" 'volume=80' \
+    >"$H/.config/mpv/mpv.conf"
+printf '%s\n%s\n' "$OMARCHY_MARKER" "--render-node-override=$NODE" >>"$H/.config/chromium-flags.conf"
+run --check
+check "with the pins written, hybrid-video is present" row_is hybrid-video present
+run --dry-run hybrid-video
+check "with the pins written, no pin would be written again" not grep -qF '[dry-run] prepend to' "$OUT"
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"
