@@ -1,0 +1,25 @@
+# Packaged the same way as omarchy-keyring (pkgbuilds/omarchy-keyring in omacom/omarchy-pkgs).
+# omarchy-asus.gpg is a copy of keys/omarchy-asus.asc: keep the two identical,
+# and keep the fingerprint in omarchy-asus-trusted and bin/omarchy-asus-setup in step.
+
+pkgname=omarchy-asus-keyring
+pkgver=20261018
+pkgrel=1
+pkgdesc="omarchy-asus keyring (EXPERIMENTAL repo, ASUS ROG Zephyrus G16 GA605 only)"
+arch=(any)
+url="https://github.com/omarchy-asus/omarchy-asus"
+license=('GPL-3.0-or-later')
+install=$pkgname.install
+source=("omarchy-asus.gpg"
+        "omarchy-asus-revoked"
+        "omarchy-asus-trusted"
+        "$install")
+
+sha512sums=('20e31a33a6f113c2a1d417075b453afaaad274ba9474d076e008f2049b70e5ca2031f7f21c02bff6fd77f3466244b650b6bd3db2c986012338469ba1f5933b44'
+            'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e'
+            '653ffdcbf31847ae0036720f87eb04cc77ee5e106661e4854d055f48308ca391e5ae6e3b8df8f40cb5128125d88acd5ff4efce3324dad59dcff9865477cd7a2c'
+            'a7e9ef4276f73010da34fef18cd70980dda083d4e0f6248504ec374eb7e1400df6b230d2408be0d49d423f586c43fa9a774c8cf5df124b5453526ffe13a8a31e')
+
+package() {
+    install -D -m0644 -t "${pkgdir}"/usr/share/pacman/keyrings/ 'omarchy-asus'{.gpg,-trusted,-revoked}
+}

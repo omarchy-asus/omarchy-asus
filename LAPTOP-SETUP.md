@@ -10,6 +10,97 @@
 the stock ones. Packages are served from the `x86_64` release of
 [omarchy-asus/omarchy-asus](https://github.com/omarchy-asus/omarchy-asus/releases/tag/x86_64).
 
+There are two ways to set it up. They give the same result:
+
+- **One step:** run `bin/omarchy-asus-setup` (below).
+- **Manual:** follow sections 1 to 4. Section 5 is for removing it again.
+
+Read [Switching an existing install](#switching-an-existing-install) first either way.
+
+## One-step setup
+
+Download the script, read it, then run it as your normal user. It calls `sudo` itself where it needs root.
+
+```bash
+curl -fLO https://raw.githubusercontent.com/omarchy-asus/omarchy-asus/main/bin/omarchy-asus-setup
+less omarchy-asus-setup                  # read it before you run it
+bash omarchy-asus-setup --dry-run        # optional: print every privileged step without running it
+bash omarchy-asus-setup
+```
+
+The script:
+
+1. Stops unless the DMI product or board name contains `GA605`. Use `--force` to skip this check.
+2. Prints the EXPERIMENTAL warning and asks you to confirm. It also warns if no fallback kernel is
+   installed, or if `IgnorePkg` holds back a package this repo ships.
+3. Downloads `keys/omarchy-asus.asc` over HTTPS. If the key isn't exactly the one with fingerprint
+   `0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88` (hardcoded in the script), it stops. Otherwise it runs
+   `pacman-key --add` and `pacman-key --lsign-key`.
+4. Lists the packages in the repo's signed database next to the versions you have installed.
+5. Writes `/etc/pacman.d/custom-repos.conf` and the pre-refresh hook with the same content as
+   sections 2 and 3. Any other repos you keep in `custom-repos.conf` stay. It then applies the hook, so
+   the `Include` line sits above the first of `[omarchy]` and `[core]`.
+6. Installs `omarchy-asus-keyring`, which ships the key in `/usr/share/pacman/keyrings/` so that
+   `pacman-key --populate omarchy-asus` works, like `archlinux-keyring` and `omarchy-keyring`.
+   This step runs `pacman -Sy`.
+7. Lists what the system upgrade would change, marking the packages from `[omarchy-asus]`, and
+   upgrades only if you say yes. The upgrade runs through `omarchy update`, which asks once more,
+   takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
+   `pacman -Syu`, so the script doesn't run one.
+
+> [!IMPORTANT]
+> The fingerprint check is trust on first use. The script, the key and this page all come from
+> the same GitHub account, so the check proves only that the downloaded key matches the script.
+> Before you trust the key, compare the fingerprint with one you got another way: from the README,
+> or from the maintainer.
+
+The script applies the hook itself and does not run `omarchy refresh pacman`. That command ends in
+`pacman -Syyuu --noconfirm`, which would upgrade before you saw the list. Later
+`omarchy refresh pacman` runs keep the repo in place, through the hook.
+
+You can run the script again safely: steps that are already done are left alone.
+
+To undo everything (the same steps as section 5), run `bash omarchy-asus-setup --uninstall`.
+
+## Switching an existing install
+
+Do it in this order on a G16 that already runs stock Omarchy. The script does step 2 and the upgrade
+at the end of step 3. Do the rest by hand: in particular, remove the `IgnorePkg` entries yourself
+before you run the script. The script only warns about them.
+
+0. **Make sure you can boot if this fails.** Keep a fallback kernel installed (`sudo pacman -S linux`).
+   Check that the Limine boot menu lists snapshot entries; `sudo snapper list` shows the snapshots.
+1. **Read-only audit.** Write down what you have now:
+
+   ```bash
+   pacman -Q linux-omarchy linux-omarchy-headers nvidia-utils lib32-nvidia-utils nvidia-open-dkms hyprland hyprpm aquamarine
+   grep -n IgnorePkg /etc/pacman.conf
+   dkms status
+   ```
+
+2. **Add the key, `custom-repos.conf` and the hook before any `omarchy refresh pacman`.** A refresh
+   rewrites `/etc/pacman.conf` and runs `pacman -Syyuu`. Without the `Include` line, the `-uu`
+   downgrades the patched builds back to stock.
+3. **Remove the `IgnorePkg` entries** for `nvidia*`, `hyprland` and `aquamarine`, then upgrade with
+   `omarchy update`, or say yes to the script's prompt. nvidia, hyprland/hyprpm and
+   linux-omarchy with its headers update in one transaction, and DKMS rebuilds nvidia for the new kernel.
+4. **Out-of-tree hid-asus module.** If you used an out-of-tree hid-asus DKMS module for Win-lock, it
+   no longer builds against the patched kernel, so expect one DKMS error. The patched kernel has
+   the fix built in, so removing the module first makes no difference to how the laptop behaves:
+   `sudo dkms remove <module>/<version> --all`.
+5. **Reboot and check:**
+   - `uname -r` ends in `-9.1-omarchy`.
+   - Fn+Super toggles the Win-lock.
+   - An external display looks right after you unplug and replug HDMI.
+   - Hibernate and resume work.
+6. **Remove leftovers** from the earlier workarounds: locally built packages, DKMS sources and
+   stale `IgnorePkg` lines.
+
+## Manual setup
+
+Sections 1 to 4 do by hand what the script does. Section 4 is a good check after either method.
+Section 5 undoes the setup, by hand or with `omarchy-asus-setup --uninstall`.
+
 ## 1. Import and locally sign the repo key
 
 Key: `omarchy-asus package signing key`, ed25519, sign-only, no expiry.
@@ -36,10 +127,14 @@ Server = https://github.com/omarchy-asus/omarchy-asus/releases/download/$arch
 
 ## 3. Hook: `~/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo`
 
-This hook is based on Omarchy's `add-custom-repo.sample`. That sample inserts the repo above `[core]`, but
-`[omarchy-asus]` must come before **every** repo it overrides, including `[omarchy]`
-(for linux-omarchy). The hook therefore inserts above whichever of `[omarchy]` and `[core]`
-comes first. Make it executable (`chmod +x`).
+This hook is based on Omarchy's `add-custom-repo.sample`. Since Omarchy 4.0.5 that sample inserts the
+repo above `[omarchy]`; earlier versions inserted it above `[core]`, which is below `[omarchy]`.
+`[omarchy-asus]` must come before **every** repo it overrides, including `[omarchy]` (for
+linux-omarchy). The hook therefore inserts above whichever of `[omarchy]` and `[core]` comes first,
+on any version. Make it executable (`chmod +x`).
+
+Don't enable a second hook that inserts the same `Include` line, such as an older copy of the
+sample. Hooks run in name order, and the first one to add the line decides where it goes.
 
 ```bash
 #!/bin/bash
@@ -85,10 +180,19 @@ and IgnorePkg would block both.
 
 ## 5. Back out
 
+This removes only the `[omarchy-asus]` section from `custom-repos.conf`. The file and its `Include`
+line are deleted only if no other repos are left in it. `omarchy-asus-setup --uninstall` does the
+same.
+
 ```bash
 rm ~/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo
-sudo sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{N;/\n$/d;s|.*\n||}' /etc/pacman.conf   # or: omarchy refresh pacman
-sudo rm /etc/pacman.d/custom-repos.conf
+f=/etc/pacman.d/custom-repos.conf
+sudo sed -i '/^\[omarchy-asus\]$/,/^\[/{/^\[omarchy-asus\]$/d;/^\[/!d}' "$f"   # drop only our section
+if ! grep -q '[^[:space:]]' "$f"; then   # no other repos left: remove the file and its Include line
+  sudo sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{$d;N;/\n$/d;D}' /etc/pacman.conf
+  sudo rm "$f"
+fi
+pacman -Q omarchy-asus-keyring && sudo pacman -R omarchy-asus-keyring   # if installed
 sudo pacman-key --delete 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
-sudo pacman -Syuu        # -uu downgrades the omarchy-asus builds back to stock
+sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu   # -uu downgrades the omarchy-asus builds back to stock
 ```
