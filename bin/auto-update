@@ -593,6 +593,14 @@ for p in sys.stdin.read().split():
             [[ -s $cr && $(as_user jq -r .reviewed "$cr" 2>/dev/null) == true && $(as_user jq -r '.head // ""' "$cr") == "$(ugit rev-parse HEAD)" ]] ||
                 reasons+=("ai-review has not reviewed the head")
             [[ ! -s $cr || $(as_user jq -r '.threads | length' "$cr") == 0 ]] || reasons+=("blocking ai-review findings")
+            # main requires every review thread resolved (admins included): P2/P3 comments and
+            # threads from earlier heads would make the merge fail late, so gate on them here.
+            local open_threads
+            open_threads=$(as_user gh api graphql -F owner="${GH_REPO%/*}" -F name="${GH_REPO#*/}" -F number="$num" -f query='
+query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
+  reviewThreads(first:100){totalCount nodes{isResolved}}}}}' \
+                --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' || echo unknown)
+            [[ $open_threads == 0 ]] || reasons+=("unresolved review threads: $open_threads")
         fi
         if [[ $REQUIRE_AGENT_APPROVAL == yes ]]; then
             [[ $agent_verdict == approve ]] || reasons+=("fixer verdict (REQUIRE_AGENT_APPROVAL=yes): $agent_verdict")
