@@ -106,6 +106,14 @@ chmod +x "$S/bin/strings"
 out=$(PATH=$S/bin:$PATH scan "$S/good" "$S/rd.tar"); rc=$?
 expect $rc 1 "a failed read in the located pass is blocked"
 grep -q 'content scan failed' <<<"$out"; expect $? 0 "says why"
+# A sort that fails in the coverage check (only the stdin 'sort -u' it uses) refuses too,
+# on a package whose stray .PKGINFO hit would otherwise be counted.
+mkdir -p "$S/bin2"
+printf '#!/bin/bash\n[[ $* == -u ]] && exit 2\nexec %q "$@"\n' "$(command -v sort)" >"$S/bin2/sort"
+chmod +x "$S/bin2/sort"
+out=$(PATH=$S/bin2:$PATH scan "$S/good" "$S/kern-pkginfo.tar"); rc=$?
+expect $rc 1 "a failed sort in the located pass is blocked"
+grep -q 'coverage check failed' <<<"$out"; expect $? 0 "says why"
 # An anchored entry: raw bytes '\0word\0' are no line of their own, but strings makes
 # one, so the located pass must read members through strings too.
 mkdir -p "$S/pkg/anc"

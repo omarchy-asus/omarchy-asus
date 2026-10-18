@@ -180,19 +180,26 @@ pii_located() {
     rm -rf "$d"; rm -f "$up/.names" "$up/.l" "$up/.one" "$up/.files" "$up/.s" "$up/.m"
     if [[ -n $err ]]; then pii_why="$err; refusing"; rm -f "$up/.loc"; return 1; fi
     # Fail closed: a first-pass hit this pass did not place (say, a string that spans
-    # two members) is not covered by any rule.
-    if [[ -n $(comm -23 <(tr '[:upper:]' '[:lower:]' <"$up/.hits" | sort -u) \
-                        <(cut -f2- "$up/.loc" | tr '[:upper:]' '[:lower:]' | sort -u)) ]]; then
+    # two members) is not covered by any rule. Intermediate files, not process
+    # substitutions, so a failed sort or comm is seen (pipefail is on).
+    local uncovered
+    if ! { tr '[:upper:]' '[:lower:]' <"$up/.hits" | sort -u >"$up/.h1" &&
+           cut -f2- "$up/.loc" | tr '[:upper:]' '[:lower:]' | sort -u >"$up/.h2" &&
+           uncovered=$(comm -23 "$up/.h1" "$up/.h2"); }; then
+        pii_why="coverage check failed; refusing"; rm -f "$up/.loc" "$up/.h1" "$up/.h2"; return 1
+    fi
+    rm -f "$up/.h1" "$up/.h2"
+    if [[ -n $uncovered ]]; then
         pii_why="a hit could not be placed"; rm -f "$up/.loc"; return 1
     fi
-    while IFS=$'\t' read -r loc m; do
+    while IFS=$'\t' read -r loc m; do   # read the file itself: no hidden exit status
         allowed=0
         for i in "${!aglobs[@]}"; do
             # shellcheck disable=SC2053  # the rules are globs
             [[ $base == ${aglobs[$i]} && $loc == ${pglobs[$i]} ]] && { allowed=1; break; }
         done
         ((allowed)) || nbad=$((nbad + 1))
-    done < <(sort -u "$up/.loc")
+    done <"$up/.loc"
     rm -f "$up/.loc"
     ((nbad == 0)) || { pii_why="$nbad hit(s) outside its allowed locations"; return 1; }
 }
