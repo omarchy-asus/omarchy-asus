@@ -1,6 +1,15 @@
 # nvidia-open-dkms 615.78.08-1.1 (PR #1299 + PR #1412): install when the mirror moves to 615
 
-> Historical note: this was the local-install procedure before the omarchy-asus repo existed. With the repo, the package arrives through pacman; see `LAPTOP-SETUP.md`.
+> [!IMPORTANT]
+> **Historical, do not follow.** This was the local-install procedure for 1.1, before the
+> omarchy-asus repo existed. The repo now ships nvidia-open-dkms 615.78.08-1.2 (adds
+> NVIDIA PR #1368), and it arrives with `omarchy update` once the repo is set up; see
+> `LAPTOP-SETUP.md`.
+>
+> - The direct `sudo pacman -Syu --ignore ...` below is blocked on Omarchy 4.0.5 by its
+>   update guard (`omarchy-update-pacman-guard`); use `omarchy update`.
+> - Don't add `IgnorePkg = nvidia-open-dkms` as recommended below: it would also hold back
+>   the repo's rebuilds.
 
 Built 2026-10-16, **not installed**. The package is `nvidia-open-dkms-615.78.08-1.1-x86_64.pkg.tar.zst` in this directory.
 
