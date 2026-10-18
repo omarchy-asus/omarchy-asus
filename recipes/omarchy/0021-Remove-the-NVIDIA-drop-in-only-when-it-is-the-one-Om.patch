@@ -1,0 +1,75 @@
+From d289307cd5d35899ef3a96e4fd83c9bcaf6454bc Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 04:53:47 -0400
+Subject: [PATCH 21/23] Remove the NVIDIA drop-in only when it is the one
+ Omarchy wrote
+
+On a hybrid machine the migration deleted /etc/mkinitcpio.conf.d/nvidia.conf
+and rebuilt the initramfs whatever the file held. A machine where the drop-in
+had been edited by hand (more modules, FILES, a different fix for the same
+resume problem) lost those settings with it, and the rebuild made the loss
+part of the next boot.
+
+Now the drop-in is removed only when its content is exactly what
+install/hardware/nvidia.sh writes. Any other content is left in place, with
+a note on how to drop it by hand, and nothing is rebuilt or marked done. A
+machine where the file is already gone is still a no-op.
+---
+ migrations/1787683023.sh                      |  8 +++++++
+ .../nvidia-hybrid-initramfs-migration-test.sh | 21 +++++++++++++++++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/migrations/1787683023.sh b/migrations/1787683023.sh
+index 2a80c6dc..8d053422 100644
+--- a/migrations/1787683023.sh
++++ b/migrations/1787683023.sh
+@@ -15,6 +15,14 @@ omarchy-cmd-present limine-mkinitcpio || exit 0
+ [[ ! -e $rebuild_marker ]] || exit 0
+ omarchy-hw-nvidia-only-display && exit 0
+ 
++# Only the drop-in exactly as the installer wrote it is Omarchy's to remove. A
++# file with any other content was edited, or written by hand, and may load or
++# configure more than this; removing it and rebuilding could break the boot.
++if [[ $(cat "$nvidia_conf"; echo x) != $'MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)\nx' ]]; then
++  echo "Leaving $nvidia_conf in place: it is not the file Omarchy wrote. Remove it and run 'sudo limine-mkinitcpio' to stop early-loading nvidia."
++  exit 0
++fi
++
+ echo "This is a hybrid GPU machine; removing nvidia from the initramfs and rebuilding it"
+ 
+ # The drop-in has to be gone before the rebuild, but the rebuild is what makes
+diff --git a/test/shell.d/nvidia-hybrid-initramfs-migration-test.sh b/test/shell.d/nvidia-hybrid-initramfs-migration-test.sh
+index 4f35e41f..04fe3e83 100755
+--- a/test/shell.d/nvidia-hybrid-initramfs-migration-test.sh
++++ b/test/shell.d/nvidia-hybrid-initramfs-migration-test.sh
+@@ -110,6 +110,27 @@ grep -Fxq 'limine-mkinitcpio' "$calls" || fail "a failed rebuild is retried on t
+ [[ -f $rebuild_marker ]] || fail "the retry records the repair"
+ pass "migration retries after a failed rebuild"
+ 
++# A drop-in that is not the one Omarchy's installer wrote is the user's: it may
++# carry other modules or options, so it stays, with nothing rebuilt or marked.
++write_pci_devices 0x8086:0x030000 0x10de:0x030200
++rm -f "$rebuild_marker"
++user_conf_body='MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)
++FILES+=(/etc/modprobe.d/nvidia-power.conf)'
++printf '%s\n' "$user_conf_body" >"$nvidia_conf"
++: >"$calls"
++output=$(PATH="$stub_bin:$ROOT/bin:$PATH" \
++  TEST_LOG="$calls" \
++  OMARCHY_MKINITCPIO_NVIDIA_CONF="$nvidia_conf" \
++  OMARCHY_NVIDIA_REBUILD_MARKER="$rebuild_marker" \
++  OMARCHY_PCI_DEVICES_PATH="$test_tmp/devices" \
++  bash -euo pipefail "$migration" 2>&1)
++
++[[ -f $nvidia_conf && $(<"$nvidia_conf") == "$user_conf_body" ]] || fail "a drop-in the user changed is kept"
++[[ ! -s $calls ]] || fail "a drop-in the user changed causes no rebuild" "$(cat "$calls")"
++[[ ! -e $rebuild_marker ]] || fail "a kept drop-in is not marked as repaired"
++[[ $output == *"$nvidia_conf"* ]] || fail "the migration says why it kept the drop-in" "$output"
++pass "migration keeps an nvidia drop-in Omarchy did not write"
++
+ # NVIDIA-only desktop: the early load is what gives it KMS at the LUKS prompt.
+ write_pci_devices 0x10de:0x030000
+ rm -f "$rebuild_marker"
+-- 
+2.55.0
+
