@@ -31,7 +31,7 @@ For the maintainer's own work (this account and its agents), **Claude Opus 5.5 w
 change and Codex `gpt-6.1-sol` reviews it**. The author never reviews its own change.
 
 - Run the review on the branch before asking for a merge:
-  `codex exec review -m gpt-6.1-sol --base main` (add review instructions as the last argument).
+  `codex exec review -m gpt-6.1-sol --base main` (or `--commit <sha>` / `--uncommitted`).
 - Fix or answer every finding, and say in the PR that the review ran and what came of it.
 - Contributors' agents may pair the other way round (Codex writes, Opus reviews).
 - Pull requests from external contributors are reviewed by us, against these rules.
