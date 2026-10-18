@@ -27,6 +27,7 @@ a stale published copy of it is unpublished.
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -77,8 +78,10 @@ def plan(check_path, status_path):
         hold = next((r.get("hold") for r in rows if r.get("hold")), None)
         if recipe in skip:
             action, notes = "attention", notes + [f"skipped by SKIP_RECIPES ({', '.join(sorted(statuses))})"]
-        elif hold and in_repo and statuses & {"rebuild-needed", "dep-mismatch"}:
-            # Held recipes never get (re)published; a stale copy still goes, so stock flows.
+        elif hold and in_repo and (statuses & {"rebuild-needed", "dep-mismatch"} or any(
+                r["repo"] and r["upstream"] and VerKey(re.sub(r"\.\d+$", "", r["repo"])) < VerKey(r["upstream"])
+                for r in rows)):
+            # Held recipes never get (re)published; a copy behind upstream still goes, so stock flows.
             action = "unpublish"
             notes.append(f"held ({hold}); stale copy unpublished instead of rebased")
         elif hold:
