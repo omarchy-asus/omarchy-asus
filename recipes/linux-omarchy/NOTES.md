@@ -30,8 +30,8 @@ kernel maintainer's key); its checksums pin it instead. Everything else
 
 Not in mainline (`torvalds/linux` master) or the HID tree (`hid.git` for-next)
 as of 2026-10-17: neither contains `QUIRK_HID_WIN_LOCK` or the 0xbf handling.
-lore.kernel.org search was not reachable, so whether it has been posted to
-linux-input is unknown.
+It was submitted to linux-input on 2026-09-10 (patchwork 14804337) and has had
+no replies yet.
 
 ## Verification
 

@@ -10,9 +10,11 @@ hardware fixes for Omarchy. It was developed on an ROG Zephyrus G16 GA605 (Ryzen
 RTX 50-series laptop GPU).
 
 Every package takes upstream's pkgrel plus `.1` (for example `615.78.08-1.1`). That sorts just
-above the stock build it replaces. When upstream moves past our base version, the package
-is rebuilt with the patches rebased, or it is removed from the repo so the stock build flows
-through. A stale pin is never kept.
+above the stock build it replaces, so the patched build is installed over stock. Because this repo
+is listed first in pacman.conf, pacman takes our build even when upstream has a newer one, so we
+must keep up. A daily check rebuilds each package when upstream moves past our base version. If the
+patches no longer apply or the build fails, the package is removed from the repo and the stock
+build flows through again. Until that automation is live, the check is run by hand.
 
 - **Install:** see [LAPTOP-SETUP.md](LAPTOP-SETUP.md).
 - **Packages:** the [`x86_64` release](https://github.com/rdoupe-omarchy/omarchy-asus-pkgs/releases/tag/x86_64)
@@ -24,7 +26,6 @@ through. A stale pin is never kept.
 | package | version | patches |
 |---|---|---|
 | nvidia-open-dkms | 615.78.08-1.1 | NVIDIA/open-gpu-kernel-modules [#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412) (no hang at power-off after hibernate), [#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299) (dGPU no longer wakes from D3cold on every battery change) |
-
 | hyprland, hyprpm | 0.56.2-4.1 | render offset after an HDMI replug (fixed upstream on main, unreleased) |
 | linux-omarchy, linux-omarchy-headers | 7.2.8-9.1 | hid-asus ROG N-Key Win-lock pass-through; **plus an EXPERIMENTAL, default-off scheduler series** (Zen 5c-first soft park) for GA605KM battery testing, compile-tested only, nothing enables it; see `recipes/linux-omarchy/NOTES.md` |
 
