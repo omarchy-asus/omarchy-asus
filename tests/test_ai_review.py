@@ -476,6 +476,57 @@ class Local(unittest.TestCase):
         self.assertIn("CLEAN", out.getvalue())
 
 
+class MissingReviewer(unittest.TestCase):
+    """issue #77: a reviewer CLI missing from PATH fails closed with a message, not a traceback."""
+
+    def setUp(self):
+        self.saved = {k: os.environ.get(k) for k in ("PATH", "AI_REVIEWER")}
+        os.environ["PATH"] = tempfile.mkdtemp(dir=TMP)  # empty: no codex, no claude
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_codex_missing_fails_closed(self):
+        os.environ["AI_REVIEWER"] = "codex"
+        with self.assertRaises(RuntimeError) as cm:
+            ar.find(TMP, "main", "t", "diff")
+        self.assertIn("codex not found", str(cm.exception))
+
+    def test_review_tree_propagates(self):
+        os.environ["AI_REVIEWER"] = "codex"
+        res = None
+        with self.assertRaisesRegex(RuntimeError, "codex not found"):
+            res = ar.review_tree(TMP, "main", "t", "diff")
+        self.assertIsNone(res, "no result with reviewed=True exists")
+
+    def test_claude_missing_fails_closed(self):
+        os.environ["AI_REVIEWER"] = "claude"
+        with self.assertRaises(RuntimeError) as cm:
+            ar.find(TMP, "main", "t", "diff")
+        self.assertIn("claude not found", str(cm.exception))
+
+    def test_main_exits_nonzero_without_json(self):
+        """bin/auto-update's ai_review_state needs a non-zero exit and no --json view."""
+        out = os.path.join(tempfile.mkdtemp(dir=TMP), "view.json")
+
+        def missing(*a, **k):
+            raise RuntimeError("codex not found on PATH")
+        saved_argv = sys.argv
+        sys.argv = ["ai-review", "pr", str(NUM), "--repo", REPO, "--json", out]
+        try:
+            with Patch(review_pr=missing), contextlib.redirect_stderr(io.StringIO()) as err:
+                rc = ar.main()
+        finally:
+            sys.argv = saved_argv
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.exists(out))
+        self.assertIn("codex not found", err.getvalue())
+
+
 def tearDownModule():
     import shutil
     shutil.rmtree(TMP, ignore_errors=True)
