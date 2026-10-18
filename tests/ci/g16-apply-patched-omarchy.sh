@@ -5,12 +5,19 @@
 # pacman, aplay, amixer, busctl, systemctl and sudo stubbed. The patched omarchy is stood in
 # for by its migrations (/usr/share/omarchy/migrations/<id>.sh) and its hybrid-cursor.lua.
 #   a. stock Omarchy: hdmi-cursor is missing
-#   b. patched: hdmi-cursor and hybrid-video are present, a "Patched omarchy installed" note,
-#      the rtkit row names migration 1789747667
+#   b. patched, migration 1792123636 run: hdmi-cursor and hybrid-video are present, a
+#      "Patched omarchy installed" note, the rtkit row names migration 1789747667
 #   c. patched, with this command's hdmi-cursor lines already in hyprland.lua: present and
 #      the lines are called redundant
 #   d. patched, --check --dry-run: nothing would be appended to hyprland.lua
 #   e. this command's asusd drop-in next to omarchy-settings' one: present, redundant
+#   f. patched, migration 1792123636 not run yet ('omarchy update' pending): hybrid-video is
+#      missing and names 'omarchy update'; --dry-run pins mpv, adds nothing to hyprland.lua
+#   g. patched, migration run, this command's older mpv and Chromium pins on an old node:
+#      needs repair, handed over to the patched omarchy; --dry-run repins and hands over,
+#      files unchanged
+#   h. patched, migration run, pins already in Omarchy's marked form (even stale): present,
+#      and --dry-run neither repins nor hands over (one owner: Omarchy)
 # Usage: tests/ci/g16-apply-patched-omarchy.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -90,6 +97,19 @@ patched() {
     done
 }
 
+# migration_ran ID: omarchy-migrate's per-user marker for a migration it ran.
+migration_ran() {
+    mkdir -p "$H/.local/state/omarchy/migrations"
+    touch "$H/.local/state/omarchy/migrations/$1.sh"
+}
+
+# The comments and markers, verbatim from the command.
+MPV_COMMENT='# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep.'
+OUR_MARKER='# omarchy-asus-g16-apply hybrid-video: decode on the iGPU (kept up to date by the command; delete this line and the next to undo)'
+OMARCHY_MARKER='# Omarchy repins the next line if the iGPU moves. Delete this comment to keep the line as your own.'
+OLD_NODE=/dev/dri/by-path/pci-0000:66:00.0-render
+NODE=/dev/dri/by-path/pci-0000:65:00.0-render
+
 # run ARGS...: the command, with its output in $OUT.
 run() {
     (
@@ -108,6 +128,7 @@ check "no patched omarchy note" not grep -qF 'Patched omarchy installed' "$OUT"
 echo "== b. patched omarchy"
 setup_case b
 patched
+migration_ran 1792123636
 run --check
 check "hdmi-cursor is present" row_is hdmi-cursor present
 check "hybrid-video is present" row_is hybrid-video present
@@ -146,6 +167,58 @@ cp "$S/share/system/asusd-power-profiles.conf" \
 run --check
 check "asusd-power-profiles is present" row_is asusd-power-profiles present
 check "this command's drop-in is redundant" row_has asusd-power-profiles redundant
+
+echo "== f. patched, migration 1792123636 not run yet"
+setup_case f
+patched
+mkdir -p "$H/.config/mpv"
+: >"$H/.config/mpv/mpv.conf"
+printf -- '--ozone-platform=wayland\n' >"$H/.config/chromium-flags.conf"
+run --check
+check "hybrid-video is missing" row_is hybrid-video missing
+check "hybrid-video names the next omarchy update" row_has hybrid-video "omarchy update"
+run --dry-run hybrid-video
+check "the run reached the apply step" grep -qF 'Would apply: hybrid-video' "$OUT"
+check "mpv would be pinned" grep -qF '[dry-run] prepend to ~/.config/mpv/mpv.conf' "$OUT"
+check "Chromium would be pinned under Omarchy's marker" \
+    grep -qF "[dry-run] append to ~/.config/chromium-flags.conf, under Omarchy's marker comment" "$OUT"
+check "nothing would be appended to hyprland.lua" not grep -qE '\[dry-run\] append to .*hyprland\.lua' "$OUT"
+
+echo "== g. patched, migration run, this command's older pins on an old node"
+setup_case g
+patched
+migration_ran 1792123636
+mkdir -p "$H/.config/mpv"
+printf '%s\n%s\n%s\n' "$MPV_COMMENT" 'hwdec=vaapi' "vaapi-device=$OLD_NODE" >"$H/.config/mpv/mpv.conf"
+printf '%s\n%s\n' "$OUR_MARKER" "--render-node-override=$OLD_NODE" >"$H/.config/chromium-flags.conf"
+cp "$H/.config/mpv/mpv.conf" "$C/mpv.conf.before"
+cp "$H/.config/chromium-flags.conf" "$C/chromium-flags.conf.before"
+run --check
+check "hybrid-video needs repair" row_is hybrid-video 'needs repair'
+check "hybrid-video hands the pins over to the patched omarchy" row_has hybrid-video 'patched omarchy'
+run --dry-run hybrid-video
+check "the mpv pin would be repinned" grep -qF "[dry-run] repin to $NODE in ~/.config/mpv/mpv.conf (line 3)" "$OUT"
+check "the Chromium pin would be repinned" grep -qF "[dry-run] repin to $NODE in ~/.config/chromium-flags.conf (line 2)" "$OUT"
+check "the mpv pin would be handed over" \
+    grep -qF '[dry-run] hand over the pin in ~/.config/mpv/mpv.conf (line 3) to the patched omarchy' "$OUT"
+check "the Chromium pin would be handed over" \
+    grep -qF '[dry-run] hand over the pin in ~/.config/chromium-flags.conf (line 2) to the patched omarchy' "$OUT"
+check "nothing would be appended to hyprland.lua" not grep -qE '\[dry-run\] append to .*hyprland\.lua' "$OUT"
+check "mpv.conf unchanged" cmp -s "$H/.config/mpv/mpv.conf" "$C/mpv.conf.before"
+check "chromium-flags.conf unchanged" cmp -s "$H/.config/chromium-flags.conf" "$C/chromium-flags.conf.before"
+
+echo "== h. patched, migration run, pins already in Omarchy's form"
+setup_case h
+patched
+migration_ran 1792123636
+mkdir -p "$H/.config/mpv"
+printf '%s\n%s\n%s\n%s\n' "$MPV_COMMENT" 'hwdec=vaapi' "$OMARCHY_MARKER" "vaapi-device=$OLD_NODE" >"$H/.config/mpv/mpv.conf"
+printf '%s\n%s\n' "$OMARCHY_MARKER" "--render-node-override=$OLD_NODE" >"$H/.config/chromium-flags.conf"
+run --check
+check "hybrid-video is present" row_is hybrid-video present
+run --dry-run hybrid-video
+check "no pin would be repinned" not grep -qF 'repin' "$OUT"
+check "no pin would be handed over" not grep -qF 'hand over' "$OUT"
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"
