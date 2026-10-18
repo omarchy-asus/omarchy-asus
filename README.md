@@ -75,7 +75,7 @@ locally sign the key, add the repo ahead of `[omarchy]` and `[core]`, and run
 go (`--dry-run` to preview, `--uninstall` to undo). LAPTOP-SETUP.md also covers how to back out.
 
 Signing key: [`keys/omarchy-asus.asc`](keys/omarchy-asus.asc), fingerprint
-`0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88`.
+`0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88`. The same key is on [keys.openpgp.org](https://keys.openpgp.org/vks/v1/by-fingerprint/0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88), so you can check it somewhere other than GitHub.
 
 ## How it works
 

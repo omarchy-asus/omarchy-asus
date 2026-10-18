@@ -55,8 +55,16 @@ The script:
 > [!IMPORTANT]
 > The fingerprint check is trust on first use. The script, the key and this page all come from
 > the same GitHub account, so the check proves only that the downloaded key matches the script.
-> Before you trust the key, compare the fingerprint with one you got another way: from the README,
-> or from the maintainer.
+> Before you trust the key, compare the fingerprint with one you got another way. The key is also
+> published on a keyserver that isn't GitHub:
+>
+> ```bash
+> curl -fsS https://keys.openpgp.org/vks/v1/by-fingerprint/0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88 \
+>   | gpg --show-keys --with-fingerprint
+> ```
+>
+> Both copies must show `0B44 FF7C CDD9 29F6 1BE4  A2E4 36FE 6B28 AB24 EC88`. You can also ask the
+> maintainer.
 
 The script applies the hook itself and does not run `omarchy refresh pacman`. That command ends in
 `pacman -Syyuu --noconfirm`, which would upgrade before you saw the list. Later
