@@ -11,11 +11,18 @@ Usage: bin/release-cohort [--cohorts FILE] [--workspace DIR] <command> [args]
       Refuse (exit 1) a set of package files that would publish a cohort member
       without every partner at the same pkgver-pkgrel, either in the same set
       or already in DB. Files outside every cohort always pass.
-  check-recipes
-      Check that the members of each cohort carry identical _tag, _commit,
-      pkgver, pkgrel, source=() and sha256sums=(), and that a quoted dependency
-      on a partner is exactly "<partner>=${pkgver}-${pkgrel}". PKGBUILDs are
-      read as text, never executed.
+  check-recipes [--strict]
+      Refuse (exit 1) a member whose dependency on a partner is not pinned to
+      the release: a package function must add exactly
+      "<partner>=${pkgver}-${pkgrel}", and the global (build-time) arrays may
+      name the partner only as "<partner>=${pkgver}" (the clean chroot and CI
+      have only the stock partner, so the exact pin there could not be
+      satisfied). Members that differ in _tag, _commit, pkgver, pkgrel,
+      source=() or sha256sums=() are a warning: auto-update rebases each
+      recipe in its own PR, so one may lag its partner on the base branch
+      (bin/publish and bin/auto-update hold it back until both match).
+      --strict makes those differences fatal too. PKGBUILDs are read as text,
+      never executed.
 
 Cohorts come from build/cohorts.conf: one cohort per line, whitespace-separated
 recipe directory names; each recipe builds one package with its own name. A
@@ -188,8 +195,11 @@ def arrays(text, var):
     return found
 
 
+PACKAGE_FN_RE = re.compile(r"^\s*package(_[A-Za-z0-9@._+-]+)?\s*\(\)")
+
+
 def cmd_check_recipes(args, cohorts):
-    problems = []
+    problems, lags = [], []
     for cohort in cohorts:
         members = " ".join(cohort)
         texts = {}
@@ -208,24 +218,42 @@ def cmd_check_recipes(args, cohorts):
             for member in cohort[1:]:
                 got = assignment(texts[member], var)
                 if got != want:
-                    problems.append(f"{member}: {var}={got} but {first} has {var}={want} (cohort: {members})")
+                    lags.append(f"{member}: {var}={got} but {first} has {var}={want} (cohort: {members})")
         for var in ARRAYS:
             want = arrays(texts[first], var)
             for member in cohort[1:]:
                 if arrays(texts[member], var) != want:
-                    problems.append(f"{member}: {var}=() differs from {first}'s (cohort: {members})")
+                    lags.append(f"{member}: {var}=() differs from {first}'s (cohort: {members})")
         for member in cohort:
-            code = "\n".join(line for line in texts[member].splitlines() if not line.lstrip().startswith("#"))
+            lines = [line for line in texts[member].splitlines() if not line.lstrip().startswith("#")]
+            split = next((i for i, line in enumerate(lines) if PACKAGE_FN_RE.match(line)), len(lines))
+            parts = (("global", "\n".join(lines[:split])), ("package", "\n".join(lines[split:])))
             for partner in cohort:
                 if partner == member:
                     continue
                 pin = f'"{partner}=${{pkgver}}-${{pkgrel}}"'
-                for m in re.finditer(rf"""["']{re.escape(partner)}(=[^"']*)?["']""", code):
-                    if m.group(0) != pin:
-                        problems.append(f"{member}: depends on {m.group(0)}, must be exactly {pin} (cohort: {members})")
+                build_pin = f'"{partner}=${{pkgver}}"'
+                refs = {part: [m.group(0) for m in re.finditer(rf"""["']{re.escape(partner)}(=[^"']*)?["']""", code)]
+                        for part, code in parts}
+                if not refs["global"] and not refs["package"]:
+                    continue
+                for ref in refs["global"]:
+                    if ref == pin:
+                        problems.append(f"{member}: {pin} is a build dependency (global depends=()): the clean chroot "
+                                        f"and CI only have the stock {partner}; add it in package() instead (cohort: {members})")
+                    elif ref != build_pin:
+                        problems.append(f"{member}: depends on {ref} at build time, must be {build_pin} (cohort: {members})")
+                for ref in refs["package"]:
+                    if ref != pin:
+                        problems.append(f"{member}: package() depends on {ref}, must be exactly {pin} (cohort: {members})")
+                if pin not in refs["package"]:
+                    problems.append(f"{member}: no package function adds depends+=({pin}), so a {partner} of another "
+                                    f"release satisfies it (cohort: {members})")
     for p in problems:
         print(f"release-cohort: {p}", file=sys.stderr)
-    return 1 if problems else 0
+    for p in lags:
+        print(f"release-cohort: {'' if args.strict else 'warning: '}{p}", file=sys.stderr)
+    return 1 if problems or (args.strict and lags) else 0
 
 
 def main(argv):
@@ -244,6 +272,7 @@ def main(argv):
     publish.add_argument("files", nargs="+")
     recipes = sub.add_parser("check-recipes", add_help=False)
     recipes.add_argument("-h", "--help", action=DocHelp)
+    recipes.add_argument("--strict", action="store_true")
     args = parser.parse_args(argv)
     cohorts = load_cohorts(args.cohorts or os.path.join(args.workspace, "build", "cohorts.conf"))
     command = {"members": cmd_members, "check-publish": cmd_check_publish, "check-recipes": cmd_check_recipes}

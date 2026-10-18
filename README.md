@@ -155,9 +155,10 @@ Where our fixes are headed:
   whole release cohort (the partners the db holds) with it.
 - `bin/release-cohort members|check-publish|check-recipes`: the release cohorts in
   `build/cohorts.conf`. `members` lists a package's partners, `check-publish` is the gate
-  `bin/publish` runs, `check-recipes` checks that the members carry the same `_tag`, `_commit`,
-  `pkgver`, `pkgrel`, sources and checksums, and pin each other as `=${pkgver}-${pkgrel}`
-  (offline test: `tests/ci/release-cohort.sh`).
+  `bin/publish` runs, `check-recipes` checks that a member's `package()` pins its partner
+  as `=${pkgver}-${pkgrel}` (never the build-time `depends=()`: the chroot only has the stock
+  partner), and warns when the members' `_tag`, `_commit`, `pkgver`, `pkgrel`, sources or
+  checksums differ (`--strict`: refuses; offline test: `tests/ci/release-cohort.sh`).
 - `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release.
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:

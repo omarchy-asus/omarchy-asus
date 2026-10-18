@@ -1,7 +1,7 @@
 #!/bin/bash
 # bin/release-cohort keeps a release cohort (build/cohorts.conf) together: patched
 # omarchy is never published without the patched omarchy-settings of the same
-# pkgver-pkgrel (#83), and the two recipes stay in step. Offline: empty package
+# pkgver-pkgrel (#83), and the recipes pin each other to the release. Offline: empty package
 # files and a hand-made repo db; needs bash, python3 and GNU tar only.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -71,11 +71,20 @@ ws=$(mkws ws-same)
 expect "check-recipes on unedited copies: ok" "$(status --workspace "$ws" check-recipes)" 0
 ws=$(mkws ws-pkgrel)
 sed -i 's/^pkgrel=.*/pkgrel=1.9/' "$ws/recipes/omarchy-settings/PKGBUILD"
-expect "check-recipes, omarchy-settings at another pkgrel: refused" "$(status --workspace "$ws" check-recipes)" 1
+# auto-update rebases each member in its own PR, so one may lag the other on main
+expect "check-recipes, omarchy-settings at another pkgrel: a warning" "$(status --workspace "$ws" check-recipes)" 0
+expect "check-recipes --strict, omarchy-settings at another pkgrel: refused" \
+    "$(status --workspace "$ws" check-recipes --strict)" 1
 ws=$(mkws ws-pin)
 # The PKGBUILD's own ${pkgver}, not ours:
 # shellcheck disable=SC2016
 sed -i 's/"omarchy-settings=${pkgver}-${pkgrel}"/"omarchy-settings=${pkgver}"/' "$ws/recipes/omarchy/PKGBUILD"
 expect "check-recipes, omarchy pins omarchy-settings to pkgver only: refused" \
+    "$(status --workspace "$ws" check-recipes)" 1
+ws=$(mkws ws-build-pin)
+# The exact pin as a build dependency: the clean chroot and CI only have stock omarchy-settings.
+# shellcheck disable=SC2016
+sed -i 's/^  "omarchy-settings=${pkgver}"$/  "omarchy-settings=${pkgver}-${pkgrel}"/' "$ws/recipes/omarchy/PKGBUILD"
+expect "check-recipes, the exact pin in the global depends: refused" \
     "$(status --workspace "$ws" check-recipes)" 1
 exit $fails

@@ -34,9 +34,7 @@ depends=(
   # package satisfy it, leaving a mixed dev/stable install. A versioned
   # dependency can only be satisfied by the real omarchy-settings built
   # from the same _commit, and forces the pair to upgrade together.
-  # omarchy-asus: pinned to pkgver-pkgrel, so only the patched omarchy-settings from this
-  # same release satisfies it, never stock's same-pkgver build (#83).
-  "omarchy-settings=${pkgver}-${pkgrel}"
+  "omarchy-settings=${pkgver}"
 
   # Wayland / Hyprland core
   'hyprland'
@@ -180,6 +178,12 @@ prepare() {
 
 package() {
   cd "$srcdir/omarchy"
+
+  # omarchy-asus: only the patched omarchy-settings of this same release satisfies
+  # this, never stock's same-pkgver build (#83). Set here, not in depends=() above,
+  # so it is in the package but not a build dependency: the clean chroot and CI only
+  # have stock omarchy-settings, which satisfies the ${pkgver} pin above.
+  depends+=("omarchy-settings=${pkgver}-${pkgrel}")
 
   # Runtime binaries — ship everything in bin/ except the debug helpers
   # that ship from omarchy-settings (needed before omarchy is installed,

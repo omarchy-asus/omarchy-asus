@@ -15,7 +15,7 @@ src=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
 LIB=/usr/local/lib/omarchy-asus
 UNITS=/etc/systemd/system
 CONF=/etc/omarchy-asus/auto-update.conf
-scripts=(ai-review auto-update auto-update-state build-pkg check-upstream env.sh mkchroot publish publish-lib.sh rebase-recipe recipe-sandbox revdep-check sync-release unpublish issue)
+scripts=(ai-review auto-update auto-update-state build-pkg check-upstream env.sh mkchroot publish publish-lib.sh rebase-recipe recipe-sandbox release-cohort revdep-check sync-release unpublish issue)
 units=(omarchy-asus-auto-update.service omarchy-asus-auto-update.timer)
 
 apply=0 enable=0 uninstall=0
