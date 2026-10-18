@@ -187,7 +187,17 @@ retry_unpublish() {  # retry the removals a previous run could not do (names sti
     fi
 }
 publish_files() {  # publish_files <recipe dir> <version>: publish the staged packages of that recipe
+    # Right after drive_pr's merge, its locals merged_pr and built_tree are set (bash scoping
+    # is dynamic): then publish only if the merge commit holds the tree that was built, and
+    # set merge_mismatch=yes otherwise. --match-head-commit pins the head, not the base: a
+    # base-branch commit to the same recipe during the build and review would otherwise ship
+    # a recipe that was never built.
     local dir=$1 ver=$2 files=() n
+    if [[ -n ${merged_pr:-} && $(merged_tree "$merged_pr" "${dir##*/}") != "${built_tree:-}" ]]; then
+        merge_mismatch=yes
+        note publish "the merge commit of $merged_pr does not hold the built recipes/${dir##*/} (or is unknown): not publishing"
+        return 1
+    fi
     for n in $(as_user bash -c 'cd "$1" && makepkg --printsrcinfo' _ "$dir" | sed -n 's/^pkgname = //p'); do
         files+=($(as_user bash -c 'ls "$1"/"$2"-"$3"-*.pkg.tar.zst 2>/dev/null' _ "$STAGE_DIR" "$n" "$ver"))
     done
@@ -202,6 +212,38 @@ recipe_version() {  # recipe_version <recipe dir>: [epoch:]pkgver-pkgrel
         awk '/^\tepoch = /{e=$3":"} /^\tpkgver = /{v=$3} /^\tpkgrel = /{r=$3} END{print e v "-" r}'
 }
 tree_hash() { ugit rev-parse "HEAD:recipes/$1" 2>/dev/null || echo none; }
+merged_tree() {  # merged_tree <pr url> <recipe>: recipes/<recipe>'s tree in the PR's merge commit, or "none"
+    local sha
+    sha=$(as_user gh pr view "$1" -R "$GH_REPO" --json mergeCommit --jq '.mergeCommit.oid // ""') || sha=
+    [[ $sha =~ ^[0-9a-f]{40,64}$ ]] || { echo none; return 0; }
+    ugit fetch --quiet origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" || true
+    ugit rev-parse --verify --quiet "$sha:recipes/$2" 2>/dev/null || echo none
+}
+
+# ---------------------------------------------------------------- what goes on the PR
+# Every PR comment and thread reply passes the PII scan bin/sync-release runs on what it
+# uploads (same denylist, whole-word, case-insensitive; a missing denylist or a failed scan
+# counts as a hit). Only text that was written to a run file and passed the scan is posted;
+# otherwise a placeholder naming the run goes instead (the original stays in the run dir).
+run_rel() {  # run_rel <text>: paths of this run's files, the data dir and the home dir made relative
+    local s=$1
+    s=${s//"$RUN/"/"run $run_id: "}
+    s=${s//"$DATA/"/"<data>/"}
+    s=${s//"$user_home/"/"~/"}
+    printf '%s' "$s"
+}
+withheld() { printf 'auto-update: %s withheld: failed the PII scan, see run %s' "$1" "$run_id"; }
+pii_ok() {  # pii_ok <file> [<text>] <what>: 0 if <text> (if given) was written to <file> and the
+            # file passes the PII scan; else logs it and returns 1 (post withheld "<what>" instead)
+    local f=$1
+    if (($# == 3)); then
+        as_user bash -c 'printf "%s\n" "$2" > "$1"' _ "$f" "$2" ||
+            { note pii "$3 withheld from the PR: cannot write run $run_id: ${f##*/}"; return 1; }
+    fi
+    as_user "$LIB/sync-release" --pii-scan-text "$f" && return 0
+    note pii "${!#} withheld from the PR: failed the PII scan (the original is run $run_id: ${f##*/})"
+    return 1
+}
 build_recipe() {  # build_recipe <recipe>: chroot build of $CLONE/recipes/<recipe> + reverse-dep checks
     local r=$1 ver
     build_log=$RUN/$r.build.log
@@ -392,17 +434,19 @@ End your answer with exactly one JSON object on its own line:
 EOF
     if as_user bash -c 'cd "$1" && timeout "$2" "${@:5}" <"$3" >"$4"' _ "$CLONE" "$REVIEW_TIMEOUT" "$prompt" "$out" "${cmd[@]}"; then
         local parsed; parsed=$(as_user "$LIB/auto-update-state" review "$out")
-        agent_verdict=$(head -1 <<<"$parsed"); agent_notes=$(tail -n +2 <<<"$parsed")
-        # Thread replies (capped per run: each is one API call).
-        local id reply n=0
+        agent_verdict=$(head -1 <<<"$parsed"); agent_notes=$(run_rel "$(tail -n +2 <<<"$parsed")")
+        # Thread replies (capped per run: each is one API call), each PII-scanned first.
+        local id reply n=0 rfile
         while IFS=$'\t' read -r id reply; do
             [[ -n $id ]] || continue
             (( n++ < REPLY_LIMIT )) || break
+            rfile=$RUN/$r.reply-$id.md reply=$(run_rel "$reply")
+            pii_ok "$rfile" "$reply" "reply to review comment $id" || reply=$(withheld "reply to review comment $id")
             as_user gh api -X POST "repos/$GH_REPO/pulls/$num/comments/$id/replies" -f body="$reply" >/dev/null ||
                 note "$r" "could not reply to review comment $id"
         done < <(as_user "$LIB/auto-update-state" replies "$out")
     else
-        agent_verdict=reject agent_notes="agent command failed or timed out (see $out)"
+        agent_verdict=reject agent_notes="agent command failed or timed out (see run $run_id: ${out##*/})"
     fi
 }
 ours_changed() {  # ours_changed <recipe> <old dir> <new dir>: our delta files that differ
@@ -466,7 +510,8 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
     as_user "$LIB/rebase-recipe" "$r" --version "$target" --out "$out" --force --verify --report "$report" || rc=$?
     local cls msg flags
     cls=$(as_user jq -r '.error_class // ""' "$report" 2>/dev/null || echo other)
-    msg=$(as_user jq -r '.error // "" | split("\n")[0:1] | join(" / ")' "$report" 2>/dev/null || echo "see $report")
+    msg=$(as_user jq -r '.error // "" | split("\n")[0:1] | join(" / ")' "$report" 2>/dev/null || echo "see run $run_id: ${report##*/}")
+    msg=$(run_rel "$msg")
     flags=$(as_user jq -r '.flags | join("; ")' "$report" 2>/dev/null || true)
     if ((rc != 0)); then
         if [[ $cls == fetch ]]; then
@@ -605,7 +650,9 @@ for p in sys.stdin.read().split():
     [[ $MERGE_MODE == auto ]] || reasons+=("MERGE_MODE=$MERGE_MODE")
     head=$(ugit rev-parse HEAD)
 
-    local outcome comment=$RUN/$r.comment.md
+    local outcome comment=$RUN/$r.comment.md notes_file=$RUN/$r.agent-notes.md
+    # The agent's notes are scanned on their own first, so a hit there withholds only them.
+    pii_ok "$notes_file" "$agent_notes" "the agent's notes" || agent_notes=$(withheld "the agent's notes")
     if ((${#reasons[@]} == 0)); then
         outcome="all gates passed: merging, publishing $new_ver and syncing the release"
     elif [[ $build_ok != yes ]]; then
@@ -624,7 +671,12 @@ $(sed 's/^/  > /' <<<"$agent_notes")
 - Gates not met: $( ((${#reasons[@]})) && printf '%s; ' "${reasons[@]}" || echo none)
 - Outcome: $outcome
 EOF
-    as_user gh pr comment "$pr" -R "$GH_REPO" --body-file "$comment" >/dev/null || note "$r" "could not comment on $pr"
+    local body=(--body-file "$comment")
+    pii_ok "$comment" "the run summary" || body=(--body "$(withheld "the run summary")")
+    as_user gh pr comment "$pr" -R "$GH_REPO" "${body[@]}" >/dev/null || note "$r" "could not comment on $pr"
+    # For publish_files after the merge below: the tree that was built, and the PR to check.
+    local built_tree merged_pr=$pr merge_mismatch=no
+    built_tree=$(tree_hash "$r")
 
     if ((${#reasons[@]} == 0)); then
         if as_user gh pr merge "$pr" -R "$GH_REPO" --squash --delete-branch --match-head-commit "$head" >/dev/null &&
@@ -632,6 +684,14 @@ EOF
             as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.built-$r" "$(tree_hash "$r")"
             as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"
             record "$r" ok rebase version="$new_ver" pr="$pr" message="merged and published"
+        elif [[ $merge_mismatch == yes ]]; then
+            # Merged, but not what was built: publish nothing. Without a built-tree marker the
+            # next run sees the base branch's recipe unbuilt, and builds and publishes it.
+            as_user rm -f "$STAGE_DIR/.built-$r" "$AU/state/$r.report.json" "$AU/state/$r.flags"
+            unpublish_now "$in_repo" "merged $new_ver is not the recipe that was built" || true
+            record "$r" failed rebase class=merge-mismatch version="$new_ver" pr="$pr" \
+                message="merged, not published: the merged recipe differs from the built head; the next run rebuilds from $BASE_BRANCH"
+            failed=1
         else
             unpublish_now "$in_repo" "merge or publish of $new_ver failed" || true
             record "$r" failed rebase class=publish version="$new_ver" pr="$pr" message="merge/publish failed"
@@ -639,7 +699,7 @@ EOF
         fi
     elif [[ $build_ok != yes ]]; then
         unpublish_now "$in_repo" "build of $new_ver failed" || true
-        record "$r" failed rebase class=build version="$new_ver" pr="$pr" message="chroot build failed: $build_log"
+        record "$r" failed rebase class=build version="$new_ver" pr="$pr" message="chroot build failed: see run $run_id: ${build_log##*/}"
         failed=1
     else
         if unpublish_now "$in_repo" "upstream is at $target; rebased $new_ver awaits review"; then
@@ -675,7 +735,7 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
         record "$r" ok build version="$ver" message="built and published"
     else
         unpublish_now "$in_repo" "build of $ver failed" || true
-        record "$r" failed build class=build version="$ver" message="chroot build failed: $build_log"
+        record "$r" failed build class=build version="$ver" message="chroot build failed: see run $run_id: ${build_log##*/}"
         failed=1
     fi
 }
@@ -743,7 +803,7 @@ while IFS=$'\t' read -r r action target in_repo names pnote; do
         note "$r" "unexpected error (exit $rc) during $action; see $LOG"
         [[ $action == rebase ]] && { unpublish_now "$in_repo" "auto-update error while rebasing onto $target" || true; }
         ugit checkout --quiet --force "$BASE_BRANCH" 2>/dev/null || true
-        record "${r#(db) }" failed "$action" class=internal message="unexpected error (exit $rc); see $LOG" || true
+        record "${r#(db) }" failed "$action" class=internal message="unexpected error (exit $rc); see logs/${LOG##*/}" || true
         failed=1
     fi
 done <<<"$plan"

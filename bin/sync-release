@@ -3,6 +3,7 @@
 #   Server = https://github.com/$GH_REPO/releases/download/$GH_TAG
 # Usage: bin/sync-release [--dry-run]
 #        bin/sync-release --pii-scan FILE...   (only run the PII scan below on these files)
+#        bin/sync-release --pii-scan-text FILE...   (the same scan, each file read as plain text)
 #
 # Incremental, to keep GitHub traffic (and the window where an asset 404s) small:
 # - one API call reads the release's assets (name, size, sha256 digest);
@@ -23,10 +24,16 @@
 # entries or the matched text. A missing denylist, an invalid regex in it or a
 # failed scan aborts too, never reads as clean (PII_SCAN=off skips
 # the scan, for a machine without one).
+# --pii-scan-text scans files as plain text, never as archives (bin/auto-update scans
+# its PR comments and replies with it; build/pii-allow-packages does not apply).
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
-dry=0 scan_only=0
-case ${1:-} in --dry-run) dry=1 ;; --pii-scan) scan_only=1; shift ;; esac
+dry=0 scan_only=0 as_text=0
+case ${1:-} in
+    --dry-run) dry=1 ;;
+    --pii-scan) scan_only=1; shift ;;
+    --pii-scan-text) scan_only=1 as_text=1; shift ;;
+esac
 run() { if ((dry)); then echo "would run: $*"; else "$@"; fi; }
 
 up=$(mktemp -d); trap 'rm -rf "$up"' EXIT
@@ -73,8 +80,12 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
     for f in "$@"; do
         declare -A seen=()
         st=0
-        { bsdtar -tf "$f" 2>/dev/null; bsdtar -xOf "$f" 2>/dev/null | strings -n 4; } |
-            grep -oiE -- "$pattern" >"$up/.hits" || st=${PIPESTATUS[1]}
+        if ((as_text)); then   # a PR comment or reply; an unreadable file is grep exit 2
+            grep -aoiE -- "$pattern" "$f" >"$up/.hits" || st=$?
+        else                   # a package or db: its file names and the strings of its contents
+            { bsdtar -tf "$f" 2>/dev/null; bsdtar -xOf "$f" 2>/dev/null | strings -n 4; } |
+                grep -oiE -- "$pattern" >"$up/.hits" || st=${PIPESTATUS[1]}
+        fi
         if ((st > 1)); then  # 1 is "no match"; anything else is a scan error
             echo "PII scan of $(basename "$f") failed (grep exit $st); refusing to upload" >&2
             rm -f "$up/.hits"; return 1
@@ -90,7 +101,9 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
         rm -f "$up/.hits"
         hit="$(basename "$f"): denylist line(s) $(printf '%s\n' "${!seen[@]}" | sort -n | paste -sd, -)"
         local ok=0
-        for g in "${globs[@]}"; do [[ $(basename "$f") == $g ]] && ok=1; done
+        if ((!as_text)); then  # the allow list names packages, never a comment
+            for g in "${globs[@]}"; do [[ $(basename "$f") == $g ]] && ok=1; done
+        fi
         if ((ok)); then echo "PII scan: allowed by build/pii-allow-packages: $hit"
         else echo "PII scan: BLOCKED $hit" >&2; rc=1; fi
         unset seen
