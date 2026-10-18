@@ -123,10 +123,10 @@ helps. Keep pull requests small, test them on real hardware, and explain the bug
 
 Where our fixes are headed:
 
-- **Omarchy:** [#15667](https://github.com/basecamp/omarchy/pull/15667) stop asusd switching
+- **Omarchy:** [#15667](https://github.com/omacom/omarchy/pull/15667) stop asusd switching
   the power profile and EPP on ROG laptops,
-  [#15668](https://github.com/basecamp/omarchy/pull/15668) save power on USB-C chargers on
-  ROG laptops, [#15669](https://github.com/basecamp/omarchy/pull/15669) let another power
+  [#15668](https://github.com/omacom/omarchy/pull/15668) save power on USB-C chargers on
+  ROG laptops, [#15669](https://github.com/omacom/omarchy/pull/15669) let another power
   manager own the profile on plug and unplug.
 - **NVIDIA:** [#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412) and
   [#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299) and

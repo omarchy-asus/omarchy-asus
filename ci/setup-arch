@@ -1,25 +1,67 @@
 #!/bin/bash
 # Turn a stock Arch container into the production build environment (run as
 # root inside ghcr.io/archlinux/archlinux:base-devel):
+#   - the Omarchy signing key from the committed ci/omarchy-signing-key.asc,
+#     checked against OMARCHY_KEY's fingerprint; the keyserver only if that fails
 #   - the same package sources as the build chroot: build/pacman.conf (Omarchy
 #     stable snapshot of Arch + [omarchy]), synced with -uu so every installed
 #     package matches the snapshot exactly, downgrades included
 #   - the devtools makepkg.conf that bin/mkchroot gives the chroot
 #   - an unprivileged "builder" user (makepkg refuses root) with sudo for pacman
 # Usage: ci/setup-arch [extra packages to install]
+# Sourced with SETUP_ARCH_SOURCE_ONLY=1 it only defines the functions (tests/ci).
 set -euo pipefail
-repo=$(cd "$(dirname "$0")/.." && pwd)
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # Omarchy package signing key (the same one omarchy-pkgs' builder image trusts).
+# The committed copy (from the omarchy-keyring package) is imported first, after
+# a fingerprint check; the keyserver is only a fallback, since keyserver outages
+# failed CI (#116).
 OMARCHY_KEY=40DFB630FF42BCFFB047046CF0134EE680CAC571
+OMARCHY_KEY_FILE=$repo/ci/omarchy-signing-key.asc
+KEYSERVER_RETRY_DELAY=5
+
+# key_file_fingerprint FILE: print the primary key fingerprint of FILE; fail
+# unless FILE holds exactly one primary key.
+key_file_fingerprint() {
+    local home out rc=0
+    home=$(mktemp -d) || return 1
+    # The first fpr line after pub is the primary key's.
+    out=$(GNUPGHOME=$home gpg --batch --with-colons --show-keys "$1" 2>/dev/null |
+        awk -F: '$1=="pub"{n++} $1=="fpr"&&!f{print $10; f=1} END{exit (n != 1)}') || rc=$?
+    gpgconf --homedir "$home" --kill all >/dev/null 2>&1 || true
+    rm -rf "$home"
+    ((rc == 0)) || return "$rc"
+    [[ -n $out ]] || return 1
+    printf '%s\n' "$out"
+}
+
+# import_omarchy_key: add the committed key if its fingerprint is OMARCHY_KEY,
+# otherwise fetch OMARCHY_KEY from the keyserver (pacman-key pins it by
+# fingerprint); then sign it locally.
+import_omarchy_key() {
+    local fpr try
+    if [[ -r $OMARCHY_KEY_FILE ]] && fpr=$(key_file_fingerprint "$OMARCHY_KEY_FILE") &&
+        [[ $fpr == "$OMARCHY_KEY" ]] && pacman-key --add "$OMARCHY_KEY_FILE"; then
+        :
+    else
+        echo "::warning::committed Omarchy key $OMARCHY_KEY_FILE missing or not $OMARCHY_KEY; trying the keyserver" >&2
+        for try in 1 2 3 4 5; do
+            pacman-key --recv-keys "$OMARCHY_KEY" --keyserver hkps://keys.openpgp.org && break
+            if [[ $try == 5 ]]; then
+                echo "::error::could not fetch the Omarchy signing key" >&2
+                return 1
+            fi
+            sleep $((try * KEYSERVER_RETRY_DELAY))
+        done
+    fi
+    pacman-key --lsign-key "$OMARCHY_KEY" >/dev/null || return 1
+}
+
+[[ ${SETUP_ARCH_SOURCE_ONLY:-} == 1 ]] && return 0
 
 pacman-key --init >/dev/null 2>&1
 pacman-key --populate archlinux >/dev/null 2>&1
-for try in 1 2 3 4 5; do
-    pacman-key --recv-keys "$OMARCHY_KEY" --keyserver hkps://keys.openpgp.org && break
-    [[ $try == 5 ]] && { echo "::error::could not fetch the Omarchy signing key" >&2; exit 1; }
-    sleep $((try * 5))
-done
-pacman-key --lsign-key "$OMARCHY_KEY" >/dev/null
+import_omarchy_key
 
 cp "$repo/build/pacman.conf" /etc/pacman.conf
 echo "==> package sources (build/pacman.conf):"

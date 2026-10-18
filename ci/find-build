@@ -7,7 +7,8 @@
 # The label here hashes everything the build depends on:
 #   - the recipe directory's git tree (PKGBUILD, patches, keys, config...)
 #   - build/pacman.conf (the pinned Omarchy snapshot the deps come from)
-#   - ci/build-recipe and ci/setup-arch (how the container builds it)
+#   - ci/build-recipe, ci/setup-arch and ci/omarchy-signing-key.asc (how the
+#     container builds it)
 #   - the builder image reference ($BUILDER_IMAGE) and a scheme version
 # Change any of them and the hash changes, so the recipe builds again.
 #
@@ -31,7 +32,8 @@ SCHEME=1
 inputs=$(
     echo "scheme $SCHEME"
     echo "image ${BUILDER_IMAGE:?}"
-    for p in "recipes/$recipe" build/pacman.conf ci/build-recipe ci/setup-arch; do
+    for p in "recipes/$recipe" build/pacman.conf ci/build-recipe ci/setup-arch \
+        ci/omarchy-signing-key.asc; do
         echo "$p $(git rev-parse --verify --quiet "$rev:$p" || echo missing)"
     done
 )
