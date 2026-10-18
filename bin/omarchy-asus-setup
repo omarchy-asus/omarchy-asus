@@ -579,30 +579,153 @@ prepare_power_owner() {
   fi
 }
 
-# A local copy of the Win-lock unit in ~/.config/systemd/user shadows the packaged one in
-# /usr/lib/systemd/user. Once asus-rog-nkey-winlock is installed, offer to move it aside.
+# A hand-made Win-lock setup has up to four local pieces next to what asus-rog-nkey-winlock
+# installs: a unit in ~/.config/systemd/user that shadows the packaged one in
+# /usr/lib/systemd/user, its drop-in dir (which still applies to the packaged unit), the
+# <target>.wants link that enabled it (dangling once the unit moves), and a udev rule in
+# /etc/udev/rules.d next to the packaged 70-g16-winlock-hidraw.rules. Once the package is
+# installed, offer to move them aside. Nothing is deleted except a dangling link.
 WINLOCK_LOCAL=$HOME/.config/systemd/user/g16-winlock.service
-retire_local_winlock() {
-  [[ -f $WINLOCK_LOCAL && ! -L $WINLOCK_LOCAL ]] || return 0
-  pacman -Q asus-rog-nkey-winlock >/dev/null 2>&1 || ((DRY_RUN)) || return 0
-  local backup=$WINLOCK_LOCAL.before-omarchy-asus
-  info "Your own ${WINLOCK_LOCAL/#$HOME/\~} shadows the packaged g16-winlock.service."
-  if confirm "Move it aside to ${backup##*/} so the packaged unit is used?"; then
-    if ((DRY_RUN)); then
-      info "[dry-run] would run: mv $WINLOCK_LOCAL $backup, systemctl --user daemon-reload, try-restart g16-winlock.service"
-    else
-      if mv "$WINLOCK_LOCAL" "$backup"; then
-        systemctl --user daemon-reload 2>/dev/null || true
-        # A running local instance keeps its old ExecStart until it restarts.
-        systemctl --user try-restart g16-winlock.service 2>/dev/null || true
-        ok "moved to ${backup/#$HOME/\~} (move it back to undo)"
-      else
-        warn "could not move it; your local unit stays in charge of Win-lock"
-      fi
-    fi
-  else
-    warn "kept: your local unit stays in charge of Win-lock."
+WINLOCK_DROPIN=$WINLOCK_LOCAL.d
+WINLOCK_UDEV_DIR=/etc/udev/rules.d
+WINLOCK_LOCAL_BIN=$HOME/.local/bin/g16-winlock
+
+# The backup name for a path: <path>.before-omarchy-asus, or the first free
+# <path>.before-omarchy-asus.N after it, so an earlier backup is never overwritten.
+aside_path() {
+  local base=$1.before-omarchy-asus n=1
+  if [[ ! -e $base && ! -L $base ]]; then
+    echo "$base"
+    return 0
   fi
+  while [[ -e $base.$n || -L $base.$n ]]; do n=$((n + 1)); done
+  echo "$base.$n"
+}
+
+retire_local_winlock() {
+  pacman -Q asus-rog-nkey-winlock >/dev/null 2>&1 || ((DRY_RUN)) || return 0
+  local unit='' dropin='' links=() rules=() files=() undo=() l f p a line moved_rule=0
+  local comment='^[[:space:]]*([#;]|$)'
+  if [[ -f $WINLOCK_LOCAL && ! -L $WINLOCK_LOCAL ]]; then unit=$WINLOCK_LOCAL; fi
+  # Links that enabled the local unit: dangling ones, or ones that resolve to it. A link to
+  # the packaged unit is the package's own enablement and stays.
+  for l in "$HOME"/.config/systemd/user/*.wants/g16-winlock.service; do
+    [[ -L $l ]] || continue
+    if [[ ! -e $l ]] || [[ -n $unit && $l -ef $unit ]]; then links+=("$l"); fi
+  done
+  # The drop-in only belongs to a hand-made setup when one is still here, or when an older
+  # version of this script moved the unit aside but not the drop-in. The G16 Control widget
+  # writes the same mode.conf for the packaged unit; that one stays.
+  if [[ -d $WINLOCK_DROPIN ]]; then
+    if [[ -n $unit ]] || ((${#links[@]})) ||
+      { compgen -G "$WINLOCK_LOCAL.before-omarchy-asus*" >/dev/null &&
+        ! compgen -G "$WINLOCK_DROPIN.before-omarchy-asus*" >/dev/null; }; then
+      dropin=$WINLOCK_DROPIN
+    fi
+  fi
+  for f in "$WINLOCK_UDEV_DIR"/*g16-winlock*.rules; do
+    if [[ -f $f && ! -L $f ]]; then rules+=("$f"); fi
+  done
+  [[ -n $unit$dropin ]] || ((${#links[@]} + ${#rules[@]})) || return 0
+
+  step "Your local Win-lock setup"
+  info "These shadow or duplicate what asus-rog-nkey-winlock now installs:"
+  if [[ -n $unit ]]; then
+    info "  ${unit/#$HOME/\~}: your own unit, used instead of the packaged one"
+  fi
+  if [[ -n $dropin ]]; then
+    info "  ${dropin/#$HOME/\~}/: your drop-in, which still applies to the packaged unit:"
+    for f in "$dropin"/*.conf; do
+      [[ -f $f ]] || continue
+      info "    ${f##*/}:"
+      while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line =~ $comment ]] && continue
+        info "      $line"
+      done <"$f"
+    done
+  fi
+  for l in "${links[@]}"; do
+    info "  ${l/#$HOME/\~}: the link that enabled your unit"
+  done
+  for f in "${rules[@]}"; do
+    info "  $f: your udev rule, next to the packaged 70-g16-winlock-hidraw.rules"
+  done
+  if [[ -f $WINLOCK_LOCAL_BIN && -x $WINLOCK_LOCAL_BIN ]]; then
+    warn "${WINLOCK_LOCAL_BIN/#$HOME/\~} shadows /usr/bin/g16-winlock on your PATH when you run"
+    warn "g16-winlock by hand. It is left in place; remove it to use the packaged one."
+  fi
+
+  if [[ -n $unit$dropin ]] || ((${#links[@]})); then
+    if confirm "Move your local Win-lock unit, its drop-in and links aside so the packaged unit is used?"; then
+      if [[ -n $unit ]]; then
+        files+=("$unit")
+        # Before the move, so systemd removes the links it made for the local unit itself.
+        if ((DRY_RUN)); then
+          info "[dry-run] would run: systemctl --user disable g16-winlock.service"
+        else
+          systemctl --user disable g16-winlock.service 2>/dev/null || true
+        fi
+      fi
+      if [[ -n $dropin ]]; then files+=("$dropin"); fi
+      for p in "${files[@]}"; do
+        a=$(aside_path "$p")
+        if ((DRY_RUN)); then
+          info "[dry-run] would run: mv ${p/#$HOME/\~} ${a/#$HOME/\~}"
+        elif ! mv "$p" "$a"; then
+          warn "could not move ${p/#$HOME/\~}; it stays in place"
+          continue
+        fi
+        undo+=("${p/#$HOME/\~} -> ${a##*/}; undo: mv ${a/#$HOME/\~} ${p/#$HOME/\~}")
+      done
+      for l in "${links[@]}"; do
+        if ((DRY_RUN)); then
+          info "[dry-run] would run: rm ${l/#$HOME/\~}"
+        elif [[ -L $l && ! -e $l ]]; then
+          rm -f "$l" || { warn "could not remove ${l/#$HOME/\~}"; continue; }
+        elif [[ -L $l ]]; then
+          continue # still resolves: the unit it points at did not move
+        fi
+        undo+=("${l/#$HOME/\~} removed; undo: systemctl --user enable g16-winlock.service (after moving the unit back)")
+      done
+      if ((DRY_RUN)); then
+        info "[dry-run] would run: systemctl --user daemon-reload, try-restart g16-winlock.service"
+      else
+        systemctl --user daemon-reload 2>/dev/null || true
+        # A running local instance keeps its old ExecStart and drop-in until it restarts.
+        systemctl --user try-restart g16-winlock.service 2>/dev/null || true
+      fi
+    else
+      warn "kept: your local unit stays in charge of Win-lock."
+    fi
+  fi
+
+  # A separate question: this one needs sudo. udev reads only *.rules, so the
+  # .before-omarchy-asus suffix is enough to stop it.
+  if ((${#rules[@]})); then
+    if confirm "Move ${rules[*]} aside (needs sudo)? The packaged 70-g16-winlock-hidraw.rules does the same."; then
+      for f in "${rules[@]}"; do
+        a=$(aside_path "$f")
+        if as_root mv "$f" "$a"; then
+          moved_rule=1
+          undo+=("$f -> ${a##*/}; undo: sudo mv $a $f && sudo udevadm control --reload")
+        else
+          warn "could not move $f; it stays in place"
+        fi
+      done
+      if ((moved_rule)); then
+        as_root udevadm control --reload || warn "udevadm control --reload failed; the old rule applies until a reboot"
+        as_root udevadm trigger --subsystem-match=hidraw --action=add || warn "udevadm trigger failed"
+      fi
+    else
+      warn "kept: ${rules[*]} still applies next to the packaged rule."
+    fi
+  fi
+
+  if ((${#undo[@]})); then
+    if ((DRY_RUN)); then info "[dry-run] would move aside:"; else ok "moved aside:"; fi
+    for line in "${undo[@]}"; do info "  $line"; done
+  fi
+  return 0
 }
 
 offer_upgrade() {

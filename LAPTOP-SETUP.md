@@ -68,9 +68,22 @@ The script:
    - If the file differs, the script shows the diff and stops before the upgrade. Nothing is
      overwritten. Decide yourself (move the file aside or make it match), then run the script again.
 9. Optional, and only if the system is fully upgraded: offers to install `omarchy-asus-g16`,
-   `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`. If you have your own
-   `~/.config/systemd/user/g16-winlock.service`, which would shadow the packaged unit, it offers to
-   move it to `g16-winlock.service.before-omarchy-asus`. It then shows `omarchy-asus-g16-apply --check`,
+   `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`. If you have your own Win-lock setup, it
+   offers to move it aside:
+   - Your own `~/.config/systemd/user/g16-winlock.service`, which would shadow the packaged unit.
+     It runs `systemctl --user disable` first, so the old `default.target.wants` link goes away,
+     then moves the unit to `g16-winlock.service.before-omarchy-asus`.
+   - That unit's `g16-winlock.service.d/` drop-in. It shows the settings in it, then moves it to
+     `g16-winlock.service.d.before-omarchy-asus`. A drop-in with no hand-made unit behind it (the
+     G16 Control widget writes one for the packaged unit) stays.
+   - An `/etc/udev/rules.d/*g16-winlock*.rules` file. With sudo, it moves it aside with the same
+     suffix and reloads udev.
+   - A `~/.local/bin/g16-winlock` that shadows `/usr/bin/g16-winlock`. It only warns about this
+     one; it doesn't move it.
+
+   Nothing is deleted except the old unit's dangling links. An existing backup is never overwritten: a numbered
+   `.before-omarchy-asus.N` name is used instead. Each piece it moves is listed with the command
+   that undoes it, and `--dry-run` prints every step. It then shows `omarchy-asus-g16-apply --check`,
    and applies the missing default fixes if you say yes. Fixes you already have in your own form
    are left alone. See [`recipes/omarchy-asus-g16-apply/README.md`](recipes/omarchy-asus-g16-apply/README.md).
 
