@@ -145,10 +145,22 @@ def cached(repo, kind, fetch, refresh=False):
             pass
     data = fetch()
     os.makedirs(CACHE_DIR, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    # A temp file unique to this run, so concurrent runs never write into the
+    # same file; os.replace makes the swap atomic (last writer wins).
+    with tempfile.NamedTemporaryFile("w", dir=CACHE_DIR, prefix=os.path.basename(path) + ".",
+                                     suffix=".tmp", delete=False) as f:
+        tmp = f.name
+        try:
+            json.dump(data, f)
+        except BaseException:
+            f.close()
+            os.unlink(tmp)
+            raise
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        os.unlink(tmp)
+        raise
     return data
 
 
@@ -324,32 +336,63 @@ def _entry_patterns(e):
     return _wrap(e)
 
 
+# C0 controls and DEL, except tab and newline. A NUL in particular makes grep
+# treat the text as binary; such text is refused before it is ever scanned.
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def control_char_lines(text):
+    """1-based line numbers of lines containing a disallowed control character."""
+    return [n for n, l in enumerate(text.split("\n"), 1) if CONTROL_RE.search(l)]
+
+
 def pii_scan(text, denylist=DENYLIST):
     """Return [(denylist_line, text_line), ...]. Never returns the entries.
 
-    Uses grep -iE so the regex dialect matches the publish hook exactly.
+    denylist_line 0 means a control character on text_line (refused outright);
+    text_line None means grep matched but did not say where (or a bad regex).
+    Uses grep -aiE so the regex dialect matches the publish hook exactly.
     Raises FileNotFoundError when the denylist is missing or unreadable.
     """
     with open(denylist) as f:   # missing/unreadable -> exception -> abort
         lines = f.read().splitlines()
+    bad = control_char_lines(text)
+    if bad:
+        return [(0, n) for n in bad]
     hits = []
-    with tempfile.NamedTemporaryFile("w", delete=False) as tf:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
         tf.write(text)
         tpath = tf.name
     try:
         for n, e in enumerate(lines, 1):
             if re.match(r"^\s*(#|$)", e):
                 continue
-            r = subprocess.run(["grep", "-niE", "-e", _entry_patterns(e), tpath],
-                               capture_output=True, text=True)
-            if r.returncode == 2:
-                hits.append((n, 0))   # bad regex: treat as a hit, fail closed
+            # -a: never fall back to "binary file matches" with no lines.
+            r = subprocess.run(["grep", "-naiE", "-e", _entry_patterns(e), tpath],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
+            if r.returncode != 1 and r.returncode != 0:
+                hits.append((n, None))   # bad regex / grep error: fail closed
                 continue
+            found = []
             for line in r.stdout.splitlines():
-                hits.append((n, int(line.split(":", 1)[0])))
+                num = line.split(":", 1)[0]
+                if num.isdigit():
+                    found.append((n, int(num)))
+            if r.returncode == 0 and not found:
+                found.append((n, None))  # grep says match; count it anyway
+            hits.extend(found)
     finally:
         os.unlink(tpath)
     return hits
+
+
+def _describe_hit(d, t):
+    if d == 0:
+        return f"control character on text line {t}"
+    if t is None:
+        return f"denylist line {d} (match at unknown line, or bad regex)"
+    return f"denylist line {d} -> text line {t}"
 
 
 def pii_guard(text, denylist=DENYLIST):
@@ -357,10 +400,12 @@ def pii_guard(text, denylist=DENYLIST):
         hits = pii_scan(text, denylist)
     except OSError:
         die(f"PII denylist {denylist} is missing or unreadable; refusing to publish.")
+    if hits and all(d == 0 for d, _ in hits):
+        die("text contains NUL or other control characters (only newline and tab "
+            "are allowed); nothing was posted (" +
+            ", ".join(_describe_hit(d, t) for d, t in hits[:12]) + ").")
     if hits:
-        where = ", ".join(
-            f"denylist line {d} -> text line {t}" if t else f"denylist line {d} (bad regex)"
-            for d, t in hits[:12])
+        where = ", ".join(_describe_hit(d, t) for d, t in hits[:12])
         die("personal information found, nothing was posted (" + where + "). "
             "Remove hostnames, usernames, home paths, emails, private IPs and "
             "device names (write e.g. '<build dir>', 'the G16'), then retry.")
