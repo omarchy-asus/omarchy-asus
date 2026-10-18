@@ -11,7 +11,11 @@ Usage: bin/release-cohort [--cohorts FILE] [--workspace DIR] <command> [args]
   check-publish [--db DB] FILE...
       Refuse (exit 1) a set of package files that would publish a cohort member
       without every partner at the same pkgver-pkgrel, either in the same set
-      or already in DB. Files outside every cohort always pass.
+      or already in DB. Files outside every cohort always pass. Each package's
+      name and pkgver-pkgrel come from the .PKGINFO inside the archive, never
+      from its file name alone: an archive that cannot be read, or whose file
+      name disagrees with its .PKGINFO, is a usage error (exit 64) and nothing
+      passes. A missing cohorts file is refused (exit 1).
   check-recipes [--strict]
       Refuse (exit 1) a member whose dependency on a partner is not pinned to
       the release: a package function must add exactly
@@ -26,8 +30,9 @@ Usage: bin/release-cohort [--cohorts FILE] [--workspace DIR] <command> [args]
       never executed.
 
 Cohorts come from build/cohorts.conf: one cohort per line, whitespace-separated
-recipe directory names; each recipe builds one package with its own name. A
-missing file means no cohorts.
+recipe directory names; each recipe builds one package with its own name. For
+members and check-recipes a missing file means no cohorts; check-publish
+refuses to run without one (exit 1), so a publish never skips the check.
 
 --cohorts FILE    cohorts file (default <workspace>/build/cohorts.conf)
 --workspace DIR   repo checkout (default $OMARCHY_ASUS_WORKSPACE, else this
@@ -38,6 +43,7 @@ Exit: 0 ok, 1 a check failed, 64 usage error.
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tarfile
 
@@ -68,7 +74,8 @@ class DocHelp(argparse.Action):
 
 
 def load_cohorts(path):
-    """The cohorts in PATH: a list of member lists. A missing file is no cohorts."""
+    """The cohorts in PATH: a list of member lists. A missing file is no cohorts
+    (main() refuses check-publish without one before calling this)."""
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -133,8 +140,48 @@ def cmd_members(args, cohorts):
     return 0
 
 
+def read_pkginfo(path):
+    """The text of the .PKGINFO inside the package archive PATH, or None if it cannot be read.
+
+    tarfile first (uncompressed, gz, xz, bz2; zst on Python >= 3.14), then bsdtar."""
+    try:
+        with tarfile.open(path, "r:*") as tar:
+            while True:
+                member = tar.next()
+                if member is None:
+                    break
+                if member.name in (".PKGINFO", "./.PKGINFO") and member.isfile():
+                    f = tar.extractfile(member)
+                    if f is not None:
+                        return f.read().decode("utf-8", errors="replace")
+            return None
+    except (tarfile.ReadError, tarfile.CompressionError):
+        pass
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    try:
+        r = subprocess.run(["bsdtar", "-xOf", path, ".PKGINFO"], capture_output=True, check=False)
+    except OSError:
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    return r.stdout.decode("utf-8", errors="replace")
+
+
+def pkginfo_field(text, key):
+    """The value of the first "KEY = VALUE" line of a .PKGINFO, or None."""
+    for line in text.splitlines():
+        k, sep, v = line.partition("=")
+        if sep and k.strip() == key:
+            return v.strip()
+    return None
+
+
 def parse_pkgfile(path):
-    """(name, pkgver-pkgrel) of a package file, or None for a signature."""
+    """(pkgname, pkgver) from the .PKGINFO of a package file, or None for a signature.
+
+    The .PKGINFO pkgver is already [epoch:]pkgver-pkgrel. A file whose name disagrees
+    with its .PKGINFO, or whose .PKGINFO cannot be read, is a UsageError."""
     base = os.path.basename(path)
     if base.endswith(".sig"):
         return None
@@ -144,7 +191,16 @@ def parse_pkgfile(path):
     parts = base[:m.start()].rsplit("-", 3)
     if len(parts) != 4 or not all(parts):
         raise UsageError(f"cannot parse <name>-<pkgver>-<pkgrel>-<arch> from {path}")
-    return parts[0], f"{parts[1]}-{parts[2]}"
+    n, v = parts[0], f"{parts[1]}-{parts[2]}"
+    text = read_pkginfo(path)
+    if text is None:
+        raise UsageError(f"cannot read .PKGINFO from {path}")
+    pn, pv = pkginfo_field(text, "pkgname"), pkginfo_field(text, "pkgver")
+    if not pn or not pv:
+        raise UsageError(f"{path}: .PKGINFO has no {'pkgname' if not pn else 'pkgver'}")
+    if (n, v) != (pn, pv):
+        raise UsageError(f"{path}: file name says {n} {v} but .PKGINFO says {pn} {pv}")
+    return pn, pv
 
 
 def cmd_check_publish(args, cohorts):
@@ -280,7 +336,13 @@ def main(argv):
     recipes.add_argument("-h", "--help", action=DocHelp)
     recipes.add_argument("--strict", action="store_true")
     args = parser.parse_args(argv)
-    cohorts = load_cohorts(args.cohorts or os.path.join(args.workspace, "build", "cohorts.conf"))
+    path = args.cohorts or os.path.join(args.workspace, "build", "cohorts.conf")
+    if args.command == "check-publish" and not os.path.isfile(path):
+        # fail closed: without the cohorts file every package would pass unchecked
+        print(f"release-cohort: no cohorts file {path}: refusing to publish "
+              "(set OMARCHY_ASUS_WORKSPACE or --cohorts)", file=sys.stderr)
+        return 1
+    cohorts = load_cohorts(path)
     command = {"members": cmd_members, "check-publish": cmd_check_publish, "check-recipes": cmd_check_recipes}
     try:
         return command[args.command](args, cohorts)

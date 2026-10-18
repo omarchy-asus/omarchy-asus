@@ -6,7 +6,9 @@
   record STATUS_JSON RUN_ID RECIPE RESULT ACTION [key=value...]
                                      update the recipe's entry (RESULT: ok, failed,
                                      attention, skipped) and append it to its history
-  get STATUS_JSON RECIPE KEY         print one field of a recipe's last entry
+  forget STATUS_JSON RECIPE          drop the recipe's entry (e.g. "(upstream dbs)" once the
+                                     dbs recover), so it no longer shows as an earlier run
+  get STATUS_JSON RECIPE KEY        print one field of a recipe's last entry
   summary STATUS_JSON RUN_ID OUT_MD  write the human summary, print it, exit 1 if a
                                      recipe failed this run (2 if only attention items)
   review VERDICT_JSON                parse a headless review's JSON output: prints
@@ -15,7 +17,8 @@
   revdep-withdraw REVDEPS_CONF WITHDRAWN_CSV REPO_NAMES_CSV
                                      "headers<TAB>dkms" for each build/revdeps.conf pair whose
                                      headers package is withdrawn while its DKMS package stays
-                                     in the repo (CSVs may be empty or "-")
+                                     in the repo (CSVs may be empty or "-"); nothing for a
+                                     missing conf, exit 1 for an unreadable one
   counterpart-key ITEM...            one key (sha256) for a revdep check's counterparts: each
                                      ITEM is a package file (basename + content hash) or
                                      "stock:NAME=VERSION"; "none" with no items
@@ -199,10 +202,16 @@ def revdep_withdraw(conf, withdrawn_csv, repo_csv):
     """Pairs of build/revdeps.conf (parsed like bin/auto-update's revdep_lines) whose headers
     package is withdrawn while the DKMS package stays published: "headers<TAB>dkms"."""
     withdrawn, repo = csv_set(withdrawn_csv), csv_set(repo_csv)
-    if not os.path.isfile(conf):
-        return
-    with open(conf) as f:
-        lines = f.read().splitlines()
+    if not os.path.exists(conf):
+        return 0
+    # Present but unreadable (a directory, no permission): fail, so the caller withdraws
+    # nothing rather than skip the retained DKMS package's check.
+    try:
+        with open(conf) as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        print(f"revdep-withdraw: cannot read {conf}: {e.strerror or e}", file=sys.stderr)
+        return 1
     for line in lines:
         parts = line.split(None, 2)
         if not parts or parts[0].startswith("#") or len(parts) < 2 or not parts[1].startswith("dkms:"):
@@ -212,6 +221,7 @@ def revdep_withdraw(conf, withdrawn_csv, repo_csv):
         hdr = opt[len("headers="):] if opt.startswith("headers=") else f"{src}-headers"
         if hdr in withdrawn and dkms not in withdrawn and dkms in repo:
             print(f"{hdr}\t{dkms}")
+    return 0
 
 
 def counterpart_key(items):
@@ -258,6 +268,14 @@ def record(status_path, run_id, recipe, result, action, kv):
     rec["last"] = entry
     rec["history"] = (rec.get("history", []) + [entry])[-HISTORY:]
     save(status_path, data)
+
+
+def forget(status_path, recipe):
+    """Drop a recipe's entry (a pseudo-recipe like "(upstream dbs)" once its cause is gone)."""
+    data = load(status_path)
+    data["recipes"].pop(recipe, None)
+    save(status_path, data)
+    return 0
 
 
 def get(status_path, recipe, key):
@@ -355,6 +373,8 @@ def main(argv):
         plan(*a)
     elif cmd == "record" and len(a) >= 5:
         record(a[0], a[1], a[2], a[3], a[4], a[5:])
+    elif cmd == "forget" and len(a) == 2:
+        return forget(*a)
     elif cmd == "get" and len(a) == 3:
         get(*a)
     elif cmd == "summary" and len(a) == 3:
@@ -364,7 +384,7 @@ def main(argv):
     elif cmd == "replies" and len(a) == 1:
         replies(a[0])
     elif cmd == "revdep-withdraw" and len(a) == 3:
-        revdep_withdraw(*a)
+        return revdep_withdraw(*a)
     elif cmd == "counterpart-key":
         return counterpart_key(a)
     else:
