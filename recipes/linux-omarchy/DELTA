@@ -5,5 +5,8 @@
 upstream omarchy-pkgs pkgbuilds/linux-omarchy
 mode overlay
 keep NOTES.md
+patch 0481-drm-amd-display-power-backports.patch after 0480-*
 patch 0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch after 0567-*
+patch 0569-i2c-designware-size-rx-fifo-threshold.patch after 0568-*
+patch 0807-platform-x86-asus-armoury-ga605km-power-limits.patch after 0806-*
 patch 9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch end -- EXPERIMENTAL, default-off scheduler series for GA605KM battery testing; see NOTES.md
