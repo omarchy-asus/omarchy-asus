@@ -535,7 +535,8 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
     os.makedirs(DATA, exist_ok=True)
     mb = merge_base(repo, base, head)  # a retargeted PR (same head, new diff) is reviewed again
     # keyed by reviewer too: AI_REVIEWER=claude must never reuse a Codex review
-    cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}-{mb[:12]}-{reviewer()}.json")
+    target = re.sub(r"[^A-Za-z0-9._-]", "_", pr["baseRefName"])  # a retarget can keep the merge-base
+    cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}-{mb[:12]}-{target}-{reviewer()}.json")
     lock = open(cache + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     if force:  # a forced review replaces whatever this head had, posted or not
@@ -598,7 +599,8 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
         try:
             post(repo, num, res, [checkout])
         except Exception as e:
-            set_status(repo, head, "error", f"posting failed: {e}"[:140])
+            log(f"posting failed: {e}")  # details stay local: statuses are public and unscanned
+            set_status(repo, head, "error", "posting the review failed; see the reviewer's log")
             res["_commentable"] = {k: sorted(v) for k, v in res["_commentable"].items()}
             json.dump(res, open(cache + ".unposted", "w"), indent=1)
             os.remove(cache)
