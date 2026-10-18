@@ -29,9 +29,14 @@ omarchy-settings from the same release satisfies the package, never stock's same
 (#83). Upstream's `omarchy-settings=${pkgver}` in the global `depends=()` stays: that is what
 `makepkg -s` installs in the clean chroot and in CI, where only stock omarchy-settings exists.
 
-**Patches:** the omarchy-asus fork's fixes (written against `quattro`), backported onto
-v4.0.5 as fork branch `asus/v4-0-5`, one commit each. Commit messages name the fork
-commit (`Backport-of:`) and any adaptation.
+**Patches:** the omarchy-asus fork's fixes, written as topic branches on the fork's `quattro`
+(a mirror of upstream's), backported onto v4.0.5 as fork branch `asus/v4-0-5`, one commit
+each. Commit messages name the fork commit (`Backport-of:`) and any adaptation. Those
+`Backport-of:` SHAs predate the 2026-10-18 rebase of the topic branches: they are no longer
+on any branch, but stay reachable through the fork's archive tags
+`archive/quattro-integrated-2026-10-18`, `archive/asus-stack-2026-10-18` and
+`archive/topic-tips-2026-10-18/<topic>`. The exception is 0010-0011, whose `Backport-of:`
+SHAs are the commits of omacom/omarchy#12428, reachable there.
 
 | patches | fix | issue | upstream |
 |---|---|---|---|
