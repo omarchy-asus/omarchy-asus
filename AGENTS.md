@@ -41,15 +41,16 @@ This repo fixes how those roles are filled and adds a sixth stage, publishing:
 |---|---|---|---|
 | 1. Plan (planner) | any agent | `bin/issue find`; read the code, the recipe's `NOTES.md`/`DELTA` and upstream; pick one fix per PR | an issue exists (or is filed) for the change |
 | 2. Work (worker) | Claude Opus 5.5 | edit on a branch in its own worktree (`git worktree add ... hub/main`); fork fixes go on the fork branch first, then into the recipe as patches | the change is committed |
-| 3. Review (reviewer) | Codex `gpt-6.1-sol`, never the author | `bin/ai-review local` (Code Review Rules below), 2-3 rounds | exit 0: no unrefuted P0/P1 |
-| 4. Integrate (integrator) | **one branch at a time** | rebase on `hub/main`; `ci/lint-scripts`; the offline tests (`tests/ci/*.sh`, `tests/test_*.py`, and the recipe's own); `bin/rebase-recipe <r> --version <v> --verify` or `makepkg --verifysource` for recipe changes; push; open a ready PR (never a draft); `bin/ai-review pr N --stamp` | the PR has the `ai-review` status |
-| 5. Land (lander) | the integrator's PR | wait for **every required check**: `ai-review`, Lint `scripts` and `recipes`, Build `result` (`gh pr checks N --watch`). Resolve every review thread. Then `gh pr merge N --squash --admin`. A red check goes back to stage 4 (at most 10 rounds; then file an issue and stop) | merged on `main` |
+| 3. Review (reviewer) | clud's `grind-reviewer` | reviews and corrects the worker's output against the goal and these rules (What reviewers flag, below) | the reviewer accepts the change |
+| 4. Integrate (integrator) | **one branch at a time** | rebase on `hub/main`; `ci/lint-scripts`; the offline tests (`tests/ci/*.sh`, `tests/test_*.py`, and the recipe's own); `bin/rebase-recipe <r> --version <v> --verify` or `makepkg --verifysource` for recipe changes; clud's `/clud-review` gate; push; open a ready PR (never a draft) | the PR is open and pushed |
+| 5. Land (lander) | the integrator's PR | wait for **every required check**: Lint `scripts` and `recipes`, Build `result` (clud's `pr_merge_watch`). Resolve every review thread. Then `gh pr merge N --squash --admin`. A red check goes back to stage 4 (at most 10 rounds; then file an issue and stop) | merged on `main` |
 | 6. Publish (this repo) | the build host only | packages only. `bin/build-pkg recipes/<r>` in the clean chroot (root via the build host's sudo; never a host build); `bin/publish <staged files>`; `bin/sync-release --dry-run`, then `bin/sync-release` (the PII scan must pass); check the live channel with a throwaway pacman config (`pacman -Sl omarchy-asus`, `-Sw` verifies signatures) | the release serves the new version |
 
 On top of clud's caps, these hold across all stages:
 
-- **Merges wait for CI.** The checks are required on `main` with admins included, so
-  `--admin` can't merge past a pending or red check, and it shouldn't try.
+- **Merges wait for CI.** Lint `scripts` and `recipes` and Build `result` are required on
+  `main` with admins included, so `--admin` can't merge past a pending or red check, and it
+  shouldn't try.
 - **A recipe change bumps `pkgrel`.** If the package content changes, the version changes:
   the release refuses a filename it already has with different bytes, and pacman caches by
   filename.
@@ -63,16 +64,19 @@ On top of clud's caps, these hold across all stages:
 
 ## Who writes, who reviews
 
-For the maintainer's own work (this account and its agents), **Claude Opus 5.5 writes the
-change and Codex `gpt-6.1-sol` reviews it**. The author never reviews its own change.
+**clud's workflow is the review.** For the maintainer's own work (this account and its agents),
+the `/do` and `/grind` roles above write, review and land the change; their reviewer and the
+integrator's `/clud-review` gate are the review, and there is no separate review step. We are
+admin: once the required CI checks are green, the lander merges with `--admin`.
 
-- Run the review on the branch before asking for a merge: `bin/ai-review local` (Codex Sol
-  finds, a fresh Codex Sol run verifies; see Code Review Rules below).
-- Fix or answer every finding, and say in the PR that the review ran and what came of it.
-- Contributors' agents may pair the other way round (Codex writes, Opus reviews).
-- Pull requests from external contributors are reviewed by us, against these rules.
-- The required `ai-review` check on `main` is how this runs on a PR (`bin/ai-review`, #50).
-- `bin/auto-update` follows it too: Claude only fixes, and ai-review (Codex Sol) gates (#54).
+- `/grind` asks which model fills each role. The session model is fine; a different model for
+  the reviewer is optional (under `clud --unified` a Codex model such as `gpt-6.1-sol` can
+  fill it).
+- `bin/ai-review` (#50) is no longer a gate and the `ai-review` status is not required on any
+  omarchy-asus repo. It stays available as an optional second opinion, and for outside
+  contributors' PRs (Code Review Rules below).
+- Pull requests from external contributors are reviewed by us, against these rules, and need
+  the maintainer's approving review.
 
 ## Labels
 
@@ -126,50 +130,20 @@ End the body with `Filed by <agent role>`.
 
 ## Code Review Rules
 
-Every PR on every omarchy-asus repo needs the `ai-review` commit status (required check, admins
-included; it replaced CodeRabbit). Nobody runs it for you: **the agent that pushes reviews
-locally, and the back-and-forth stays off GitHub.** Review threads on GitHub are only for
-outside contributors' PRs.
+Our own work is reviewed inside clud's workflow (Who writes, who reviews, above): no `ai-review`
+status, no review threads on GitHub. Your own account's PRs merge with
+`gh pr merge N --squash --admin` once the required CI checks are green. `--admin` bypasses the
+approval ruleset, not CI. Every review thread must be resolved.
 
-Our own work (this account and its agents):
+Outside contributors' PRs need the maintainer's approving review. `bin/ai-review` can help with
+that review, so the contributor sees every finding on GitHub:
 
-1. Commit, then review the commit locally from a clean checkout: `bin/ai-review local`
-   (`--base REF` for a base other than the hub's main, `--effort low|medium|high`). Codex
-   `gpt-6.1-sol` finds issues and a fresh Codex Sol run tries to refute each one. The findings
-   print in the terminal; nothing touches GitHub. Exit 0: no blocking finding; exit 3: blocking
-   (a P0/P1 not refuted). This takes 1-5 min, and a reviewed commit is cached.
-2. Fix and run it again until it exits 0. **Batch your fixes:** fix every finding of a round in
-   one commit, then review once. Fix every P0/P1. Fix a P2/P3 only when it's a one-liner;
-   otherwise file it (`bin/issue`) and move on. P2/P3 don't block the status. Keep it to 2-3
-   rounds. To dispute a finding instead, answer it with
-   `bin/ai-review pr N --checkout . --reply answers.json` (`{"<id>": "why this is not a defect"}`,
-   ids from `--json`); the reviewer re-checks the answer in the code.
-3. Push once per round, then stamp: `bin/ai-review pr N --repo omarchy-asus/<repo> --stamp`. It
-   reuses the local review of that exact head and merge-base (and reviews only if there is
-   none) and posts the `ai-review` status, plus a one-line comment if non-blocking findings
-   remain. If blocking findings remain, it posts the full review instead.
-
-Outside contributors' PRs get the full review on GitHub, so the contributor sees every finding:
-
-4. `bin/ai-review pr N --checkout .` on their head (or without `--checkout`: a temporary clone),
-   settle with `--reply` as above, then `bin/ai-review pr N --checkout . --post`: one review
-   (inline comments, answers, the reviewer's checks) and the status. It refuses a head that has
-   no local review (`--force` reviews again first). `bin/ai-review sweep --post` picks the mode
-   itself: stamp for our account's PRs and bodies signed `Filed by <agent>`, full review for the
-   rest.
-5. A new review or stamp comment minimizes the PR's earlier ai-review summaries as outdated.
-   PRs that don't target the default branch get the review but no status (a retarget means a
-   new review).
-
-Both:
-
-6. For Codex-written work, review with Claude instead (`AI_REVIEWER=claude`): the author never
-   reviews its own change.
-7. Your own account's PRs merge with `gh pr merge N --squash --admin`. `--admin` only bypasses the
-   approval ruleset. Without it, the merge is refused, and nothing bypasses `ai-review`. Every review
-   thread must be resolved. PRs from any other account need the maintainer's approving review.
-8. Everything ai-review posts goes through the secret and PII scan first. A hit posts nothing and
-   sets the status to `error`; fix the text it came from (usually your code), not the scan.
+1. `bin/ai-review pr N --checkout .` on their head (or without `--checkout`: a temporary clone),
+   settle findings with `--reply answers.json` (`{"<id>": "why this is not a defect"}`), then
+   `bin/ai-review pr N --checkout . --post`: one review (inline comments, answers, the
+   reviewer's checks).
+2. Everything ai-review posts goes through the secret and PII scan first. A hit posts nothing;
+   fix the text it came from (usually your code), not the scan.
 
 What reviewers flag:
 

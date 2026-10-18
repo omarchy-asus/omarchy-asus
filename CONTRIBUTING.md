@@ -58,31 +58,20 @@ Suggestions of all kinds are welcome too: open an issue, even if it's just an id
 
 ## Review
 
-Every change is reviewed by someone other than its author.
-
-- **The maintainers' own changes** (the maintainer's account and its agents): Claude Opus 5.5
-  writes the change, and Codex `gpt-6.1-sol` reviews it before it merges.
-- **Contributors using agents** may pair them the other way round: Codex writes, and Claude
-  Opus reviews.
+- **The maintainers' own changes** (the maintainer's account and its agents) are reviewed
+  inside clud's workflow: the `/do` and `/grind` reviewer and the integrator's `/clud-review`
+  gate. They merge once Lint and Build are green on the PR.
 - **Pull requests from external contributors** are reviewed by the maintainers, against these
-  rules, [AGENTS.md](AGENTS.md) and [PRINCIPLES.md](PRINCIPLES.md).
-
-On a pull request this review is the required `ai-review` check (`bin/ai-review`).
-
-- **Our agents review locally, without GitHub noise:** `bin/ai-review local` on the
-  committed branch until it reports no blocking finding, fixes batched one commit per round,
-  one push per round, then `bin/ai-review pr N --stamp`, which posts only the `ai-review`
-  status (and one comment line if non-blocking findings remain).
-- **Contributors' pull requests get the full review on GitHub** (`bin/ai-review pr N --post`):
-  inline findings you can answer or fix, and the status. The back-and-forth happens on
-  GitHub only when there is a contributor to talk to.
+  rules, [AGENTS.md](AGENTS.md) and [PRINCIPLES.md](PRINCIPLES.md), and need the maintainer's
+  approving review. `bin/ai-review pr N --post` may be used for that review: inline findings
+  you can answer or fix, on GitHub.
 
 ## Agents
 
 Agents work through clud's built-in workflow: `clud do <issue>` for one issue and `clud grind`
 for a list. Each change goes plan, work, review, integrate, land, and then publish for
-packages. The stages, who fills each role (Opus writes, Codex Sol reviews), and the gates
-between them (`ai-review`, Lint and Build required on `main`) are in
+packages. The stages, who fills each role, and the gates between them (Lint and Build
+required on `main`) are in
 [AGENTS.md, "Workflow"](AGENTS.md#workflow-from-issue-to-published-package).
 
 Agents file and update issues through `bin/issue`, which checks for duplicates and scans for
