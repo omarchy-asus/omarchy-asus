@@ -15,7 +15,7 @@
 
 pkgname=omarchy-asus-g16-apply
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Apply the ASUS ROG Zephyrus G16 GA605KM fixes that live in user config or /etc, on request (EXPERIMENTAL)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
