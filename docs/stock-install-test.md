@@ -92,7 +92,8 @@ in its output, so the file can go into an issue. It exits 1 if any check FAILs.
 | 1 | node access | PASS for reading and writing (the packaged udev rule's uaccess ACL) |
 | 1 | udev rule, helper, service | PASS: `/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules`, `/usr/bin/g16-winlock`, `g16-winlock.service` active |
 | 1 | `--live` | PASS: `seen: on off` (the patched hid-asus passes the Win-lock report through) |
-| 2 | every local workaround | `clear` on a fresh install |
+| 2 | omarchy-asus-g16-apply lines in hyprland.lua | WARN `present`, expected: applying the default fixes adds them (hybrid-video, hdmi-cursor). They only need to go before the patched omarchy 4.0.5-1.1 is installed |
+| 2 | every other local workaround | `clear` on a fresh install |
 | 3 | repo order | PASS: `[omarchy-asus]` before `[omarchy]` and `[core]`, SigLevel Required |
 | 3 | key | PASS: in pacman's keyring, validity `f` |
 | 3 | packages | PASS: linux-omarchy(-headers), nvidia-open-dkms, hyprland, hyprpm, omarchy-asus-keyring, omarchy-asus-g16, asus-rog-nkey-winlock, omarchy-asus-g16-apply from `[omarchy-asus]`; no WARN about stock builds or unknown versions |
