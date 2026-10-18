@@ -369,13 +369,27 @@ offer_upgrade() {
 # and omarchy-asus-g16-apply leaves alone any fix you already have in your own form.
 offer_g16_fixes() {
   step "Optional: G16 fixes for a fresh install"
+  # omarchy-asus-g16-apply runs only on a GA605KM (its own DMI check, the same
+  # as omarchy-hw-match GA605KM) unless it gets --force.
+  local product family apply_opts=()
+  product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
+  family=$(cat /sys/class/dmi/id/product_family 2>/dev/null || true)
+  if [[ ${product,,} != *ga605km* && ${family,,} != *ga605km* ]]; then
+    if ((FORCE)); then
+      warn "not a GA605KM; passing --force to omarchy-asus-g16-apply because of --force"
+      apply_opts=(--force)
+    else
+      info "skipped: these fixes are for the GA605KM ('$product')"
+      return 0
+    fi
+  fi
   info "Packages: ${G16_PKGS[*]}. omarchy-asus-g16-apply then lists the fixes that"
   info "live in your config or /etc (video decode on the iGPU, HDMI cursor, speaker level, rtkit,"
   info "asusd, Win-lock service) and applies the missing ones. Settings you already have are kept."
   if ((DRY_RUN)); then
     confirm "Install them and review the fixes?"
     as_root pacman -S --needed "${G16_PKGS[@]}"
-    info "[dry-run] would run: omarchy-asus-g16-apply --check, ask, then omarchy-asus-g16-apply --yes"
+    info "[dry-run] would run: omarchy-asus-g16-apply ${apply_opts[*]} --check, ask, then omarchy-asus-g16-apply ${apply_opts[*]} --yes"
     return 0
   fi
   if [[ -n $(pacman -Qu 2>/dev/null) ]]; then
@@ -398,10 +412,10 @@ offer_g16_fixes() {
   fi
   as_root pacman -S --needed "${available[@]}" || { warn "install failed; skipping the fixes"; return 0; }
   command -v omarchy-asus-g16-apply >/dev/null || return 0
-  omarchy-asus-g16-apply --check || rc=$?
+  omarchy-asus-g16-apply "${apply_opts[@]}" --check || rc=$?
   if ((rc == 10)); then
     if confirm "Apply the missing default fixes listed above?"; then
-      omarchy-asus-g16-apply --yes || warn "some fixes failed; run 'omarchy-asus-g16-apply' again to retry"
+      omarchy-asus-g16-apply "${apply_opts[@]}" --yes || warn "some fixes failed; run 'omarchy-asus-g16-apply' again to retry"
     else
       info "skipped. Run 'omarchy-asus-g16-apply' whenever you like ('--check' changes nothing)."
     fi
