@@ -34,7 +34,8 @@ The script:
 2. Prints the EXPERIMENTAL warning and asks you to confirm. If no fallback kernel is installed, it
    offers to install Arch's `linux` and `linux-headers` first (from the databases you already have,
    so no partial upgrade), and DKMS builds the NVIDIA module for both kernels. It also warns if
-   `IgnorePkg` holds back a package this repo ships.
+   `IgnorePkg` holds back a package this repo ships, and about an out-of-tree hid-asus DKMS source
+   in `/usr/src` (see step 4 of [Switching an existing install](#switching-an-existing-install)).
 3. Downloads `keys/omarchy-asus.asc` over HTTPS. If the key isn't exactly the one with fingerprint
    `0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88` (hardcoded in the script), it stops. Otherwise it runs
    `pacman-key --add` and `pacman-key --lsign-key`.
@@ -109,14 +110,39 @@ before you run the script. The script only warns about them.
    no longer builds against the patched kernel, so expect one DKMS error. The patched kernel has
    the fix built in, so removing the module first makes no difference to how the laptop behaves:
    `sudo dkms remove <module>/<version> --all`.
+
+   `dkms remove` is not enough when the source dir was installed by hand. Arch's DKMS hook adds
+   every `/usr/src/<name>-<version>/dkms.conf` again on each kernel update, so the module comes
+   back (and prints a build error every update). Check who owns it; `bin/g16-check` also reports
+   which case applies:
+
+   ```bash
+   pacman -Qo /usr/src/<module>-<version>
+   ```
+
+   If a package owns it, remove that package instead:
+
+   ```bash
+   sudo pacman -Rns <package>
+   ```
+
+   If no package owns it, move the source out of `/usr/src`:
+
+   ```bash
+   sudo mkdir -p /usr/local/src/dkms-disabled
+   sudo mv /usr/src/<module>-<version> /usr/local/src/dkms-disabled/
+   ```
+
+   Move it rather than delete it: it may be your only copy of the patch. Move it out of
+   `/usr/src`, because a renamed dir inside `/usr/src` still matches the hook.
 5. **Reboot and check.** [`bin/g16-check`](bin/g16-check) (read-only) checks most of this and
    prints PASS/WARN/FAIL; `bin/g16-check --live` also waits for Fn+Super. By hand:
    - `uname -r` ends in `-9.1-omarchy`.
    - Fn+Super toggles the Win-lock.
    - An external display looks right after you unplug and replug HDMI.
    - Hibernate and resume work.
-6. **Remove leftovers** from the earlier workarounds: locally built packages, DKMS sources and
-   stale `IgnorePkg` lines.
+6. **Remove leftovers** from the earlier workarounds: locally built packages, DKMS sources
+   (see step 4: move unowned ones out of `/usr/src`) and stale `IgnorePkg` lines.
 
 ## Manual setup
 
