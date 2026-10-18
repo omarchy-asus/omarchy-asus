@@ -40,6 +40,10 @@ jobs:
           echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color
+      # The publish/sync transaction tests need bsdtar (gpg, flock and strings ship with
+      # the runner); on CI they fail instead of skipping when a tool is missing.
+      - name: Install bsdtar
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libarchive-tools
       # Offline tests: tests/test_*.py (python unittest, e.g. bin/issue's) and
       # tests/ci/*.sh (hermetic shell tests opt in by living there).
       # tests/auto-update-simulate.sh (PR #6) needs network and local repo state.

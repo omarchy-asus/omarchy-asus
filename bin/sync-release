@@ -5,14 +5,29 @@
 #        bin/sync-release --pii-scan FILE...   (only run the PII scan below on these files)
 #        bin/sync-release --pii-scan-text FILE...   (the same scan, each file read as plain text)
 #
-# Incremental, to keep GitHub traffic (and the window where an asset 404s) small:
-# - one API call reads the release's assets (name, size, sha256 digest);
-# - a package already uploaded with the same bytes is skipped; a package filename
-#   that is already uploaded with DIFFERENT bytes is refused (a rebuild must bump
-#   pkgrel: pacman and caches treat a filename as immutable);
-# - new packages and signatures go up first, the db/files (+ .sig) last and only
-#   when they changed, and assets the db no longer names are deleted only after
-#   the new db is up.
+# One transaction, under the publication lock ($DATA/publish.lock, shared with
+# bin/publish and bin/unpublish; PUBLISH_LOCK_WAIT seconds, then exit 75) for the
+# whole run: snapshot, uploads, verification and pruning (--dry-run too).
+# - The snapshot's db and files must carry a good signature by $SIGN_KEY, and so
+#   must every package (+ .sig) about to go up; otherwise nothing is uploaded.
+# - One publisher: $DATA/release-db.sha256 records the db this host last put on the
+#   release (plus any it uploaded since without verifying: each is appended before its
+#   upload). If the release's db is none of those nor the local one, someone else
+#   published: refuse (checked again right before the db upload) unless
+#   SYNC_ADOPT_REMOTE=1. Without a record this host adopts the release as it is.
+# - Incremental, to keep GitHub traffic (and the window where an asset 404s) small:
+#   one API call reads the release's assets (name, size, sha256 digest); a package
+#   already uploaded with the same bytes is skipped; a package filename that is
+#   already uploaded with DIFFERENT bytes is refused (a rebuild must bump pkgrel:
+#   pacman and caches treat a filename as immutable); new packages and signatures go
+#   up first, the db/files (+ .sig) last and only when they changed.
+# - Journal: after the uploads the release is read again and every db file, package
+#   and signature the db names must match the local bytes. Only then is the db sum
+#   recorded and $DATA/sync-pending cleared; any mismatch keeps it, for a retry.
+# - Grace period: an asset the db no longer names is not deleted at once (a client
+#   may hold the previous db). It is listed in $DATA/prune-candidates with the time
+#   it was first seen unreferenced, and deleted by a later verified sync once it is
+#   PRUNE_GRACE_HOURS (default 72; 0 deletes at once) old.
 # Release assets can't be symlinks, so the db/files links are uploaded as real
 # files under the names pacman requests.
 #
@@ -25,9 +40,10 @@
 # at '<member path>:<line>' (the strings line holding it). One hit anywhere else
 # (.PKGINFO, .BUILDINFO, another member) still blocks. Only denylist line numbers are
 # printed, never the entries, the matched text or its location. A missing denylist,
-# an invalid regex in it, a malformed allow rule, a hit the located pass cannot place
-# or a failed scan aborts too, never reads as clean (PII_SCAN=off skips the scan,
-# for a machine without one).
+# an invalid regex in it, a malformed allow rule, a hit the located pass cannot place,
+# an archive that cannot be listed or read to the end (truncated, not an archive) or
+# any other failed scan step aborts too, never reads as clean (PII_SCAN=off skips the
+# scan, for a machine without one).
 # --pii-scan-text scans files as plain text, never as archives (bin/auto-update scans
 # its PR comments and replies with it; build/pii-allow-packages does not apply).
 set -euo pipefail
@@ -97,8 +113,31 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
         if ((as_text)); then   # a PR comment or reply; an unreadable file is grep exit 2
             grep -aoiE -- "$pattern" "$f" >"$up/.hits" || st=$?
         else                   # a package or db: its file names and the strings of its contents
-            { bsdtar -tf "$f" 2>/dev/null; bsdtar -xOf "$f" 2>/dev/null | strings -n 4; } |
-                grep -oiE -- "$pattern" >"$up/.hits" || st=${PIPESTATUS[1]}
+            # Every step is checked: an archive that cannot be listed or read to the end
+            # (truncated, not an archive) must abort, not read as "no hits".
+            local why='' ps=()
+            : >"$up/.hits"
+            if ! bsdtar -tf "$f" >"$up/.list" 2>/dev/null; then
+                why="could not list it"
+            else
+                grep -oiE -- "$pattern" "$up/.list" >"$up/.hits" || st=$?
+                if ((st > 1)); then
+                    why="grep exit $st"
+                else
+                    st=0; ps=(0 0 0)
+                    bsdtar -xOf "$f" 2>/dev/null | strings -n 4 | grep -oiE -- "$pattern" >>"$up/.hits" ||
+                        ps=("${PIPESTATUS[@]}")
+                    if ((ps[0] != 0)); then why="could not read it"
+                    elif ((ps[1] != 0)); then why="strings exit ${ps[1]}"
+                    elif ((ps[2] > 1)); then why="grep exit ${ps[2]}"
+                    fi
+                fi
+            fi
+            rm -f "$up/.list"
+            if [[ -n $why ]]; then
+                echo "PII scan of $(basename "$f") failed ($why); refusing to upload" >&2
+                rm -f "$up/.hits"; return 1
+            fi
         fi
         if ((st > 1)); then  # 1 is "no match"; anything else is a scan error
             echo "PII scan of $(basename "$f") failed (grep exit $st); refusing to upload" >&2
@@ -224,33 +263,108 @@ pii_located() {
 }
 if ((scan_only)); then pii_scan "$@"; exit; fi
 
+# shellcheck source=bin/publish-lib.sh
+source "$(dirname "$0")/publish-lib.sh"
+: "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
+grace_h=${PRUNE_GRACE_HOURS:-72}
+[[ $grace_h =~ ^[0-9]+$ ]] || { echo "PRUNE_GRACE_HOURS=$grace_h is not a whole number of hours" >&2; exit 1; }
+# Set the EXIT trap before pub_lock, so a trap the lock sets up is not replaced.
+remote_dl=$(mktemp -d); trap 'rm -rf "$up" "$remote_dl"' EXIT
+pub_lock  # held until exit: snapshot, uploads, verification and pruning
+
 for f in "$REPO_DIR"/*; do
     case $(basename "$f") in *.tar.gz|*.tar.gz.sig|*.old|*.old.sig) continue ;; esac
     cp -L "$f" "$up/$(basename "$f")"
 done
 dbfiles=("$REPO_NAME".db "$REPO_NAME".db.sig "$REPO_NAME".files "$REPO_NAME".files.sig)
 for f in "${dbfiles[@]}"; do [[ -e $up/$f ]] || { echo "missing $REPO_DIR/$f" >&2; exit 1; }; done
+# The db and files must be validly signed by our key: repo-add can keep an old .sig
+# beside a new db when signing fails, and pacman (SigLevel Required) would refuse it.
+for n in "$REPO_NAME".db "$REPO_NAME".files; do
+    pub_verify_sig "$up/$n" "$up/$n.sig" ||
+        { echo "sync aborted: the local db/files signature does not verify; nothing uploaded" >&2; exit 1; }
+done
 # Every package the db names must be here (with its signature), or pacman would 404.
-while IFS= read -r f; do
+# Intermediate files, so a db that cannot be read aborts instead of naming nothing.
+bsdtar -tf "$up/$REPO_NAME.db" >"$up/.dblist" 2>/dev/null ||
+    { echo "cannot list $REPO_DIR/$REPO_NAME.db; nothing uploaded" >&2; exit 1; }
+: >"$up/.desc"
+gs=0; grep -q '/desc$' "$up/.dblist" || gs=$?
+((gs < 2)) || { echo "cannot read the listing of $REPO_DIR/$REPO_NAME.db; nothing uploaded" >&2; exit 1; }
+if ((gs == 0)); then   # an empty repo has no entries to extract
+    bsdtar -xOf "$up/$REPO_NAME.db" '*/desc' >"$up/.desc" 2>/dev/null ||
+        { echo "cannot read $REPO_DIR/$REPO_NAME.db; nothing uploaded" >&2; exit 1; }
+fi
+awk 'p {print; p=0} /^%FILENAME%$/ {p=1}' "$up/.desc" >"$up/.dbnames"
+mapfile -t db_pkgs <"$up/.dbnames"
+rm -f "$up/.dblist" "$up/.desc" "$up/.dbnames"
+for f in "${db_pkgs[@]}"; do
     [[ -e $up/$f && -e $up/$f.sig ]] || { echo "db names $f but $REPO_DIR lacks it (or its .sig)" >&2; exit 1; }
-done < <(bsdtar -xOf "$up/$REPO_NAME.db" '*/desc' | awk 'p {print; p=0} /^%FILENAME%$/ {p=1}')
+done
+db_sum=$(sha256sum "$up/$REPO_NAME.db" | cut -d' ' -f1)
 
-# --- remote state (one API call) ---
+# --- remote state (one API call per read) ---
 declare -A rsize rdigest
-if ! assets=$(gh release view "$GH_TAG" -R "$GH_REPO" --json assets \
-        --jq '.assets[] | [.name, (.size|tostring), (.digest // "")] | @tsv' 2>/dev/null); then
+read_assets() {  # fill rsize/rdigest from the release; 1 if it cannot be read
+    local assets n s d
+    assets=$(gh release view "$GH_TAG" -R "$GH_REPO" --json assets \
+        --jq '.assets[] | [.name, (.size|tostring), (.digest // "")] | @tsv' 2>/dev/null) || return 1
+    rsize=(); rdigest=()
+    while IFS=$'\t' read -r n s d; do
+        [[ -n $n ]] || continue
+        rsize[$n]=$s; rdigest[$n]=$d
+    done <<<"$assets"
+}
+release_missing=0
+if ! read_assets; then
     echo "release $GH_TAG does not exist yet"
     run gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
         --prerelease --title "EXPERIMENTAL omarchy-asus pacman repo ($GH_TAG) - ROG Zephyrus G16 GA605 only" \
         --notes-file "$WORKSPACE/build/release-notes.md"
-    assets=
+    rsize=(); rdigest=(); release_missing=1
 fi
-while IFS=$'\t' read -r n s d; do
-    [[ -n $n ]] || continue
-    rsize[$n]=$s; rdigest[$n]=$d
-done <<<"$assets"
 
-remote_dl=$(mktemp -d); trap 'rm -rf "$up" "$remote_dl"' EXIT
+remote_sum() {  # remote_sum <asset name>: print the release asset's sha256 (from the API's
+                # digest, else by downloading it); 1 the asset is absent, 2 the download failed
+    local n=$1 d s
+    [[ -n ${rsize[$n]:-} ]] || return 1
+    d=${rdigest[$n]:-}
+    if [[ $d == sha256:?* ]]; then echo "${d#sha256:}"; return 0; fi
+    rm -f "$remote_dl/$n"
+    gh release download "$GH_TAG" -R "$GH_REPO" -p "$n" -D "$remote_dl" --clobber >/dev/null 2>&1 &&
+        [[ -f $remote_dl/$n ]] || { echo "cannot download release asset $n to hash it" >&2; return 2; }
+    s=$(sha256sum "$remote_dl/$n" | cut -d' ' -f1) || { rm -f "$remote_dl/$n"; return 2; }
+    rm -f "$remote_dl/$n"
+    echo "$s"
+}
+# One publisher: the release's db must be the one this host last synced (or already
+# the local one). Anything else was put there by someone else; don't overwrite it.
+check_publisher() {  # check_publisher [first]: exits 1 on a foreign db
+    local rec rs rc=0
+    if [[ ${SYNC_ADOPT_REMOTE:-} == 1 ]]; then
+        [[ ${1:-} == first ]] && echo "SYNC_ADOPT_REMOTE=1: taking over the release whatever db it has"
+        return 0
+    fi
+    if [[ ! -e $DATA/release-db.sha256 ]]; then
+        [[ ${1:-} == first ]] &&
+            echo "note: no $DATA/release-db.sha256 yet; this host adopts the release as it is"
+        return 0
+    fi
+    [[ -n ${rsize[$REPO_NAME.db]:-} ]] || return 0
+    rec=$DATA/release-db.sha256
+    rs=$(remote_sum "$REPO_NAME.db") || rc=$?
+    # The record lists every db this host uploaded since its last verified sync (one per
+    # line, see below): a sync killed after its db upload must not look like another publisher.
+    if ((rc == 0)) && [[ -n $rs ]] && { [[ $rs == "$db_sum" ]] || grep -qxF -- "$rs" "$rec"; }; then
+        return 0
+    fi
+    ((rc == 0)) || echo "cannot hash the release's $REPO_NAME.db" >&2
+    echo "refusing: the release's db changed since this host last synced it (another publisher?);" \
+        "check it, then rerun with SYNC_ADOPT_REMOTE=1" >&2
+    exit 1
+}
+check_publisher first
+
 same() {  # same <local file>: 0 the remote asset of that name has the same bytes, 1 it differs
           # (or is absent), 2 unknown (no digest from the API and the download failed)
     local n sum; n=$(basename "$1")
@@ -289,6 +403,17 @@ for f in "$up"/*.pkg.tar.zst; do
     same "$f.sig" || upload_pkgs+=("$f.sig")
 done
 for n in "${dbfiles[@]}"; do same "$up/$n" || upload_db+=("$up/$n"); done
+n_assets=${#rsize[@]}
+
+# --- every package about to go up must be signed by our key ---
+declare -A sig_ok=()
+for f in "${upload_pkgs[@]}"; do
+    p=${f%.sig}
+    [[ $p == *.pkg.tar.zst && -z ${sig_ok[$p]:-} ]] || continue
+    pub_verify_sig "$p" "$p.sig" ||
+        { echo "sync aborted: $(basename "$p") has no good signature by $SIGN_KEY; nothing uploaded" >&2; exit 1; }
+    sig_ok[$p]=1
+done
 
 # --- PII scan of what is about to become public ---
 scan=("${new_pkgs[@]}")
@@ -297,11 +422,85 @@ if ((${#scan[@]})); then
     pii_scan "${scan[@]}" || { echo "sync aborted: nothing uploaded" >&2; exit 1; }
 fi
 
-# --- upload: packages first, db last, then prune ---
+# --- upload: packages first, db last ---
 ((${#upload_pkgs[@]})) && run gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "${upload_pkgs[@]}"
-((${#upload_db[@]})) && run gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "${upload_db[@]}"
+if ((${#upload_db[@]})); then
+    # Another publisher may have replaced the db while the packages went up: look again.
+    if read_assets; then
+        check_publisher
+    elif ((dry && release_missing)); then
+        :   # dry run against a release that would have been created: nothing to re-read
+    else
+        echo "refusing: cannot re-read release $GH_TAG before the db upload; db not uploaded" >&2
+        exit 1
+    fi
+    # Record this db before it goes up: if the run dies between the upload and the
+    # verification below, the next sync still knows the release's db as this host's.
+    if ((!dry)); then
+        # No record yet (the release was adopted as it is): record the adopted db too, so
+        # an upload that fails before replacing it does not make it look foreign later.
+        if [[ ! -e $DATA/release-db.sha256 && -n ${rsize[$REPO_NAME.db]:-} ]]; then
+            arc=0; adopted=$(remote_sum "$REPO_NAME.db") || arc=$?
+            ((arc == 0)) && [[ -n $adopted ]] ||
+                { echo "refusing: cannot hash the release's $REPO_NAME.db to record it; db not uploaded" >&2; exit 1; }
+            printf '%s\n' "$adopted" >>"$DATA/release-db.sha256" ||
+                { echo "refusing: cannot write $DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
+        fi
+        printf '%s\n' "$db_sum" >>"$DATA/release-db.sha256" ||
+            { echo "refusing: cannot write $DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
+    fi
+    run gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "${upload_db[@]}"
+fi
+
+# --- verify the release, then record the db and clear the journal ---
+verify_asset() {  # verify_asset <name>: 0 the release has exactly the bytes of $up/<name>
+    local rs
+    rs=$(remote_sum "$1") || return 1
+    [[ $rs == "$(sha256sum "$up/$1" | cut -d' ' -f1)" ]]
+}
+if ((dry)); then
+    echo "dry run: would verify the release against the db, record $db_sum in" \
+        "$DATA/release-db.sha256 and clear $DATA/sync-pending"
+else
+    read_assets ||
+        { echo "sync incomplete: cannot read release $GH_TAG to verify it; $DATA/sync-pending kept" >&2; exit 1; }
+    want=("${dbfiles[@]}")
+    for f in "${db_pkgs[@]}"; do want+=("$f" "$f.sig"); done
+    for n in "${want[@]}"; do
+        verify_asset "$n" ||
+            { echo "sync incomplete: $n on the release does not match; $DATA/sync-pending kept" >&2; exit 1; }
+    done
+    printf '%s\n' "$db_sum" >"$DATA/release-db.sha256.tmp"
+    mv -f "$DATA/release-db.sha256.tmp" "$DATA/release-db.sha256"
+    pub_clear_pending
+fi
+
+# --- prune what the db no longer names, after a grace period ---
+# $DATA/prune-candidates: '<asset>\t<epoch first seen unreferenced>' per line.
+cand=$DATA/prune-candidates now=$(date +%s) grace_s=$((10#$grace_h * 3600)) deleted=0 waiting=0
+declare -A first_seen=()
+if [[ -e $cand ]]; then
+    while IFS=$'\t' read -r n t; do
+        if [[ -n $n && $t =~ ^[0-9]+$ ]]; then first_seen[$n]=$t; fi
+    done <"$cand"
+fi
+: >"$up/.cand"
 for a in "${!rsize[@]}"; do
-    [[ -e $up/$a ]] || run gh release delete-asset "$GH_TAG" "$a" -R "$GH_REPO" --yes
+    [[ -e $up/$a ]] && continue
+    case " ${dbfiles[*]} " in *" $a "*) continue ;; esac
+    t=${first_seen[$a]:-$now}
+    if ((now - t >= grace_s)); then
+        run gh release delete-asset "$GH_TAG" "$a" -R "$GH_REPO" --yes
+        deleted=$((deleted + 1))
+    else
+        printf '%s\t%s\n' "$a" "$t" >>"$up/.cand"
+        waiting=$((waiting + 1))
+    fi
 done
-echo "sync: ${#upload_pkgs[@]} package file(s) and ${#upload_db[@]} db file(s) uploaded" \
-    "($(( ${#rsize[@]} )) assets were in the release)"
+if ((!dry)); then
+    cp "$up/.cand" "$cand.tmp"
+    mv -f "$cand.tmp" "$cand"
+fi
+echo "sync: ${#upload_pkgs[@]} package file(s) and ${#upload_db[@]} db file(s) uploaded;" \
+    "$deleted superseded asset(s) deleted, $waiting waiting out the ${grace_h}h grace period" \
+    "($n_assets assets were in the release)"

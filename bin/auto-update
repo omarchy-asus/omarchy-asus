@@ -28,6 +28,9 @@
 #   synced at once (stock flows through: a stale pin blocks or breaks updates, because
 #   pacman takes the first repo that has the name), and the reason goes to
 #   $DATA/status.json and $DATA/status.md. Failures make the run exit 1 (systemctl --failed).
+#   While the journal $DATA/sync-pending exists (written by bin/publish and bin/unpublish
+#   before the local repo changes, removed by bin/sync-release once the release is verified)
+#   the release may lag: the next run syncs before planning, and the run fails until it clears.
 #
 # Root vs user: run as root (systemd), only the chroot build runs as root; every other
 # step runs as BUILD_USER via runuser. Run as a normal user, the build uses sudo.
@@ -69,6 +72,9 @@ SKIP_RECIPES='' BUILD_NOT_BUILT=yes KEEP_PUBLISHED='' FETCH_FAIL_UNPUBLISH_AFTER
 FAIL_ON_ATTENTION=no AI_REVIEW=required AI_REVIEW_TIMEOUT=1800 AI_REVIEW_EFFORT='' VERIFIER='' OPENROUTER_API_KEY_FILE=''
 MAX_FIX_ROUNDS=2 REPLY_LIMIT=10
 REQUIRE_AGENT_APPROVAL=no   # the fixer's own verdict; the review gate is ai-review (Codex)
+# Passed through to bin/publish, bin/unpublish and bin/sync-release when the config sets them
+# (their own defaults otherwise): PRUNE_GRACE_HOURS=72 (hours before superseded release assets
+# are deleted), PUBLISH_LOCK_WAIT (seconds to wait for the publication lock before exit 75).
 # REVIEW_CMD stays unset unless the config sets it: unset -> the default below,
 # explicitly empty (REVIEW_CMD=) -> agent review disabled.
 unset REVIEW_CMD
@@ -100,7 +106,8 @@ GH_TOKEN=
 
 # Run a command as the build user, with a fixed environment (root: runuser; user: direct).
 pass_env=(OMARCHY_ASUS_UPSTREAM_OVERRIDE OMARCHY_ASUS_ARCH_GIT_URL OMARCHY_ASUS_OMARCHY_PKGS_GIT_URL
-          PII_DENYLIST PII_SCAN SKIP_RECIPES BUILD_NOT_BUILT KEEP_PUBLISHED)
+          PII_DENYLIST PII_SCAN SKIP_RECIPES BUILD_NOT_BUILT KEEP_PUBLISHED
+          PRUNE_GRACE_HOURS PUBLISH_LOCK_WAIT)
 as_user() {
     local e=(HOME="$user_home" USER="$BUILD_USER" LOGNAME="$BUILD_USER" LANG=C.UTF-8 PATH="$user_path"
              OMARCHY_ASUS_WORKSPACE="$CLONE" OMARCHY_ASUS_DATA="$DATA" GNUPGHOME="$DATA/gnupg"
@@ -146,10 +153,19 @@ note() { echo "[$1] $2"; }
 record() { as_user "$LIB/auto-update-state" record "$STATUS" "$run_id" "$@"; }
 
 # ---------------------------------------------------------------- repo helpers
+# bin/publish and bin/unpublish write the journal $DATA/sync-pending before they change the
+# local repo, and bin/sync-release removes it only once the release matches the local repo:
+# while it exists the release may lag, and every run syncs first. $AU/sync-pending is the
+# marker older versions of this script wrote; it is still honoured and removed on success.
 sync_now() {
     [[ $mode == full ]] || { note dry "would run bin/sync-release"; return 0; }
-    if as_user "$LIB/sync-release"; then as_user rm -f "$AU/sync-pending"
-    else as_user touch "$AU/sync-pending"; note sync "sync-release failed; retried next run"; failed=1; fi
+    local rc=0
+    as_user "$LIB/sync-release" || rc=$?
+    if ((rc == 0)); then as_user rm -f "$AU/sync-pending"
+    else
+        as_user touch "$DATA/sync-pending"
+        note sync "sync-release failed (exit $rc); retried next run"; failed=1
+    fi
 }
 # A failed bin/unpublish leaves the package published: its names go to unpublish-pending,
 # the caller records a failure, the next run retries the removal before anything else, and
@@ -184,7 +200,7 @@ retry_unpublish() {  # retry the removals a previous run could not do (names sti
     if ((${#want[@]} == 0)); then as_user rm -f "$PENDING_UNPUB"; return 0; fi
     note unpublish "retrying the removal of ${want[*]} (failed in an earlier run)"
     if as_user "$LIB/unpublish" "${want[@]}"; then
-        as_user rm -f "$PENDING_UNPUB"; as_user touch "$AU/sync-pending"
+        as_user rm -f "$PENDING_UNPUB"; as_user touch "$DATA/sync-pending"
     else
         note unpublish "bin/unpublish FAILED again for ${want[*]}"; failed=1
     fi
@@ -727,7 +743,11 @@ if [[ -z $workspace_arg ]]; then
         _ "$CLONE" "$GIT_URL" "$BASE_BRANCH"
 fi
 [[ $mode == full ]] && retry_unpublish
-[[ $mode == full && -n $(as_user ls "$AU/sync-pending" 2>/dev/null) ]] && sync_now
+# Sync a release left behind (a crash or failure after publish/unpublish) before the plan
+# reads the local db, so the run decides what is current against a release that matches it.
+if [[ $mode == full ]] && { as_user test -e "$DATA/sync-pending" || as_user test -e "$AU/sync-pending"; }; then
+    sync_now
+fi
 
 check=$RUN/check.json
 crc=0
@@ -786,7 +806,9 @@ as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" || src=$
 as_user find "$AU/runs" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 ((src == 1)) && failed=1
 ((src == 2)) && attention=1
-[[ $mode == full && -n $(as_user ls "$AU/sync-pending" 2>/dev/null) ]] && { note sync "release sync pending"; failed=1; }
+if [[ $mode == full ]] && as_user test -e "$DATA/sync-pending"; then
+    note sync "sync pending: the release may lag the local repo; retried next run"; failed=1
+fi
 [[ $mode == full && -n $(as_user cat "$PENDING_UNPUB" 2>/dev/null) ]] &&
     { note unpublish "still published, removal pending: $(as_user cat "$PENDING_UNPUB" | paste -sd' ')"; failed=1; }
 if ((failed)); then echo "auto-update: FAILED (see $SUMMARY)"; exit 1; fi
