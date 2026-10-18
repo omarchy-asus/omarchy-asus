@@ -66,7 +66,7 @@ expect "$([[ -n $warn_line && -n $prompt_line ]] && ((warn_line < prompt_line)) 
 
 echo "== c. leftover step"
 sed -n '/==> Packages only the omarchy-asus repo had/,$p' "$S/out" >"$S/left"
-[[ -s $S/left ]]; expect $? 0 "has a leftover step"
+if [[ -s $S/left ]]; then r=0; else r=1; fi; expect "$r" 0 "has a leftover step"
 for p in omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock hyprpm; do
     grep -qxE " +$p" "$S/left"; expect $? 0 "lists $p"
 done
@@ -76,12 +76,12 @@ done
 
 echo "== d. pacman -Rns offer"
 rns=$(grep -F '[dry-run] sudo' "$S/out" | grep -F 'pacman -Rns' | head -n1)
-[[ -n $rns ]]; expect $? 0 "prints a [dry-run] sudo ... pacman -Rns line"
+[[ -n $rns ]]; r=$?; expect "$r" 0 "prints a [dry-run] sudo ... pacman -Rns line"
 for p in omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock hyprpm; do
-    [[ "$rns " == *" $p "* ]]; expect $? 0 "-Rns names $p"
+    [[ "$rns " == *" $p "* ]]; r=$?; expect "$r" 0 "-Rns names $p"
 done
 for p in linux-omarchy nvidia-open-dkms bash asus-zephyrus-g16-control; do
-    [[ "$rns " == *" $p "* ]]; expect $? 1 "-Rns leaves out $p"
+    [[ "$rns " == *" $p "* ]]; r=$?; expect "$r" 1 "-Rns leaves out $p"
 done
 
 echo "== e. omarchy-asus-g16 / HibernateMode=shutdown"
