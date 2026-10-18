@@ -2,11 +2,12 @@
 *.pkg.tar.zst
 *.pkg.tar.zst.sig
 *.tar.xz
+*.tar.sign
 src/
 pkg/
 logs/
-# upstream Arch hyprland checkout with its own .git (reference; patch copied into recipes/hyprland-4 when built)
-recipes/hyprland/
+# Arch's hyprland packaging checkout with its own .git (reference for rebasing recipes/hyprland)
+recipes/.hyprland-arch-checkout/
 
 # local-only: machine-specific brief and status report (read on the build host)
 BRIEF.md

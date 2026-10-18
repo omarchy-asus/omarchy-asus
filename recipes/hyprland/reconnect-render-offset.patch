@@ -1,0 +1,17 @@
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index e69d8dd..98f6856 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -378,6 +378,12 @@ void CMonitor::onConnect(bool noRule) {
+     if (!found)
+         Desktop::focusState()->rawMonitorFocus(m_self.lock());
+ 
++    // Whatever workspace ended up active here may have been hidden elsewhere with a
++    // slide-out offset (e.g. on the backup monitor while we were gone). The internal
++    // changeWorkspace above never animates it in, so settle it on-screen.
++    if (m_activeWorkspace)
++        Animation::Workspace::startAnimation(m_activeWorkspace, Animation::Workspace::ANIMATION_TYPE_IN, true, true);
++
+     scheduleFrame(Aquamarine::IOutput::AQ_SCHEDULE_NEW_MONITOR);
+ 
+     PROTO::gamma->applyGammaToState(m_self.lock());

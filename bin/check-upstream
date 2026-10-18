@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Compare every package we carry with the version upstream currently ships.
+
+Usage: bin/check-upstream [--json] [--refresh] [--no-prs]
+
+Our packages: every recipes/<dir>/PKGBUILD (via `makepkg --printsrcinfo`, one
+entry per split package) plus anything in the local repo db ($REPO_DIR).
+Upstream: the repos the laptop uses, in pacman.conf order, first match wins:
+[omarchy] pkgs.omarchy.org/stable, then core/extra/multilib from the Omarchy
+stable mirror.
+
+Base version = our pkgver-pkgrel with the trailing ".1" removed.
+Text output, one line per package:  name ours upstream status
+  current          upstream == base and the repo db holds the recipe's version
+  rebuild-needed   upstream moved past our base (rebuild with rebased patches, or unpublish)
+  upstream-older   upstream < base (check the mirror; our base may be too new)
+  not-built        recipe exists but the package is not in the repo db
+  repo-stale       repo db holds a different version than the recipe
+  not-upstream     no upstream repo ships this name
+  bad-pkgrel       our pkgrel does not end in ".1"
+"ours" is the recipe version (the repo db version when there is no recipe).
+
+Patch status: each recipes/<dir>/UPSTREAM_PRS lists "owner/repo#N" lines; the
+PR state is fetched from the public GitHub API, cached 24h in $DATA/cache.
+A merged PR is reported as needing action (drop the patch when rebasing).
+
+Exit: 0 all current, 10 something needs action, 1 error.
+"""
+import argparse
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+
+WORKSPACE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+UPSTREAM_DBS = [  # pacman.conf order
+    ("omarchy", "https://pkgs.omarchy.org/stable/x86_64/omarchy.db"),
+    ("core", "https://stable-mirror.omarchy.org/core/os/x86_64/core.db"),
+    ("extra", "https://stable-mirror.omarchy.org/extra/os/x86_64/extra.db"),
+    ("multilib", "https://stable-mirror.omarchy.org/multilib/os/x86_64/multilib.db"),
+]
+DB_TTL = 3600          # upstream dbs: refetch after 1h
+PR_TTL = 24 * 3600     # GitHub PR state: refetch after 24h
+UA = "omarchy-asus-check-upstream"
+
+
+def env_from_sh():
+    """DATA and REPO_DIR as bin/env.sh defines them."""
+    out = subprocess.run(
+        ["bash", "-c", 'source "$1" >/dev/null 2>&1; printf "%s\\n%s\\n%s\\n" "$DATA" "$REPO_DIR" "$REPO_NAME"',
+         "_", os.path.join(WORKSPACE, "bin", "env.sh")],
+        capture_output=True, text=True, check=True).stdout.splitlines()
+    return out[0], out[1], out[2]
+
+
+def open_tar(data):
+    if data[:4] == b"\x28\xb5\x2f\xfd":  # zstd magic
+        try:
+            from compression import zstd  # Python >= 3.14
+            data = zstd.decompress(data)
+        except ImportError:
+            data = subprocess.run(["zstd", "-dcq"], input=data, capture_output=True, check=True).stdout
+    return tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+
+
+def parse_db(data):
+    """{name: version} from a pacman sync db (tar of <pkg>/desc files)."""
+    pkgs = {}
+    with open_tar(data) as tf:
+        for m in tf:
+            if not m.isfile() or not m.name.endswith("/desc"):
+                continue
+            fields, key = {}, None
+            for line in tf.extractfile(m).read().decode("utf-8", "replace").splitlines():
+                if line.startswith("%") and line.endswith("%"):
+                    key = line.strip("%")
+                elif line and key and key not in fields:
+                    fields[key] = line
+            if "NAME" in fields and "VERSION" in fields:
+                pkgs[fields["NAME"]] = fields["VERSION"]
+    return pkgs
+
+
+def fetch(url, cache_file, ttl, refresh):
+    fresh = os.path.exists(cache_file) and time.time() - os.path.getmtime(cache_file) < ttl
+    if fresh and not refresh:
+        with open(cache_file, "rb") as f:
+            return f.read()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = r.read()
+    except OSError as e:
+        if os.path.exists(cache_file):  # stale beats nothing
+            print(f"warning: {url}: {e}; using cached copy", file=sys.stderr)
+            with open(cache_file, "rb") as f:
+                return f.read()
+        raise
+    tmp = cache_file + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, cache_file)
+    return data
+
+
+def recipe_packages():
+    """[(recipe_dir, pkgname, version)] from recipes/*/PKGBUILD."""
+    out = []
+    rdir = os.path.join(WORKSPACE, "recipes")
+    for d in sorted(os.listdir(rdir)):
+        path = os.path.join(rdir, d)
+        if d.startswith(".") or not os.path.isfile(os.path.join(path, "PKGBUILD")):
+            continue
+        r = subprocess.run(["makepkg", "--printsrcinfo"], cwd=path, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"warning: recipes/{d}: makepkg --printsrcinfo failed: {r.stderr.strip()}", file=sys.stderr)
+            continue
+        info, names = {}, []
+        for line in r.stdout.splitlines():
+            k, _, v = line.strip().partition(" = ")
+            if k == "pkgname":
+                names.append(v)
+            elif k in ("pkgver", "pkgrel", "epoch") and k not in info:
+                info[k] = v
+        ver = f"{info['pkgver']}-{info['pkgrel']}"
+        if info.get("epoch"):
+            ver = f"{info['epoch']}:{ver}"
+        out += [(d, n, ver) for n in names]
+    return out
+
+
+def vercmp(a, b):
+    return int(subprocess.run(["vercmp", a, b], capture_output=True, text=True, check=True).stdout)
+
+
+def base_of(ver):
+    return ver[:-2] if ver.endswith(".1") else None
+
+
+def pr_states(cache_dir, refresh):
+    """[(recipe_dir, 'owner/repo#N', state, merged_at)] for every UPSTREAM_PRS entry."""
+    res = []
+    rdir = os.path.join(WORKSPACE, "recipes")
+    for d in sorted(os.listdir(rdir)):
+        f = os.path.join(rdir, d, "UPSTREAM_PRS")
+        if d.startswith(".") or not os.path.isfile(f):
+            continue
+        for line in open(f):
+            m = re.match(r"\s*([\w.-]+/[\w.-]+)#(\d+)", line)
+            if not m:
+                continue
+            repo, num = m.group(1), m.group(2)
+            cache = os.path.join(cache_dir, f"pr-{repo.replace('/', '_')}-{num}.json")
+            try:
+                pr = json.loads(fetch(f"https://api.github.com/repos/{repo}/pulls/{num}", cache, PR_TTL, refresh))
+                state = "merged" if pr.get("merged_at") else pr.get("state", "unknown")
+                res.append((d, f"{repo}#{num}", state, pr.get("merged_at")))
+            except (OSError, ValueError) as e:
+                res.append((d, f"{repo}#{num}", "unknown", None))
+                print(f"warning: {repo}#{num}: {e}", file=sys.stderr)
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true", help="machine-readable JSON instead of text lines")
+    ap.add_argument("--refresh", action="store_true", help="ignore caches (dbs 1h, PR state 24h)")
+    ap.add_argument("--no-prs", action="store_true", help="skip the GitHub PR state check")
+    args = ap.parse_args()
+
+    data_dir, repo_dir, repo_name = env_from_sh()
+    cache_dir = os.path.join(data_dir, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    upstream = []  # [(repo, {name: ver})] in priority order
+    for name, url in UPSTREAM_DBS:
+        upstream.append((name, parse_db(fetch(url, os.path.join(cache_dir, f"{name}.db"), DB_TTL, args.refresh))))
+
+    local_db = os.path.join(repo_dir, f"{repo_name}.db")
+    ours_repo = {}
+    if os.path.exists(local_db):
+        with open(local_db, "rb") as f:
+            ours_repo = parse_db(f.read())
+
+    recipes = recipe_packages()
+    rows, seen = [], set()
+    for recipe, name, ver in recipes + [(None, n, v) for n, v in sorted(ours_repo.items())]:
+        if name in seen:
+            continue
+        seen.add(name)
+        up_repo, up_ver = next(((r, p[name]) for r, p in upstream if name in p), (None, None))
+        repo_ver = ours_repo.get(name)
+        base = base_of(ver)
+        if base is None:
+            status = "bad-pkgrel"
+        elif up_ver is None:
+            status = "not-upstream"
+        elif (c := vercmp(up_ver, base)) > 0:
+            status = "rebuild-needed"
+        elif c < 0:
+            status = "upstream-older"
+        elif repo_ver is None:
+            status = "not-built"
+        elif repo_ver != ver:
+            status = "repo-stale"
+        else:
+            status = "current"
+        rows.append({"name": name, "ours": ver, "base": base, "repo": repo_ver,
+                     "upstream": up_ver, "upstream_repo": up_repo, "recipe": recipe, "status": status})
+
+    prs = [] if args.no_prs else pr_states(cache_dir, args.refresh)
+    action = any(r["status"] != "current" for r in rows) or any(p[2] in ("merged", "closed") for p in prs)
+
+    if args.json:
+        json.dump({"packages": rows,
+                   "prs": [{"recipe": d, "pr": p, "state": s, "merged_at": m} for d, p, s, m in prs],
+                   "action_needed": action}, sys.stdout, indent=2)
+        print()
+    else:
+        for r in rows:
+            print(r["name"], r["ours"], r["upstream"] or "-", r["status"])
+        for d, p, s, m in prs:
+            print(f"pr {p} {s}{' ' + m if m else ''} ({d})")
+    return 10 if action else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)

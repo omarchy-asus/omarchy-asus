@@ -1,0 +1,6 @@
+# Unmodified upstream files (verified against upstream signatures/checksums) whose
+# contents happen to match the publish guard's denylist: hardware names in kernel
+# sound quirks/config, and an HDMI spec section number that looks like an IP.
+recipes/linux-omarchy/0450-amd-hdmi-vrr-allm.patch
+recipes/linux-omarchy/0512-sound-fixes-1.patch
+recipes/linux-omarchy/config.x86_64
