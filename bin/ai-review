@@ -116,7 +116,8 @@ def model():
     return os.environ.get("AI_REVIEW_MODEL") or (CODEX_MODEL if reviewer() == "codex" else "")
 
 
-CODEX_FLAGS = ["--ephemeral", "-c", "sandbox_mode=read-only", "-c", "approval_policy=never"]
+# projects={}: no trusted projects, so a PR's own .codex/ config (MCP servers, hooks) never loads.
+CODEX_FLAGS = ["--ephemeral", "-c", "projects={}", "-c", "sandbox_mode=read-only", "-c", "approval_policy=never"]
 
 FIND_PROMPT = """Review the pull request diff below (base {base}, head = the current checkout) as a
 strict code reviewer. Read the files you need for context. Follow the review rules in
@@ -202,8 +203,10 @@ def confirm_clean(root, text):
 
 
 def claude(root, prompt, timeout, mdl=None):
-    cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence",
-           "--allowedTools", "Read", "Grep", "Glob",
+    # --restricted: no project/user/local settings (a PR's .claude/settings.json hooks never
+    # run), no code-running tools, file tools confined to the checkout.
+    cmd = ["claude", "-p", "--restricted", "--strict-mcp-config", "--output-format", "json",
+           "--no-session-persistence", "--allowedTools", "Read", "Grep", "Glob",
            "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
     if mdl:
         cmd += ["--model", mdl]
@@ -341,8 +344,17 @@ def scrub(text, roots):
     return text
 
 
+SECRET = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:ant-|or-|proj-)?[A-Za-z0-9_-]{20,}"
+                    r"|AKIA[0-9A-Z]{16}|xox[abpr]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+                    r"|\"(?:access|refresh|id)_token\"\s*:")
+
+
 def pii_check(text):
-    """bin/issue's denylist scan over everything we post; raises (posts nothing) on a hit."""
+    """Secret patterns and bin/issue's denylist scan over everything we post; raises (posts
+    nothing) on a hit. The reviewers' read-only sandbox can still read local files, so a
+    prompt-injected PR could get a credential quoted into a finding."""
+    if SECRET.search(text):
+        raise RuntimeError("secret-like text in the review; nothing posted")
     issue = importlib.machinery.SourceFileLoader("issue", os.path.join(LIB, "issue")).load_module()
     try:
         hits = issue.pii_scan(text)
@@ -408,6 +420,8 @@ def post(repo, num, res, roots):
             review["comments"] = []
             json.dump(review, open(fh.name, "w"))
             p = run(["gh", "api", "-X", "POST", f"repos/{repo}/pulls/{num}/reviews", "--input", fh.name])
+        elif p.returncode != 0:
+            raise RuntimeError(f"posting the review failed: {p.stderr.strip()[:200]}")
         rv = json.loads(p.stdout)
     finally:
         os.unlink(fh.name)
