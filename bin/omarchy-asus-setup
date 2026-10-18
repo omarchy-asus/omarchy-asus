@@ -230,8 +230,13 @@ preflight_warnings() {
     warn "no fallback kernel (linux, linux-lts, ...) is installed. This repo replaces linux-omarchy"
     warn "with a build whose patches have not been booted on hardware yet."
     # From the databases the system already has (no -y), so this is not a partial upgrade.
-    # linux-headers too, so DKMS builds the NVIDIA module for the fallback as well.
-    if confirm "Install Arch's 'linux' kernel (and its headers) now as a boot fallback (recommended)?"; then
+    # linux-headers too, so DKMS builds the NVIDIA module for the fallback as well. Only on a
+    # system that is current with its databases (an earlier run may have synced them):
+    # otherwise the install would upgrade just the packages it pulls in.
+    if [[ -n $(pacman -Qu 2>/dev/null) ]]; then
+      warn "the system has pending upgrades, so installing a kernel now would be a partial upgrade."
+      warn "Run 'omarchy update' first, then 'sudo pacman -S linux linux-headers', before you reboot."
+    elif confirm "Install Arch's 'linux' kernel (and its headers) now as a boot fallback (recommended)?"; then
       as_root pacman -S --needed --noconfirm linux linux-headers ||
         warn "could not install linux; install a fallback kernel before you reboot"
     else
@@ -387,10 +392,12 @@ retire_local_winlock() {
   info "Your own ${WINLOCK_LOCAL/#$HOME/\~} shadows the packaged g16-winlock.service."
   if confirm "Move it aside to ${backup##*/} so the packaged unit is used?"; then
     if ((DRY_RUN)); then
-      info "[dry-run] would run: mv $WINLOCK_LOCAL $backup && systemctl --user daemon-reload"
+      info "[dry-run] would run: mv $WINLOCK_LOCAL $backup, systemctl --user daemon-reload, try-restart g16-winlock.service"
     else
       if mv "$WINLOCK_LOCAL" "$backup"; then
         systemctl --user daemon-reload 2>/dev/null || true
+        # A running local instance keeps its old ExecStart until it restarts.
+        systemctl --user try-restart g16-winlock.service 2>/dev/null || true
         ok "moved to ${backup/#$HOME/\~} (move it back to undo)"
       else
         warn "could not move it; your local unit stays in charge of Win-lock"
