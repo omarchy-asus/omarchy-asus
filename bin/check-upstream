@@ -36,6 +36,10 @@ A merged PR is reported as needing action (drop the patch when rebasing).
 --recipe-path PATH checks a recipe directory outside recipes/ (e.g. a rebased copy;
 reported under its basename) and, like --recipe, skips the repo-db-only entries.
 
+The JSON carries `inventory_errors`, the recipe dirs whose `makepkg --printsrcinfo`
+failed (they count as needing action); while it is non-empty, bin/auto-update-state
+retires a db-only package only when it is stale.
+
 Testing: OMARCHY_ASUS_UPSTREAM_OVERRIDE="name=ver,name=ver" replaces the upstream
 version of those names (simulated upstream bumps).
 
@@ -124,8 +128,8 @@ def fetch(url, cache_file, ttl, refresh):
 
 
 def recipe_packages(only=None, paths=()):
-    """[(recipe_dir, pkgname, version, depends)] from recipes/*/PKGBUILD (or just `paths`)."""
-    out = []
+    """([(recipe_dir, pkgname, version, depends)], [failed recipe_dir]) from recipes/*/PKGBUILD (or just `paths`)."""
+    out, errors = [], []
     rdir = os.path.join(WORKSPACE, "recipes")
     if paths:
         dirs = [(os.path.basename(os.path.normpath(p)), p) for p in paths]
@@ -141,6 +145,7 @@ def recipe_packages(only=None, paths=()):
         r = subprocess.run(["makepkg", "--printsrcinfo"], cwd=path, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"warning: recipes/{d}: makepkg --printsrcinfo failed: {r.stderr.strip()}", file=sys.stderr)
+            errors.append(d)
             continue
         info, names = {}, []
         base_deps, deps, section = [], {}, None
@@ -160,7 +165,7 @@ def recipe_packages(only=None, paths=()):
         if info.get("epoch"):
             ver = f"{info['epoch']}:{ver}"
         out += [(d, n, ver, deps.get(n, base_deps)) for n in names]
-    return out
+    return out, sorted(errors)
 
 
 def vercmp(a, b):
@@ -246,7 +251,7 @@ def main():
         with open(local_db, "rb") as f:
             ours_repo = parse_db(f.read())
 
-    recipes = recipe_packages(args.recipe, args.recipe_path)
+    recipes, inventory_errors = recipe_packages(args.recipe, args.recipe_path)
     rows, seen = [], set()
     extra = [] if args.recipe or args.recipe_path else [(None, n, v, []) for n, v in sorted(ours_repo.items())]
     for recipe, name, ver, deps in recipes + extra:
@@ -298,10 +303,12 @@ def main():
 
     prs = [] if args.no_prs else pr_states(cache_dir, args.refresh)
     action = any(r["status"] not in ("current", "local") for r in rows) or any(p[2] in ("merged", "closed") for p in prs)
+    action = action or bool(inventory_errors)
 
     if args.json:
         json.dump({"packages": rows,
                    "prs": [{"recipe": d, "pr": p, "state": s, "merged_at": m} for d, p, s, m in prs],
+                   "inventory_errors": inventory_errors,
                    "action_needed": action}, sys.stdout, indent=2)
         print()
     else:
@@ -310,6 +317,8 @@ def main():
             print(r["name"], r["ours"], r["upstream"] or "-", r["status"] + extra)
         for d, p, s, m in prs:
             print(f"pr {p} {s}{' ' + m if m else ''} ({d})")
+        for d in inventory_errors:
+            print(f"inventory-error recipes/{d}: makepkg --printsrcinfo failed")
     return 10 if action else 0
 
 

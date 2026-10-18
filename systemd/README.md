@@ -55,7 +55,9 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
                                otherwise: PR stays open (next run resumes it), stale package
                                unpublished meanwhile
             build      recipe on the branch not in the repo db: build, publish, sync
-            unpublish  stale and nothing to rebuild from
+            unpublish  stale and nothing to rebuild from, or in the repo db with no recipe
+                       (recipe removed; KEEP_PUBLISHED exempts); while check-upstream reports
+                       inventory_errors (a recipe that failed to parse), only if it is stale
             attention  listed in the status, no automatic change (e.g. upstream merged one of
                        our patches' PRs: flagged, never dropped automatically)
 ```
