@@ -232,6 +232,14 @@ This removes only the `[omarchy-asus]` section from `custom-repos.conf`. The fil
 line are deleted only if no other repos are left in it. `omarchy-asus-setup --uninstall` does the
 same.
 
+Read this before the final `pacman -Syuu` line. Going back downgrades `nvidia-open-dkms` to the
+stock build, and the stock build lacks the NVIDIA/open-gpu-kernel-modules#1412 fix. On a GA605KM
+the machine can then hang at power-off after it writes the hibernate image (#11).
+suspend-then-hibernate is the default lid action, so the battery can drain overnight. You have two
+options. Keep a locally patched driver: for example, add `nvidia-open-dkms` to `IgnorePkg` in
+`/etc/pacman.conf` before you run `-Syuu`. Or disable hibernation until NVIDIA/open-gpu-kernel-modules#1412 lands.
+`omarchy-asus-setup --uninstall` prints this warning before its `-Syuu` prompt.
+
 ```bash
 rm ~/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo
 f=/etc/pacman.d/custom-repos.conf
@@ -244,3 +252,16 @@ pacman -Q omarchy-asus-keyring && sudo pacman -R omarchy-asus-keyring   # if ins
 sudo pacman-key --delete 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
 sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu   # -uu downgrades the omarchy-asus builds back to stock
 ```
+
+Packages that only this repo ships stay installed, and they stop getting updates. These are
+`omarchy-asus-g16` (it sets `HibernateMode=shutdown`, #16), `omarchy-asus-g16-apply`,
+`asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` and `hyprpm`. List what is left, then remove
+what you don't want:
+
+```bash
+pacman -Qm
+sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Rns <pkgs>
+```
+
+`omarchy-asus-setup --uninstall` offers to remove these leftovers after the `-Syuu`. The default
+is no.
