@@ -153,6 +153,13 @@ pii_located() {
     : >"$up/.loc"
     # name hits: the member path itself (no leading ./ or trailing /)
     bsdtar -tf "$f" >"$up/.names" 2>/dev/null || err="could not list it"
+    # A repeated member path is overwritten on extraction, so its earlier contents would
+    # go unread here (the first pass streams them all): refuse such an asset.
+    if [[ -z $err ]]; then
+        local dups
+        if ! dups=$(sed -e 's,^\./,,' -e 's,/$,,' "$up/.names" | sort | uniq -d); then err="could not list it"
+        elif [[ -n $dups ]]; then err="it repeats a member path"; fi
+    fi
     if [[ -z $err ]]; then
         grep -iE -- "$pattern" "$up/.names" >"$up/.l" || st=$?
         ((st > 1)) && err="name scan failed"

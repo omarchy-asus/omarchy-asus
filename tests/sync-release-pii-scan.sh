@@ -106,6 +106,16 @@ chmod +x "$S/bin/strings"
 out=$(PATH=$S/bin:$PATH scan "$S/good" "$S/rd.tar"); rc=$?
 expect $rc 1 "a failed read in the located pass is blocked"
 grep -q 'content scan failed' <<<"$out"; expect $? 0 "says why"
+# A repeated member path: extraction keeps only the last (clean) copy, so the asset is
+# refused rather than judged on what survived.
+mkdir -p "$S/pkg/dup1" "$S/pkg/dup2"
+printf 'zorbleplex\n' >"$S/pkg/dup1/allowed"; printf 'zorbleplex\n' >"$S/pkg/dup1/forbidden"
+printf 'clean\n' >"$S/pkg/dup2/forbidden"
+bsdtar -cf "$S/dup.tar" -C "$S/pkg/dup1" allowed forbidden -C "$S/pkg/dup2" forbidden
+printf 'dup.tar  allowed:*\n' >>"$S/ws/build/pii-allow-packages"
+out=$(scan "$S/good" "$S/dup.tar"); rc=$?
+expect $rc 1 "a repeated member path is blocked"
+grep -q 'repeats a member path' <<<"$out"; expect $? 0 "says why"
 # A sort that fails in the coverage check (only the stdin 'sort -u' it uses) refuses too,
 # on a package whose stray .PKGINFO hit would otherwise be counted.
 mkdir -p "$S/bin2"
