@@ -10,7 +10,10 @@
 # Usage: ci/lint-scripts
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
-SOURCED=(bin/env.sh)
+# Sourced libraries without a shebang. hybrid-video-decode.sh is a byte-identical
+# copy of the fork's helper, so it is linted as is: its functions' callers live
+# elsewhere (SC2119/SC2120 don't apply).
+SOURCED=(bin/env.sh recipes/omarchy-asus-g16-apply/hybrid-video-decode.sh)
 fail=0 n=0
 err() { echo "::error file=$1::$2"; fail=1; }
 pyc=$(mktemp -d); trap 'rm -rf "$pyc"' EXIT
@@ -35,7 +38,7 @@ while IFS= read -r f; do
             ;;
         sourced)
             bash -n "$f" || err "$f" "bash -n failed"
-            shellcheck -x -S warning --shell=bash -e SC2034 "$f" || err "$f" "shellcheck findings"
+            shellcheck -x -S warning --shell=bash -e SC2034,SC2119,SC2120 "$f" || err "$f" "shellcheck findings"
             ;;
         install) bash -n "$f" || err "$f" "bash -n failed" ;;
         python)
