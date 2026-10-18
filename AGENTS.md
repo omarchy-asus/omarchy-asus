@@ -27,20 +27,26 @@ and fixes that only exist upstream. Every Claude/Codex session files here.
 
 ## Workflow: from issue to published package
 
-Every change goes through the same stages, in order, modelled on `clud grind`'s roles. One
-agent may play several roles, but never review its own work, and the gates below are not
-skipped.
+Run the work through **clud's built-in workflow**: `clud do <issue URL>` for one issue,
+`clud grind` (or `/grind <meta issue | issue list>`) for several. clud takes each goal through
+its capped roles (planner, worker, reviewer, integrator, lander; see the
+[clud README](https://github.com/zackees/clud#clud-grind--burn-down-issues-to-merged-prs)). Don't
+re-implement them by hand. If `/grind` or `/do` is missing from a session, clud's setup didn't
+run (`~/.claude/agents/grind-*.md` absent): relaunch through `clud grind` / `clud do` rather than
+working around it.
 
-| Stage | Who | Does | Gate before the next stage |
+This repo fixes how those roles are filled and adds a sixth stage, publishing:
+
+| Stage (clud role) | Who | Does | Gate before the next stage |
 |---|---|---|---|
-| 1. Plan | any agent | `bin/issue find`; read the code, the recipe's `NOTES.md`/`DELTA` and upstream; pick one fix per PR | an issue exists (or is filed) for the change |
-| 2. Work | Claude Opus 5.5 | edit on a branch in its own worktree (`git worktree add ... hub/main`); fork fixes go on the fork branch first, then into the recipe as patches | the change is committed |
-| 3. Review | Codex `gpt-6.1-sol` | `bin/ai-review local` (Code Review Rules below), 2-3 rounds | exit 0: no unrefuted P0/P1 |
-| 4. Integrate | the author, **one branch at a time** | rebase on `hub/main`; `ci/lint-scripts`; the offline tests (`tests/ci/*.sh`, `tests/test_*.py`, and the recipe's own); `bin/rebase-recipe <r> --version <v> --verify` or `makepkg --verifysource` for recipe changes; push; open a ready PR (never a draft); `bin/ai-review pr N --stamp` | the PR has the `ai-review` status |
-| 5. Land | the author | wait for **every required check**: `ai-review`, Lint `scripts` and `recipes`, Build `result` (`gh pr checks N --watch`). Resolve every review thread. Then `gh pr merge N --squash --admin`. A red check goes back to stage 4 (at most 10 rounds; then file an issue and stop) | merged on `main` |
-| 6. Publish | the build host only | packages only. `bin/build-pkg recipes/<r>` in the clean chroot (root via the build host's sudo; never a host build); `bin/publish <staged files>`; `bin/sync-release --dry-run`, then `bin/sync-release` (the PII scan must pass); check the live channel with a throwaway pacman config (`pacman -Sl omarchy-asus`, `-Sw` verifies signatures) | the release serves the new version |
+| 1. Plan (planner) | any agent | `bin/issue find`; read the code, the recipe's `NOTES.md`/`DELTA` and upstream; pick one fix per PR | an issue exists (or is filed) for the change |
+| 2. Work (worker) | Claude Opus 5.5 | edit on a branch in its own worktree (`git worktree add ... hub/main`); fork fixes go on the fork branch first, then into the recipe as patches | the change is committed |
+| 3. Review (reviewer) | Codex `gpt-6.1-sol`, never the author | `bin/ai-review local` (Code Review Rules below), 2-3 rounds | exit 0: no unrefuted P0/P1 |
+| 4. Integrate (integrator) | **one branch at a time** | rebase on `hub/main`; `ci/lint-scripts`; the offline tests (`tests/ci/*.sh`, `tests/test_*.py`, and the recipe's own); `bin/rebase-recipe <r> --version <v> --verify` or `makepkg --verifysource` for recipe changes; push; open a ready PR (never a draft); `bin/ai-review pr N --stamp` | the PR has the `ai-review` status |
+| 5. Land (lander) | the integrator's PR | wait for **every required check**: `ai-review`, Lint `scripts` and `recipes`, Build `result` (`gh pr checks N --watch`). Resolve every review thread. Then `gh pr merge N --squash --admin`. A red check goes back to stage 4 (at most 10 rounds; then file an issue and stop) | merged on `main` |
+| 6. Publish (this repo) | the build host only | packages only. `bin/build-pkg recipes/<r>` in the clean chroot (root via the build host's sudo; never a host build); `bin/publish <staged files>`; `bin/sync-release --dry-run`, then `bin/sync-release` (the PII scan must pass); check the live channel with a throwaway pacman config (`pacman -Sl omarchy-asus`, `-Sw` verifies signatures) | the release serves the new version |
 
-Rules that hold across all stages:
+On top of clud's caps, these hold across all stages:
 
 - **Merges wait for CI.** The checks are required on `main` with admins included, so
   `--admin` can't merge past a pending or red check, and it shouldn't try.
