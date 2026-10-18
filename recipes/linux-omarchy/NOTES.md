@@ -172,6 +172,39 @@ the DC limits bite on battery has not been measured yet.
 for-next, then mainline) and reaches linux-omarchy. Revisit nv_tgp when
 upstream settles the offset-or-absolute question.
 
+## G16 test kit (g16-test/)
+
+`g16-test/` holds the hardware test for this kernel. It travels with the kernel
+PR and is not part of the package (it is not in `source=()`); `DELTA` keeps it
+across rebases. Remove it, or refresh it for the next kernel, once the G16 boot
+test has passed and the HOLD is lifted.
+
+On the G16, from a clone of this repo:
+
+```sh
+gh pr checkout 8 && recipes/linux-omarchy/g16-test/deploy   # then reboot
+recipes/linux-omarchy/g16-test/test                         # after the reboot
+recipes/linux-omarchy/g16-test/test --temps                 # #42, on battery
+```
+
+- `deploy` checks the machine (GA605 DMI) and the fallback kernel (Arch `linux`
+  + `linux-headers` with nvidia DKMS built), fetches the packages (the newest
+  CI artifact for the PR head, or `--from <dir|URL|host:path>` with a chroot
+  build's stage dir; `.sig` files are verified), records a baseline of the
+  running kernel, takes a snapper snapshot, installs with `pacman -U`, checks
+  `dkms status` and reads (never writes) the Limine config: an entry boots the
+  new kernel and the fallback entry is still there. `--dry-run` changes nothing.
+- `test` runs every check from the sections above (kernel log against the
+  baseline, Win-lock key press, touchpad IRQs per report, asus-armoury ranges
+  and the fan-curve gate, `panel_power_savings`, one s2idle cycle with s0i3
+  residency, 9900 knobs at their defaults, nvidia and runtime PM; hibernate
+  with `--hibernate`), writes a report without host or user names to
+  `~/omarchy-asus-g16-test-<kernel>-<date>.md` and offers to post it on the PR.
+  `--temps [MIN]` is the #42 measurement (quiet fan table on battery,
+  sustained load, `--ab` adds the balanced table); its report goes to #42.
+- Editing the kit changes the recipe tree, so CI builds the kernel again
+  (about 2.5-3 hours). Push kit changes together with recipe changes.
+
 ## Verification
 
 `prepare()` applies every `*.patch` with `patch -Np1 --fuzz=0`, so a
@@ -188,7 +221,7 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md and our patches: 0481, 0568, 0569, 0807, 9900).
+   NOTES.md, the g16-test kit and our patches: 0481, 0568, 0569, 0807, 9900).
 2. Add them back to `source=()`: 0481 after `0480`, 0568 and 0569 after the last `056x` patch,
    0807 after the last `080x` patch (renumber if upstream took the number),
    9900 last.
