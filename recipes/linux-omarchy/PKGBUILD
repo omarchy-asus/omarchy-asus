@@ -215,6 +215,8 @@ source=(
   8207-mm-classify-huge-page-allocations-as-failable.patch{,.sig}
   8209-xe-shrinker-use-opportunistic-hint.patch{,.sig}
   8210-xe-shrinker-single-backup-decision.patch{,.sig}
+  # EXPERIMENTAL, default-off scheduler series for GA605KM battery testing; see NOTES.md
+  9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch
 )
 source_x86_64=(config.x86_64)
 validpgpkeys=(
@@ -569,7 +571,8 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         '70e35154f9385156a11280294cc254cb314fd89653daedb46546a6bd64c550e3fc7e7a8df3e653c516687f0317bcc710fce82b4d649472333c501ed85fcd6cf6'
         'SKIP'
         '576fd826f28d945782840865f3e5b7c87d7f6f91f08e473ff0d06a37caa2f89cdd9cb4a7aafef5551363aab9c60e887ee794d5b6292874c12baf88c23ea5668e'
-        'SKIP')
+        'SKIP'
+        '99ee66fddb731be724ff229a47336ae2a91631c060c4314c26280741a8ef27b7435d4e8023652b722526bc50e45abe31936f3870d2ca0535d84dfb22eca58072')
 b2sums_x86_64=('c42cea9a386e1d10e53974a18fe560f369bc9a561882fc3330a8f2aac4b406ebb66eff02cfd3b1bdcb45cb67f64a5690ce17ed9edc6c775dcbd534a7ede6cbfa')
 
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
@@ -920,7 +923,8 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             'c5279468d93e562f509a6b599a2b7ca7ee0032d3fe35314c5769fc6c9a9234ab'
             'SKIP'
             'c0111614ec44014cbf621eedf5a4ef302a855423bc1633ee692392950e971d0e'
-            'SKIP')
+            'SKIP'
+        '8e27311cf13056ac55fdcd5385ec52271a5a1420efda27a110d24fce84ef42e3')
 
 export KBUILD_BUILD_HOST=omarchy
 export KBUILD_BUILD_USER=$pkgbase

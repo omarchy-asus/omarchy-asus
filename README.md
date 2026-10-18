@@ -25,9 +25,8 @@ through. A stale pin is never kept.
 |---|---|---|
 | nvidia-open-dkms | 615.78.08-1.1 | NVIDIA/open-gpu-kernel-modules [#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412) (no hang at power-off after hibernate), [#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299) (dGPU no longer wakes from D3cold on every battery change) |
 
-Planned:
-- hyprland 0.56.2-4.1 (render offset after an HDMI replug);
-- linux-omarchy 7.2.8-9.1 with headers (hid-asus ROG N-Key Win-lock pass-through).
+| hyprland, hyprpm | 0.56.2-4.1 | render offset after an HDMI replug (fixed upstream on main, unreleased) |
+| linux-omarchy, linux-omarchy-headers | 7.2.8-9.1 | hid-asus ROG N-Key Win-lock pass-through; **plus an EXPERIMENTAL, default-off scheduler series** (Zen 5c-first soft park) for GA605KM battery testing, compile-tested only, nothing enables it; see `recipes/linux-omarchy/NOTES.md` |
 
 ## Layout
 

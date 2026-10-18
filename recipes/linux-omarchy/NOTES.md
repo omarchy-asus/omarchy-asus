@@ -71,3 +71,21 @@ outranks ours, so rebase promptly.
   build user's keyring or build with `--skippgpcheck` (checksums still apply).
 - Config has DWARF5 debug info and BTF, no LTO: expect a build tree of about
   20-30 GB and roughly 30-60 minutes on 16 cores.
+
+## EXPERIMENTAL: 9900 Zen 5c-first soft park (default off)
+
+`9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch` is a local carry
+for battery testing on the ROG Zephyrus G16 GA605KM (Ryzen AI 300, Zen 5 +
+Zen 5c). It is **experimental**, **compile-tested only**, and **not intended
+for upstream**.
+
+- Five changes combined into one patch: amd_hfi ITMT ranking knob, soft wakeup
+  CPU preference, AMD workload-class tracking/steering, optional SMT packing,
+  and NOHZ idle-load-balancer preference. Details are in the patch header.
+- Every knob defaults OFF (static keys and sysfs). This package enables
+  nothing: no kernel cmdline, udev rule or sysctl. With defaults the
+  scheduler takes the stock code paths.
+- Applied last, after all upstream patches and 0568, at fuzz 0 (regenerated
+  against 7.2.8-9 without offsets).
+- Remove it if the battery A/B testing shows no win, or move it to a
+  separate `-experimental` kernel package.

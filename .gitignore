@@ -14,3 +14,6 @@ BRIEF.md
 STATUS.md
 # unmodified upstream kernel sources the reference DKMS build compiles; fetch per its README
 recipes/hid-asus-winlock-dkms-reference/variants/
+INVENTORY.md
+# private research notes for the experimental scheduler series (the patch itself is in recipes/linux-omarchy)
+recipes/cores-kernel/

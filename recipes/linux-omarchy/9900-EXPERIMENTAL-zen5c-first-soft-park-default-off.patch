@@ -1,0 +1,729 @@
+EXPERIMENTAL, DEFAULT-OFF: "Zen 5c-first soft park" scheduler series
+(local carry for ROG Zephyrus G16 GA605KM battery testing; NOT for upstream)
+
+Five changes, combined and rebased onto linux-omarchy 7.2.8-9 (applies after
+all other patches at fuzz 0):
+  1. platform/x86/amd/hfi: optional ITMT ranking (performance / efficiency /
+     inverted) via sysfs `ranking` and `amd_hfi.ranking=` (default performance).
+  2. sched/fair: soft wakeup CPU preference behind a static key (off).
+  3. x86/amd: optional workload-class tracking/steering behind static keys (off).
+  4. sched/fair: optional SMT packing inside the preferred set (off).
+  5. sched/fair: prefer an idle preferred CPU as the NOHZ idle-load balancer
+     (only when a preference is set).
+
+Nothing is enabled by this package: no cmdline, udev rule or sysctl. With the
+knobs at their defaults the scheduler takes the stock paths. Status:
+compile-tested only, pending battery A/B measurements on the target laptop.
+
+diff -Nurp a/arch/x86/include/asm/amd/wlc.h b/arch/x86/include/asm/amd/wlc.h
+--- a/arch/x86/include/asm/amd/wlc.h	1969-12-31 19:00:00.000000000 -0500
++++ b/arch/x86/include/asm/amd/wlc.h	2026-10-17 23:54:41.353112826 -0400
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_X86_AMD_WLC_H
++#define _ASM_X86_AMD_WLC_H
++
++#include <linux/bits.h>
++#include <linux/jump_label.h>
++
++/*
++ * AMD hardware workload classification (Zen 5 hybrid parts).
++ *
++ * The core classifies the running thread into class 0 (default), 1
++ * (non-scalable) or 2 (I/O / memory bound); see
++ * Documentation/arch/x86/amd-hfi.rst. The OS reads MSR_AMD_WORKLOAD_CLASS_ID
++ * when switching a thread out and then writes MSR_AMD_WORKLOAD_HRST.
++ *
++ * UNVERIFIED: the field layout below is a placeholder. Confirm it against
++ * the AMD PPR for Family 1Ah (MSRC000_0501) or by sampling the MSR as root
++ * before enabling the tracking key on real hardware.
++ */
++#define AMD_WLC_CLASS_MASK	GENMASK_ULL(7, 0)
++#define AMD_WLC_VALID		BIT_ULL(63)
++
++/* Read the class on every switch-out (costs one RDMSR per switch). */
++DECLARE_STATIC_KEY_FALSE(amd_wlc_track);
++/* Use the class for the soft wakeup preference (classes 1 and 2 only). */
++DECLARE_STATIC_KEY_FALSE(amd_wlc_steer);
++
++#endif /* _ASM_X86_AMD_WLC_H */
+diff -Nurp a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+--- a/arch/x86/include/asm/processor.h	2026-10-17 23:54:41.266241741 -0400
++++ b/arch/x86/include/asm/processor.h	2026-10-17 23:54:41.353217211 -0400
+@@ -463,6 +463,9 @@ struct thread_struct {
+ #else
+ 	unsigned short		es;
+ 	unsigned short		ds;
++	/* AMD workload class: stable value and last raw sample (asm/amd/wlc.h) */
++	u8			amd_wlc;
++	u8			amd_wlc_last;
+ 	unsigned short		fsindex;
+ 	unsigned short		gsindex;
+ #endif
+diff -Nurp a/arch/x86/include/asm/topology.h b/arch/x86/include/asm/topology.h
+--- a/arch/x86/include/asm/topology.h	2026-10-17 23:54:41.283079524 -0400
++++ b/arch/x86/include/asm/topology.h	2026-10-17 23:54:41.353331465 -0400
+@@ -281,6 +281,9 @@ int sched_set_itmt_support(void);
+ /* Interface to notify scheduler that system revokes ITMT support */
+ void sched_clear_itmt_support(void);
+ 
++/* Interface to apply a runtime change of many CPU priorities */
++void sched_itmt_update_priorities(void);
++
+ #else /* CONFIG_SCHED_MC_PRIO */
+ 
+ #define sysctl_sched_itmt_enabled	false
+@@ -294,6 +297,9 @@ static inline int sched_set_itmt_support
+ static inline void sched_clear_itmt_support(void)
+ {
+ }
++static inline void sched_itmt_update_priorities(void)
++{
++}
+ #endif /* CONFIG_SCHED_MC_PRIO */
+ 
+ #if defined(CONFIG_SMP) && defined(CONFIG_X86_64)
+diff -Nurp a/arch/x86/kernel/itmt.c b/arch/x86/kernel/itmt.c
+--- a/arch/x86/kernel/itmt.c	2026-10-17 23:54:41.298572824 -0400
++++ b/arch/x86/kernel/itmt.c	2026-10-17 23:54:41.353411043 -0400
+@@ -161,6 +161,27 @@ void sched_clear_itmt_support(void)
+ 	}
+ }
+ 
++/**
++ * sched_itmt_update_priorities() - Apply a bulk change of ITMT priorities
++ *
++ * Call after sched_set_itmt_core_prio() was used on many CPUs at runtime
++ * (e.g. a driver switching between a performance and an efficiency
++ * ranking). The scheduler caches the preferred CPU of every asym-packing
++ * group (sched_group::asym_prefer_cpu); rebuilding the domains recomputes
++ * it from the new priorities. A no-op while ITMT is disabled, since the
++ * domains are rebuilt from the current priorities when it is re-enabled.
++ */
++void sched_itmt_update_priorities(void)
++{
++	guard(mutex)(&itmt_update_mutex);
++
++	if (!sched_itmt_capable || !sysctl_sched_itmt_enabled)
++		return;
++
++	x86_topology_update = true;
++	rebuild_sched_domains();
++}
++
+ int arch_asym_cpu_priority(int cpu)
+ {
+ 	return per_cpu(sched_core_priority, cpu);
+diff -Nurp a/arch/x86/kernel/process_64.c b/arch/x86/kernel/process_64.c
+--- a/arch/x86/kernel/process_64.c	2026-10-17 23:54:41.310441612 -0400
++++ b/arch/x86/kernel/process_64.c	2026-10-17 23:54:41.353508756 -0400
+@@ -38,10 +38,12 @@
+ #include <linux/prctl.h>
+ #include <linux/uaccess.h>
+ #include <linux/io.h>
++#include <linux/jump_label.h>
+ #include <linux/ftrace.h>
+ #include <linux/syscalls.h>
+ #include <linux/iommu.h>
+ 
++#include <asm/amd/wlc.h>
+ #include <asm/processor.h>
+ #include <asm/pkru.h>
+ #include <asm/fpu/sched.h>
+@@ -606,6 +608,38 @@ void compat_start_thread(struct pt_regs
+  * Function graph tracer not supported too.
+  */
+ __no_kmsan_checks
++DEFINE_STATIC_KEY_FALSE(amd_wlc_track);
++DEFINE_STATIC_KEY_FALSE(amd_wlc_steer);
++
++/*
++ * Debounce: a new class becomes the task's class only after two
++ * consecutive switch-outs report it.
++ */
++static __always_inline void amd_wlc_consume(struct task_struct *prev)
++{
++	u64 val;
++	u8 cls;
++
++	rdmsrq(MSR_AMD_WORKLOAD_CLASS_ID, val);
++	if (!(val & AMD_WLC_VALID))
++		return;
++
++	cls = val & AMD_WLC_CLASS_MASK;
++	if (cls == prev->thread.amd_wlc_last)
++		WRITE_ONCE(prev->thread.amd_wlc, cls);
++	prev->thread.amd_wlc_last = cls;
++}
++
++/* Overrides the __weak default in kernel/sched/fair.c. */
++bool arch_task_wake_pref(struct task_struct *p)
++{
++	if (!static_branch_unlikely(&amd_wlc_steer))
++		return true;
++
++	/* Only non-scalable (1) and memory/I/O-bound (2) tasks are steered. */
++	return READ_ONCE(p->thread.amd_wlc) != 0;
++}
++
+ __visible __notrace_funcgraph struct task_struct *
+ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+ {
+@@ -706,9 +740,12 @@ __switch_to(struct task_struct *prev_p,
+ 	/* Load the Intel cache allocation PQR MSR. */
+ 	resctrl_arch_sched_in(next_p);
+ 
+-	/* Reset hw history on AMD CPUs */
+-	if (cpu_feature_enabled(X86_FEATURE_AMD_WORKLOAD_CLASS))
++	/* Consume prev's workload class, then reset hw history on AMD CPUs */
++	if (cpu_feature_enabled(X86_FEATURE_AMD_WORKLOAD_CLASS)) {
++		if (static_branch_unlikely(&amd_wlc_track))
++			amd_wlc_consume(prev_p);
+ 		wrmsrq(MSR_AMD_WORKLOAD_HRST, 0x1);
++	}
+ 
+ 	return prev_p;
+ }
+diff -Nurp a/drivers/platform/x86/amd/hfi/hfi.c b/drivers/platform/x86/amd/hfi/hfi.c
+--- a/drivers/platform/x86/amd/hfi/hfi.c	2026-10-17 23:54:41.322383717 -0400
++++ b/drivers/platform/x86/amd/hfi/hfi.c	2026-10-17 23:54:41.353651332 -0400
+@@ -23,9 +23,12 @@
+ #include <linux/percpu-defs.h>
+ #include <linux/platform_device.h>
+ #include <linux/smp.h>
++#include <linux/string.h>
++#include <linux/sysfs.h>
+ #include <linux/topology.h>
+ #include <linux/workqueue.h>
+ 
++#include <asm/amd/wlc.h>
+ #include <asm/cpu_device_id.h>
+ 
+ #include <acpi/pcc.h>
+@@ -115,6 +118,67 @@ static DEFINE_PER_CPU(struct amd_hfi_cpu
+ 
+ static DEFINE_MUTEX(hfi_cpuinfo_lock);
+ 
++/*
++ * Which ranking-table column feeds the ITMT (asym packing) priorities.
++ *
++ * "performance" (default, upstream behaviour): class-0 perf score, so the
++ *	scheduler packs work onto the classic (Zen 5) cores first.
++ * "efficiency": class-0 eff score, so work is packed onto the most
++ *	efficient (dense, Zen 5c) cores first and spills to the classic cores
++ *	only when every dense core is busy.
++ * "inverted": 256 - class-0 perf, for tables whose eff column is flat.
++ *
++ * Meant to be switched by a power policy daemon (e.g. on battery) through
++ * /sys/bus/platform/devices/AMDI0104:00/ranking; amd_hfi.ranking= sets the
++ * initial value.
++ */
++enum amd_hfi_ranking {
++	AMD_HFI_RANK_PERF,
++	AMD_HFI_RANK_EFF,
++	AMD_HFI_RANK_INV,
++};
++
++static const char * const amd_hfi_ranking_names[] = {
++	[AMD_HFI_RANK_PERF]	= "performance",
++	[AMD_HFI_RANK_EFF]	= "efficiency",
++	[AMD_HFI_RANK_INV]	= "inverted",
++};
++
++static enum amd_hfi_ranking amd_hfi_ranking = AMD_HFI_RANK_PERF;
++static DEFINE_MUTEX(amd_hfi_ranking_lock);
++
++/*
++ * wake_preferred: also steer wakeups to the upper half of the current
++ * ranking (sched_set_wake_preferred_cpus()), not only load balancing.
++ *   off   - stock wakeup placement
++ *   all   - every task prefers those CPUs while one of them is idle
++ *   class - only tasks the hardware classifies as class 1 (non-scalable)
++ *           or 2 (I/O bound) do; class-0 tasks keep stock placement
++ */
++enum amd_hfi_wake_pref {
++	AMD_HFI_WAKE_OFF,
++	AMD_HFI_WAKE_ALL,
++	AMD_HFI_WAKE_CLASS,
++};
++
++static const char * const amd_hfi_wake_pref_names[] = {
++	[AMD_HFI_WAKE_OFF]	= "off",
++	[AMD_HFI_WAKE_ALL]	= "all",
++	[AMD_HFI_WAKE_CLASS]	= "class",
++};
++
++static enum amd_hfi_wake_pref amd_hfi_wake_pref;
++/* wake_pack: within the preferred CPUs, fill SMT siblings of busy cores first */
++static bool amd_hfi_wake_pack;
++/* wlc_track: read the per-task class even when not steering (measurement) */
++static bool amd_hfi_wlc_track;
++
++static char amd_hfi_ranking_param[16];
++module_param_string(ranking, amd_hfi_ranking_param,
++		    sizeof(amd_hfi_ranking_param), 0444);
++MODULE_PARM_DESC(ranking,
++		 "Initial ITMT ranking: performance (default), efficiency or inverted");
++
+ static void amd_hfi_sched_itmt_work(struct work_struct *work)
+ {
+ 	sched_set_itmt_support();
+@@ -247,13 +311,31 @@ static void amd_hfi_remove(struct platfo
+ 	debugfs_remove_recursive(dev->dbgfs_dir);
+ }
+ 
++static int amd_hfi_core_prio(struct amd_hfi_cpuinfo *hfi_cpuinfo)
++{
++	struct amd_hfi_classes *c0 = &hfi_cpuinfo->amd_hfi_classes[0];
++
++	switch (READ_ONCE(amd_hfi_ranking)) {
++	case AMD_HFI_RANK_EFF:
++		return c0->eff;
++	case AMD_HFI_RANK_INV:
++		return 256 - c0->perf;
++	case AMD_HFI_RANK_PERF:
++	default:
++		return c0->perf;
++	}
++}
++
+ static int amd_set_hfi_ipcc_score(struct amd_hfi_cpuinfo *hfi_cpuinfo, int cpu)
+ {
++	if (!hfi_cpuinfo->nr_class || !hfi_cpuinfo->amd_hfi_classes)
++		return -EINVAL;
++
+ 	for (int i = 0; i < hfi_cpuinfo->nr_class; i++)
+ 		WRITE_ONCE(hfi_cpuinfo->ipcc_scores[i],
+ 			   hfi_cpuinfo->amd_hfi_classes[i].perf);
+ 
+-	sched_set_itmt_core_prio(hfi_cpuinfo->ipcc_scores[0], cpu);
++	sched_set_itmt_core_prio(amd_hfi_core_prio(hfi_cpuinfo), cpu);
+ 
+ 	return 0;
+ }
+@@ -421,6 +503,177 @@ static int class_capabilities_show(struc
+ }
+ DEFINE_SHOW_ATTRIBUTE(class_capabilities);
+ 
++/* Caller holds amd_hfi_ranking_lock. */
++static void amd_hfi_update_wake_pref(void)
++{
++	int cpu, lo = INT_MAX, hi = INT_MIN;
++	cpumask_var_t mask;
++
++	if (amd_hfi_wake_pref == AMD_HFI_WAKE_CLASS || amd_hfi_wlc_track)
++		static_branch_enable(&amd_wlc_track);
++	else
++		static_branch_disable(&amd_wlc_track);
++
++	if (amd_hfi_wake_pref == AMD_HFI_WAKE_CLASS)
++		static_branch_enable(&amd_wlc_steer);
++	else
++		static_branch_disable(&amd_wlc_steer);
++
++	if (amd_hfi_wake_pref == AMD_HFI_WAKE_OFF) {
++		sched_set_wake_preferred_cpus(NULL, 0);
++		return;
++	}
++
++	if (!zalloc_cpumask_var(&mask, GFP_KERNEL))
++		return;
++
++	for_each_possible_cpu(cpu) {
++		int prio = arch_asym_cpu_priority(cpu);
++
++		lo = min(lo, prio);
++		hi = max(hi, prio);
++	}
++
++	/* Upper half of the priority range: one core type on a 2-type part. */
++	if (hi > lo) {
++		for_each_possible_cpu(cpu)
++			if (2 * arch_asym_cpu_priority(cpu) >= lo + hi)
++				cpumask_set_cpu(cpu, mask);
++	}
++
++	sched_set_wake_preferred_cpus(mask, amd_hfi_wake_pack ?
++				      SCHED_WAKE_PREF_PACK : 0);
++	free_cpumask_var(mask);
++}
++
++static ssize_t ranking_show(struct device *dev, struct device_attribute *attr,
++			    char *buf)
++{
++	enum amd_hfi_ranking cur = READ_ONCE(amd_hfi_ranking);
++	int len = 0;
++
++	for (int i = 0; i < ARRAY_SIZE(amd_hfi_ranking_names); i++)
++		len += sysfs_emit_at(buf, len, i == cur ? "[%s] " : "%s ",
++				     amd_hfi_ranking_names[i]);
++	buf[len - 1] = '\n';
++
++	return len;
++}
++
++static ssize_t ranking_store(struct device *dev, struct device_attribute *attr,
++			     const char *buf, size_t count)
++{
++	int idx, ret;
++
++	idx = sysfs_match_string(amd_hfi_ranking_names, buf);
++	if (idx < 0)
++		return idx;
++
++	guard(mutex)(&amd_hfi_ranking_lock);
++
++	if (idx == READ_ONCE(amd_hfi_ranking))
++		return count;
++
++	WRITE_ONCE(amd_hfi_ranking, idx);
++
++	ret = update_hfi_ipcc_scores();
++	if (ret)
++		return ret;
++
++	/* Recompute every asym-packing group's preferred CPU. */
++	sched_itmt_update_priorities();
++	amd_hfi_update_wake_pref();
++
++	return count;
++}
++static DEVICE_ATTR_RW(ranking);
++
++static ssize_t wake_preferred_show(struct device *dev,
++				   struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "%s\n",
++			  amd_hfi_wake_pref_names[READ_ONCE(amd_hfi_wake_pref)]);
++}
++
++static ssize_t wake_preferred_store(struct device *dev,
++				    struct device_attribute *attr,
++				    const char *buf, size_t count)
++{
++	int idx = sysfs_match_string(amd_hfi_wake_pref_names, buf);
++
++	if (idx < 0)
++		return idx;
++
++	guard(mutex)(&amd_hfi_ranking_lock);
++
++	WRITE_ONCE(amd_hfi_wake_pref, idx);
++	amd_hfi_update_wake_pref();
++
++	return count;
++}
++static DEVICE_ATTR_RW(wake_preferred);
++
++static ssize_t wlc_track_show(struct device *dev,
++			      struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "%d\n", READ_ONCE(amd_hfi_wlc_track));
++}
++
++static ssize_t wlc_track_store(struct device *dev,
++			       struct device_attribute *attr,
++			       const char *buf, size_t count)
++{
++	bool val;
++	int ret;
++
++	ret = kstrtobool(buf, &val);
++	if (ret)
++		return ret;
++
++	guard(mutex)(&amd_hfi_ranking_lock);
++
++	WRITE_ONCE(amd_hfi_wlc_track, val);
++	amd_hfi_update_wake_pref();
++
++	return count;
++}
++static DEVICE_ATTR_RW(wlc_track);
++
++static ssize_t wake_pack_show(struct device *dev,
++			      struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "%d\n", READ_ONCE(amd_hfi_wake_pack));
++}
++
++static ssize_t wake_pack_store(struct device *dev,
++			       struct device_attribute *attr,
++			       const char *buf, size_t count)
++{
++	bool val;
++	int ret;
++
++	ret = kstrtobool(buf, &val);
++	if (ret)
++		return ret;
++
++	guard(mutex)(&amd_hfi_ranking_lock);
++
++	WRITE_ONCE(amd_hfi_wake_pack, val);
++	amd_hfi_update_wake_pref();
++
++	return count;
++}
++static DEVICE_ATTR_RW(wake_pack);
++
++static struct attribute *amd_hfi_attrs[] = {
++	&dev_attr_ranking.attr,
++	&dev_attr_wake_preferred.attr,
++	&dev_attr_wlc_track.attr,
++	&dev_attr_wake_pack.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(amd_hfi);
++
+ static int amd_hfi_pm_resume(struct device *dev)
+ {
+ 	int ret, cpu;
+@@ -482,6 +735,17 @@ static int amd_hfi_probe(struct platform
+ 	if (ret)
+ 		return ret;
+ 
++	if (amd_hfi_ranking_param[0]) {
++		int idx = sysfs_match_string(amd_hfi_ranking_names,
++					     amd_hfi_ranking_param);
++
++		if (idx >= 0)
++			amd_hfi_ranking = idx;
++		else
++			dev_warn(&pdev->dev, "unknown ranking '%s', using performance\n",
++				 amd_hfi_ranking_param);
++	}
++
+ 	ret = update_hfi_ipcc_scores();
+ 	if (ret)
+ 		return ret;
+@@ -509,6 +773,7 @@ static struct platform_driver amd_hfi_dr
+ 		.name = AMD_HFI_DRIVER,
+ 		.pm = &amd_hfi_pm_ops,
+ 		.acpi_match_table = ACPI_PTR(amd_hfi_platform_match),
++		.dev_groups = amd_hfi_groups,
+ 	},
+ 	.probe = amd_hfi_probe,
+ 	.remove = amd_hfi_remove,
+diff -Nurp a/include/linux/sched/topology.h b/include/linux/sched/topology.h
+--- a/include/linux/sched/topology.h	2026-10-17 23:54:41.334384330 -0400
++++ b/include/linux/sched/topology.h	2026-10-17 23:54:41.353807434 -0400
+@@ -222,6 +222,12 @@ struct sched_domain_topology_level {
+ 
+ extern void __init set_sched_topology(struct sched_domain_topology_level *tl);
+ extern void sched_update_asym_prefer_cpu(int cpu, int old_prio, int new_prio);
++/* Soft wakeup preference flags */
++#define SCHED_WAKE_PREF_PACK	0x1	/* idle SMT sibling of a busy core first */
++extern void sched_set_wake_preferred_cpus(const struct cpumask *mask,
++					  unsigned int flags);
++/* Should @p follow the soft wakeup preference? (__weak: always true) */
++extern bool arch_task_wake_pref(struct task_struct *p);
+ 
+ #define SDTL_INIT(maskfn, flagsfn, dname) ((struct sched_domain_topology_level) \
+ 	    { .mask = maskfn, .sd_flags = flagsfn, .name = #dname })
+diff -Nurp a/kernel/sched/fair.c b/kernel/sched/fair.c
+--- a/kernel/sched/fair.c	2026-10-17 23:54:41.346491634 -0400
++++ b/kernel/sched/fair.c	2026-10-17 23:54:41.355271846 -0400
+@@ -8926,6 +8926,108 @@ static inline bool asym_fits_cpu(unsigne
+ }
+ 
+ /*
++ * Soft wakeup preference ("soft park").
++ *
++ * A platform power policy may name a set of CPUs that wakeups should use
++ * while any of them is idle, e.g. the efficient cores of a hybrid part on
++ * battery (see the amd_hfi "wake_preferred" attribute). Wakeup placement
++ * otherwise ignores ITMT/asym-packing priorities and wakes whichever idle
++ * CPU the LLC scan meets first; asym packing then corrects it only for
++ * tasks that run long enough to be seen by load balancing.
++ *
++ * The preference is soft: when no preferred CPU is idle, the stock
++ * selection runs unchanged, so a busy preferred set spills to the other
++ * CPUs immediately (no queueing behind a busy CPU).
++ */
++static DEFINE_STATIC_KEY_FALSE(sched_wake_pref);
++static struct cpumask sched_wake_pref_cpus;
++static unsigned int sched_wake_pref_flags;
++static DEFINE_MUTEX(sched_wake_pref_lock);
++
++/**
++ * sched_set_wake_preferred_cpus - set or clear the soft wakeup preference
++ * @mask: CPUs to prefer for wakeups, or NULL / empty / all to clear it.
++ * @flags: SCHED_WAKE_PREF_PACK: within @mask, wake an idle SMT sibling of
++ *	an already busy core before a fully idle core. This keeps fewer cores
++ *	out of deep idle (fewer core C6 exits) at the cost of SMT sharing.
++ *
++ * May sleep.
++ */
++void sched_set_wake_preferred_cpus(const struct cpumask *mask,
++				   unsigned int flags)
++{
++	guard(mutex)(&sched_wake_pref_lock);
++
++	if (static_branch_unlikely(&sched_wake_pref)) {
++		static_branch_disable(&sched_wake_pref);
++		/* Wakeups run with IRQs off: wait for readers of the old mask. */
++		synchronize_rcu();
++	}
++
++	if (!mask || cpumask_empty(mask) ||
++	    cpumask_subset(cpu_possible_mask, mask))
++		return;
++
++	cpumask_copy(&sched_wake_pref_cpus, mask);
++	WRITE_ONCE(sched_wake_pref_flags, flags);
++	static_branch_enable(&sched_wake_pref);
++}
++
++bool __weak arch_task_wake_pref(struct task_struct *p)
++{
++	return true;
++}
++
++static inline const struct cpumask *sis_pref_mask(struct task_struct *p)
++{
++	if (!static_branch_unlikely(&sched_wake_pref))
++		return NULL;
++
++	if (!arch_task_wake_pref(p))
++		return NULL;
++
++	if (!cpumask_intersects(&sched_wake_pref_cpus, p->cpus_ptr))
++		return NULL;
++
++	return &sched_wake_pref_cpus;
++}
++
++static inline bool sis_pref_ok(const struct cpumask *pref, int cpu)
++{
++	return !pref || cpumask_test_cpu(cpu, pref);
++}
++
++/*
++ * Idle CPU in @pref within the LLC of @target: a fully idle core first,
++ * else an idle SMT sibling (reversed with SCHED_WAKE_PREF_PACK). The
++ * preferred set is small, so scan all of it.
++ */
++static int select_idle_cpu_pref(struct task_struct *p, struct sched_domain *sd,
++				int target, const struct cpumask *pref)
++{
++	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
++	bool pack = READ_ONCE(sched_wake_pref_flags) & SCHED_WAKE_PREF_PACK;
++	int cpu, idle_cpu = -1;
++
++	if (!cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr) ||
++	    !cpumask_and(cpus, cpus, pref))
++		return -1;
++
++	for_each_cpu_wrap(cpu, cpus, target + 1) {
++		if (!choose_idle_cpu(cpu, p))
++			continue;
++
++		if (!sched_smt_active() || is_core_idle(cpu) != pack)
++			return cpu;
++
++		if (idle_cpu < 0)
++			idle_cpu = cpu;
++	}
++
++	return idle_cpu;
++}
++
++/*
+  * Try and locate an idle core/thread in the LLC cache domain.
+  */
+ static int select_idle_sibling(struct task_struct *p, int prev, int target)
+@@ -8934,6 +9036,7 @@ static int select_idle_sibling(struct ta
+ 	struct sched_domain *sd;
+ 	unsigned long task_util, util_min, util_max;
+ 	int i, recent_used_cpu, prev_aff = -1;
++	const struct cpumask *pref;
+ 
+ 	/*
+ 	 * On asymmetric system, update task utilization because we will check
+@@ -8951,7 +9054,9 @@ static int select_idle_sibling(struct ta
+ 	 */
+ 	lockdep_assert_irqs_disabled();
+ 
+-	if (choose_idle_cpu(target, p) &&
++	pref = sis_pref_mask(p);
++
++	if (choose_idle_cpu(target, p) && sis_pref_ok(pref, target) &&
+ 	    asym_fits_cpu(task_util, util_min, util_max, target))
+ 		return target;
+ 
+@@ -8959,7 +9064,7 @@ static int select_idle_sibling(struct ta
+ 	 * If the previous CPU is cache affine and idle, don't be stupid:
+ 	 */
+ 	if (prev != target && cpus_share_cache(prev, target) &&
+-	    choose_idle_cpu(prev, p) &&
++	    choose_idle_cpu(prev, p) && sis_pref_ok(pref, prev) &&
+ 	    asym_fits_cpu(task_util, util_min, util_max, prev)) {
+ 
+ 		if (!static_branch_unlikely(&sched_cluster_active) ||
+@@ -8992,6 +9097,7 @@ static int select_idle_sibling(struct ta
+ 	    recent_used_cpu != target &&
+ 	    cpus_share_cache(recent_used_cpu, target) &&
+ 	    choose_idle_cpu(recent_used_cpu, p) &&
++	    sis_pref_ok(pref, recent_used_cpu) &&
+ 	    cpumask_test_cpu(recent_used_cpu, p->cpus_ptr) &&
+ 	    asym_fits_cpu(task_util, util_min, util_max, recent_used_cpu)) {
+ 
+@@ -9027,6 +9133,22 @@ static int select_idle_sibling(struct ta
+ 	if (!sd)
+ 		return target;
+ 
++	if (pref) {
++		i = select_idle_cpu_pref(p, sd, target, pref);
++		if ((unsigned int)i < nr_cpumask_bits)
++			return i;
++
++		/* No preferred CPU is idle: the stock choices, unfiltered. */
++		if (choose_idle_cpu(target, p) &&
++		    asym_fits_cpu(task_util, util_min, util_max, target))
++			return target;
++
++		if (prev != target && cpus_share_cache(prev, target) &&
++		    choose_idle_cpu(prev, p) &&
++		    asym_fits_cpu(task_util, util_min, util_max, prev))
++			return prev;
++	}
++
+ 	if (sched_smt_active()) {
+ 		has_idle_core = test_idle_cores(target);
+ 
+@@ -10963,6 +11085,18 @@ int can_migrate_task(struct task_struct
+ 		return 0;
+ 	}
+ 
++	/*
++	 * Soft park: keep a task that follows the wakeup preference on a
++	 * preferred CPU while it is alone there; let it spill only once
++	 * tasks queue up behind it.
++	 */
++	if (static_branch_unlikely(&sched_wake_pref) &&
++	    env->src_rq->nr_running <= 1 &&
++	    cpumask_test_cpu(env->src_cpu, &sched_wake_pref_cpus) &&
++	    !cpumask_test_cpu(env->dst_cpu, &sched_wake_pref_cpus) &&
++	    arch_task_wake_pref(p))
++		return 0;
++
+ 	/* Record that we found at least one task that could run on dst_cpu */
+ 	env->flags &= ~LBF_ALL_PINNED;
+ 
+@@ -14088,6 +14222,15 @@ static inline int find_new_ilb(void)
+ 	cpumask_and(ilb_cpus, nohz.idle_cpus_mask,
+ 		    housekeeping_cpumask(HK_TYPE_KERNEL_NOISE));
+ 
++	/*
++	 * Soft park: run the idle balancer on a preferred CPU when one is
++	 * idle, instead of CPU 0 (a classic core on AMD hybrid parts), which
++	 * an ILB kick would wake from deep idle.
++	 */
++	if (static_branch_unlikely(&sched_wake_pref) &&
++	    cpumask_intersects(ilb_cpus, &sched_wake_pref_cpus))
++		cpumask_and(ilb_cpus, ilb_cpus, &sched_wake_pref_cpus);
++
+ 	for_each_cpu(ilb_cpu, ilb_cpus) {
+ 		if (!idle_cpu(ilb_cpu)) {
+ 			/*
