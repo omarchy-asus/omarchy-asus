@@ -6,10 +6,11 @@
 #   3. DISTCC_KEY_DIR= (empty): no mount even though the default key exists
 #   4. DISTCC_KEY_DIR=<dir>: that dir is bound; extra args still come after it
 #   5. a key dir without id_ed25519: no mount
+#   6. a relative DISTCC_KEY_DIR: bound by its absolute path (build-pkg cds first)
 # Usage: tests/ci/build-pkg-distcc.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
-S=$(mktemp -d)
+S=$(realpath "$(mktemp -d)")
 [[ ${1:-} == keep ]] && echo "state: $S" || trap 'rm -rf "$S"' EXIT
 mkdir -p "$S/bin" "$S/recipes/demo" "$S/data"
 printf 'pkgname=demo\n' >"$S/recipes/demo/PKGBUILD"
@@ -52,6 +53,9 @@ expect "$(args)" "-c -u -r $C -D $S/other:/distcc -- --nocheck" "override dir bo
 echo "== 5. dir without a key"
 mkdir -p "$S/empty"
 DISTCC_KEY_DIR=$S/empty build; expect "$(args)" "-c -u -r $C" "stock arguments"
+
+echo "== 6. relative DISTCC_KEY_DIR"
+(cd "$S" && DISTCC_KEY_DIR=other build); expect "$(args)" "-c -u -r $C -D $S/other:/distcc" "bound by absolute path"
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"

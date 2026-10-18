@@ -64,6 +64,7 @@ makepkg_args=()
 distcc_dir=${DISTCC_KEY_DIR-$DATA/distcc}
 distcc_bind=()
 if [[ -n $distcc_dir && -f $distcc_dir/id_ed25519 ]]; then
+    distcc_dir=$(realpath "$distcc_dir")  # absolute: makechrootpkg runs after cd "$work"
     distcc_bind=(-D "$distcc_dir:/distcc")
     echo "==> distcc: key dir mounted read-only at /distcc"
 fi
