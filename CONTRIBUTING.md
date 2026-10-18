@@ -67,7 +67,7 @@ Every change is reviewed by someone other than its author.
 - **Pull requests from external contributors** are reviewed by the maintainers, against these
   rules, [AGENTS.md](AGENTS.md) and [PRINCIPLES.md](PRINCIPLES.md).
 
-This review comes on top of the required CodeRabbit check on `main`.
+On a pull request this review is the required `ai-review` check (`bin/ai-review`).
 
 ## Agents
 
