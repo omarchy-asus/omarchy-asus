@@ -1,0 +1,27 @@
+# Warn, never fail, when this is not the machine the files are for. The check
+# is the same one the omarchy-asus fork gates these fixes on: an ASUS ROG
+# laptop (omarchy-hw-asus-rog) whose DMI product name or family contains
+# GA605KM (omarchy-hw-match "GA605KM"). Nothing is enabled, started, written
+# or triggered here.
+
+_omarchy_asus_g16_is_ga605km() {
+  local dmi=/sys/class/dmi/id
+  [ "$(cat "$dmi/sys_vendor" 2>/dev/null)" = "ASUSTeK COMPUTER INC." ] &&
+    grep -q "ROG" "$dmi/product_family" 2>/dev/null &&
+    { grep -qi -- "GA605KM" "$dmi/product_name" 2>/dev/null ||
+      grep -qi -- "GA605KM" "$dmi/product_family" 2>/dev/null; }
+}
+
+_omarchy_asus_g16_check() {
+  _omarchy_asus_g16_is_ga605km && return 0
+  printf '==> WARNING: omarchy-asus-g16 is for the ASUS ROG Zephyrus G16 GA605KM only.\n' >&2
+  printf '==> WARNING: This machine does not report GA605KM in its DMI data; remove the package unless you know you need it.\n' >&2
+}
+
+post_install() {
+  _omarchy_asus_g16_check
+}
+
+post_upgrade() {
+  _omarchy_asus_g16_check
+}
