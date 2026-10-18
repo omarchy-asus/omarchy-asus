@@ -31,8 +31,10 @@ bash omarchy-asus-setup
 The script:
 
 1. Stops unless the DMI product or board name contains `GA605`. Use `--force` to skip this check.
-2. Prints the EXPERIMENTAL warning and asks you to confirm. It also warns if no fallback kernel is
-   installed, or if `IgnorePkg` holds back a package this repo ships.
+2. Prints the EXPERIMENTAL warning and asks you to confirm. If no fallback kernel is installed, it
+   offers to install Arch's `linux` and `linux-headers` first (from the databases you already have,
+   so no partial upgrade), and DKMS builds the NVIDIA module for both kernels. It also warns if
+   `IgnorePkg` holds back a package this repo ships.
 3. Downloads `keys/omarchy-asus.asc` over HTTPS. If the key isn't exactly the one with fingerprint
    `0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88` (hardcoded in the script), it stops. Otherwise it runs
    `pacman-key --add` and `pacman-key --lsign-key`.
@@ -43,12 +45,19 @@ The script:
 6. Installs `omarchy-asus-keyring`, which ships the key in `/usr/share/pacman/keyrings/` so that
    `pacman-key --populate omarchy-asus` works, like `archlinux-keyring` and `omarchy-keyring`.
    This step runs `pacman -Sy`.
-7. Lists what the system upgrade would change, marking the packages from `[omarchy-asus]`, and
+7. If you run your own power manager (a `rog-power.service` in `~/.config/systemd/user`,
+   `/etc/systemd/user` or `/etc/systemd/system`), offers to set Omarchy's
+   `powerprofiles-autoswitch-off` toggle before the upgrade. The patched Omarchy then leaves the
+   power profile to yours, instead of both switching it on every charger change. Delete
+   `~/.local/state/omarchy/toggles/powerprofiles-autoswitch-off` to hand over later.
+8. Lists what the system upgrade would change, marking the packages from `[omarchy-asus]`, and
    upgrades only if you say yes. The upgrade runs through `omarchy update`, which asks once more,
    takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
    `pacman -Syu`, so the script doesn't run one.
-8. Optional, and only if the system is fully upgraded: offers to install `omarchy-asus-g16`,
-   `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`, shows `omarchy-asus-g16-apply --check`,
+9. Optional, and only if the system is fully upgraded: offers to install `omarchy-asus-g16`,
+   `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`. If you have your own
+   `~/.config/systemd/user/g16-winlock.service`, which would shadow the packaged unit, it offers to
+   move it to `g16-winlock.service.before-omarchy-asus`. It then shows `omarchy-asus-g16-apply --check`,
    and applies the missing default fixes if you say yes. Fixes you already have in your own form
    are left alone. See [`recipes/omarchy-asus-g16-apply/README.md`](recipes/omarchy-asus-g16-apply/README.md).
 

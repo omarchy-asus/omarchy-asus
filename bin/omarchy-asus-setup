@@ -227,8 +227,21 @@ preflight_warnings() {
   if [[ -n $fallback ]]; then
     ok "fallback kernel installed:$fallback"
   else
-    warn "no fallback kernel (linux, linux-lts, ...) is installed. This repo replaces linux-omarchy;"
-    warn "install one first (sudo pacman -S linux) so you can boot if the patched kernel fails."
+    warn "no fallback kernel (linux, linux-lts, ...) is installed. This repo replaces linux-omarchy"
+    warn "with a build whose patches have not been booted on hardware yet."
+    # From the databases the system already has (no -y), so this is not a partial upgrade.
+    # linux-headers too, so DKMS builds the NVIDIA module for the fallback as well. Only on a
+    # system that is current with its databases (an earlier run may have synced them):
+    # otherwise the install would upgrade just the packages it pulls in.
+    if [[ -n $(pacman -Qu 2>/dev/null) ]]; then
+      warn "the system has pending upgrades, so installing a kernel now would be a partial upgrade."
+      warn "Run 'omarchy update' first, then 'sudo pacman -S linux linux-headers', before you reboot."
+    elif confirm "Install Arch's 'linux' kernel (and its headers) now as a boot fallback (recommended)?"; then
+      as_root pacman -S --needed --noconfirm linux linux-headers ||
+        warn "could not install linux; install a fallback kernel before you reboot"
+    else
+      warn "no fallback kernel: install one (sudo pacman -S linux) before you reboot into the new kernel."
+    fi
   fi
   if grep -nE '^[[:space:]]*IgnorePkg' "$CONF" | grep -qE 'nvidia|hyprland|hyprpm|aquamarine|linux-omarchy'; then
     warn "$CONF has IgnorePkg lines for packages this repo ships; remove them, or the repo builds won't install:"
@@ -334,6 +347,67 @@ run_upgrade() {
   fi
 }
 
+# A power manager of your own (rog-power) and the packaged profile switching would both act
+# on every plug and unplug. The patched omarchy-powerprofiles-set stands back when Omarchy's
+# powerprofiles-autoswitch-off toggle is set; set it before the upgrade runs the migrations.
+POWER_TOGGLE=$HOME/.local/state/omarchy/toggles/powerprofiles-autoswitch-off
+own_power_manager() {
+  local unit
+  for unit in "$HOME/.config/systemd/user/rog-power.service" /etc/systemd/user/rog-power.service \
+    /etc/systemd/system/rog-power.service; do
+    [[ -f $unit ]] && { echo "$unit"; return 0; }
+  done
+  return 1
+}
+
+prepare_power_owner() {
+  local unit
+  unit=$(own_power_manager) || return 0
+  step "Your own power manager"
+  if [[ -e $POWER_TOGGLE ]]; then
+    ok "${unit/#$HOME/\~} found and Omarchy's powerprofiles-autoswitch-off toggle is already set"
+    return 0
+  fi
+  info "${unit/#$HOME/\~} manages your power profile. The patched Omarchy also switches it on"
+  info "every charger change; with both, they would fight. Setting Omarchy's"
+  info "powerprofiles-autoswitch-off toggle keeps yours in charge (delete the file to hand over)."
+  if confirm "Keep your power manager in charge (set the toggle)?"; then
+    if ((DRY_RUN)); then
+      info "[dry-run] would run: mkdir -p ${POWER_TOGGLE%/*} && touch $POWER_TOGGLE"
+    else
+      mkdir -p "${POWER_TOGGLE%/*}" && touch "$POWER_TOGGLE" && ok "set ${POWER_TOGGLE/#$HOME/\~}"
+    fi
+  else
+    warn "not set: stop ${unit##*/} yourself, or both will switch profiles on plug and unplug."
+  fi
+}
+
+# A local copy of the Win-lock unit in ~/.config/systemd/user shadows the packaged one in
+# /usr/lib/systemd/user. Once asus-rog-nkey-winlock is installed, offer to move it aside.
+WINLOCK_LOCAL=$HOME/.config/systemd/user/g16-winlock.service
+retire_local_winlock() {
+  [[ -f $WINLOCK_LOCAL && ! -L $WINLOCK_LOCAL ]] || return 0
+  pacman -Q asus-rog-nkey-winlock >/dev/null 2>&1 || ((DRY_RUN)) || return 0
+  local backup=$WINLOCK_LOCAL.before-omarchy-asus
+  info "Your own ${WINLOCK_LOCAL/#$HOME/\~} shadows the packaged g16-winlock.service."
+  if confirm "Move it aside to ${backup##*/} so the packaged unit is used?"; then
+    if ((DRY_RUN)); then
+      info "[dry-run] would run: mv $WINLOCK_LOCAL $backup, systemctl --user daemon-reload, try-restart g16-winlock.service"
+    else
+      if mv "$WINLOCK_LOCAL" "$backup"; then
+        systemctl --user daemon-reload 2>/dev/null || true
+        # A running local instance keeps its old ExecStart until it restarts.
+        systemctl --user try-restart g16-winlock.service 2>/dev/null || true
+        ok "moved to ${backup/#$HOME/\~} (move it back to undo)"
+      else
+        warn "could not move it; your local unit stays in charge of Win-lock"
+      fi
+    fi
+  else
+    warn "kept: your local unit stays in charge of Win-lock."
+  fi
+}
+
 offer_upgrade() {
   step "What the system upgrade would change"
   if ((DRY_RUN)); then
@@ -389,6 +463,7 @@ offer_g16_fixes() {
   if ((DRY_RUN)); then
     confirm "Install them and review the fixes?"
     as_root pacman -S --needed "${G16_PKGS[@]}"
+    retire_local_winlock
     info "[dry-run] would run: omarchy-asus-g16-apply ${apply_opts[*]} --check, ask, then omarchy-asus-g16-apply ${apply_opts[*]} --yes"
     return 0
   fi
@@ -411,6 +486,7 @@ offer_g16_fixes() {
     return 0
   fi
   as_root pacman -S --needed "${available[@]}" || { warn "install failed; skipping the fixes"; return 0; }
+  retire_local_winlock
   command -v omarchy-asus-g16-apply >/dev/null || return 0
   omarchy-asus-g16-apply "${apply_opts[@]}" --check || rc=$?
   if ((rc == 10)); then
@@ -437,6 +513,7 @@ do_install() {
   install_hook
   apply_hook
   install_keyring
+  prepare_power_owner
   offer_upgrade
   offer_g16_fixes
   step "Done"
