@@ -19,11 +19,15 @@
 # PII guard: before anything is uploaded, the new packages and the db are scanned
 # (strings of every file in them, plus file names) against the denylist
 # ($PII_DENYLIST, default ~/.config/agent-pii/denylist), whole-word and
-# case-insensitive. A hit aborts the sync unless the package file matches a glob
-# in build/pii-allow-packages. Only denylist line numbers are printed, never the
-# entries or the matched text. A missing denylist, an invalid regex in it or a
-# failed scan aborts too, never reads as clean (PII_SCAN=off skips
-# the scan, for a machine without one).
+# case-insensitive. A hit aborts the sync unless build/pii-allow-packages has a rule
+# '<asset glob> <location glob>' for that asset AND every hit in it lies at an
+# allowed location: a hit in a file name is at that member path, a hit in contents
+# at '<member path>:<line>' (the strings line holding it). One hit anywhere else
+# (.PKGINFO, .BUILDINFO, another member) still blocks. Only denylist line numbers are
+# printed, never the entries, the matched text or its location. A missing denylist,
+# an invalid regex in it, a malformed allow rule, a hit the located pass cannot place
+# or a failed scan aborts too, never reads as clean (PII_SCAN=off skips the scan,
+# for a machine without one).
 # --pii-scan-text scans files as plain text, never as archives (bin/auto-update scans
 # its PR comments and replies with it; build/pii-allow-packages does not apply).
 set -euo pipefail
@@ -42,10 +46,20 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
     [[ ${PII_SCAN:-on} == off ]] && { echo "PII scan skipped (PII_SCAN=off)"; return 0; }
     local list=${PII_DENYLIST:-$HOME/.config/agent-pii/denylist}
     [[ -r $list ]] || { echo "PII denylist $list is missing; refusing to upload (PII_SCAN=off to skip)" >&2; return 1; }
-    local allow=$WORKSPACE/build/pii-allow-packages globs=() g
-    [[ -r $allow ]] && while IFS= read -r g; do
-        g=${g%%#*}; g=${g%"${g##*[![:space:]]}"}; [[ -n $g ]] && globs+=("$g")
-    done <"$allow"
+    local allow=$WORKSPACE/build/pii-allow-packages g ag pg extra n=0
+    local -a aglobs=() pglobs=()
+    if [[ -r $allow ]]; then
+        while IFS= read -r g; do
+            n=$((n + 1)); g=${g%%#*}; ag='' pg='' extra=''
+            read -r ag pg extra <<<"$g" || true
+            [[ -z $ag ]] && continue
+            if [[ -z $pg || -n $extra ]]; then  # a bare asset glob would allow the whole file
+                echo "build/pii-allow-packages line $n: want '<asset glob> <location glob>'; refusing to upload" >&2
+                return 1
+            fi
+            aglobs+=("$ag"); pglobs+=("$pg")
+        done <"$allow"
+    fi
     # Whole-word regex per denylist line (same rules as the publish guard's wrap()).
     local -a res=() nums=()
     local e pre post i=0 lineno=0
@@ -98,18 +112,64 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
                 shopt -u nocasematch
             done
         done < <(sort -u "$up/.hits")
-        rm -f "$up/.hits"
         hit="$(basename "$f"): denylist line(s) $(printf '%s\n' "${!seen[@]}" | sort -n | paste -sd, -)"
-        local ok=0
+        local ok=0 why=''
         if ((!as_text)); then  # the allow list names packages, never a comment
-            # shellcheck disable=SC2053 # $g is a glob on purpose
-            for g in "${globs[@]}"; do [[ $(basename "$f") == $g ]] && ok=1; done
+            # shellcheck disable=SC2053  # the rules are globs
+            for i in "${!aglobs[@]}"; do [[ $(basename "$f") == ${aglobs[$i]} ]] && ok=1; done
+            ((ok)) && { pii_located "$f" || { ok=0; why=$pii_why; }; }
         fi
+        rm -f "$up/.hits"
         if ((ok)); then echo "PII scan: allowed by build/pii-allow-packages: $hit"
-        else echo "PII scan: BLOCKED $hit" >&2; rc=1; fi
+        else echo "PII scan: BLOCKED $hit${why:+ ($why)}" >&2; rc=1; fi
         unset seen
     done
     return $rc
+}
+# pii_located <asset>: second pass, only for an asset that has allow rules. Unpacks it
+# and places every hit (the member path for a name hit, '<member>:<line>' for a
+# content hit); returns 0 only if every hit lies at a location a rule for this asset
+# allows AND the placed hits cover every distinct hit of the first pass ($up/.hits).
+# Otherwise sets pii_why (a count, never a location or the text) and returns 1.
+pii_located() {
+    local f=$1 base x m line loc i allowed nbad=0 d=$up/.x
+    base=$(basename "$f"); pii_why=''
+    rm -rf "$d"; mkdir -p "$d"
+    if ! bsdtar -xf "$f" -C "$d" 2>/dev/null; then
+        pii_why="could not unpack it to place the hits"; chmod -R u+rwX "$d"; rm -rf "$d"; return 1
+    fi
+    chmod -R u+rwX "$d"  # read every member, and let rm remove read-only dirs
+    {   # name hits: the member path itself (no leading ./ or trailing /)
+        bsdtar -tf "$f" 2>/dev/null | grep -iE -- "$pattern" | while IFS= read -r x; do
+            loc=${x#./}; loc=${loc%/}
+            grep -oiE -- "$pattern" <<<"$x" | while IFS= read -r m; do printf '%s\t%s\n' "${loc//$'\t'/ }" "$m"; done
+        done
+        # content hits; the C-locale grep -l only narrows which files get read
+        while IFS= read -r -d '' x; do
+            strings -n 4 "$x" | grep -iE -- "$pattern" | while IFS= read -r line; do
+                grep -oiE -- "$pattern" <<<"$line" | while IFS= read -r m; do
+                    printf '%s\t%s\n' "${x#"$d"/}:${line//$'\t'/ }" "$m"
+                done
+            done
+        done < <(LC_ALL=C grep -rlaiZE -- "$pattern" "$d")
+    } >"$up/.loc"
+    rm -rf "$d"
+    # Fail closed: a first-pass hit this pass did not place (say, a string that spans
+    # two members) is not covered by any rule.
+    if [[ -n $(comm -23 <(tr '[:upper:]' '[:lower:]' <"$up/.hits" | sort -u) \
+                        <(cut -f2- "$up/.loc" | tr '[:upper:]' '[:lower:]' | sort -u)) ]]; then
+        pii_why="a hit could not be placed"; rm -f "$up/.loc"; return 1
+    fi
+    while IFS=$'\t' read -r loc m; do
+        allowed=0
+        for i in "${!aglobs[@]}"; do
+            # shellcheck disable=SC2053  # the rules are globs
+            [[ $base == ${aglobs[$i]} && $loc == ${pglobs[$i]} ]] && { allowed=1; break; }
+        done
+        ((allowed)) || nbad=$((nbad + 1))
+    done < <(sort -u "$up/.loc")
+    rm -f "$up/.loc"
+    ((nbad == 0)) || { pii_why="$nbad hit(s) outside its allowed locations"; return 1; }
 }
 if ((scan_only)); then pii_scan "$@"; exit; fi
 

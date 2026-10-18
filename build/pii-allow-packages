@@ -1,9 +1,18 @@
-# Release assets whose PII-scan hits are known upstream content (see bin/sync-release).
-# Kernel packages: upstream module and config names (HID device drivers) match
-# hardware words on the denylist. Our own kernel patches are scanned when
-# committed (.pii-allow / publish hook).
-linux-omarchy-*.pkg.tar.zst
-linux-omarchy-headers-*.pkg.tar.zst
-# The files database lists every file of every package, so it inherits the
-# kernel's module names; each package is scanned on its own.
-omarchy-asus.files
+# Known upstream PII-scan hits in release assets (see bin/sync-release).
+# Each rule is '<asset glob> <location glob>': it allows a hit only at that location
+# inside that asset. A name hit is at its member path; a content hit is at
+# '<member path>:<line>'. Any other hit in the same asset (.PKGINFO, .BUILDINFO,
+# another member) still blocks the sync. Globs are bash patterns ('*' crosses '/').
+#
+# Kernel: upstream HID driver module names match hardware words on the denylist; the
+# module list repeats them. Our own kernel patches are scanned when committed
+# (.pii-allow / publish hook).
+linux-omarchy-*.pkg.tar.zst          usr/lib/modules/*/kernel/drivers/hid/*
+linux-omarchy-*.pkg.tar.zst          usr/lib/modules/*/modules.order:*
+# Kernel headers: the unmodified upstream build tree (Kconfig, config, uapi headers,
+# rust metadata) names that hardware and has version strings shaped like addresses.
+linux-omarchy-headers-*.pkg.tar.zst  usr/lib/modules/*/build/*
+# The files database lists every file of every package, so it repeats the two lines
+# above; only those kernel paths are allowed, each package's own list otherwise scanned.
+omarchy-asus.files  linux-omarchy-[0-9]*/files:usr/lib/modules/*/kernel/drivers/hid/*
+omarchy-asus.files  linux-omarchy-headers-*/files:usr/lib/modules/*/build/*
