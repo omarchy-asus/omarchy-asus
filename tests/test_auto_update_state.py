@@ -72,6 +72,17 @@ class PlanTest(unittest.TestCase):
         line = self.plan([row("b", "current", "1.0-1.1", recipe="")], **EXTRA_EXPIRED)["(db) b"]
         self.assertEqual(line[1], "unpublish")
 
+    def test_expired_db_respects_keep_published(self):
+        os.environ["KEEP_PUBLISHED"] = "b"
+        self.addCleanup(os.environ.pop, "KEEP_PUBLISHED", None)
+        line = self.plan([row("b", "current", "1.0-1.1", recipe="")], **EXTRA_EXPIRED)["(db) b"]
+        self.assertEqual(line[1], "attention")
+        self.assertIn("KEEP_PUBLISHED", line[5])
+
+    def test_expired_db_keeps_package_without_upstream(self):
+        line = self.plan([row("d", "current", "1.0-1.1", upstream=None)], **EXTRA_EXPIRED)["d"]
+        self.assertNotEqual(line[1], "unpublish")
+
     def test_expired_db_leaves_local_only_recipe(self):
         line = self.plan([row("c", "local", "1.0-1.1", local_only=True, upstream=None)],
                          **EXTRA_EXPIRED)["c"]
