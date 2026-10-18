@@ -606,7 +606,8 @@ for p in sys.stdin.read().split():
             open_threads=$(as_user gh api graphql -F owner="${GH_REPO%/*}" -F name="${GH_REPO#*/}" -F number="$num" -f query='
 query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
   reviewThreads(first:100){totalCount nodes{isResolved}}}}}' \
-                --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' || echo unknown)
+                --jq '.data.repository.pullRequest.reviewThreads | if .totalCount > (.nodes | length) then "unknown (over 100 threads)"
+                      else [.nodes[] | select(.isResolved | not)] | length end' || echo unknown)
             [[ $open_threads == 0 ]] || reasons+=("unresolved review threads: $open_threads")
         fi
         if [[ $REQUIRE_AGENT_APPROVAL == yes ]]; then

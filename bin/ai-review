@@ -388,7 +388,8 @@ def final_status(repo, head, mb):
     st = gh_json("api", f"repos/{repo}/commits/{head}/status")
     for s in (st or {}).get("statuses") or []:
         if s.get("context") == CONTEXT:  # newest first
-            return s.get("state") if f"mb {mb[:12]}" in (s.get("description") or "") else None
+            d = s.get("description") or ""  # same diff, same reviewer family (never the author's)
+            return s.get("state") if f"mb {mb[:12]}" in d and f"by {reviewer()}" in d else None
     return None
 
 
@@ -471,7 +472,7 @@ def post(repo, num, res, roots):
         return
     state = "failure" if res["blocking"] else "success"
     set_status(repo, res["head"], state,
-               f"{res['blocking']} blocking, {len(shown)} posted, {len(refuted)} refuted | mb {res['merge_base'][:12]}",
+               f"{res['blocking']} blocking, {len(shown)} posted, {len(refuted)} refuted | mb {res['merge_base'][:12]} by {reviewer()}",
                rv.get("html_url"))
 
 
@@ -607,10 +608,10 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
             post(repo, num, res, [checkout])
         except Exception as e:
             log(f"posting failed: {e}")  # details stay local: statuses are public and unscanned
-            set_status(repo, head, "error", "posting the review failed; see the reviewer's log")
             res["_commentable"] = {k: sorted(v) for k, v in res["_commentable"].items()}
-            json.dump(res, open(cache + ".unposted", "w"), indent=1)
+            json.dump(res, open(cache + ".unposted", "w"), indent=1)  # keeps review_id: never post twice
             os.remove(cache)
+            set_status(repo, head, "error", "posting the review failed; see the reviewer's log")
             raise
         res["posted"] = True
         res["_commentable"] = {k: sorted(v) for k, v in res["_commentable"].items()}
