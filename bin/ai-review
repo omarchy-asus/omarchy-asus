@@ -464,6 +464,11 @@ def post(repo, num, res, roots):
                         "url": c["html_url"], "body": c["body"]})
     res["comment_ids"] = ids
     res["review_url"] = rv.get("html_url")
+    if not res.get("default_base", True):
+        # The required check lives on default branches only. A status from a review against
+        # another base would still be green after a retarget onto the default branch, so
+        # such PRs get the review but no status: retargeted, they are reviewed again.
+        return
     state = "failure" if res["blocking"] else "success"
     set_status(repo, res["head"], state,
                f"{res['blocking']} blocking, {len(shown)} posted, {len(refuted)} refuted | mb {res['merge_base'][:12]}",
@@ -561,6 +566,7 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
         with Checkout(repo, num, head, base, checkout) as co:
             raw, findings = find(co.root, base, pr["title"], co.diff)
             res = {"repo": repo, "pr": num, "head": head, "base": base, "merge_base": mb, "codex_raw": raw,
+                   "default_base": pr["baseRefName"] == gh_json("api", f"repos/{repo}")["default_branch"],
                    "reviewer": f"{reviewer()} {model()}".strip(), "findings": findings, "verifier": None,
                    "_commentable": {k: sorted(v) for k, v in commentable(co.diff).items() if k}}
             if findings:
@@ -575,8 +581,8 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
         save()
 
     if reply:  # the author answers findings; the reviewer family checks the answers against the code
-        if res.get("posted"):
-            raise RuntimeError("this head's review is already posted; push a fix for a new review")
+        if res.get("posted") or res.get("review_id"):  # what is on GitHub must stay the agreed result
+            raise RuntimeError("this head's review is already submitted; push a fix for a new review")
         answers = {i: a for i, a in load_replies(reply).items() if 0 <= i < len(res["findings"])}
         if answers:
             with Checkout(repo, num, head, base, checkout) as co:

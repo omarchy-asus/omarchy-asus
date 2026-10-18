@@ -104,7 +104,8 @@ and nothing goes to GitHub until you and the reviewer agree.**
      checks each answer against the code and withdraws the finding only if the code agrees.
 3. When you agree (no finding you still dispute; normally no blocking P0/P1 left), post once:
    `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`. This puts one review
-   (findings, your answers, the reviewer's checks) and the status on the head. It never reviews
+   (findings, your answers, the reviewer's checks) and the status on the head. PRs that
+   don't target the default branch get the review but no status (a retarget means a new review). It never reviews
    again, and it refuses a head that has no local review.
 4. For Codex-written work, review with Claude instead (`AI_REVIEWER=claude`): the author never
    reviews its own change.
