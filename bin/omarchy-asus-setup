@@ -752,9 +752,11 @@ run_upgrade() {
 # on every plug and unplug. The patched omarchy-powerprofiles-set stands back when Omarchy's
 # powerprofiles-autoswitch-off toggle is set; set it before the upgrade runs the migrations.
 POWER_TOGGLE=$HOME/.local/state/omarchy/toggles/powerprofiles-autoswitch-off
+# The user unit dir follows XDG_CONFIG_HOME (~/.config by default), like systemd and g16ctl.
+USER_UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 own_power_manager() {
   local unit
-  for unit in "$HOME/.config/systemd/user/rog-power.service" /etc/systemd/user/rog-power.service \
+  for unit in "$USER_UNIT_DIR/rog-power.service" /etc/systemd/user/rog-power.service \
     /etc/systemd/system/rog-power.service; do
     [[ -f $unit ]] && { echo "$unit"; return 0; }
   done
@@ -789,8 +791,7 @@ prepare_power_owner() {
 # <target>.wants link that enabled it (dangling once the unit moves), and a udev rule in
 # /etc/udev/rules.d next to the packaged 70-g16-winlock-hidraw.rules. Once the package is
 # installed, offer to move them aside. Nothing is deleted except a dangling link.
-# The user unit dir follows XDG_CONFIG_HOME (~/.config by default), like systemd and g16ctl.
-WINLOCK_USER_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+WINLOCK_USER_DIR=$USER_UNIT_DIR
 WINLOCK_LOCAL=$WINLOCK_USER_DIR/g16-winlock.service
 WINLOCK_DROPIN=$WINLOCK_LOCAL.d
 WINLOCK_UDEV_DIR=/etc/udev/rules.d

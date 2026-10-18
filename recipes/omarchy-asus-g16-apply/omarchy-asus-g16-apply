@@ -121,6 +121,8 @@ source "$SHARE/fork/hybrid-video-decode.sh" || die "missing $SHARE/fork/hybrid-v
 HYBRID_VIDEO_MPV_COMMENT="# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."
 
 HYPR_CONF=$HOME/.config/hypr/hyprland.lua
+# The user unit dir follows XDG_CONFIG_HOME (~/.config by default), like systemd and g16ctl.
+USER_UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 
 # ---------------------------------------------------------------------------
 # Hardware and ownership checks (cached sysfs and config files only).
@@ -143,7 +145,7 @@ power_owner() {
     echo "toggle $(tilde "$toggle")"
     return 0
   fi
-  for unit in "$HOME/.config/systemd/user/rog-power.service" "$(r /etc/systemd/user/rog-power.service)" \
+  for unit in "$USER_UNIT_DIR/rog-power.service" "$(r /etc/systemd/user/rog-power.service)" \
     "$(r /etc/systemd/system/rog-power.service)"; do
     if [[ -e $unit ]]; then
       echo "rog-power ($(tilde "$unit"))"
@@ -824,7 +826,7 @@ winlock_nodes_accessible() {
 }
 
 check_winlock() {
-  local unit=$HOME/.config/systemd/user/g16-winlock.service
+  local unit=$USER_UNIT_DIR/g16-winlock.service
   if [[ ! -x $(r /usr/bin/g16-winlock) || ! -f $(r /usr/lib/systemd/user/g16-winlock.service) ]]; then
     ST=n/a DETAIL="asus-rog-nkey-winlock is not installed"
     return
@@ -840,7 +842,7 @@ check_winlock() {
   # older builds and a manual enable may have used default.target.
   local t dir
   for t in graphical-session default; do
-    for dir in "$HOME/.config/systemd/user" "$(r /etc/systemd/user)" "$(r /usr/lib/systemd/user)"; do
+    for dir in "$USER_UNIT_DIR" "$(r /etc/systemd/user)" "$(r /usr/lib/systemd/user)"; do
       if [[ -L $dir/$t.target.wants/g16-winlock.service ]]; then
         ST=applied DETAIL="g16-winlock.service enabled ($t.target)"
         return
