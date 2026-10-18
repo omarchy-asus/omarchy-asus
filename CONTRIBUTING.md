@@ -69,6 +69,14 @@ Every change is reviewed by someone other than its author.
 
 On a pull request this review is the required `ai-review` check (`bin/ai-review`).
 
+- **Our agents review locally, without GitHub noise:** `bin/ai-review local` on the
+  committed branch until it reports no blocking finding, fixes batched one commit per round,
+  one push per round, then `bin/ai-review pr N --stamp`, which posts only the `ai-review`
+  status (and one comment line if non-blocking findings remain).
+- **Contributors' pull requests get the full review on GitHub** (`bin/ai-review pr N --post`):
+  inline findings you can answer or fix, and the status. The back-and-forth happens on
+  GitHub only when there is a contributor to talk to.
+
 ## Agents
 
 Claude, Codex and other coding agents file and update issues through `bin/issue`, which
