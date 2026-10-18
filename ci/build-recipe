@@ -1,0 +1,41 @@
+#!/bin/bash
+# Build one recipe the way bin/build-pkg does, but in a throwaway container
+# instead of a devtools chroot (run as root inside the Arch container):
+#   ci/setup-arch, then `makepkg -s` as the unprivileged builder user with the
+#   recipe's keys/pgp (if any) as that user's only PGP keys, so validpgpkeys
+#   sources are verified against exactly the keys checked into the recipe.
+# Output: the unsigned packages land in $OUT (default /out). The build tree
+# is $WORK/<recipe> (default /build), so it can live on a big disk.
+# Usage: ci/build-recipe <recipe>
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+name=${1:?usage: ci/build-recipe <recipe>}
+src=$repo/recipes/$name
+[[ -f $src/PKGBUILD ]] || { echo "::error::recipes/$name/PKGBUILD not found" >&2; exit 1; }
+OUT=${OUT:-/out} WORK=${WORK:-/build}
+
+"$repo/ci/setup-arch"
+
+work=$WORK/$name
+rm -rf "$work"; mkdir -p "$work" "$OUT"
+cp -a "$src"/. "$work"/
+rm -rf "$work"/{src,pkg} "$work"/*.pkg.tar.zst
+chown -R builder: "$work"
+
+builder_home=$(getent passwd builder | cut -d: -f6)
+as_builder() { runuser -u builder -- env -C "$work" HOME="$builder_home" "$@"; }
+if [[ -d $work/keys/pgp ]]; then
+    echo "==> importing $(find "$work/keys/pgp" -name '*.asc' | wc -l) recipe PGP key(s) into the builder keyring"
+    as_builder gpg --batch --quiet --import keys/pgp/*.asc
+fi
+
+echo "==> makepkg -s ($name, MAKEFLAGS from /etc/makepkg.conf.d/zz-ci.conf, $(nproc) CPUs)"
+df -h "$work" | tail -1
+as_builder makepkg -s --noconfirm --noprogressbar
+
+shopt -s nullglob
+pkgs=("$work"/*.pkg.tar.zst)
+(( ${#pkgs[@]} )) || { echo "::error::$name built no packages" >&2; exit 1; }
+cp -v "${pkgs[@]}" "$OUT"/
+chmod a+r "$OUT"/*
+rm -rf "$work"

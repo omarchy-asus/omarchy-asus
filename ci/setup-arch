@@ -1,0 +1,42 @@
+#!/bin/bash
+# Turn a stock Arch container into the production build environment (run as
+# root inside ghcr.io/archlinux/archlinux:base-devel):
+#   - the same package sources as the build chroot: build/pacman.conf (Omarchy
+#     stable snapshot of Arch + [omarchy]), synced with -uu so every installed
+#     package matches the snapshot exactly, downgrades included
+#   - the devtools makepkg.conf that bin/mkchroot gives the chroot
+#   - an unprivileged "builder" user (makepkg refuses root) with sudo for pacman
+# Usage: ci/setup-arch [extra packages to install]
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+# Omarchy package signing key (the same one omarchy-pkgs' builder image trusts).
+OMARCHY_KEY=40DFB630FF42BCFFB047046CF0134EE680CAC571
+
+pacman-key --init >/dev/null 2>&1
+pacman-key --populate archlinux >/dev/null 2>&1
+for try in 1 2 3 4 5; do
+    pacman-key --recv-keys "$OMARCHY_KEY" --keyserver hkps://keys.openpgp.org && break
+    [[ $try == 5 ]] && { echo "::error::could not fetch the Omarchy signing key" >&2; exit 1; }
+    sleep $((try * 5))
+done
+pacman-key --lsign-key "$OMARCHY_KEY" >/dev/null
+
+cp "$repo/build/pacman.conf" /etc/pacman.conf
+echo "==> package sources (build/pacman.conf):"
+grep -E '^(\[|Server)' /etc/pacman.conf
+pacman -Syyuu --noconfirm --needed --noprogressbar omarchy-keyring base-devel devtools "$@"
+pacman-key --populate omarchy >/dev/null
+
+# The makepkg.conf the production chroot gets (mkarchroot -M in bin/mkchroot).
+cp /usr/share/devtools/makepkg.conf.d/x86_64.conf /etc/makepkg.conf
+mkdir -p /etc/makepkg.conf.d
+cat >/etc/makepkg.conf.d/zz-ci.conf <<EOF
+MAKEFLAGS="-j$(nproc)"
+PACKAGER="omarchy-asus CI (unsigned)"
+EOF
+
+if ! id builder >/dev/null 2>&1; then
+    useradd -m -s /bin/bash builder
+    echo 'builder ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/builder
+    chmod 440 /etc/sudoers.d/builder
+fi

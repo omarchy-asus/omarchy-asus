@@ -141,5 +141,8 @@ Where our fixes are headed:
 - `bin/check-upstream [--json]`: compares each package with the version upstream ships and
   the state of its upstream PRs. Exits 10 when something needs action.
 - `keys/`: the repo signing key.
+- `.github/workflows/`, `ci/`: PR CI on GitHub Actions (lint, build the changed recipes in an Arch
+  container, compile nvidia-open-dkms against linux-omarchy-headers). Artifacts are unsigned;
+  signing and publishing stay on the maintainer's machine.
 
 Maintained by [@rdoupe](https://github.com/rdoupe) and contributors.

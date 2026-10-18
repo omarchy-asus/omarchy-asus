@@ -1,0 +1,47 @@
+#!/bin/bash
+# Reverse-dependency check: compile our nvidia-open-dkms against our
+# linux-omarchy-headers with dkms, exactly as the laptop's pacman hook would
+# (run as root inside the Arch container).
+# Each side comes from $PKGS (built earlier in the same workflow) if present,
+# otherwise from the published x86_64 release (signature-verified).
+# Usage: ci/nvidia-compat [pkgs dir]   (default /pkgs)
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+PKGS=${1:-/pkgs}
+
+"$repo/ci/setup-arch" dkms
+
+pick() {
+    local name=$1 f
+    shopt -s nullglob
+    for f in "$PKGS/$name"-[0-9]*.pkg.tar.zst; do
+        # skip e.g. linux-omarchy-headers when asked for linux-omarchy
+        [[ $(bsdtar -xOf "$f" .PKGINFO | awk -F' = ' '$1=="pkgname"{print $2}') == "$name" ]] || continue
+        echo "==> $name: built in this workflow ($(basename "$f"))" >&2
+        echo "$f"; return
+    done
+    echo "==> $name: not built in this workflow, using the published release" >&2
+    "$repo/ci/fetch-release" "$name" /tmp/release
+}
+headers=$(pick linux-omarchy-headers)
+nvidia=$(pick nvidia-open-dkms)
+
+pacman -U --noconfirm --needed --noprogressbar "$headers"
+# Only the module sources: the package's runtime deps (nvidia-utils=<ver>)
+# don't matter for a compile test, and extracting skips the dkms install hook.
+bsdtar -xf "$nvidia" -C / usr/src
+
+kver=$(pacman -Qlq linux-omarchy-headers | sed -n 's|^/usr/lib/modules/\([^/]*\)/build/$|\1|p' | head -1)
+ver=$(bsdtar -xOf "$nvidia" .PKGINFO | awk -F' = ' '$1=="pkgver"{print $2}'); ver=${ver%-*}
+[[ -n $kver && -d /usr/lib/modules/$kver/build ]] || { echo "::error::no kernel build dir from linux-omarchy-headers" >&2; exit 1; }
+[[ -f /usr/src/nvidia-$ver/dkms.conf ]] || { echo "::error::/usr/src/nvidia-$ver/dkms.conf missing" >&2; exit 1; }
+echo "==> dkms build nvidia/$ver against $kver"
+dkms add "nvidia/$ver"
+if ! dkms build "nvidia/$ver" -k "$kver"; then
+    log=$(find /var/lib/dkms/nvidia -name make.log | head -1)
+    [[ -n $log ]] && { echo "==> $log (last 200 lines)"; tail -200 "$log"; }
+    echo "::error::nvidia-open-dkms $ver does not compile against linux-omarchy-headers $kver"
+    exit 1
+fi
+find "/var/lib/dkms/nvidia/$ver/$kver" -name '*.ko*' -printf '%f %s bytes\n' | sort
+echo "==> OK: nvidia-open-dkms $ver compiles against $kver"

@@ -1,0 +1,201 @@
+name: Build changed packages
+
+# Build every recipe a PR touches, one job per recipe, in a stock Arch
+# container set up with the production package sources (build/pacman.conf:
+# Omarchy stable snapshot + [omarchy]) and the devtools makepkg.conf. Shaped
+# after omarchy-pkgs' build-pr.yml (changes -> build matrix -> result).
+#
+# Artifacts are UNSIGNED and short-lived; they exist for review and for the
+# NVIDIA check below. Signing and publishing stay on the maintainer's machine
+# (bin/build-pkg -> bin/publish -> bin/sync-release): no workflow here holds
+# a key or a secret, and the token is read-only.
+#
+# ci/changed-recipes has the planning rules. linux-omarchy has its own job
+# (big disk, long timeout); when it or nvidia-open-dkms builds, nvidia-compat
+# compiles our NVIDIA module against our kernel headers with dkms, taking
+# whichever side this run did not build from the signed x86_64 release.
+#
+# No paths filter: `result` reports on every PR (a PR without recipe changes
+# plans an empty matrix and passes in seconds).
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      recipes:
+        description: "Space-separated recipe directories to build (e.g. hyprland). linux-omarchy takes hours."
+        required: false
+        default: ""
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BUILDER_IMAGE: ghcr.io/archlinux/archlinux:base-devel
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      recipes: ${{ steps.plan.outputs.recipes }}
+      kernel: ${{ steps.plan.outputs.kernel }}
+      nvidia_built: ${{ steps.plan.outputs.nvidia_built }}
+      nvidia_compat: ${{ steps.plan.outputs.nvidia_compat }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ github.event.inputs.recipes }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ $EVENT == workflow_dispatch ]]; then
+            ci/changed-recipes --list "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+          else
+            ci/changed-recipes "$BASE_SHA" "$HEAD_SHA" | tee -a "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "### Build plan"
+            echo
+            sed 's/^/- /' "$GITHUB_OUTPUT" | grep -E '^- (recipes|kernel|nvidia_compat)='
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.recipes != '[]'
+    name: build (${{ matrix.recipe }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJSON(needs.changes.outputs.recipes) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build ${{ matrix.recipe }}
+        env:
+          RECIPE: ${{ matrix.recipe }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/out:/out" "$BUILDER_IMAGE" /repo/ci/build-recipe "$RECIPE"
+          ls -l out
+          { echo "### $RECIPE"; echo; echo '```'; (cd out && ls -l -- *.pkg.tar.zst); echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload packages (unsigned)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkgs-${{ matrix.recipe }}
+          path: out/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  kernel:
+    needs: changes
+    if: needs.changes.outputs.kernel == 'true'
+    name: build (linux-omarchy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      # The kernel tree, its objects and the packages need ~30 GB; a stock
+      # runner has ~20 GB free on /. Drop the preinstalled toolchains we never
+      # use (no third-party action) and build on whichever disk is bigger.
+      - name: Free disk space
+        run: |
+          df -h / /mnt || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/local/lib/node_modules /opt/microsoft /opt/google
+          docker image prune --all --force >/dev/null
+          df -h / /mnt || true
+      - name: Pick the build disk
+        id: disk
+        run: |
+          root=$(df --output=avail -B1 / | tail -1)
+          mnt=$(df --output=avail -B1 /mnt 2>/dev/null | tail -1 || echo 0)
+          if (( ${mnt:-0} > root )); then dir=/mnt/omarchy-asus-build; else dir=$RUNNER_TEMP/omarchy-asus-build; fi
+          sudo mkdir -p "$dir/work" "$dir/out"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "building in $dir ($(df -h --output=avail "$dir" | tail -1) free), $(nproc) CPUs, $(free -g | awk '/Mem/{print $2}') GB RAM"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build linux-omarchy
+        env:
+          DIR: ${{ steps.disk.outputs.dir }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/repo:ro" -v "$DIR/out:/out" -v "$DIR/work:/build" \
+            "$BUILDER_IMAGE" /repo/ci/build-recipe linux-omarchy
+          ls -l "$DIR/out"
+          { echo "### linux-omarchy"; echo; echo '```'; ls -l "$DIR/out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # ~260 MB (kernel + headers); kept two days, long enough for
+      # nvidia-compat and a reviewer to fetch it.
+      - name: Upload packages (unsigned)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pkgs-linux-omarchy
+          path: ${{ steps.disk.outputs.dir }}/out/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+  nvidia-compat:
+    needs: [changes, build, kernel]
+    # Runs when either side changed and neither of this run's builds failed.
+    if: >-
+      !cancelled() && needs.changes.outputs.nvidia_compat == 'true' &&
+      needs.build.result != 'failure' && needs.kernel.result != 'failure'
+    name: nvidia-open-dkms vs linux-omarchy-headers
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch linux-omarchy from this run
+        if: needs.changes.outputs.kernel == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkgs-linux-omarchy
+          path: pkgs
+      - name: Fetch nvidia-open-dkms from this run
+        if: needs.changes.outputs.nvidia_built == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pkgs-nvidia-open-dkms
+          path: pkgs
+      - name: dkms build nvidia against linux-omarchy-headers
+        run: |
+          mkdir -p pkgs && ls -l pkgs
+          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/pkgs:/pkgs:ro" "$BUILDER_IMAGE" /repo/ci/nvidia-compat /pkgs
+
+  # One stable check name for branch protection, as in omarchy-pkgs.
+  result:
+    needs: [changes, build, kernel, nvidia-compat]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          CHANGES: ${{ needs.changes.result }}
+          BUILD: ${{ needs.build.result }}
+          KERNEL: ${{ needs.kernel.result }}
+          NVIDIA: ${{ needs.nvidia-compat.result }}
+          RECIPES: ${{ needs.changes.outputs.recipes }}
+        run: |
+          echo "changes=$CHANGES build=$BUILD kernel=$KERNEL nvidia-compat=$NVIDIA recipes=$RECIPES"
+          [[ $CHANGES == success ]] || { echo "::error::build planning failed"; exit 1; }
+          for r in "$BUILD" "$KERNEL" "$NVIDIA"; do
+            [[ $r == success || $r == skipped ]] || { echo "::error::a build or check did not pass"; exit 1; }
+          done

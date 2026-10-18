@@ -1,0 +1,31 @@
+#!/bin/bash
+# Download the currently published build of a package from the x86_64 release
+# and verify it with keys/omarchy-asus.asc: first the signed repo database
+# (which names the file), then the package's own detached signature.
+# Usage: ci/fetch-release <pkgname> <dest dir>    prints the package path
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+pkg=${1:?usage: ci/fetch-release <pkgname> <dest dir>} dest=${2:?}
+RELEASE=${RELEASE:-https://github.com/omarchy-asus/omarchy-asus/releases/download/x86_64}
+DB=omarchy-asus.db
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+gpg --batch --quiet --dearmor -o "$tmp/key.gpg" "$repo/keys/omarchy-asus.asc"
+verify() { gpgv --quiet --keyring "$tmp/key.gpg" "$1.sig" "$1" 2>&1 >/dev/null | sed 's/^/    /' >&2; }
+get() { curl -fsSL --retry 5 --retry-all-errors -o "$1" "$RELEASE/$(basename "$1")"; }
+
+get "$tmp/$DB"; get "$tmp/$DB.sig"
+verify "$tmp/$DB" || { echo "::error::$DB signature does not verify with keys/omarchy-asus.asc" >&2; exit 1; }
+mkdir "$tmp/db"; bsdtar -xf "$tmp/$DB" -C "$tmp/db"
+file=
+for desc in "$tmp"/db/*/desc; do
+    if [[ $(awk '/^%NAME%$/{getline; print; exit}' "$desc") == "$pkg" ]]; then
+        file=$(awk '/^%FILENAME%$/{getline; print; exit}' "$desc"); break
+    fi
+done
+[[ -n $file ]] || { echo "::error::$pkg is not in the published $DB" >&2; exit 1; }
+mkdir -p "$dest"
+get "$dest/$file"; get "$dest/$file.sig"
+verify "$dest/$file" || { echo "::error::$file signature does not verify with keys/omarchy-asus.asc" >&2; exit 1; }
+echo "==> published $file (signature OK)" >&2
+echo "$dest/$file"
