@@ -296,7 +296,8 @@ cr_state() {  # cr_state <pr number> <out json>: CodeRabbit's state for the PR h
 query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){
   headRefOid
   commits(last:1){nodes{commit{oid status{contexts{context state description creator{__typename login}}}
-    checkSuites(first:20){nodes{app{slug} checkRuns(first:20){nodes{name status conclusion title}}}}}}}
+    checkSuites(first:50){pageInfo{hasNextPage} nodes{app{slug}
+      checkRuns(first:50){pageInfo{hasNextPage} nodes{name status conclusion title}}}}}}}
   reviews(last:30){nodes{author{__typename login} state commit{oid} body}}
   reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{isResolved isOutdated
     comments(first:1){nodes{databaseId author{__typename login} body path line url}}}}}}}' || return 1
@@ -322,6 +323,10 @@ ctx = [c for n in raw["commits"]["nodes"] for c in ((n["commit"].get("status") o
        if "coderabbit" in c["context"].lower() and bot(c.get("creator"))]
 # "Review completed" counts; "Review skipped: ..." (e.g. base branch not enabled) does not
 # CodeRabbit reports progress as a commit status, or as check runs of its app
+suites = [s for n in raw["commits"]["nodes"] for s in [(n["commit"].get("checkSuites") or {})]]
+runs_complete = (not any((s.get("pageInfo") or {}).get("hasNextPage") for s in suites)
+                 and not any(((x.get("checkRuns") or {}).get("pageInfo") or {}).get("hasNextPage")
+                             for s in suites for x in (s.get("nodes") or [])))
 runs = [cr for n in raw["commits"]["nodes"] for s in (((n["commit"].get("checkSuites") or {}).get("nodes")) or [])
         if ((s.get("app") or {}).get("slug") or "") == "coderabbitai" for cr in ((s.get("checkRuns") or {}).get("nodes") or [])]
 status_done = (any(c["state"] == "SUCCESS" and "skipped" not in (c.get("description") or "").lower() for c in ctx)
@@ -336,7 +341,7 @@ for t in all_threads:
     if c and bot(c["author"]) and not t["isResolved"] and not t["isOutdated"]:
         threads.append({"id": c["databaseId"], "path": c["path"], "line": c["line"], "url": c["url"],
                         "body": c["body"][:4000]})
-json.dump({"head": head, "reviewed": reviewed and not status_pending and complete, "seen": bool(ctx) or bool(runs) or reviewed,
+json.dump({"head": head, "reviewed": reviewed and not status_pending and complete and runs_complete, "seen": bool(ctx) or bool(runs) or reviewed,
            "threads": threads}, open(sys.argv[2], "w"), indent=2)' "$out.raw" "$out"
 }
 wait_coderabbit() {  # wait_coderabbit <pr number> <out json>: 0 when CodeRabbit finished on the head
