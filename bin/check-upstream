@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare every package we carry with the version upstream currently ships.
 
-Usage: bin/check-upstream [--json] [--refresh] [--no-prs] [--recipe DIR]...
+Usage: bin/check-upstream [--json] [--refresh] [--no-prs] [--recipe DIR]... [--recipe-path PATH]...
 
 Our packages: every recipes/<dir>/PKGBUILD (via `makepkg --printsrcinfo`, one
 entry per split package) plus anything in the local repo db ($REPO_DIR).
@@ -32,6 +32,9 @@ one; it blocks or breaks `omarchy update` until it is rebuilt or unpublished.
 Patch status: each recipes/<dir>/UPSTREAM_PRS lists "owner/repo#N" lines; the
 PR state is fetched from the public GitHub API, cached 24h in $DATA/cache.
 A merged PR is reported as needing action (drop the patch when rebasing).
+
+--recipe-path PATH checks a recipe directory outside recipes/ (e.g. a rebased copy;
+reported under its basename) and, like --recipe, skips the repo-db-only entries.
 
 Testing: OMARCHY_ASUS_UPSTREAM_OVERRIDE="name=ver,name=ver" replaces the upstream
 version of those names (simulated upstream bumps).
@@ -120,13 +123,18 @@ def fetch(url, cache_file, ttl, refresh):
     return data
 
 
-def recipe_packages(only=None):
-    """[(recipe_dir, pkgname, version, depends)] from recipes/*/PKGBUILD."""
+def recipe_packages(only=None, paths=()):
+    """[(recipe_dir, pkgname, version, depends)] from recipes/*/PKGBUILD (or just `paths`)."""
     out = []
     rdir = os.path.join(WORKSPACE, "recipes")
-    for d in sorted(os.listdir(rdir)):
-        path = os.path.join(rdir, d)
+    if paths:
+        dirs = [(os.path.basename(os.path.normpath(p)), p) for p in paths]
+    else:
+        dirs = [(d, os.path.join(rdir, d)) for d in sorted(os.listdir(rdir))]
+    for d, path in dirs:
         if d.startswith(".") or not os.path.isfile(os.path.join(path, "PKGBUILD")):
+            if paths:
+                raise SystemExit(f"error: {path}: no PKGBUILD")
             continue
         if only and d not in only:
             continue
@@ -213,6 +221,8 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="ignore caches (dbs 1h, PR state 24h)")
     ap.add_argument("--no-prs", action="store_true", help="skip the GitHub PR state check")
     ap.add_argument("--recipe", action="append", help="only this recipes/ directory (repeatable)")
+    ap.add_argument("--recipe-path", action="append", default=[],
+                    help="check this recipe directory instead of recipes/ (repeatable)")
     args = ap.parse_args()
 
     data_dir, repo_dir, repo_name = env_from_sh()
@@ -236,9 +246,9 @@ def main():
         with open(local_db, "rb") as f:
             ours_repo = parse_db(f.read())
 
-    recipes = recipe_packages(args.recipe)
+    recipes = recipe_packages(args.recipe, args.recipe_path)
     rows, seen = [], set()
-    extra = [] if args.recipe else [(None, n, v, []) for n, v in sorted(ours_repo.items())]
+    extra = [] if args.recipe or args.recipe_path else [(None, n, v, []) for n, v in sorted(ours_repo.items())]
     for recipe, name, ver, deps in recipes + extra:
         if name in seen:
             continue

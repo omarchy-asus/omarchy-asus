@@ -366,6 +366,31 @@ for f in sorted(ours):
         print(f)' "$1" "$2" "$3"
 }
 
+# Flags that block the merge. The rebase report's own flags are fixed for a proposed PR
+# (saved in $AU/state/<r>.flags); the rest is re-derived on every run: upstream-PR notes
+# from this run's plan, exact-version dependency mismatches from the recipe as proposed
+# (the plan's dep-mismatch notes describe the pre-rebase recipe, which the rebase may fix).
+derived_note() {  # derived_note <note>: 0 if the note is re-derived each run (see above)
+    [[ $1 =~ ^[^\ ]+\ needs\ [^\ ]+=[^\ ]+,\ upstream\ has\ [^\ ]+$ || $1 == "upstream PR "* ]]
+}
+join_flags() {  # join_flags <"; "-joined lists>...: one "; "-joined list, empty/"-" and duplicates dropped
+    printf '%s\n' "$@" | sed 's/; /\n/g' | awk 'NF && $0 != "-" && !seen[$0]++ {o = o (n++ ? "; " : "") $0} END {print o}'
+}
+current_flags() {  # current_flags <saved flags> <plan note> <recipe dir as proposed>
+    local kept=() pr_notes=() n j rc=0 deps
+    while IFS= read -r n; do [[ -n $n ]] && ! derived_note "$n" && kept+=("$n"); done <<<"${1//; /$'\n'}"
+    while IFS= read -r n; do [[ $n == "upstream PR "* ]] && pr_notes+=("$n"); done <<<"${2//; /$'\n'}"
+    j=$(as_user "$LIB/check-upstream" --json --no-prs --recipe-path "$3") || rc=$?
+    if ((rc == 0 || rc == 10)); then
+        deps=$(as_user jq -r '[.packages[] | .name as $n | .dep_mismatch[] |
+            "\($n) needs \(.dep)=\(.want), upstream has \(.upstream // "none")"] | join("; ")' <<<"$j") ||
+            deps="dependency re-check failed (unreadable check-upstream output)"
+    else
+        deps="dependency re-check failed (check-upstream exit $rc)"
+    fi
+    join_flags "${kept[@]}" "${pr_notes[@]}" "$deps"
+}
+
 # ---------------------------------------------------------------- per-recipe actions
 handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
     local r=$1 target=$2 in_repo=$3 pnote=$4 branch=auto-update/$1 out=$RUN/$1 report=$RUN/$1.json rc=0
@@ -403,7 +428,6 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
         failed=1; return 0
     fi
     new_ver=$(as_user jq -r .to "$report")
-    [[ -z $pnote || $pnote == - ]] || flags="${flags:+$flags; }$pnote"
     local diff=$RUN/$r.diff
     as_user bash -c 'cd "$1" && diff -ruN -x src -x pkg -x "*.pkg.tar.zst" "recipes/$2" "$3" > "$4"' \
         _ "$CLONE" "$r" "$out" "$diff" || true
@@ -411,6 +435,7 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
     as_user bash -c 'grep -c "^[-+][^-+]" "$1" | sed "s/^/  changed lines: /"' _ "$diff" || true
 
     if [[ $mode != full ]]; then
+        flags=$(current_flags "$flags" "$pnote" "$out")
         note dry "would commit to $branch, push, open a PR (ready for review), build in the chroot,"
         while read -r line; do [[ -n $line ]] && note dry "  then $line"; done < <(revdep_plan "$r")
         note dry "wait for CodeRabbit, run the agent fixer/second opinion, then gate"
@@ -447,7 +472,7 @@ drive_pr() {  # drive_pr <recipe> <target> <repo names> <note> <branch> <pr url>
     local r=$1 target=$2 in_repo=$3 pnote=$4 branch=$5 pr=$6 report=$7 num=${6##*/}
     local new_ver flags round=0 build_ok=no head built_sha cr=$RUN/$1.coderabbit.json
     new_ver=$(as_user jq -r .to "$report")
-    flags=$(as_user cat "$AU/state/$r.flags" 2>/dev/null || true)
+    flags=$(as_user cat "$AU/state/$r.flags" 2>/dev/null || true)   # the rebase report's flags
     local tail_log=$RUN/$r.build-tail.log diff=$RUN/$r.pr.diff
     agent_verdict=none agent_notes="not run" cr_note="not checked"
     while :; do
@@ -503,6 +528,7 @@ for p in sys.stdin.read().split():
     [[ $build_ok == yes ]] || reasons+=("chroot build failed")
     [[ $(as_user jq -r '.fuzz' "$report") == false ]] || reasons+=("a patch applied with fuzz")
     [[ -z $changed ]] || reasons+=("changes our patches or DELTA: $(echo $changed)")
+    flags=$(current_flags "$flags" "$pnote" "$CLONE/recipes/$r")
     [[ -z $flags ]] || reasons+=("flags: $flags")
     if [[ $build_ok == yes ]]; then
         if [[ $cr_note != "CodeRabbit gate off"* ]]; then
