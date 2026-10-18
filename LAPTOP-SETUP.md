@@ -85,7 +85,9 @@ The script:
    `.before-omarchy-asus.N` name is used instead. Each piece it moves is listed with the command
    that undoes it, and `--dry-run` prints every step. It then shows `omarchy-asus-g16-apply --check`,
    and applies the missing default fixes if you say yes. Fixes you already have in your own form
-   are left alone. See [`recipes/omarchy-asus-g16-apply/README.md`](recipes/omarchy-asus-g16-apply/README.md).
+   are left alone. With the patched omarchy installed, most rows show `present` because its
+   migrations already applied them; only the speaker level (`audio-master`) and the opt-ins
+   remain manual. See [`recipes/omarchy-asus-g16-apply/README.md`](recipes/omarchy-asus-g16-apply/README.md).
 
 > [!IMPORTANT]
 > The fingerprint check is trust on first use. The script, the key and this page all come from
