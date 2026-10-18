@@ -29,6 +29,9 @@ The delta: recipes/<name>/DELTA, one directive per line (# comments):
                                    source order, like linux-omarchy)
   patch <file> end [-- comment]    add at the end of source=(), optionally after a comment
   patch <file> template            template mode: already wired into our PKGBUILD
+  pkgbuild-patch <file>            overlay: a diff (paths a/PKGBUILD, b/PKGBUILD) applied at fuzz 0
+                                   to upstream's recipe files, for changes the patch
+                                   directives can't express (e.g. one more install line)
   reference <path>                 also store upstream's PKGBUILD at <path> (for review)
   fixed-upstream <owner/repo> <commit> <tag-format>
                                    flag (never drop) when the new release tag, e.g.
@@ -102,7 +105,7 @@ def git(*args, cwd=None, check=True):
 
 def parse_delta(path):
     d = {"upstream": None, "mode": "overlay", "take": [], "keep": [], "patches": [],
-         "reference": None, "fixed_upstream": []}
+         "reference": None, "fixed_upstream": [], "pkgbuild_patches": []}
     with open(path) as f:
         for n, raw in enumerate(f, 1):
             line, _, comment = raw.partition(" -- ")
@@ -122,6 +125,8 @@ def parse_delta(path):
                 d["patches"].append({"file": a[0], "where": a[1], "glob": a[2] if a[1] == "after" else None,
                                      "dir": a[2] if a[1] == "prepare" and len(a) == 3 else None,
                                      "comment": comment.strip() or None})
+            elif k == "pkgbuild-patch" and len(a) == 1:
+                d["pkgbuild_patches"].append(a[0])
             elif k == "reference" and len(a) == 1:
                 d["reference"] = a[0]
             elif k == "fixed-upstream" and len(a) == 3:
@@ -511,7 +516,9 @@ def main():
             raise Fail(4, "delta", f"upstream PKGBUILD at {report['upstream_source']['ref']} is "
                                    f"{get_var(up_lines, 'pkgver')}-{get_var(up_lines, 'pkgrel')}, expected {up_ver}-{up_rel}")
 
-        patch_files = [p["file"] for p in delta["patches"]]
+        patch_files = [p["file"] for p in delta["patches"]] + delta["pkgbuild_patches"]
+        if delta["pkgbuild_patches"] and delta["mode"] != "overlay":
+            raise Fail(4, "delta", "'pkgbuild-patch' only belongs in mode overlay")
         for f in patch_files + delta["keep"]:
             if not os.path.isfile(os.path.join(rdir, f)):
                 raise Fail(4, "delta", f"DELTA names {f}, which is not in recipes/{args.recipe}")
@@ -534,6 +541,11 @@ def main():
                 if os.path.exists(os.path.join(updir, f)) and f in patch_files:
                     raise Fail(4, "delta", f"upstream now ships a file named {f}; rename our patch")
                 shutil.copy2(os.path.join(rdir, f), os.path.join(out, f))
+            for f in delta["pkgbuild_patches"]:
+                r = run(["patch", "-p1", "-F0", "--no-backup-if-mismatch", "-d", out,
+                         "-i", os.path.join(rdir, f)], check=False)
+                if r.returncode != 0:
+                    raise Fail(2, "patch", f"{f} does not apply to upstream's recipe: {r.stdout.strip()[-500:]}")
             lines = open(os.path.join(out, "PKGBUILD")).read().split("\n")
             set_var(lines, "pkgrel", new_rel)
             for p in delta["patches"]:

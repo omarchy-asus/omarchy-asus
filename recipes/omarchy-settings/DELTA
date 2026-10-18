@@ -8,6 +8,9 @@
 upstream omarchy-pkgs pkgbuilds/omarchy-settings
 mode overlay
 keep NOTES.md
+# Ship the fork's charger-swap monitor user unit (0002) in /usr/lib/systemd/user; omarchy-settings
+# installs user units from an explicit list. Fork pkgs branch omarchy-settings-source-monitor.
+pkgbuild-patch pkgbuild-source-monitor-unit.diff
 patch 0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch prepare omarchy
 patch 0002-Save-power-on-USB-C-chargers-on-ASUS-ROG-Zephyrus-la.patch prepare omarchy
 patch 0003-Let-another-power-manager-own-the-profile-on-plug-an.patch prepare omarchy
