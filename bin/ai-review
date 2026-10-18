@@ -4,14 +4,17 @@
   bin/ai-review pr N [--repo OWNER/REPO] [--checkout DIR] [--post] [--force] [--json OUT]
   bin/ai-review sweep [--owner OWNER]... [--limit N] [--include-forks] [--post]
 
-Two stages, two model families:
-  1. find:   `codex exec review --base <base sha>` on the PR head, in a read-only sandbox,
-             on the ChatGPT login of the user running it (Codex credits, no API bill).
+Two stages, both by the reviewer family, never the author's (org rule: Opus writes,
+Codex Sol reviews; for Codex-written contributor work, --reviewer claude):
+  1. find:   `codex exec review --base <base sha>` on the PR head (model gpt-6.1-sol,
+             read-only sandbox, the ChatGPT login of the user running it: Codex credits).
              It reports prioritised findings ([P0]..[P3]) with a file and line range.
-  2. verify: a second model tries to refute every finding against the code
-             (VERIFIER=claude: `claude -p` with Read/Grep/Glob in the PR checkout;
-             VERIFIER=openrouter:<model>: OpenRouter with the cited code inlined).
-             Only findings it confirms are posted as review comments.
+  2. verify: a fresh run of the same family tries to refute every finding against the
+             code (VERIFIER=codex|claude, or openrouter:<model> with the cited code
+             inlined). Refuted findings are listed but never block.
+
+Agents run it inline, in their own checkout, as soon as they push a PR:
+  bin/ai-review pr N --checkout . --post
 
 With --post the PR gets one review (inline comments where the line is in the diff) and
 an `ai-review` commit status on the head: failure when a confirmed P0/P1 finding exists,
@@ -21,18 +24,24 @@ Results are cached per head under ~/.local/share/omarchy-asus/ai-review, so the
 pipeline (bin/auto-update) and the sweep never review the same commit twice.
 
 `sweep` reviews every open PR of the given owners (default: the authenticated user and
-its organisations) whose head has no `ai-review` status yet. Fork PRs are skipped
-unless --include-forks. Run it from a timer (systemd/omarchy-asus-ai-review.timer).
+its organisations) whose head has no `ai-review` status yet, to catch up on PRs nobody
+reviewed inline. Fork PRs are skipped unless --include-forks.
+
+Everything posted (review body and comments) goes through bin/issue's PII scan
+(~/.config/agent-pii/denylist) first; a hit or a missing denylist posts nothing and
+sets the status to error.
 
 Environment (all optional):
-  AI_REVIEW_MODEL, AI_REVIEW_EFFORT (default medium)   codex model / reasoning effort
-  VERIFIER (default claude), VERIFY_MODEL               verifier, model for claude -p
+  AI_REVIEWER (default codex), AI_REVIEW_MODEL (default gpt-6.1-sol for codex)
+  AI_REVIEW_EFFORT (default medium)                     codex reasoning effort
+  VERIFIER (default: the reviewer family), VERIFY_MODEL (default: AI_REVIEW_MODEL)
   OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE         for VERIFIER=openrouter:<model>
   AI_REVIEW_TIMEOUT (default 1800), VERIFY_TIMEOUT (default 900)   seconds
 Only stdlib, git, gh and the codex/claude CLIs are used.
 """
 import argparse
 import fcntl
+import importlib.machinery
 import json
 import os
 import re
@@ -50,6 +59,8 @@ DATA = os.path.join(os.environ.get("OMARCHY_ASUS_DATA") or
 MARK = "<!-- ai-review:{head} -->"
 FINDING = re.compile(r"^- \[P([0-3])\] (.+?) — (.+?):(\d+)(?:-(\d+))?\s*$")
 BLOCKING = (0, 1)
+CODEX_MODEL = "gpt-6.1-sol"
+LIB = os.path.dirname(os.path.realpath(__file__))
 
 
 def log(msg):
@@ -68,6 +79,13 @@ def gh_json(*args):
 
 
 # ---------------------------------------------------------------- stage 1: codex
+def confine(root, path):
+    """Repo-relative path, or None when it points outside the checkout."""
+    full = os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path))
+    rel = os.path.relpath(full, os.path.realpath(root))
+    return None if rel == ".." or rel.startswith("../") else rel
+
+
 def parse_codex(text, root):
     """Findings from codex's review text: '- [P1] title — /path:a-b' plus indented body."""
     findings, cur = [], None
@@ -75,7 +93,7 @@ def parse_codex(text, root):
         m = FINDING.match(line)
         if m:
             pri, title, path, a, b = m.groups()
-            path = os.path.relpath(path, root) if os.path.isabs(path) else path
+            path = confine(root, path)
             cur = {"priority": int(pri), "title": title.strip(), "path": path,
                    "start": int(a), "end": int(b or a), "body": ""}
             findings.append(cur)
@@ -85,17 +103,56 @@ def parse_codex(text, root):
             cur = None
     for f in findings:
         f["body"] = f["body"].strip()
+        if f["path"] is None:  # never read, cite or post a path outside the checkout
+            f["path"], f["outside"] = "(outside the checkout)", True
     return findings
 
 
-def codex_review(root, base, title):
-    cmd = ["codex", "exec", "review", "--ephemeral", "--base", base, "--title", title,
-           "-c", "sandbox_mode=read-only", "-c", "approval_policy=never",
-           "-c", f"model_reasoning_effort={os.environ.get('AI_REVIEW_EFFORT', 'medium')}"]
-    if os.environ.get("AI_REVIEW_MODEL"):
-        cmd += ["-m", os.environ["AI_REVIEW_MODEL"]]
-    p = run(cmd, cwd=root, timeout=int(os.environ.get("AI_REVIEW_TIMEOUT", 1800)), inp="")
-    return p.stdout, parse_codex(p.stdout, root)
+def reviewer():
+    return os.environ.get("AI_REVIEWER", "codex")
+
+
+def model():
+    return os.environ.get("AI_REVIEW_MODEL") or (CODEX_MODEL if reviewer() == "codex" else "")
+
+
+CODEX_FLAGS = ["--ephemeral", "-c", "sandbox_mode=read-only", "-c", "approval_policy=never"]
+
+FIND_PROMPT = """Review the changes on this branch against {base} (`git diff {base}...HEAD`)
+as a strict code reviewer. Follow the review rules in AGENTS.md. Report only defects with a
+concrete trigger. List each finding as:
+- [P<0-3>] <title> — <repo-relative path>:<start>-<end>
+  <what breaks, for which input or state, and the fix>
+If there are none, say so in one line.
+"""
+
+
+def find(root, base, title):
+    timeout = int(os.environ.get("AI_REVIEW_TIMEOUT", 1800))
+    if reviewer() == "codex":
+        cmd = ["codex", "exec", "review", "--base", base, "--title", title, *CODEX_FLAGS,
+               "-c", f"model_reasoning_effort={os.environ.get('AI_REVIEW_EFFORT', 'medium')}"]
+        if model():
+            cmd += ["-m", model()]
+        out = run(cmd, cwd=root, timeout=timeout, inp="").stdout
+    elif reviewer() == "claude":
+        out = claude(root, FIND_PROMPT.format(base=base), timeout, os.environ.get("AI_REVIEW_MODEL"))
+    else:
+        raise RuntimeError(f"unknown AI_REVIEWER {reviewer()!r}")
+    return out, parse_codex(out, root)
+
+
+def claude(root, prompt, timeout, mdl=None):
+    cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence",
+           "--allowedTools", "Read", "Grep", "Glob",
+           "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+    if mdl:
+        cmd += ["--model", mdl]
+    out = run(cmd, cwd=root, inp=prompt, timeout=timeout).stdout
+    try:
+        return json.loads(out).get("result") or out
+    except ValueError:
+        return out
 
 
 # ---------------------------------------------------------------- stage 2: verify
@@ -129,6 +186,8 @@ def last_json(text, key):
 
 
 def excerpt(root, path, start, end, pad=40):
+    if confine(root, path) is None:
+        return "(outside the checkout: not read)"
     try:
         with open(os.path.join(root, path), errors="replace") as fh:
             lines = fh.readlines()
@@ -139,23 +198,18 @@ def excerpt(root, path, start, end, pad=40):
 
 
 def verify(root, findings, diff):
-    verifier = os.environ.get("VERIFIER", "claude")
+    verifier = os.environ.get("VERIFIER") or reviewer()
     payload = json.dumps([{"index": i, **{k: f[k] for k in ("priority", "title", "path", "start", "end", "body")}}
                           for i, f in enumerate(findings)], indent=1)
     timeout = int(os.environ.get("VERIFY_TIMEOUT", 900))
-    if verifier == "claude":
-        prompt = VERIFY_PROMPT.format(findings=payload) + \
-            "\nThe current directory is the PR head checkout; read the files you need.\n"
-        cmd = ["claude", "-p", "--output-format", "json", "--no-session-persistence",
-               "--allowedTools", "Read", "Grep", "Glob",
-               "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
-        if os.environ.get("VERIFY_MODEL"):
-            cmd += ["--model", os.environ["VERIFY_MODEL"]]
-        out = run(cmd, cwd=root, inp=prompt, timeout=timeout).stdout
-        try:
-            out = json.loads(out).get("result") or out
-        except ValueError:
-            pass
+    local = VERIFY_PROMPT.format(findings=payload) + \
+        "\nThe current directory is the PR head checkout; read the files you need.\n"
+    vmodel = os.environ.get("VERIFY_MODEL") or os.environ.get("AI_REVIEW_MODEL")
+    if verifier == "codex":
+        cmd = ["codex", "exec", *CODEX_FLAGS, "-m", vmodel or CODEX_MODEL, "-"]
+        out = run(cmd, cwd=root, inp=local, timeout=timeout).stdout
+    elif verifier == "claude":
+        out = claude(root, local, timeout, vmodel if reviewer() == "claude" else os.environ.get("VERIFY_MODEL"))
     elif verifier.startswith("openrouter:"):
         key = os.environ.get("OPENROUTER_API_KEY")
         if not key and os.environ.get("OPENROUTER_API_KEY_FILE"):
@@ -183,7 +237,7 @@ def verify(root, findings, diff):
         v = got.get(i) or {}
         f["verdict"] = v.get("verdict") if v.get("verdict") in ("confirmed", "refuted", "uncertain") else "uncertain"
         f["reason"] = str(v.get("reason") or "no verdict returned")[:1000]
-    return verifier
+    return f"{verifier} {vmodel or (CODEX_MODEL if verifier == 'codex' else '')}".strip()
 
 
 # ---------------------------------------------------------------- checkout
@@ -228,6 +282,18 @@ def scrub(text, roots):
     return text
 
 
+def pii_check(text):
+    """bin/issue's denylist scan over everything we post; raises (posts nothing) on a hit."""
+    issue = importlib.machinery.SourceFileLoader("issue", os.path.join(LIB, "issue")).load_module()
+    try:
+        hits = issue.pii_scan(text)
+    except OSError as e:
+        raise RuntimeError(f"PII denylist missing or unreadable ({e.__class__.__name__}); nothing posted")
+    if hits:
+        raise RuntimeError("PII scan hit (" + ", ".join(issue._describe_hit(d, t) for d, t in hits[:8])
+                           + "); nothing posted")
+
+
 def final_status(repo, head):
     st = gh_json("api", f"repos/{repo}/commits/{head}/status")
     for s in (st or {}).get("statuses") or []:
@@ -259,7 +325,7 @@ def post(repo, num, res, roots):
     refuted = [f for f in res["findings"] if f["verdict"] == "refuted"]
     summary = [MARK.format(head=res["head"]),
                f"### ai-review of `{res['head'][:12]}`",
-               f"codex found {len(res['findings'])}, verifier confirmed "
+               f"{res.get('reviewer', 'codex')} found {len(res['findings'])}, verifier confirmed "
                f"{sum(f['verdict'] == 'confirmed' for f in res['findings'])}, "
                f"refuted {len(refuted)} ({res['seconds']}s). "
                f"Blocking (confirmed or unverified P0/P1): {res['blocking']}."]
@@ -273,6 +339,7 @@ def post(repo, num, res, roots):
                     for f in refuted]
         summary += ["", "</details>"]
     review = {"commit_id": res["head"], "event": "COMMENT", "body": "\n".join(summary), "comments": comments}
+    pii_check(review["body"] + "\n" + "\n".join(c["body"] for c in comments))
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump(review, fh)
     try:
@@ -288,7 +355,8 @@ def post(repo, num, res, roots):
     ids = []
     if comments:
         for c in gh_json("api", f"repos/{repo}/pulls/{num}/reviews/{rv['id']}/comments?per_page=100") or []:
-            ids.append({"id": c["id"], "path": c["path"], "line": c.get("line"), "url": c["html_url"], "body": c["body"]})
+            ids.append({"id": c["id"], "path": c["path"], "line": c.get("line") or c.get("original_line"),
+                        "url": c["html_url"], "body": c["body"]})
     res["comment_ids"] = ids
     res["review_url"] = rv.get("html_url")
     state = "failure" if res["blocking"] else "success"
@@ -308,9 +376,17 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
         res = json.load(open(cache))
         if not do_post or res.get("posted"):
             return res
-    elif do_post and not force and final_status(repo, head) in ("success", "failure"):
-        log(f"{repo}#{num} {head[:12]}: already reviewed (status {CONTEXT} is final)")
-        return {"head": head, "reviewed": True, "skipped": "already reviewed", "blocking": 0, "findings": []}
+    elif do_post and not force and (state := final_status(repo, head)) in ("success", "failure"):
+        # Reviewed elsewhere (another agent, another HOME): trust the posted status, and
+        # keep a failure blocking, since its findings are not in this cache.
+        log(f"{repo}#{num} {head[:12]}: already reviewed (status {CONTEXT} is {state})")
+        res = {"head": head, "reviewed": True, "skipped": "already reviewed", "posted": True,
+               "blocking": int(state == "failure"), "findings": []}
+        if state == "failure":
+            res["findings"] = [{"priority": 1, "verdict": "confirmed", "path": "(see the PR)", "start": 0, "end": 0,
+                                "title": f"{CONTEXT} already failed on this head", "body": "Read the posted review.",
+                                "reason": "status posted by an earlier review"}]
+        return res
     else:
         res = None
 
@@ -333,8 +409,9 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
             run(["git", "-C", src, "worktree", "add", "--quiet", "--detach", root, head])
         try:
             diff = run(["git", "-C", root, "diff", "-U3", f"{base}...{head}"]).stdout
-            raw, findings = codex_review(root, base, pr["title"])
+            raw, findings = find(root, base, pr["title"])
             res = {"repo": repo, "pr": num, "head": head, "base": base, "codex_raw": raw,
+                   "reviewer": f"{reviewer()} {model()}".strip(),
                    "findings": findings, "verifier": None}
             if findings:
                 try:
@@ -360,7 +437,12 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
         roots = []
     res["_commentable"] = {k: set(v) for k, v in res.get("_commentable", {}).items()}
     if do_post and not res.get("posted"):
-        post(repo, num, res, roots)
+        try:
+            post(repo, num, res, roots)
+        except Exception as e:
+            set_status(repo, head, "error", f"posting failed: {e}"[:140])
+            json.dump({k: v for k, v in res.items() if k != "_commentable"}, open(cache + ".unposted", "w"), indent=1)
+            raise
         res["posted"] = True
     res["_commentable"] = {k: sorted(v) for k, v in res.get("_commentable", {}).items()}
     json.dump(res, open(cache, "w"), indent=1)
@@ -372,7 +454,7 @@ def pipeline_view(res):
     threads = []
     for f in res.get("findings", []):
         if f["priority"] in BLOCKING and f["verdict"] != "refuted":
-            c = next((c for c in res.get("comment_ids", []) if c["path"] == f["path"] and c.get("line") == f["end"]), {})
+            c = next((c for c in res.get("comment_ids", []) if c["path"] == f["path"] and c.get("line") in (f["end"], f["start"])), {})
             threads.append({"id": c.get("id"), "path": f["path"], "line": f["end"], "url": c.get("url"),
                             "body": f"[P{f['priority']}] {f['title']} ({f['verdict']})\n{f['body']}\n"
                                     f"Verifier: {f.get('reason', '')}"[:4000]})

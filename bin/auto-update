@@ -66,7 +66,7 @@ BUILD_USER= GIT_URL= BASE_BRANCH= MERGE_MODE=auto REVIEW_TIMEOUT=1200
 SKIP_RECIPES= BUILD_NOT_BUILT=yes FETCH_FAIL_UNPUBLISH_AFTER=2 EXTRA_PATH= GH_TOKEN_FILE=
 FAIL_ON_ATTENTION=no AI_REVIEW=required AI_REVIEW_TIMEOUT=1800 AI_REVIEW_EFFORT= VERIFIER= OPENROUTER_API_KEY_FILE=
 MAX_FIX_ROUNDS=2 REPLY_LIMIT=10
-REQUIRE_AGENT_APPROVAL=yes
+REQUIRE_AGENT_APPROVAL=no   # the fixer's own verdict; the review gate is ai-review (Codex)
 # REVIEW_CMD stays unset unless the config sets it: unset -> the default below,
 # explicitly empty (REVIEW_CMD=) -> agent review disabled.
 unset REVIEW_CMD
@@ -487,7 +487,7 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
         flags=$(current_flags "$flags" "$pnote" "$out")
         note dry "would commit to $branch, push, open a PR (ready for review), build in the chroot,"
         while read -r line; do [[ -n $line ]] && note dry "  then $line"; done < <(revdep_plan "$r")
-        note dry "run ai-review, the agent fixer/second opinion, then gate"
+        note dry "run ai-review (Codex), the Claude fixer on its findings, ai-review again, then gate"
         note dry "rebased recipe: $out; diff: $diff"
         [[ -n $changed ]] && note dry "not a pure recipe bump, changes our files: $(echo $changed)"
         [[ -n $flags ]] && note dry "flags: $flags"
@@ -506,7 +506,7 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
     if [[ -z $pr ]]; then
         pr=$(as_user gh pr create -R "$GH_REPO" --base "$BASE_BRANCH" --head "$branch" \
             --title "$r: rebase onto upstream $target ($new_ver)" \
-            --body "Automated rebase by \`bin/auto-update\` (run $run_id). The chroot build, the verified ai-review and the agent's second opinion are reported in one comment per run; it merges itself only when every gate passes.
+            --body "Automated rebase by \`bin/auto-update\` (run $run_id). The chroot build, the Codex ai-review (the review gate) and the Claude fixer are reported in one comment per run; it merges itself only when every gate passes.
 
 $body" | tail -1)
     fi
@@ -546,7 +546,8 @@ drive_pr() {  # drive_pr <recipe> <target> <repo names> <note> <branch> <pr url>
         local nthreads; nthreads=$(as_user jq -r '.threads | length' "$cr")
         cr_note="ai-review: $nthreads blocking finding(s) of $(as_user jq -r '.findings // 0' "$cr") on $head ($(as_user jq -r '.seconds // "cached"' "$cr")s)"
         [[ $(as_user jq -r '.off // false' "$cr") == true ]] && cr_note="ai-review gate off (AI_REVIEW=off)"
-        # Agent: fixer for the threads + second opinion.
+        # Agent (Claude): fixer for the threads. The author never reviews its own change, so
+        # the review gate is ai-review (Codex Sol) on the head after the fixer's commits.
         as_user bash -c 'git -C "$1" diff "origin/$2" HEAD > "$3"' _ "$CLONE" "$BASE_BRANCH" "$diff"
         [[ -s $tail_log ]] || as_user bash -c 'echo "(build of this commit happened in an earlier run; log in $2)" > "$1"' _ "$tail_log" "$LOG_DIR"
         agent_round "$r" "$num" "$cr" "$diff" "$report" "$tail_log"
@@ -594,7 +595,7 @@ for p in sys.stdin.read().split():
             [[ ! -s $cr || $(as_user jq -r '.threads | length' "$cr") == 0 ]] || reasons+=("blocking ai-review findings")
         fi
         if [[ $REQUIRE_AGENT_APPROVAL == yes ]]; then
-            [[ $agent_verdict == approve ]] || reasons+=("agent second opinion: $agent_verdict")
+            [[ $agent_verdict == approve ]] || reasons+=("fixer verdict (REQUIRE_AGENT_APPROVAL=yes): $agent_verdict")
         fi
     fi
     [[ $MERGE_MODE == auto ]] || reasons+=("MERGE_MODE=$MERGE_MODE")
@@ -616,7 +617,7 @@ for p in sys.stdin.read().split():
 - Rebase: upstream \`$target\` -> \`$new_ver\`, patches applied at fuzz 0: $([[ $(as_user jq -r .fuzz "$report") == false ]] && echo yes || echo NO)
 - Chroot build: **$build_ok**
 - $cr_note
-- Agent (fixer + second opinion): **$agent_verdict**, fix rounds this run: $round
+- Fixer (Claude; its verdict gates only with REQUIRE_AGENT_APPROVAL=yes): **$agent_verdict**, fix rounds this run: $round
 $(sed 's/^/  > /' <<<"$agent_notes")
 - Gates not met: $( ((${#reasons[@]})) && printf '%s; ' "${reasons[@]}" || echo none)
 - Outcome: $outcome
@@ -629,7 +630,7 @@ EOF
     built_tree=$(tree_hash "$r")
 
     if ((${#reasons[@]} == 0)); then
-        if as_user gh pr merge "$pr" -R "$GH_REPO" --squash --delete-branch --match-head-commit "$head" >/dev/null &&
+        if as_user gh pr merge "$pr" -R "$GH_REPO" --squash --delete-branch --admin --match-head-commit "$head" >/dev/null &&
            publish_files "$CLONE/recipes/$r" "$new_ver"; then
             as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.built-$r" "$(tree_hash "$r")"
             as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"

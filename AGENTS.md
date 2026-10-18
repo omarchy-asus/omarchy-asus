@@ -91,8 +91,24 @@ End the body with `Filed by <agent role>`.
 
 ## Code Review Rules
 
-`bin/ai-review` (codex, then a second model that tries to refute each finding) reviews every
-PR; a confirmed or unverified P0/P1 finding fails the required `ai-review` status.
+Every PR on every omarchy-asus repo needs the `ai-review` commit status (required check, admins
+included; it replaced CodeRabbit). Nobody runs it for you: **the agent that pushes reviews inline.**
+
+1. Push the branch, open the PR, then from the checkout at the PR head:
+   `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`
+   Codex `gpt-6.1-sol` finds issues, a fresh Codex Sol run tries to refute each one, and only
+   what survives is posted. A confirmed or unverified P0/P1 fails the status. It takes 1-5 min.
+2. Fix the findings and push (the next run reviews the new head), or answer the thread when no
+   change is right. Every review thread must be resolved before merging.
+3. For Codex-written work, review with Claude instead (`AI_REVIEWER=claude`): the author never
+   reviews its own change.
+4. Your own account's PRs merge with `gh pr merge N --squash --admin`. `--admin` only bypasses the
+   approval ruleset. Without it, the merge is refused, and nothing bypasses `ai-review`.
+   PRs from any other account need the maintainer's approving review.
+5. Everything ai-review posts goes through the PII scan first. A hit posts nothing and sets the
+   status to `error`; fix the text it came from (usually your code), not the scan.
+
+What reviewers flag:
 
 - Flag only what breaks: wrong behaviour with a concrete trigger, fail-open safety checks
   (signing, checksums, the PII scan, merge/publish gates), privilege mistakes between root

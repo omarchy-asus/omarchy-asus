@@ -1,9 +1,0 @@
-[Unit]
-Description=Review new PR heads every 10 minutes (bin/ai-review sweep)
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-
-[Install]
-WantedBy=timers.target

@@ -46,12 +46,12 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
                        └─ ok: branch auto-update/<r>, push, PR (ready for review)
                              → chroot build of the PR head (root: makechrootpkg only)
                              → bin/ai-review on the head: codex finds, a second model verifies (review + `ai-review` status)
-                             → headless agent: fixes or answers the blocking findings (edits only
-                               recipes/<r>/, never our patches/DELTA), second-opinion verdict
+                             → headless Claude fixer: fixes or answers the blocking findings (edits only
+                               recipes/<r>/, never our patches/DELTA); Codex reviews its commits
                              → fixes pushed? rebuild + ai-review of the new head (≤ MAX_FIX_ROUNDS)
                                (a fix outside NOTES.md is never auto-merged: a human merges)
                              → one PR comment with the results
-                             → gates all pass: squash-merge, bin/publish, bin/sync-release
+                             → gates all pass: squash-merge (--admin: bypasses only the approval ruleset), bin/publish, bin/sync-release
                                otherwise: PR stays open (next run resumes it), stale package
                                unpublished meanwhile
             build      recipe on the branch not in the repo db: build, publish, sync
@@ -95,7 +95,7 @@ bin/revdep-check --headers ~/.local/share/omarchy-asus/repo/x86_64/linux-omarchy
   a prompt, so anything else (PKGBUILD, sources, checksums, install files) waits for a human.
 - There are no flags. A flag is raised when upstream merged or closed one of the PRs our patches carry (`UPSTREAM_PRS`). It is also raised when a release contains a fix that a `fixed-upstream` line names. And it is raised when an exact-version dependency of the recipe as proposed (`depends=(x=ver)`) no longer matches upstream; this is re-checked on every run.
 - `bin/ai-review` reviewed the head, and no finding is blocking: a P0/P1 finding blocks unless the verifier refuted it, and an unverified one (verifier failed) blocks too.
-- The agent's second opinion approves (`REQUIRE_AGENT_APPROVAL=yes`). If `claude` is missing or `REVIEW_CMD` is empty, the PR waits for a human.
+- Optionally (`REQUIRE_AGENT_APPROVAL=yes`) the Claude fixer's own verdict approves too. It is not the review: the fixer is the author of its fix commits, and the review gate is the Codex `ai-review` above. If `codex` is missing, ai-review fails and the PR waits for a human.
 - `MERGE_MODE=auto`.
 
 After the merge, the run publishes only if `recipes/<r>` in the merge commit is the tree it built.
@@ -183,21 +183,10 @@ sudo bin/install-auto-update --uninstall --apply
 
 This stops and disables the timer, removes the units and `/usr/local/lib/omarchy-asus`. It keeps the config, the chroot and the user's state.
 
-## ai-review for every PR (user timer)
+## ai-review on every PR
 
-`bin/ai-review` replaces CodeRabbit for every repo the user can reach, not only for the
-pipeline's own PRs. `systemd/omarchy-asus-ai-review.{service,timer}` are **user** units
-(codex and claude run on the user's own logins): every 10 minutes, `bin/ai-review sweep --post`
-reviews each open PR of the user and its organisations whose head has no `ai-review`
-status yet, and posts one review plus the `ai-review` commit status. Branch protection
-requires `ai-review` in place of `CodeRabbit`.
-
-```bash
-install -Dm644 -t ~/.config/systemd/user systemd/omarchy-asus-ai-review.{service,timer}
-systemctl --user daemon-reload && systemctl --user enable --now omarchy-asus-ai-review.timer
-bin/ai-review sweep --dry-run          # what the next run would review
-bin/ai-review pr N --repo OWNER/REPO   # one PR, printed, nothing posted
-```
-
-GitHub traffic per sweep: one search per owner, then one PR view and one status read per
-open PR; a review adds two status writes and one review post.
+`bin/ai-review` replaces CodeRabbit on every omarchy-asus repo. There is no review service: the
+agent that opens or updates a PR reviews it inline, from its own checkout, on the user's Codex
+login (see AGENTS.md, "Code Review Rules"). This pipeline does the same for its rebase PRs.
+The `ai-review` commit status is the required check on every default branch (enforce_admins on).
+`bin/ai-review sweep --dry-run` lists open PRs whose head has no `ai-review` status yet.

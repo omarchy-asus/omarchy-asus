@@ -24,11 +24,12 @@ BUILD_USER=
 #MAX_FIX_ROUNDS=2            # agent fix -> push -> rebuild -> re-review rounds per run
 #REPLY_LIMIT=10              # review-thread replies per run (one API call each)
 
-# Headless agent (fixer for ai-review's blocking findings + second opinion). Empty disables it;
-# with REQUIRE_AGENT_APPROVAL=yes the PR then waits for a human.
+# Headless fixer (Claude) for ai-review's blocking findings. Empty disables it. The review gate
+# is ai-review (Codex): the fixer is the author, so its verdict gates only when
+# REQUIRE_AGENT_APPROVAL=yes (then an empty REVIEW_CMD makes the PR wait for a human).
 #REVIEW_CMD="claude -p --output-format json --no-session-persistence --allowedTools Read Grep Glob --disallowedTools Bash NotebookEdit WebFetch WebSearch"
 #REVIEW_TIMEOUT=1200
-#REQUIRE_AGENT_APPROVAL=yes
+#REQUIRE_AGENT_APPROVAL=no
 
 # Directories with gh, codex and claude for BUILD_USER (they are often user-installed),
 # e.g. EXTRA_PATH=/home/<user>/.local/bin:/home/<user>/.local/share/mise/shims
