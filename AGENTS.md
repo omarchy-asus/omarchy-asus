@@ -74,7 +74,9 @@ admin: once the required CI checks are green, the lander merges with `--admin`.
   fill it).
 - `bin/ai-review` (#50) is no longer a gate and the `ai-review` status is not required on any
   omarchy-asus repo. It stays available as an optional second opinion, and for outside
-  contributors' PRs (Code Review Rules below).
+  contributors' PRs (Code Review Rules below). The exception is `bin/auto-update`: it is still
+  the review gate of its unattended rebase PRs, where no clud reviewer runs (#77,
+  systemd/README.md "Merge gates"). If codex is unavailable, those PRs wait for a human.
 - Pull requests from external contributors are reviewed by us, against these rules, and need
   the maintainer's approving review.
 

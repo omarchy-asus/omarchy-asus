@@ -7,7 +7,7 @@ A daily systemd timer keeps the omarchy-asus repo current with upstream:
 
 When upstream moves past a package's base version, the service has two outcomes:
 
-- It rebases our patches onto the new upstream recipe. The PR goes through a chroot build, a verified AI review (`bin/ai-review`) and an agent review. It merges and publishes only when every gate passes.
+- It rebases our patches onto the new upstream recipe. The PR goes through a chroot build and a verified AI review (`bin/ai-review`), plus the Claude fixer. `bin/ai-review` is this pipeline's own review gate, because no clud reviewer runs in the unattended loop. It merges and publishes only when every gate passes.
 - Otherwise, it removes the package from the repo so the stock build flows through.
 
 Nothing here is installed by default. `bin/install-auto-update` prints what it would do. It changes the system only with `--apply`, run through sudo by the user.
@@ -96,8 +96,8 @@ bin/revdep-check --headers ~/.local/share/omarchy-asus/repo/x86_64/linux-omarchy
 - The agent's fix commits changed nothing in the recipe but `NOTES.md`. Its edit limits are only
   a prompt, so anything else (PKGBUILD, sources, checksums, install files) waits for a human.
 - There are no flags. A flag is raised when upstream merged or closed one of the PRs our patches carry (`UPSTREAM_PRS`). It is also raised when a release contains a fix that a `fixed-upstream` line names. And it is raised when an exact-version dependency of the recipe as proposed (`depends=(x=ver)`) no longer matches upstream; this is re-checked on every run.
-- `bin/ai-review` reviewed the head, and no finding is blocking: a P0/P1 finding blocks unless the verifier refuted it, and an unverified one (verifier failed) blocks too.
-- Optionally (`REQUIRE_AGENT_APPROVAL=yes`) the Claude fixer's own verdict approves too. It is not the review: the fixer is the author of its fix commits, and the review gate is the Codex `ai-review` above. If `codex` is missing, ai-review fails and the PR waits for a human.
+- `bin/ai-review` reviewed the head, and no finding is blocking: a P0/P1 finding blocks unless the verifier refuted it, and an unverified one (verifier failed) blocks too. This is the review gate for this pipeline (#77). If `codex` is missing or not logged in, or the review errors or times out, `bin/ai-review` exits non-zero and the head counts as not reviewed ("ai-review has not reviewed the head"). The PR stays open for a human, the stale package is unpublished meanwhile, and the next run retries. `AI_REVIEW=off` removes this gate entirely, so PRs then merge on the build and recipe gates alone. Use it only for testing, together with `MERGE_MODE=pr`.
+- Optionally (`REQUIRE_AGENT_APPROVAL=yes`) the Claude fixer's own verdict approves too. It is not the review: the fixer is the author of its fix commits, and the review gate is the Codex `ai-review` above.
 - `MERGE_MODE=auto`.
 
 After the merge, the run publishes only if `recipes/<r>` in the merge commit is the tree it built.
@@ -188,7 +188,10 @@ This stops and disables the timer, removes the units and `/usr/local/lib/omarchy
 ## ai-review
 
 `bin/ai-review` runs on the user's Codex login, from a local checkout; there is no review
-service. This pipeline still gates its own rebase PRs on it. It is no longer a required check:
-the maintainer's own work is reviewed inside clud's `/do` and `/grind` workflow (see AGENTS.md,
-"Who writes, who reviews"), and `ai-review` stays available for outside contributors' PRs.
+service. `bin/auto-update` keeps it as the review gate of its rebase PRs (decided in #77),
+because it runs unattended and no clud reviewer runs in that loop. The required `ai-review`
+status is gone from main (#76), so the gate lives in auto-update's own merge decision (see
+"Merge gates"), not in branch protection. For the maintainer's own work, which clud's `/do` and
+`/grind` workflow reviews (see AGENTS.md, "Who writes, who reviews"), `bin/ai-review` is only an
+optional second opinion. It stays available for outside contributors' PRs.
 `bin/ai-review sweep --dry-run` lists open PRs whose head has no `ai-review` status yet.

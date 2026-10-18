@@ -12,6 +12,8 @@
 #      c. the agent's notes and reply contain a denylisted word: not posted verbatim (the
 #         reply goes to ai-review, never to GitHub; ai-review PII-scans its one final post)
 #      d. the agent command fails: no absolute path in the PR comment or the status
+#      e. the PII scan fails closed (bin/sync-release --pii-scan-text only, no full run)
+#      f. ai-review cannot run (codex missing): the PR is left open, nothing merged or published
 # The fake upstream is a local clone of Arch's hyprland packaging with two extra tags;
 # upstream versions are overridden with OMARCHY_ASUS_UPSTREAM_OVERRIDE. State goes to a
 # temp dir; the real repo db is only read (through a symlink). Downloads the Hyprland
@@ -72,12 +74,25 @@ fi
 # ---------------------------------------------------------------- 4. stubbed full runs
 # A copy of bin/ in which every step that builds, signs, publishes or calls a network is a
 # stub that logs its call to $T/calls. bin/sync-release --pii-scan(-text) stays the real one.
-stub_case() {  # stub_case <name> <base changes the recipe: 0|1> <agent: approve|pii|fail>
-    local name=$1 race=$2 agent=$3
+stub_case() {  # stub_case <name> <base changes the recipe: 0|1> <agent: approve|pii|fail> [review: off|nocodex]
+    local name=$1 race=$2 agent=$3 review=${4:-off}
     T=$S/stub-$name
     local L=$T/lib B=$T/bin
     mkdir -p "$L" "$B" "$T/posted" "$T/cfg/omarchy-asus"
     cp -a "$W/bin/." "$L/"
+    local ai_review=off
+    if [[ $review == nocodex ]]; then
+        # ai-review without codex: what the real bin/ai-review does when codex is not on PATH
+        # (no --json file, exit 1). AI_REVIEW=required makes auto-update depend on it.
+        ai_review=required
+        cat >"$L/ai-review" <<'EOF'
+#!/bin/bash
+echo "ai-review $*" >>"$T/calls"
+echo "ai-review: codex not found on PATH: install it and run codex login; no review was made, so the gate stays closed" >&2
+exit 1
+EOF
+        chmod +x "$L/ai-review"
+    fi
     mv "$L/sync-release" "$L/sync-release.real"
     : >"$T/calls"
     export T
@@ -164,7 +179,7 @@ EOF
     cat >"$T/cfg/omarchy-asus/auto-update.conf" <<EOF
 GIT_URL=$T/hub.git
 EXTRA_PATH=$B
-AI_REVIEW=off
+AI_REVIEW=$ai_review
 REVIEW_CMD=$B/agent
 MERGE_MODE=auto
 EOF
@@ -215,6 +230,16 @@ grep -q 'agent command failed or timed out (see run [0-9-]*: fake.agent.json)' "
 expect $? 0 "the failure names the run file by run id"
 grep -qE "(^|[^[:alnum:]])/(home|tmp|root|var)/|$T" "$T/posted/comment.md"; expect $? 1 "no absolute path in the PR comment"
 grep -qF "$T" "$T/data/status.json"; expect $? 1 "no absolute path in status.json"
+
+echo "== 4f. codex is missing: ai-review cannot review, so the PR waits"
+stub_case nocodex 0 approve nocodex
+grep -q '^ai-review pr ' "$T/calls"; expect $? 0 "ai-review was asked to review the head"
+grep -q '^gh pr merge ' "$T/calls"; expect $? 1 "not merged without a review"
+grep -q '^publish ' "$T/calls"; expect $? 1 "nothing published without a review"
+expect "$(last result)" attention "status: the PR only needs attention"
+expect "$(last class)" "" "no failure class"
+last message | grep -q 'ai-review has not reviewed the head'; expect $? 0 "status names the missing review"
+grep -q 'ai-review has not reviewed the head' "$T/posted/comment.md"; expect $? 0 "the PR comment names the missing review"
 
 echo "== 4e. the PII scan fails closed"
 printf 'hello\n' >"$T/text.md"
