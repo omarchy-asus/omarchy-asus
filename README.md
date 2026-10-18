@@ -175,3 +175,7 @@ Where our fixes are headed:
   signing and publishing stay on the maintainer's machine.
 
 Maintained by [@rdoupe](https://github.com/rdoupe) and contributors.
+
+## License
+
+The tooling, docs and our own recipe files are [MIT](LICENSE). Packaged software keeps its own upstream license (each recipe declares it), and patches carried from upstream projects keep theirs.
