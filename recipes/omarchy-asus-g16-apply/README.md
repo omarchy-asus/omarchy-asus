@@ -27,8 +27,7 @@ omarchy-asus-g16-apply quiet-fans          # an opt-in fix is applied only when 
 omarchy-asus-g16-apply --list
 ```
 
-Run it as your normal user. System steps go through `sudo`. `bin/omarchy-asus-setup`
-offers it as its last step on a fresh install.
+Run it as your normal user. System steps go through `sudo`.
 
 `--check` lists, for each fix:
 
