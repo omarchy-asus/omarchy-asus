@@ -21,9 +21,12 @@ DB_URL=https://github.com/$GH_REPO/releases/download/x86_64/$REPO.db
 KEYRING_PKG=omarchy-asus-keyring
 # Offered as the optional last step on a fresh install.
 G16_PKGS=(omarchy-asus-g16 asus-rog-nkey-winlock omarchy-asus-g16-apply)
+# Packages only the repo ships (no stock build): left behind by --uninstall unless removed.
+REPO_ONLY_PKGS=(omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock asus-zephyrus-g16-control hyprpm)
 
-CONF=/etc/pacman.conf
-SNIPPET=/etc/pacman.d/custom-repos.conf
+# The overrides exist for the offline test (tests/ci/setup-uninstall.sh).
+CONF=${OMARCHY_ASUS_PACMAN_CONF:-/etc/pacman.conf}
+SNIPPET=${OMARCHY_ASUS_CUSTOM_REPOS:-/etc/pacman.d/custom-repos.conf}
 MARKER="Include = $SNIPPET"
 HOOK_DIR=$HOME/.config/omarchy/hooks/pre-refresh-pacman.d
 HOOK=$HOOK_DIR/add-omarchy-asus-repo
@@ -538,11 +541,63 @@ do_install() {
   info "Undo with: $SELF --uninstall"
 }
 
+# Installed packages that come from the repo, without the keyring (removed on its own):
+# the repo's package list against the installed ones, plus any installed REPO_ONLY_PKGS
+# in case the repo database isn't synced.
+repo_installed() {
+  local pkg
+  {
+    comm -12 <(pacman -Slq "$REPO" 2>/dev/null | sort -u) <(pacman -Qq 2>/dev/null | sort -u) || true
+    for pkg in "${REPO_ONLY_PKGS[@]}"; do
+      if pacman -Q "$pkg" >/dev/null 2>&1; then echo "$pkg"; fi
+    done
+  } | sort -u | grep -vxF "$KEYRING_PKG" || true
+}
+
+# After going back: the packages from the repo that no other repo has. Once the repo is
+# gone they never update. Removing them is offered, defaulting to no.
+offer_leftover_removal() {
+  local snapshot=("$@") leftovers=() elsewhere sl pkg
+  step "Packages only the $REPO repo had"
+  # Without a full listing, stock replacements (linux-omarchy) would look repo-only.
+  if ! sl=$(pacman -Sl 2>/dev/null) || [[ -z $sl ]]; then
+    warn "could not list the configured repos (pacman -Sl); skipping the leftover check."
+    return 0
+  fi
+  elsewhere=" $(awk -v repo="$REPO" '$1 != repo { print $2 }' <<<"$sl" | tr '\n' ' ') "
+  for pkg in "${snapshot[@]}"; do
+    [[ $elsewhere == *" $pkg "* ]] && continue
+    pacman -Q "$pkg" >/dev/null 2>&1 || continue
+    leftovers+=("$pkg")
+  done
+  if ((${#leftovers[@]} == 0)); then
+    ok "none installed"
+    return 0
+  fi
+  info "These came from the $REPO repo, have no stock build, and no longer get updates:"
+  for pkg in "${leftovers[@]}"; do
+    info "  $pkg"
+  done
+  if [[ " ${leftovers[*]} " == *" omarchy-asus-g16 "* ]]; then
+    info "omarchy-asus-g16 sets HibernateMode=shutdown; removing it restores the stock hibernate mode."
+  fi
+  if confirm "Remove them with 'pacman -Rns'?"; then
+    as_root env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Rns "${leftovers[@]}" ||
+      warn "could not remove them. Run 'sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Rns ${leftovers[*]}' to retry."
+  else
+    info "kept. Remove them later with 'sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Rns ${leftovers[*]}'."
+  fi
+}
+
 do_uninstall() {
   check_user
+  local snapshot=()
+  mapfile -t snapshot < <(repo_installed)
   step "Removing the omarchy-asus repo"
   info "This removes the hook, the repo section, the keyring package and the key, then runs"
-  info "pacman -Syuu so the omarchy-asus builds go back to the stock ones."
+  info "pacman -Syuu so the omarchy-asus builds go back to the stock ones. Before that it warns"
+  info "about the stock NVIDIA driver's hibernate hang; afterwards it lists the packages only"
+  info "the repo had and offers to remove them (default no)."
   confirm "Continue?" || die "cancelled"
 
   step "Removing the pre-refresh hook"
@@ -575,11 +630,20 @@ do_uninstall() {
   # `omarchy update` runs pacman -Syu, which never downgrades, so this one
   # transaction bypasses Omarchy's update guard with its documented override.
   step "Going back to the stock builds"
+  if ((DRY_RUN)) || [[ " ${snapshot[*]} " == *" nvidia-open-dkms "* ]] || pacman -Q nvidia-open-dkms >/dev/null 2>&1; then
+    warn "the stock nvidia-open-dkms lacks the NVIDIA/open-gpu-kernel-modules#1412 fix. On a GA605KM the"
+    warn "machine can hang at power-off after writing the hibernate image (omarchy-asus #11)."
+    warn "Suspend-then-hibernate is the default lid action, so the battery can drain overnight."
+    warn "To avoid it, keep a locally patched driver (for example, add nvidia-open-dkms to IgnorePkg"
+    warn "in $CONF before going back), or disable hibernation until #1412 lands."
+  fi
   if confirm "Run 'pacman -Syuu' now? (-uu downgrades the omarchy-asus builds to stock)"; then
     as_root env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu
   else
     warn "skipped. Run 'sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu' to go back to the stock builds."
   fi
+
+  offer_leftover_removal "${snapshot[@]}"
 }
 
 ((DRY_RUN)) && printf '%s(dry run: privileged commands and file writes are printed, not run)%s\n' "$Y" "$N"
