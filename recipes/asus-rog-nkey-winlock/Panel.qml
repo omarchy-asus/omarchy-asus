@@ -215,6 +215,8 @@ Panel {
       root.showOnBattery = bool(m["SlashShowOnBattery"])
       root.showBatteryWarning = bool(m["SlashShowBatteryWarning"])
       root.showOnLidClosed = bool(m["SlashShowOnLidClosed"])
+    } else {
+      root.slashOn = false
     }
 
     root.refreshHz = parseInt(m["RefreshHz"]) || 0
@@ -378,7 +380,7 @@ Panel {
     onPressed: function(b) {
       if (b === Qt.RightButton) {
         if (root.hasAura) root.toggleKeyboard()
-        else root.toggleSlash()
+        else if (root.hasSlash) root.toggleSlash()
       } else root.toggle()
     }
   }
