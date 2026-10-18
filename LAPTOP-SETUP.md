@@ -13,7 +13,7 @@ the stock ones. Packages are served from the `x86_64` release of
 There are two ways to set it up. They give the same result:
 
 - **One step:** run `bin/omarchy-asus-setup` (below).
-- **Manual:** follow sections 1 to 5.
+- **Manual:** follow sections 1 to 4. Section 5 is for removing it again.
 
 Read [Switching an existing install](#switching-an-existing-install) first either way.
 
@@ -98,7 +98,8 @@ before you run the script. The script only warns about them.
 
 ## Manual setup
 
-Sections 1 to 5 do by hand what the script does. Section 4 is a good check after either method.
+Sections 1 to 4 do by hand what the script does. Section 4 is a good check after either method.
+Section 5 undoes the setup, by hand or with `omarchy-asus-setup --uninstall`.
 
 ## 1. Import and locally sign the repo key
 
@@ -179,13 +180,18 @@ and IgnorePkg would block both.
 
 ## 5. Back out
 
-If `custom-repos.conf` also holds other repos, delete only the `[omarchy-asus]` section, and keep the
-file and its `Include` line. `omarchy-asus-setup --uninstall` handles this for you.
+This removes only the `[omarchy-asus]` section from `custom-repos.conf`. The file and its `Include`
+line are deleted only if no other repos are left in it. `omarchy-asus-setup --uninstall` does the
+same.
 
 ```bash
 rm ~/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo
-sudo sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{$d;N;/\n$/d;D}' /etc/pacman.conf   # or: omarchy refresh pacman
-sudo rm /etc/pacman.d/custom-repos.conf
+f=/etc/pacman.d/custom-repos.conf
+sudo sed -i '/^\[omarchy-asus\]$/,/^\[/{/^\[omarchy-asus\]$/d;/^\[/!d}' "$f"   # drop only our section
+if ! grep -q '[^[:space:]]' "$f"; then   # no other repos left: remove the file and its Include line
+  sudo sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{$d;N;/\n$/d;D}' /etc/pacman.conf
+  sudo rm "$f"
+fi
 pacman -Q omarchy-asus-keyring && sudo pacman -R omarchy-asus-keyring   # if installed
 sudo pacman-key --delete 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
 sudo env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Syuu   # -uu downgrades the omarchy-asus builds back to stock
