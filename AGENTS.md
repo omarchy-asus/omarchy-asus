@@ -94,16 +94,16 @@ Every PR on every omarchy-asus repo needs the `ai-review` commit status (require
 included; it replaced CodeRabbit). Nobody runs it for you: **the agent that pushes reviews inline,
 and nothing goes to GitHub until you and the reviewer agree.**
 
-1. Push the branch and open the PR, then review locally from the checkout at the PR head (clean,
-   committed): `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout .`
+1. Open the PR, then review your local commit from a clean checkout (nothing to push yet):
+   `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout .`
    Codex `gpt-6.1-sol` finds issues, and a fresh Codex Sol run tries to refute each one. The
    findings come back to you (`items`, each with an `id`); nothing is posted. This takes 1-5 min.
 2. Settle every finding with the reviewer, still locally:
-   - fix it: commit and push, then run step 1 again (the new head gets a fresh review);
+   - fix it: commit (don't push), then run step 1 again (the new commit gets a fresh review);
    - or answer it: `--reply answers.json` with `{"<id>": "why this is not a defect"}`. The reviewer
      checks each answer against the code and withdraws the finding only if the code agrees.
-3. When you agree (no finding you still dispute; normally no blocking P0/P1 left), post once:
-   `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`. This puts one review
+3. When you agree (no finding you still dispute; normally no blocking P0/P1 left), push once and
+   post once: `git push`, then `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`. This puts one review
    (findings, your answers, the reviewer's checks) and the status on the head. PRs that
    don't target the default branch get the review but no status (a retarget means a new review). It never reviews
    again, and it refuses a head that has no local review.

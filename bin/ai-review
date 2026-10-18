@@ -17,8 +17,8 @@ Agents run it inline, in their own checkout. Nothing reaches GitHub until both a
   bin/ai-review pr N --checkout .                  review the head; findings come back to you
   bin/ai-review pr N --checkout . --reply F.json   answer findings ({"<id>": "why"}); the
                                                    reviewer re-checks each answer in the code
-  (or fix, commit and push: the new head gets a fresh review)
-  bin/ai-review pr N --checkout . --post           post the agreed result once: one review and
+  (or fix and commit, no push: the new commit gets a fresh review)
+  git push; bin/ai-review pr N --checkout . --post  push once, post the agreed result once: one review and
                                                    the `ai-review` status (no new review)
 
 --post gives the PR one review (inline comments where the line is in the diff) and an
@@ -519,21 +519,28 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
     """
     fields = "headRefOid,baseRefOid,baseRefName,title,isCrossRepository"
     pr = gh_json("pr", "view", str(num), "-R", repo, "--json", fields)
-    if checkout:  # the checkout must be the PR head; GitHub can lag a just-pushed head
-        local = run(["git", "-C", checkout, "rev-parse", "HEAD"]).stdout.strip()
-        for _ in range(6):
-            if pr["headRefOid"] == local:
-                break
-            time.sleep(5)
-            pr = gh_json("pr", "view", str(num), "-R", repo, "--json", fields)
-        if pr["headRefOid"] != local:
-            raise RuntimeError(f"--checkout {checkout} is at {local[:12]}, the PR head is {pr['headRefOid'][:12]}")
+    head, base = pr["headRefOid"], pr["baseRefOid"]
+    if checkout:
+        # The rounds review the checkout's local commit: nothing has to be pushed until the
+        # final --post, which needs that same commit to be the PR head.
         if run(["git", "-C", checkout, "status", "--porcelain"]).stdout.strip():
             raise RuntimeError(f"--checkout {checkout} has uncommitted or untracked changes: "
-                               "the review must see exactly the PR head")
-    head, base = pr["headRefOid"], pr["baseRefOid"]
+                               "commit them; the review must see exactly the commit it covers")
+        local = run(["git", "-C", checkout, "rev-parse", "HEAD"]).stdout.strip()
+        if do_post:  # GitHub can lag a just-pushed head
+            for _ in range(6):
+                if pr["headRefOid"] == local:
+                    break
+                time.sleep(5)
+                pr = gh_json("pr", "view", str(num), "-R", repo, "--json", fields)
+            if pr["headRefOid"] != local:
+                raise RuntimeError(f"push first: the PR head is {pr['headRefOid'][:12]}, the checkout is at {local[:12]}")
+        head, base = local, pr["baseRefOid"]
+        run(git_cred("-C", checkout, "fetch", "--quiet", f"https://github.com/{repo}.git", base))
+        mb = run(["git", "-C", checkout, "merge-base", base, head]).stdout.strip()
+    else:
+        mb = merge_base(repo, base, head)  # a retargeted PR (same head, new diff) is reviewed again
     os.makedirs(DATA, exist_ok=True)
-    mb = merge_base(repo, base, head)  # a retargeted PR (same head, new diff) is reviewed again
     # keyed by reviewer too: AI_REVIEWER=claude must never reuse a Codex review
     target = re.sub(r"[^A-Za-z0-9._-]", "_", pr["baseRefName"])  # a retarget can keep the merge-base
     cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}-{mb[:12]}-{target}-{reviewer()}.json")
