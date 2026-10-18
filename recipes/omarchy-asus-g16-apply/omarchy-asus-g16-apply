@@ -1,0 +1,724 @@
+#!/bin/bash
+# omarchy-asus-g16-apply: apply the ASUS ROG Zephyrus G16 GA605KM fixes that no
+# package can ship, because they live in your own config or in /etc. EXPERIMENTAL.
+#
+#   omarchy-asus-g16-apply --check          report every known G16 fix (read-only)
+#   omarchy-asus-g16-apply --dry-run [FIX]  show what applying would change
+#   omarchy-asus-g16-apply [FIX...]         apply the default fixes, or the named ones
+#   omarchy-asus-g16-apply --list           list the fixes this command applies
+#
+#   --yes    don't ask before applying     --force  skip the GA605KM model check
+#
+# Each fix does what the omarchy-asus fork's install leaf or migration does, with
+# the same files, contents and commands. Nothing of Omarchy's is edited. A fix you
+# already have in your own form (any setting of your own for the same thing) is
+# reported as "present (local)" and left alone; nothing is overwritten. Run it as
+# your normal user; it calls sudo for the system steps.
+# check_<fix> and apply_<fix> run by name (check_fix, the apply loop).
+# shellcheck disable=SC2329
+set -uo pipefail
+
+SHARE=${OMARCHY_ASUS_G16_APPLY_SHARE:-/usr/share/omarchy-asus-g16-apply}
+LIB=${OMARCHY_ASUS_G16_APPLY_LIB:-/usr/lib/omarchy-asus-g16-apply}
+# Test prefix for /sys, /etc, /usr, /var and /dev. Empty on a real system; a run
+# with a prefix can only check or dry-run.
+ROOT=${OMARCHY_ASUS_G16_ROOT:-}
+# The Lua lines added to hyprland.lua always name the installed files.
+INSTALLED_SHARE=/usr/share/omarchy-asus-g16-apply
+
+DEFAULT_FIXES=(hybrid-video hdmi-cursor audio-master rtkit asusd-power-profiles winlock)
+OPTIN_FIXES=(initramfs-no-nvidia quiet-fans g16-widget)
+
+declare -A DESC=(
+  [hybrid-video]="VA-API, mpv and Chromium video decode on the iGPU instead of the RTX (fork asus/hybrid-video-decode)"
+  [hdmi-cursor]="software cursor while a monitor on the RTX is connected (fork asus/hdmi-cursor)"
+  [audio-master]="ALC285 hardware Master at 100 % under the soft mixer (fork asus/audio)"
+  [rtkit]="rtkit, so PipeWire gets realtime scheduling (fork asus/rtkit)"
+  [asusd-power-profiles]="asusd stops switching the power profile and EPP itself (fork asus/asusd-power-profiles)"
+  [winlock]="enable the g16-winlock user service (asus-rog-nkey-winlock)"
+  [initramfs-no-nvidia]="opt-in: drop NVIDIA early load from the initramfs and rebuild it (fork carry/initramfs-8263)"
+  [quiet-fans]="opt-in, EXPERIMENTAL: fans off at idle on battery (fork asus/ga605km-quiet-fans helper)"
+  [g16-widget]="opt-in: link and enable the G16 Control bar widget (asus-zephyrus-g16-control)"
+)
+
+DRY_RUN=0 CHECK=0 YES=0 FORCE=0
+SELECTED=()
+
+usage() { sed -n '2,16s/^# \{0,1\}//p' "$0"; }
+
+is_fix() {
+  local f
+  for f in "${DEFAULT_FIXES[@]}" "${OPTIN_FIXES[@]}"; do [[ $f == "$1" ]] && return 0; done
+  return 1
+}
+
+is_optin() {
+  local f
+  for f in "${OPTIN_FIXES[@]}"; do [[ $f == "$1" ]] && return 0; done
+  return 1
+}
+
+for arg in "$@"; do
+  case $arg in
+    --check) CHECK=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --yes | -y) YES=1 ;;
+    --force) FORCE=1 ;;
+    --list)
+      for f in "${DEFAULT_FIXES[@]}" "${OPTIN_FIXES[@]}"; do printf '%-22s %s\n' "$f" "${DESC[$f]}"; done
+      exit 0
+      ;;
+    -h | --help) usage; exit 0 ;;
+    -*) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
+    *)
+      is_fix "$arg" || { echo "Unknown fix: $arg (see --list)" >&2; exit 2; }
+      SELECTED+=("$arg")
+      ;;
+  esac
+done
+
+if [[ -t 1 ]]; then B=$'\e[1m' R=$'\e[31m' Y=$'\e[33m' G=$'\e[32m' N=$'\e[0m'; else B='' R='' Y='' G='' N=''; fi
+step() { printf '\n%s==> %s%s\n' "$B" "$*" "$N"; }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '    %swarning:%s %s\n' "$Y" "$N" "$*" >&2; }
+die() { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+# Path under the test prefix.
+r() { printf '%s%s' "$ROOT" "$1"; }
+# ~ for $HOME in messages.
+tilde() { printf '%s' "${1/#"$HOME"/\~}"; }
+
+# Under --dry-run these print what they would do instead of doing it.
+run() {
+  if ((DRY_RUN)); then printf '    [dry-run] %s\n' "$*"; else "$@"; fi
+}
+as_root() {
+  if ((DRY_RUN)); then printf '    [dry-run] sudo %s\n' "$*"; else sudo "$@"; fi
+}
+
+# The fork's tools, shipped unchanged, find each other by name.
+PATH=$LIB/bin:$PATH
+if [[ -n $ROOT ]]; then
+  export OMARCHY_PCI_DEVICES_PATH=${OMARCHY_PCI_DEVICES_PATH:-$ROOT/sys/bus/pci/devices}
+  export OMARCHY_DRI_BY_PATH=${OMARCHY_DRI_BY_PATH:-$ROOT/dev/dri/by-path}
+fi
+# hybrid_video_pin_mpv, hybrid_video_pin_chromium, hybrid_video_mpv_sets and
+# HYBRID_VIDEO_* from the fork's install/helpers/hybrid-video-decode.sh.
+# shellcheck source=/dev/null
+source "$SHARE/fork/hybrid-video-decode.sh" || die "missing $SHARE/fork/hybrid-video-decode.sh"
+HYBRID_VIDEO_MPV_COMMENT="# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."
+
+HYPR_CONF=$HOME/.config/hypr/hyprland.lua
+
+# ---------------------------------------------------------------------------
+# Hardware and ownership checks (cached sysfs and config files only).
+
+dmi() { local v=""; read -r v <"$(r "/sys/class/dmi/id/$1")" 2>/dev/null; printf '%s' "$v"; }
+# omarchy-hw-asus-rog
+is_asus_rog() { [[ $(dmi sys_vendor) == "ASUSTeK COMPUTER INC." && $(dmi product_family) == *ROG* ]]; }
+# omarchy-hw-match GA605KM
+is_ga605km() {
+  local p f
+  p=$(dmi product_name) f=$(dmi product_family)
+  [[ ${p,,} == *ga605km* || ${f,,} == *ga605km* ]]
+}
+
+# Another tool owns the power profile: the fork's external-owner toggle, or a
+# local power manager. Prints what it found.
+power_owner() {
+  local toggle=$HOME/.local/state/omarchy/toggles/powerprofiles-autoswitch-off unit
+  if [[ -f $toggle ]]; then
+    echo "toggle $(tilde "$toggle")"
+    return 0
+  fi
+  for unit in "$HOME/.config/systemd/user/rog-power.service" "$(r /etc/systemd/user/rog-power.service)" \
+    "$(r /etc/systemd/system/rog-power.service)"; do
+    if [[ -e $unit ]]; then
+      echo "rog-power ($(tilde "$unit"))"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Non-comment lines of the user's Hyprland config matching an ERE, not counting
+# the lines this command adds. Prints the first file.
+hypr_sets() {
+  local f
+  [[ -d $HOME/.config/hypr ]] || return 1
+  while IFS= read -r f; do
+    if grep -vE '^[[:space:]]*(--|#)' "$f" | grep -vF "$INSTALLED_SHARE" | grep -qE "$1"; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  done < <(find "$HOME/.config/hypr" -maxdepth 3 -type f \( -name '*.lua' -o -name '*.conf' \) 2>/dev/null | sort)
+  return 1
+}
+
+# A LIBVA_DRIVER_NAME of the user's own: Hyprland config, uwsm or environment.d.
+libva_set_by_user() {
+  local f
+  if f=$(hypr_sets 'LIBVA_DRIVER_NAME'); then
+    printf '%s\n' "$f"
+    return 0
+  fi
+  for f in "$HOME/.config/uwsm/env" "$HOME/.config/uwsm/env-hyprland" "$HOME"/.config/environment.d/*.conf; do
+    [[ -f $f ]] && grep -qE '^[[:space:]]*(export[[:space:]]+)?LIBVA_DRIVER_NAME=' "$f" && { printf '%s\n' "$f"; return 0; }
+  done
+  return 1
+}
+
+# The two lines a Hyprland fix adds to hyprland.lua.
+lua_comment() { printf -- '-- omarchy-asus-g16-apply %s: %s (delete this line and the next to undo)' "$1" "$2"; }
+lua_line() {
+  printf 'do local f = "%s/hypr/%s"; local h = io.open(f, "r"); if h then h:close(); dofile(f) end end' "$INSTALLED_SHARE" "$1"
+}
+hypr_has_line() { [[ -f $HYPR_CONF ]] && grep -qxF "$(lua_line "$1")" "$HYPR_CONF"; }
+
+hypr_append() {
+  local fix=$1 file=$2 summary=$3
+  if ((DRY_RUN)); then
+    printf '    [dry-run] append to %s:\n        %s\n        %s\n' "$(tilde "$HYPR_CONF")" "$(lua_comment "$fix" "$summary")" "$(lua_line "$file")"
+    return 0
+  fi
+  [[ -f $HYPR_CONF ]] || { warn "$(tilde "$HYPR_CONF") not found"; return 1; }
+  # Append in place, which keeps a symlinked config pointing where it did.
+  [[ -s $HYPR_CONF && -n $(tail -c1 "$HYPR_CONF") ]] && echo >>"$HYPR_CONF"
+  printf '\n%s\n%s\n' "$(lua_comment "$fix" "$summary")" "$(lua_line "$file")" >>"$HYPR_CONF"
+  info "added to $(tilde "$HYPR_CONF")"
+}
+
+# drm cards: an NVIDIA one next to one from another vendor (hybrid-cursor.lua's test).
+drm_hybrid() {
+  local v nvidia=0 other=0 card
+  for card in "$(r /sys/class/drm)"/card[0-9] "$(r /sys/class/drm)"/card[0-9][0-9]; do
+    [[ -r $card/device/vendor ]] || continue
+    v=$(<"$card/device/vendor")
+    if [[ $v == 0x10de ]]; then nvidia=1; else other=1; fi
+  done
+  ((nvidia && other))
+}
+
+pci_has_nvidia_display() {
+  local d
+  for d in "${OMARCHY_PCI_DEVICES_PATH:-/sys/bus/pci/devices}"/*; do
+    [[ -r $d/class && -r $d/vendor ]] || continue
+    [[ $(<"$d/class") == 0x03* && $(<"$d/vendor") == 0x10de ]] && return 0
+  done
+  return 1
+}
+
+# Each check sets ST (applied, present, local, missing or n/a) and DETAIL.
+# applied: the change this command makes is in place. present: the fix is in
+# place from somewhere else. local: you have your own setting for it, which is
+# left alone. missing: applying would add it. n/a: not this hardware, or a
+# prerequisite package is not installed.
+ST='' DETAIL=''
+
+# ---------------------------------------------------------------------------
+# hybrid-video
+
+check_hybrid_video() {
+  local node f local_parts=() env_ours=0 mpv_ours=0 unpinned=()
+  if [[ ! -f $HYPR_CONF ]]; then ST=n/a DETAIL="no $(tilde "$HYPR_CONF")"; return; fi
+  if ! node=$(omarchy-hw-igpu-render-node 2>/dev/null); then
+    ST=n/a DETAIL="no iGPU-driven display next to an NVIDIA GPU (omarchy-hw-igpu-render-node)"
+    return
+  fi
+  hypr_has_line hybrid-video-env.lua && env_ours=1
+  if f=$(libva_set_by_user); then local_parts+=("LIBVA_DRIVER_NAME set in $(tilde "$f")"); fi
+  if [[ -f $HYBRID_VIDEO_MPV_CONF ]] && grep -qxF "$HYBRID_VIDEO_MPV_COMMENT" "$HYBRID_VIDEO_MPV_CONF"; then
+    mpv_ours=1
+  elif hybrid_video_mpv_sets hwdec || hybrid_video_mpv_sets vaapi-device; then
+    local_parts+=("hwdec/vaapi-device set in $(tilde "$HYBRID_VIDEO_MPV_CONF")")
+  fi
+  for f in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
+    [[ -f $f ]] || continue
+    if grep -q -- '^[[:space:]]*--render-node-override=' "$f"; then
+      ((env_ours || mpv_ours)) || local_parts+=("--render-node-override set in $(tilde "$f")")
+    else
+      unpinned+=("$(tilde "$f")")
+    fi
+  done
+  if ((${#local_parts[@]})); then
+    local joined
+    printf -v joined '%s; ' "${local_parts[@]}"
+    ST=local DETAIL="${joined}left alone"
+  elif ((env_ours && mpv_ours)) && ((${#unpinned[@]} == 0)); then
+    ST=applied DETAIL="decode pinned to $node"
+  else
+    ST=missing DETAIL="stock sets LIBVA_DRIVER_NAME=nvidia; would pin mpv and Chromium flags to $node"
+  fi
+}
+
+apply_hybrid_video() {
+  local node f
+  node=$(omarchy-hw-igpu-render-node) || return 1
+  hypr_has_line hybrid-video-env.lua ||
+    hypr_append hybrid-video hybrid-video-env.lua "VA-API on the iGPU instead of the RTX" || return 1
+  # The fork's leaf (install/user/hardware/hybrid-video-decode.sh).
+  if ((DRY_RUN)); then
+    local opts=()
+    hybrid_video_mpv_sets hwdec || opts+=("hwdec=vaapi")
+    hybrid_video_mpv_sets vaapi-device || opts+=("vaapi-device=$node")
+    ((${#opts[@]})) && printf '    [dry-run] prepend to %s: %s\n' "$(tilde "$HYBRID_VIDEO_MPV_CONF")" "${opts[*]}"
+    for f in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
+      [[ -f $f ]] && ! grep -q -- '^[[:space:]]*--render-node-override=' "$f" &&
+        printf '    [dry-run] append to %s: --render-node-override=%s\n' "$(tilde "$f")" "$node"
+    done
+    return 0
+  fi
+  echo "    Detected a hybrid GPU with the display on the iGPU. Decoding video on $node."
+  hybrid_video_pin_mpv
+  hybrid_video_pin_chromium
+  info "log out and back in for LIBVA_DRIVER_NAME; restart mpv and the browser for the pins"
+  info "'omarchy refresh chromium' rewrites chromium-flags.conf; run this again after it"
+}
+
+# ---------------------------------------------------------------------------
+# hdmi-cursor
+
+check_hdmi_cursor() {
+  local f
+  if [[ ! -f $HYPR_CONF ]]; then ST=n/a DETAIL="no $(tilde "$HYPR_CONF")"; return; fi
+  if ! drm_hybrid; then ST=n/a DETAIL="not a hybrid NVIDIA laptop (DRM sysfs)"; return; fi
+  if hypr_has_line hybrid-cursor.lua; then
+    ST=applied DETAIL="hybrid-cursor.lua loaded from $(tilde "$HYPR_CONF")"
+  elif f=$(hypr_sets 'no_hardware_cursors'); then
+    ST=local DETAIL="cursor.no_hardware_cursors set in $(tilde "$f"); left alone"
+  else
+    ST=missing DETAIL="hardware cursor blits fail on the RTX's HDMI output and grow Hyprland's memory"
+  fi
+}
+
+apply_hdmi_cursor() {
+  hypr_append hdmi-cursor hybrid-cursor.lua "software cursor while a monitor on the RTX is connected"
+}
+
+# ---------------------------------------------------------------------------
+# audio-master
+
+SOFT_MIXER_CONF=$HOME/.config/wireplumber/wireplumber.conf.d/alsa-soft-mixer.conf
+
+alc285_card() {
+  aplay -l 2>/dev/null | grep -i "ALC285" | head -1 | sed 's/card \([0-9]*\).*/\1/'
+}
+
+check_audio_master() {
+  local card level
+  if ! is_asus_rog; then ST=n/a DETAIL="not an ASUS ROG laptop"; return; fi
+  if [[ ! -f $SOFT_MIXER_CONF ]]; then ST=n/a DETAIL="no soft mixer: PipeWire drives Master itself"; return; fi
+  card=$(alc285_card)
+  if [[ -z $card ]]; then ST=n/a DETAIL="no ALC285 card (aplay -l)"; return; fi
+  level=$(amixer -c "$card" sget Master 2>/dev/null | grep -o '\[[0-9]*%\]' | head -1 | tr -d '[]%')
+  case $level in
+    100) ST=present DETAIL="Master at 100 % on card $card" ;;
+    80) ST=missing DETAIL="Master at 80 % (Omarchy's install value): the slider's 100 % is 12.75 dB below full scale" ;;
+    '') ST=n/a DETAIL="card $card has no Master control" ;;
+    *) ST=local DETAIL="Master at $level % on card $card (your setting); left alone" ;;
+  esac
+}
+
+apply_audio_master() {
+  local card
+  card=$(alc285_card)
+  [[ -n $card ]] || return 1
+  warn "the speakers get louder at the same volume slider setting"
+  # The fork's install/user/hardware/asus/fix-audio-mixer.sh.
+  run amixer -c "$card" set Master 100% unmute
+}
+
+# ---------------------------------------------------------------------------
+# rtkit
+
+check_rtkit() {
+  if pacman -Q rtkit >/dev/null 2>&1; then
+    ST=present DETAIL="rtkit $(pacman -Q rtkit | cut -d' ' -f2) installed"
+  else
+    ST=missing DETAIL="nothing pulls rtkit in on x86_64; PipeWire runs without realtime threads"
+  fi
+}
+
+apply_rtkit() {
+  # The fork's migration 1792162892.
+  if command -v omarchy-pkg-add >/dev/null; then
+    run omarchy-pkg-add rtkit
+  else
+    as_root pacman -S --needed --noconfirm rtkit
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# asusd-power-profiles
+
+ASUSD_DROPIN=/etc/systemd/system/asusd.service.d/20-omarchy-asus-power-profiles.conf
+ASUSD_PROPS=(ChangePlatformProfileOnAc ChangePlatformProfileOnBattery PlatformProfileLinkedEpp)
+asusd_platform=(xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform)
+
+check_asusd_power_profiles() {
+  local owner f dir prop value off=0
+  if ! is_asus_rog; then ST=n/a DETAIL="not an ASUS ROG laptop"; return; fi
+  if [[ ! -e $(r /usr/lib/systemd/system/asusd.service) ]]; then ST=n/a DETAIL="asusctl is not installed"; return; fi
+  if owner=$(power_owner); then
+    ST=local DETAIL="power profiles are owned by $owner; left alone"
+    return
+  fi
+  if [[ -f $(r "$ASUSD_DROPIN") ]]; then
+    if cmp -s "$(r "$ASUSD_DROPIN")" "$SHARE/system/asusd-power-profiles.conf"; then
+      ST=applied DETAIL="$ASUSD_DROPIN"
+    else
+      ST=local DETAIL="$ASUSD_DROPIN differs from the packaged copy; left alone"
+    fi
+    return
+  fi
+  for dir in /etc/systemd/system/asusd.service.d /run/systemd/system/asusd.service.d /usr/lib/systemd/system/asusd.service.d; do
+    for f in "$(r "$dir")"/*.conf; do
+      [[ -f $f ]] || continue
+      grep -q 'ChangePlatformProfileOn' "$f" || continue
+      if [[ ${f##*/} == 10-omarchy-power-profiles.conf ]]; then
+        ST=present DETAIL="the omarchy fork's drop-in ${f#"$ROOT"}"
+      else
+        ST=local DETAIL="${f#"$ROOT"} sets asusd's profile switching; left alone"
+      fi
+      return
+    done
+  done
+  for prop in "${ASUSD_PROPS[@]}"; do
+    value=$(busctl --system get-property "${asusd_platform[@]}" "$prop" 2>/dev/null || true)
+    [[ $value == "b false" ]] && ((off++))
+  done
+  ST=missing
+  if ((off == ${#ASUSD_PROPS[@]})); then
+    DETAIL="asusd's switching is off for now (asusd.ron); the drop-in keeps it off at every start"
+  else
+    DETAIL="asusd and Omarchy both switch the profile on every plug, and asusd rewrites the EPP"
+  fi
+}
+
+apply_asusd_power_profiles() {
+  local prop value
+  # The fork's etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf,
+  # under a basename no Omarchy package uses.
+  as_root install -Dm644 "$SHARE/system/asusd-power-profiles.conf" "$ASUSD_DROPIN" || return 1
+  as_root systemctl daemon-reload
+  # The fork's migration 1792122579: the running asusd too. asusd's D-Bus policy
+  # lets wheel members set these without root.
+  if ((DRY_RUN)); then
+    printf '    [dry-run] busctl --system set-property %s %s b false (each of: %s, if asusd is running and it is true)\n' \
+      "${asusd_platform[*]}" '<property>' "${ASUSD_PROPS[*]}"
+    return 0
+  fi
+  systemctl is-active --quiet asusd.service || return 0
+  for prop in "${ASUSD_PROPS[@]}"; do
+    value=$(busctl --system get-property "${asusd_platform[@]}" "$prop" 2>/dev/null || true)
+    if [[ $value == "b true" ]]; then
+      busctl --system set-property "${asusd_platform[@]}" "$prop" b false ||
+        echo "    Could not turn off asusd $prop now; it is turned off when asusd next starts"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# winlock
+
+winlock_nodes_accessible() {
+  local dev ok=0 found=0
+  for dev in "$(r /sys/class/hidraw)"/hidraw*; do
+    grep -qi 'HID_ID=0003:00000B05:000019B6' "$dev/device/uevent" 2>/dev/null || continue
+    found=1
+    [[ -r $(r "/dev/${dev##*/}") && -w $(r "/dev/${dev##*/}") ]] && ok=1
+  done
+  ((found && ok))
+}
+
+check_winlock() {
+  local unit=$HOME/.config/systemd/user/g16-winlock.service
+  if [[ ! -x $(r /usr/bin/g16-winlock) || ! -f $(r /usr/lib/systemd/user/g16-winlock.service) ]]; then
+    ST=n/a DETAIL="asus-rog-nkey-winlock is not installed"
+    return
+  fi
+  if [[ -e $unit ]]; then
+    ST=local DETAIL="your own unit $(tilde "$unit") (shadows the packaged one); left alone"
+  elif [[ -L $HOME/.config/systemd/user/default.target.wants/g16-winlock.service ||
+    -L $(r /etc/systemd/user/default.target.wants/g16-winlock.service) ]]; then
+    ST=applied DETAIL="g16-winlock.service enabled"
+  else
+    ST=missing DETAIL="g16-winlock.service is installed but not enabled"
+  fi
+}
+
+apply_winlock() {
+  run systemctl --user enable --now g16-winlock.service || return 1
+  if ! winlock_nodes_accessible; then
+    warn "you can't open the ROG N-Key keyboard's hidraw node yet. Reboot, or run"
+    warn "'sudo udevadm trigger --subsystem-match=hidraw', so the packaged rule applies."
+  fi
+  info "the Win-lock toast needs linux-omarchy from this repo (7.2.8-9.1 or later)"
+}
+
+# ---------------------------------------------------------------------------
+# g16-widget (opt-in)
+
+WIDGET_ID=omarchy-asus.g16
+
+check_g16_widget() {
+  local d
+  if [[ ! -d $(r "/usr/share/omarchy/plugins/$WIDGET_ID") ]]; then
+    ST=n/a DETAIL="asus-zephyrus-g16-control is not installed"
+    return
+  fi
+  if [[ -e $HOME/.config/omarchy/plugins/$WIDGET_ID ]]; then
+    ST=applied DETAIL="$(tilde "$HOME/.config/omarchy/plugins/$WIDGET_ID")"
+    return
+  fi
+  for d in "$HOME"/.config/omarchy/plugins/*/; do
+    [[ -f $d/g16ctl ]] || continue
+    ST=local DETAIL="a G16 widget of your own in $(tilde "${d%/}"); left alone"
+    return
+  done
+  ST=missing DETAIL="the widget is installed but not linked into ~/.config/omarchy/plugins"
+}
+
+apply_g16_widget() {
+  run mkdir -p "$HOME/.config/omarchy/plugins"
+  run ln -s "/usr/share/omarchy/plugins/$WIDGET_ID" "$HOME/.config/omarchy/plugins/$WIDGET_ID" || return 1
+  if command -v omarchy-plugin-enable >/dev/null || ((DRY_RUN)); then
+    run omarchy-plugin-enable "$WIDGET_ID"
+  else
+    warn "omarchy-plugin-enable not found; enable $WIDGET_ID in the bar settings"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# initramfs-no-nvidia (opt-in)
+
+NVIDIA_CONF=/etc/mkinitcpio.conf.d/nvidia.conf
+NVIDIA_CONF_STOCK='MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)'
+# The fork's migration marker: shared, so the rebuild runs once whichever does it.
+NVIDIA_REBUILD_MARKER=/var/lib/omarchy/migrations/1787683023
+
+check_initramfs_no_nvidia() {
+  local conf f others=()
+  conf=$(r "$NVIDIA_CONF")
+  if ! command -v limine-mkinitcpio >/dev/null; then ST=n/a DETAIL="limine-mkinitcpio is not installed"; return; fi
+  if ! pci_has_nvidia_display; then ST=n/a DETAIL="no NVIDIA GPU"; return; fi
+  if omarchy-hw-nvidia-only-display; then ST=n/a DETAIL="NVIDIA drives every display; it needs the early load"; return; fi
+  for f in "$(r /etc/mkinitcpio.conf)" "$(r /etc/mkinitcpio.conf.d)"/*.conf; do
+    [[ -f $f && $f != "$conf" ]] || continue
+    grep -vE '^[[:space:]]*#' "$f" | grep -qE 'MODULES.*nvidia' && others+=("${f#"$ROOT"}")
+  done
+  if [[ -f $conf ]]; then
+    if [[ $(<"$conf") == "$NVIDIA_CONF_STOCK" ]]; then
+      ST=missing DETAIL="$NVIDIA_CONF from Omarchy's installer early-loads nvidia; resume from hibernation fails"
+    else
+      ST=local DETAIL="$NVIDIA_CONF has your own content; left alone"
+    fi
+  elif [[ -e $(r "$NVIDIA_REBUILD_MARKER") ]]; then
+    ST=applied DETAIL="no $NVIDIA_CONF; rebuilt (marker $NVIDIA_REBUILD_MARKER)"
+  else
+    local kept
+    kept=$(find "$(r /etc/mkinitcpio.conf.d)" -maxdepth 1 -name 'nvidia.conf?*' -printf '%f\n' 2>/dev/null | head -1)
+    if [[ -n $kept ]]; then
+      ST=local DETAIL="no $NVIDIA_CONF (your ${kept} is kept)"
+    else
+      ST=present DETAIL="no $NVIDIA_CONF"
+    fi
+  fi
+  if ((${#others[@]})); then
+    DETAIL+="; nvidia is still in MODULES in ${others[*]} (yours, left alone)"
+  fi
+}
+
+apply_initramfs_no_nvidia() {
+  local backup
+  # The fork's migration 1787683023.
+  echo "    This is a hybrid GPU machine; removing nvidia from the initramfs and rebuilding it"
+  if ((DRY_RUN)); then
+    printf '    [dry-run] back up %s, sudo rm -f %s, sudo limine-mkinitcpio (restore the file if it fails), mark %s\n' \
+      "$NVIDIA_CONF" "$NVIDIA_CONF" "$NVIDIA_REBUILD_MARKER"
+    return 0
+  fi
+  backup=$(mktemp)
+  cp "$NVIDIA_CONF" "$backup"
+  sudo rm -f "$NVIDIA_CONF"
+  if ! sudo limine-mkinitcpio; then
+    sudo install -m644 "$backup" "$NVIDIA_CONF"
+    rm -f "$backup"
+    echo "Rebuilding the initramfs failed; restored $NVIDIA_CONF" >&2
+    return 1
+  fi
+  rm -f "$backup"
+  sudo install -Dm644 /dev/null "$NVIDIA_REBUILD_MARKER"
+  info "takes effect at the next boot; keep a fallback kernel entry until it has booted and resumed once"
+}
+
+# ---------------------------------------------------------------------------
+# quiet-fans (opt-in)
+
+QUIET_FANS_UNIT=omarchy-asus-g16-quiet-fans.service
+
+has_profile_handler() {
+  local d name
+  for d in "$(r /sys/class/platform-profile)"/platform-profile-*; do
+    name=""
+    read -r name <"$d/name" 2>/dev/null || true
+    [[ $name == "$1" ]] && return 0
+  done
+  return 1
+}
+
+check_quiet_fans() {
+  local owner
+  if ! is_ga605km; then ST=n/a DETAIL="not a GA605KM"; return; fi
+  if ! has_profile_handler asus-wmi || ! has_profile_handler amd-pmf; then
+    ST=n/a DETAIL="needs both the asus-wmi and amd-pmf platform profile handlers"
+    return
+  fi
+  if owner=$(power_owner); then
+    ST=local DETAIL="power profiles are owned by $owner; left alone"
+  elif [[ -e $(r /usr/bin/omarchy-powerprofiles-asus-quiet-fans) || -e $(r /etc/sudoers.d/omarchy-asus-quiet-fans) ]]; then
+    ST=present DETAIL="the omarchy fork's omarchy-powerprofiles-set does this"
+  elif [[ -L $(r "/etc/systemd/system/multi-user.target.wants/$QUIET_FANS_UNIT") ]]; then
+    ST=applied DETAIL="$QUIET_FANS_UNIT enabled"
+  else
+    ST=missing DETAIL="balanced keeps the fans at 2,000-3,800 rpm at idle on battery"
+  fi
+}
+
+apply_quiet_fans() {
+  as_root systemctl enable --now "$QUIET_FANS_UNIT"
+}
+
+# ---------------------------------------------------------------------------
+# Report-only rows: fixes that come from packages, and fixes no package or
+# command can deliver without changing Omarchy.
+
+pkg_version() { pacman -Q "$1" 2>/dev/null | cut -d' ' -f2; }
+
+info_rows() {
+  local v f owner
+  v=$(pkg_version linux-omarchy)
+  if [[ $v =~ -[0-9]+\.[0-9]+$ ]]; then row linux-omarchy present "$v (omarchy-asus build: hid-asus Win-lock)"
+  elif [[ -n $v ]]; then row linux-omarchy missing "$v is the stock build; the omarchy-asus build adds the hid-asus Win-lock pass-through"
+  else row linux-omarchy n/a "not installed"; fi
+
+  v=$(pkg_version nvidia-open-dkms)
+  if [[ $v =~ -[0-9]+\.[0-9]+$ ]]; then row nvidia-open-dkms present "$v (omarchy-asus build: #1299 NVPCF defer, #1412 hibernate power-off)"
+  elif [[ -n $v ]]; then row nvidia-open-dkms missing "$v is the stock build; the omarchy-asus build adds #1299 and #1412"
+  else row nvidia-open-dkms n/a "not installed"; fi
+
+  v=$(pkg_version hyprland)
+  if [[ $v =~ -[0-9]+\.[0-9]+$ ]]; then row hyprland present "$v (omarchy-asus build: render offset after HDMI replug)"
+  elif [[ -n $v ]]; then row hyprland missing "$v is the stock build; the omarchy-asus build fixes the render offset after an HDMI replug"
+  else row hyprland n/a "not installed"; fi
+
+  v=$(pkg_version aquamarine)
+  if [[ -n $v ]] && (($(vercmp "$v" 0.15.1) >= 0)); then row aquamarine present "$v (0.15.1 or later: the RTX sleeps again after an HDMI unplug)"
+  elif [[ -n $v ]]; then row aquamarine missing "$v: needs 0.15.1 or later ('omarchy update')"
+  else row aquamarine n/a "not installed"; fi
+
+  if [[ -f $(r /usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules) ]]; then row touchpad-wake present "omarchy-asus-g16"
+  elif f=$(grep -lE 'ASUF1209' "$(r /etc/udev/rules.d)"/*.rules 2>/dev/null | head -1) && [[ -n $f ]]; then row touchpad-wake local "${f#"$ROOT"}"
+  else row touchpad-wake missing "install omarchy-asus-g16"; fi
+
+  if [[ -f $(r /usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf) ]]; then row hibernate-mode present "omarchy-asus-g16"
+  elif f=$(grep -lE '^[[:space:]]*HibernateMode=shutdown' "$(r /etc/systemd/sleep.conf)" "$(r /etc/systemd/sleep.conf.d)"/*.conf 2>/dev/null | head -1) && [[ -n $f ]]; then
+    row hibernate-mode local "${f#"$ROOT"}"
+  else row hibernate-mode missing "install omarchy-asus-g16"; fi
+
+  if [[ -f $(r /usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf) ]]; then row nvidia-powerd present "omarchy-asus-g16"
+  elif f=$(grep -lE '^[[:space:]]*StartLimitIntervalSec=' "$(r /etc/systemd/system/nvidia-powerd.service.d)"/*.conf "$(r /usr/lib/systemd/system/nvidia-powerd.service.d)"/*.conf 2>/dev/null | head -1) && [[ -n $f ]]; then
+    row nvidia-powerd local "${f#"$ROOT"}"
+  else row nvidia-powerd missing "install omarchy-asus-g16"; fi
+
+  if owner=$(power_owner); then
+    row usbc-power local "power profiles are owned by $owner"
+    row external-owner local "power profiles are owned by $owner"
+  else
+    row usbc-power upstream "changes Omarchy's omarchy-powerprofiles-set: omacom/omarchy#15668"
+    row external-owner upstream "changes Omarchy's omarchy-powerprofiles-set: omacom/omarchy#15669"
+  fi
+}
+
+label() {
+  case $1 in
+    local) echo "present (local)" ;;
+    upstream) echo "upstream PR only" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+row() {
+  local color=''
+  case $2 in
+    applied | present | local) color=$G ;;
+    missing) color=$Y ;;
+  esac
+  printf '  %-22s %s%-18s%s %s\n' "$1" "$color" "$(label "$2")" "$N" "$3"
+}
+
+# Runs one fix's check; sets ST and DETAIL.
+check_fix() { ST='' DETAIL=''; "check_${1//-/_}"; }
+
+# ---------------------------------------------------------------------------
+
+((EUID != 0)) || die "run this as your normal user, not root; it calls sudo where needed"
+if [[ -n $ROOT ]] && ((!DRY_RUN && !CHECK)); then
+  die "OMARCHY_ASUS_G16_ROOT is set: only --check and --dry-run can run against a test prefix"
+fi
+((DRY_RUN)) && printf '%s(dry run: nothing is changed)%s\n' "$Y" "$N"
+
+if ! is_ga605km; then
+  if ((CHECK || DRY_RUN || FORCE)); then
+    warn "this machine does not report GA605KM in its DMI data; these fixes are for the G16 GA605KM"
+  else
+    die "this is not an ASUS ROG Zephyrus G16 GA605KM (DMI). Use --force only if you know why it should run here."
+  fi
+fi
+
+if ((CHECK)); then
+  step "Packages ('omarchy update' with the omarchy-asus repo; report only)"
+  info_rows
+  step "Fixes this command applies"
+  missing_default=0
+  for fix in "${DEFAULT_FIXES[@]}" "${OPTIN_FIXES[@]}"; do
+    check_fix "$fix"
+    status=$ST
+    if [[ $ST == missing ]] && is_optin "$fix"; then
+      printf '  %-22s %s%-18s%s %s\n' "$fix" "$Y" "missing (opt-in)" "$N" "$DETAIL"
+      continue
+    fi
+    row "$fix" "$status" "$DETAIL"
+    [[ $status == missing ]] && missing_default=1
+  done
+  ((DRY_RUN)) || exit $((missing_default ? 10 : 0))
+fi
+
+((${#SELECTED[@]})) || SELECTED=("${DEFAULT_FIXES[@]}")
+
+TODO=()
+((CHECK)) || step "Checking"
+for fix in "${SELECTED[@]}"; do
+  check_fix "$fix"
+  ((CHECK)) || row "$fix" "$ST" "$DETAIL"
+  [[ $ST == missing ]] && TODO+=("$fix")
+done
+
+if ((${#TODO[@]} == 0)); then
+  step "Nothing to apply"
+  exit 0
+fi
+
+if ((DRY_RUN)); then step "Would apply: ${TODO[*]}"; else step "Applying: ${TODO[*]}"; fi
+if ((!DRY_RUN && !YES)); then
+  [[ -r /dev/tty ]] || die "no terminal to ask on; pass --yes"
+  read -r -p "    Apply these fixes? [y/N] " answer </dev/tty
+  [[ $answer == [yY] || $answer == [yY][eE][sS] ]] || die "cancelled"
+fi
+
+failed=0
+for fix in "${TODO[@]}"; do
+  step "$fix: ${DESC[$fix]}"
+  "apply_${fix//-/_}" || { warn "$fix failed"; failed=1; }
+done
+exit "$failed"

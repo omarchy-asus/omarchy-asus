@@ -1,0 +1,82 @@
+# EXPERIMENTAL: ASUS ROG Zephyrus G16 GA605KM only.
+#
+# omarchy-asus-g16-apply: the G16 fixes no package can ship, because the
+# omarchy-asus fork applies them to the user's own config or to /etc through an
+# install leaf or migration. Installing this package changes nothing: it ships
+# the command, the fork's files it uses (byte-identical: hybrid-video-decode.sh,
+# omarchy-hw-igpu-render-node, omarchy-hw-nvidia-only-display, hybrid-cursor.lua,
+# asusd-10-omarchy-power-profiles.conf, omarchy-powerprofiles-asus-quiet-fans), and an
+# opt-in system unit that stays disabled. Each fix runs only when the user runs
+# `omarchy-asus-g16-apply`, and a fix the user already has in any form of their
+# own is reported and left alone. See README.md.
+#
+# A local package with no upstream build to track, so pkgrel does not use the
+# repo's "<upstream>.1" scheme.
+
+pkgname=omarchy-asus-g16-apply
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Apply the ASUS ROG Zephyrus G16 GA605KM fixes that live in user config or /etc, on request (EXPERIMENTAL)'
+arch=('any')
+url='https://github.com/omarchy-asus/omarchy-asus'
+license=('MIT')
+depends=('bash' 'systemd')
+optdepends=('omarchy-asus-g16: the touchpad-wake, hibernate-mode and nvidia-powerd fixes'
+            'asus-rog-nkey-winlock: the winlock fix enables its user service'
+            'asus-zephyrus-g16-control: the g16-widget fix links it into the bar'
+            'alsa-utils: the audio-master fix (aplay, amixer)'
+            'power-profiles-daemon: the quiet-fans fix reads the active profile'
+            'limine-mkinitcpio-hook: the initramfs-no-nvidia fix rebuilds with limine-mkinitcpio')
+options=('!debug' '!strip')
+source=('omarchy-asus-g16-apply'
+        'hybrid-video-env.lua'
+        'quiet-fans-monitor'
+        'omarchy-asus-g16-quiet-fans.service'
+        'hybrid-video-decode.sh'
+        'omarchy-hw-igpu-render-node'
+        'omarchy-hw-nvidia-only-display'
+        'hybrid-cursor.lua'
+        'asusd-10-omarchy-power-profiles.conf'
+        'omarchy-powerprofiles-asus-quiet-fans'
+        'README.md'
+        'LICENSE')
+sha256sums=('78df7277f64a6e3530ffd2c27888248dba8fdf2cfdfc0810fcf605b9d20f6410'
+            '1c02bdc6b3055649bd8bee1394c68cd26af05a0fefefcd6190f164cd8fc0ab13'
+            'eadf7a74b73aec5c63fb2164908dc0f0f28a40411f9c696761265a96c76e6fc9'
+            '54997bee5a950335bb8ce471c72c79923133dc777a1ea61f7a311540582e0be5'
+            '9b68707e793ddf3cce38dd5a57588ef95c2b1a23e211039a7556d79f2b0217c7'
+            'd2c7c7a1d9e3f57e51d6f979007676c44067a22bedab653c0b63530069917a47'
+            '3c840abd69138ee776fdc23423fab2287fd80ff0f661413bd214584b3f1caca7'
+            '1f5f1b0f51d2a12db84e2125ca56b704a41ce78d8a4787d862bdbaae4aa0404b'
+            'e781d8e218dcb06ab49627ab567fafbad652a45f706ad65e7a8f728429c8915a'
+            '336a30e3ca249944448ac35ffe45154f1bd83f81c4bfa34fa7b489ff152d3e00'
+            '6fa2f332b5b97f5df77c003cb8e6362394eb6c26e0e3827a020cb29c32777487'
+            '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
+
+package() {
+  local share="$pkgdir/usr/share/$pkgname" lib="$pkgdir/usr/lib/$pkgname"
+
+  install -Dm755 omarchy-asus-g16-apply "$pkgdir/usr/bin/omarchy-asus-g16-apply"
+
+  # Sourced by the command (the fork's install/helpers/hybrid-video-decode.sh).
+  install -Dm644 hybrid-video-decode.sh "$share/fork/hybrid-video-decode.sh"
+  # Loaded from ~/.config/hypr/hyprland.lua by the line the command adds there.
+  install -Dm644 hybrid-video-env.lua "$share/hypr/hybrid-video-env.lua"
+  install -Dm644 hybrid-cursor.lua "$share/hypr/hybrid-cursor.lua"
+  # Copied to /etc/systemd/system/asusd.service.d/20-omarchy-asus-power-profiles.conf.
+  install -Dm644 asusd-10-omarchy-power-profiles.conf "$share/system/asusd-power-profiles.conf"
+
+  # The fork's detectors, found by name on the command's PATH. Not in /usr/bin,
+  # where a later omarchy package may ship the same names.
+  install -Dm755 omarchy-hw-igpu-render-node "$lib/bin/omarchy-hw-igpu-render-node"
+  install -Dm755 omarchy-hw-nvidia-only-display "$lib/bin/omarchy-hw-nvidia-only-display"
+
+  # quiet-fans (opt-in): the fork's helper, run as root by the disabled unit.
+  install -Dm755 omarchy-powerprofiles-asus-quiet-fans "$lib/omarchy-powerprofiles-asus-quiet-fans"
+  install -Dm755 quiet-fans-monitor "$lib/quiet-fans-monitor"
+  install -Dm644 omarchy-asus-g16-quiet-fans.service \
+    "$pkgdir/usr/lib/systemd/system/omarchy-asus-g16-quiet-fans.service"
+
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

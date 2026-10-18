@@ -1,0 +1,118 @@
+#!/bin/bash
+
+# omarchy:summary=Stop the idle fans of the ROG Zephyrus G16 GA605KM on battery without slowing it down
+# omarchy:args=on|off
+# omarchy:requires-sudo=true
+# omarchy:hidden=true
+
+set -euo pipefail
+
+# The GA605KM has two platform profile handlers, and the balanced profile
+# keeps its fans at ~2000-3800 rpm even when idle and cool. The fan floor comes
+# from the ASUS handler (asus-wmi), the clock limits from the AMD one
+# (amd-pmf). With asus-wmi on quiet and amd-pmf left on balanced the fans stop
+# and the CPU still boosts to its full clock, which saved ~0.8 W on battery
+# (A/B, 3 of 4 rounds); the full quiet profile also stops the fans but caps the
+# CPU at 2 GHz. power-profiles-daemon reads the mixed state as "custom" and
+# keeps its own profile, balanced.
+#
+# on  - on battery, with both handlers on balanced: set asus-wmi to quiet.
+# off - undo exactly that mixed state; leave any other state alone.
+#
+# Each profile write makes the firmware wake the discrete GPU for ~20 s, so
+# this writes only when the state has to change.
+
+# Root never resolves a helper out of a dev checkout on sudo's secure_path,
+# and tests point the paths below into a fixture only as an ordinary user.
+if (( EUID == 0 )); then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+  sys=/sys
+else
+  sys="${OMARCHY_SYS_ROOT:-/sys}"
+fi
+
+# The path etc/sudoers.d/omarchy-asus-quiet-fans names.
+PACKAGED_PATH=/usr/bin/omarchy-powerprofiles-asus-quiet-fans
+
+usage() {
+  echo "Usage: omarchy-powerprofiles-asus-quiet-fans on|off" >&2
+  exit 1
+}
+
+(( $# == 1 )) || usage
+case "$1" in
+  on | off) mode=$1 ;;
+  *) usage ;;
+esac
+
+product=""
+read -r product <"$sys/class/dmi/id/product_name" 2>/dev/null || true
+[[ $product == *GA605KM* ]] || exit 0
+
+handler() {
+  local dir name
+  for dir in "$sys"/class/platform-profile/platform-profile-*; do
+    name=""
+    read -r name <"$dir/name" 2>/dev/null || true
+    if [[ $name == "$1" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
+on_battery() {
+  local supply online type
+  for supply in "$sys"/class/power_supply/*; do
+    type="" online=""
+    read -r type <"$supply/type" 2>/dev/null || true
+    [[ $type == "Mains" ]] || continue
+    read -r online <"$supply/online" 2>/dev/null || true
+    [[ $online == "1" ]] && return 1
+  done
+  return 0
+}
+
+asus=$(handler asus-wmi) || exit 0
+amd=$(handler amd-pmf) || exit 0
+read -r asus_profile <"$asus/profile"
+read -r amd_profile <"$amd/profile"
+
+if [[ $mode == "on" ]]; then
+  current=balanced target=quiet
+  # Quiet on AC would slow the fans while the machine runs at full power.
+  on_battery || exit 0
+else
+  current=quiet target=balanced
+fi
+[[ $asus_profile == "$current" && $amd_profile == "balanced" ]] || exit 0
+
+if (( EUID != 0 )) && [[ -z ${OMARCHY_SYS_ROOT:-} ]]; then
+  # Runs on every power source change from the shell, which has no terminal
+  # to ask for a password in. The sudoers grant covers exactly on and off; if
+  # it is missing, ask in a terminal and otherwise leave the fans as they are
+  # rather than raise a password dialog on every plug.
+  if [[ -x $PACKAGED_PATH ]] && sudo -n "$PACKAGED_PATH" "$mode" 2>/dev/null; then
+    exit 0
+  elif [[ -x $PACKAGED_PATH && -t 0 ]]; then
+    exec sudo "$PACKAGED_PATH" "$mode"
+  else
+    # Say why once per boot, in the journal: a checkout linked with `omarchy
+    # dev link` has neither the packaged helper nor the sudoers grant until the
+    # omarchy package is built from it (omarchy-dev-pkg-test).
+    flag="${XDG_RUNTIME_DIR:-/tmp}/omarchy-powerprofiles-asus-quiet-fans.skipped"
+    if [[ ! -e $flag ]]; then
+      : >"$flag" 2>/dev/null || true
+      if [[ -x $PACKAGED_PATH ]]; then
+        reason="its sudoers grant in /etc/sudoers.d is missing"
+      else
+        reason="$PACKAGED_PATH is not installed"
+      fi
+      logger -t omarchy-powerprofiles-asus-quiet-fans "fans left as they are: $reason (install the omarchy package, or omarchy-dev-pkg-test from a dev checkout)" 2>/dev/null || true
+    fi
+    exit 0
+  fi
+fi
+
+printf '%s\n' "$target" >"$asus/profile"
