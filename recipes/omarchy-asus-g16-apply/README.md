@@ -294,6 +294,7 @@ Omarchy:
   busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform ChangePlatformProfileOnBattery b true
   busctl --system set-property xyz.ljones.Asusd /xyz/ljones xyz.ljones.Platform PlatformProfileLinkedEpp b true
   ```
-- winlock: `systemctl --user disable --now g16-winlock.service`, or
-  `systemctl --user mask --now g16-winlock.service` where the package enabled it.
+- winlock: `systemctl --user mask --now g16-winlock.service` (current builds enable it
+  through a vendor link that `disable` leaves in place); `systemctl --user disable --now
+  g16-winlock.service` only undoes a per-user enable on older builds.
 - audio-master, rtkit, initramfs-no-nvidia: no undo needed; set Master, remove rtkit, or restore `nvidia.conf` by hand if you want the old state.
