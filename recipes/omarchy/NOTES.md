@@ -28,7 +28,7 @@ commit (`Backport-of:`) and any adaptation.
 | 0003 | another power manager can own the profile on plug and unplug | #23 | omacom/omarchy#15669 |
 | 0004 | GA605KM fans stop at idle on battery (sudoers grant for the helper) | #24 | not submitted |
 | 0005, 0019 | software cursor while an NVIDIA-driven monitor is plugged in (hybrid; 0019 picks the connected card when both GPUs have the connector name) | #25 | not submitted |
-| 0006-0008 | video decode on the iGPU of hybrid laptops (LIBVA, mpv, Chromium) | #26 | not submitted |
+| 0006-0008, 0020 | video decode on the iGPU of hybrid laptops (LIBVA, mpv, Chromium; 0020 repins only the pins Omarchy wrote, under its marker comment, so a render node the user chose is never replaced) | #26 | not submitted |
 | 0009 | ALC285 Master at full scale under the soft mixer | #27 | not submitted |
 | 0010-0011 | rtkit on x86_64; restart the portal, then PipeWire | #28 | omacom/omarchy#12428 (another contributor's PR, taken as is) |
 | 0012-0013 | no NVIDIA early load in the initramfs on hybrid machines | #29 | omacom/omarchy#8263 (another contributor's PR) |

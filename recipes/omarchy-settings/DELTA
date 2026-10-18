@@ -30,3 +30,4 @@ patch 0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch prepare om
 patch 0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch prepare omarchy
 patch 0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch prepare omarchy
 patch 0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch prepare omarchy
+patch 0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch prepare omarchy

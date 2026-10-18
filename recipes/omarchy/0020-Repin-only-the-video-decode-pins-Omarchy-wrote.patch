@@ -1,0 +1,272 @@
+From 3e1ed51cacca4a54cd76c462620ba62a5fc8817c Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 04:29:38 -0400
+Subject: [PATCH] Repin only the video decode pins Omarchy wrote
+
+The hybrid video decode pins are checked at Hyprland start and refreshed
+when one names a device that is gone or is the NVIDIA GPU. That check
+looked at every by-path render node setting, so a user who chose the
+NVIDIA GPU on purpose with a /dev/dri/by-path/pci-...-render override had
+it deleted at the next login and replaced with the iGPU pin, against the
+promise to keep settings the user already has.
+
+Omarchy now writes a marker comment on the line above each pin it adds,
+the --render-node-override line in the Chromium-family flags files and
+the vaapi-device line in mpv.conf. Only a pin right under that marker is
+checked at start, dropped (with its marker) when stale and written again.
+Any other render node setting is the user's, whatever device it names,
+and neither triggers the refresh nor is touched by it. Deleting the
+marker hands a pin over to the user.
+
+Pins written before this change carry no marker and are treated as the
+user's: they are left alone rather than guessed at. The change has not
+been released, so only test installs have them.
+
+When a stale mpv pin is dropped, the new one goes back under Omarchy's
+mpv comment instead of above it.
+
+Found by ai-review on omarchy-asus PR #58.
+---
+ default/hypr/nvidia.lua                  | 18 +++++---
+ install/helpers/hybrid-video-decode.sh   | 53 +++++++++++++++++-------
+ test/shell.d/hybrid-video-decode-test.sh | 33 +++++++++++++--
+ 3 files changed, 80 insertions(+), 24 deletions(-)
+
+diff --git a/default/hypr/nvidia.lua b/default/hypr/nvidia.lua
+index 1e30f9c2..e5c2d814 100644
+--- a/default/hypr/nvidia.lua
++++ b/default/hypr/nvidia.lua
+@@ -7,10 +7,14 @@ local nvidia_without_gsp = paths.omarchy_path .. "/bin/omarchy-hw-nvidia-without
+ local igpu_render_node = paths.omarchy_path .. "/bin/omarchy-hw-igpu-render-node"
+ 
+ -- Video decode pins (install/helpers/hybrid-video-decode.sh) name the iGPU's
+--- render node by PCI path. True when one names a device that is gone or is not
+--- a non-NVIDIA display device any more: a MUX switch, an iGPU turned off in
+--- firmware, a BIOS update that moved the address. Reads the config files and
+--- cached sysfs IDs only, never a device node.
++-- render node by PCI path. True when one Omarchy wrote (the line right under
++-- its marker comment) names a device that is gone or is not a non-NVIDIA
++-- display device any more: a MUX switch, an iGPU turned off in firmware, a BIOS
++-- update that moved the address. A render node the user set is theirs, even the
++-- NVIDIA GPU's. Reads the config files and cached sysfs IDs only, never a
++-- device node.
++local hybrid_video_pin_marker =
++  "# Omarchy repins the next line if the iGPU moves. Delete this comment to keep the line as your own."
+ local function hybrid_video_pin_stale()
+   local home = os.getenv("HOME") or ""
+   local devices = os.getenv("OMARCHY_PCI_DEVICES_PATH") or "/sys/bus/pci/devices"
+@@ -26,9 +30,10 @@ local function hybrid_video_pin_stale()
+   for _, name in ipairs(files) do
+     local file = io.open(home .. name, "r")
+     if file then
++      local marked = false
+       for line in file:lines() do
+-        local address = line:match("^%s*%-%-render%-node%-override=%S*/by%-path/pci%-(.-)%-render%s*$")
+-          or line:match("^%s*%-?%-?vaapi%-device%s*=%s*%S*/by%-path/pci%-(.-)%-render%s*$")
++        local address = marked and (line:match("^%s*%-%-render%-node%-override=%S*/by%-path/pci%-(.-)%-render%s*$")
++          or line:match("^%s*%-?%-?vaapi%-device%s*=%s*%S*/by%-path/pci%-(.-)%-render%s*$"))
+         if address then
+           local vendor = first_line(devices .. "/" .. address .. "/vendor")
+           local class = first_line(devices .. "/" .. address .. "/class")
+@@ -37,6 +42,7 @@ local function hybrid_video_pin_stale()
+             return true
+           end
+         end
++        marked = line == hybrid_video_pin_marker
+       end
+       file:close()
+     end
+diff --git a/install/helpers/hybrid-video-decode.sh b/install/helpers/hybrid-video-decode.sh
+index c01834b8..e2f44940 100644
+--- a/install/helpers/hybrid-video-decode.sh
++++ b/install/helpers/hybrid-video-decode.sh
+@@ -6,6 +6,10 @@
+ # fraction of the power. Pin mpv and Chromium-family browsers to the iGPU by
+ # the stable path omarchy-hw-igpu-render-node prints. Every other machine is
+ # left alone, and so is any setting the user already has.
++#
++# Each pin goes under HYBRID_VIDEO_PIN_MARKER. Only a pin right under that line
++# is Omarchy's to repin or remove later; any other render node setting, an
++# unmarked pin an earlier version wrote included, is the user's and stays.
+ 
+ HYBRID_VIDEO_CHROMIUM_FLAGS_FILES=(
+   "$HOME/.config/chromium-flags.conf"
+@@ -16,6 +20,9 @@ HYBRID_VIDEO_CHROMIUM_FLAGS_FILES=(
+ )
+ 
+ HYBRID_VIDEO_MPV_CONF="$HOME/.config/mpv/mpv.conf"
++HYBRID_VIDEO_MPV_COMMENT="# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."
++# Keep in step with default/hypr/nvidia.lua, which looks for it too.
++HYBRID_VIDEO_PIN_MARKER="# Omarchy repins the next line if the iGPU moves. Delete this comment to keep the line as your own."
+ 
+ # Appends --render-node-override to the flags files given, or to every
+ # Chromium-family flags file Omarchy seeds. Only files the user already has.
+@@ -31,7 +38,7 @@ hybrid_video_pin_chromium() {
+     [[ -f $conf ]] || continue
+     grep -q -- '^[[:space:]]*--render-node-override=' "$conf" && continue
+     [[ -s $conf && -n $(tail -c1 "$conf") ]] && echo >>"$conf"
+-    echo "--render-node-override=$node" >>"$conf"
++    printf '%s\n--render-node-override=%s\n' "$HYBRID_VIDEO_PIN_MARKER" "$node" >>"$conf"
+   done
+ }
+ 
+@@ -48,15 +55,16 @@ hybrid_video_mpv_sets() {
+ # Decodes through VA-API on the iGPU. hwdec=auto-safe from /etc/mpv/mpv.conf
+ # can settle on NVDEC, which loads CUDA and wakes the dGPU. The options go at
+ # the top of ~/.config/mpv/mpv.conf, ahead of any [profile] section, and only
+-# those the user has not set.
++# those the user has not set. When the comment Omarchy writes above them is
++# still there (a stale pin was dropped), they go back under it.
+ hybrid_video_pin_mpv() {
+-  local node existing=""
++  local node existing="" out
+   local -a options=()
+ 
+   node=$(omarchy-hw-igpu-render-node) || return 0
+ 
+   hybrid_video_mpv_sets hwdec || options+=("hwdec=vaapi")
+-  hybrid_video_mpv_sets vaapi-device || options+=("vaapi-device=$node")
++  hybrid_video_mpv_sets vaapi-device || options+=("$HYBRID_VIDEO_PIN_MARKER" "vaapi-device=$node")
+   (( ${#options[@]} )) || return 0
+ 
+   mkdir -p "$(dirname "$HYBRID_VIDEO_MPV_CONF")"
+@@ -65,9 +73,19 @@ hybrid_video_pin_mpv() {
+   fi
+ 
+   # Rewrite in place, which keeps a symlinked config pointing where it did.
+-  local comment="# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."
++  if [[ -n $existing ]] && awk -v m="$HYBRID_VIDEO_MPV_COMMENT" '
++    /^[[:space:]]*\[/ { exit }
++    $0 == m { found = 1; exit }
++    END { exit !found }' "$HYBRID_VIDEO_MPV_CONF"; then
++    out=$(printf '%s\n' "${options[@]}" | awk -v m="$HYBRID_VIDEO_MPV_COMMENT" '
++      FNR == NR { options = options $0 "\n"; next }
++      { print }
++      !done && $0 == m { printf "%s", options; done = 1 }' - "$HYBRID_VIDEO_MPV_CONF"; echo x)
++    printf '%s' "${out%x}" >"$HYBRID_VIDEO_MPV_CONF"
++    return 0
++  fi
+   {
+-    [[ $existing == *"$comment"* ]] || echo "$comment"
++    echo "$HYBRID_VIDEO_MPV_COMMENT"
+     printf '%s\n' "${options[@]}"
+     if [[ -n $existing ]]; then
+       printf '\n%s\n' "$existing"
+@@ -90,24 +108,31 @@ hybrid_video_node_valid() {
+   [[ $vendor != "0x10de" && $class == 0x03* ]]
+ }
+ 
+-# Drops render node pins (by-path only) that no longer name the iGPU, from the
+-# Chromium-family flags files and from the top of mpv.conf. Pins the user set to
+-# any other path are left alone.
++# Drops the render node pins Omarchy wrote (the by-path line right under
++# HYBRID_VIDEO_PIN_MARKER) that no longer name the iGPU, with their marker, from
++# the Chromium-family flags files and mpv.conf. A render node setting without
++# the marker is the user's, whatever it names, and is left alone.
+ hybrid_video_unpin_stale() {
+-  local conf line node changed out
++  local conf line held changed out pin='^[[:space:]]*(--render-node-override=|(--)?vaapi-device[[:space:]]*=[[:space:]]*)([^[:space:]]*/by-path/pci-[^[:space:]]+-render)[[:space:]]*$'
+   for conf in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}" "$HYBRID_VIDEO_MPV_CONF"; do
+     [[ -f $conf ]] || continue
+-    changed=0 out=""
++    changed=0 out="" held=0
+     while IFS= read -r line || [[ -n $line ]]; do
+-      if [[ $line =~ ^[[:space:]]*(--render-node-override=|(--)?vaapi-device[[:space:]]*=[[:space:]]*)([^[:space:]]*/by-path/pci-[^[:space:]]+-render) ]]; then
+-        node=${BASH_REMATCH[3]}
+-        if ! hybrid_video_node_valid "$node"; then
++      if (( held )); then
++        held=0
++        if [[ $line =~ $pin ]] && ! hybrid_video_node_valid "${BASH_REMATCH[3]}"; then
+           changed=1
+           continue
+         fi
++        out+="$HYBRID_VIDEO_PIN_MARKER"$'\n'
++      fi
++      if [[ $line == "$HYBRID_VIDEO_PIN_MARKER" ]]; then
++        held=1
++        continue
+       fi
+       out+="$line"$'\n'
+     done <"$conf"
++    (( held )) && out+="$HYBRID_VIDEO_PIN_MARKER"$'\n'
+     # Rewrite in place, which keeps a symlinked config pointing where it did.
+     (( changed )) && printf '%s' "$out" >"$conf"
+   done
+diff --git a/test/shell.d/hybrid-video-decode-test.sh b/test/shell.d/hybrid-video-decode-test.sh
+index f821352e..156d2ad0 100755
+--- a/test/shell.d/hybrid-video-decode-test.sh
++++ b/test/shell.d/hybrid-video-decode-test.sh
+@@ -7,6 +7,8 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
+ test_tmp=$(mktemp -d)
+ trap 'rm -rf "$test_tmp"' EXIT
+ 
++mpv_comment="# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."
++marker="# Omarchy repins the next line if the iGPU moves. Delete this comment to keep the line as your own."
+ migration=$(grep -l 'Decode video on the integrated GPU of hybrid NVIDIA laptops' "$ROOT"/migrations/*.sh)
+ home="$test_tmp/home"
+ node="$test_tmp/by-path/pci-0000:65:00.0-render"
+@@ -69,6 +71,8 @@ run_migration
+ for flags in chromium-flags.conf chrome-flags.conf; do
+   count=$(grep -cFx -- "--render-node-override=$node" "$home/.config/$flags" || true)
+   (( count == 1 )) || fail "the migration pins $flags to the iGPU once" "$(cat "$home/.config/$flags")"
++  grep -A1 -xF -- "$marker" "$home/.config/$flags" | tail -n1 | grep -qFx -- "--render-node-override=$node" ||
++    fail "the Chromium pin in $flags sits under Omarchy's marker" "$(cat "$home/.config/$flags")"
+ done
+ grep -qx -- '--ozone-platform=wayland--render-node-override=.*' "$home/.config/chrome-flags.conf" &&
+   fail "the pin starts a line of its own after a missing trailing newline"
+@@ -76,7 +80,7 @@ grep -qx -- '--ozone-platform=wayland--render-node-override=.*' "$home/.config/c
+ [[ ! -e $home/.config/brave-flags.conf ]] || fail "flags files the user does not have stay absent"
+ pass "the migration pins existing Chromium-family flags files to the iGPU, once"
+ 
+-[[ $(cat "$home/.config/mpv/mpv.conf") == "# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep."$'\n'"hwdec=vaapi"$'\n'"vaapi-device=$node" ]] ||
++[[ $(cat "$home/.config/mpv/mpv.conf") == "$mpv_comment"$'\n'"hwdec=vaapi"$'\n'"$marker"$'\n'"vaapi-device=$node" ]] ||
+   fail "the migration creates an mpv config that decodes through VA-API on the iGPU" "$(cat "$home/.config/mpv/mpv.conf")"
+ pass "the migration creates an mpv config that decodes through VA-API on the iGPU, once"
+ 
+@@ -89,7 +93,7 @@ run_migration
+ 
+ grep -c -- '--render-node-override=' "$home/.config/chromium-flags.conf" | grep -qx 1 ||
+   fail "a render node the user chose is kept" "$(cat "$home/.config/chromium-flags.conf")"
+-expected=$(printf '%s\n' "# Decode video on the integrated GPU that drives the display, so the NVIDIA GPU can stay asleep." "vaapi-device=$node" '' 'hwdec = auto-copy' 'volume=80' '' '[big]' 'vaapi-device=/dev/dri/renderD128')
++expected=$(printf '%s\n' "$mpv_comment" "$marker" "vaapi-device=$node" '' 'hwdec = auto-copy' 'volume=80' '' '[big]' 'vaapi-device=/dev/dri/renderD128')
+ [[ $(cat "$home/.config/mpv/mpv.conf") == "$expected" ]] ||
+   fail "the mpv pin keeps the user's hwdec and lands ahead of their profiles" "$(cat "$home/.config/mpv/mpv.conf")"
+ pass "settings the user already has are kept"
+@@ -151,11 +155,32 @@ HOME="$home" bash "$ROOT/bin/omarchy-refresh-hybrid-video"
+   fail "the stale pins are dropped"
+ grep -qFx -- "--render-node-override=$moved" "$home/.config/chromium-flags.conf" || fail "Chromium is pinned to the iGPU's new address"
+ grep -qFx -- "vaapi-device=$moved" "$home/.config/mpv/mpv.conf" || fail "mpv is pinned to the iGPU's new address"
+-(( $(grep -c '^# Decode video on the integrated GPU' "$home/.config/mpv/mpv.conf") == 1 )) || fail "the mpv note is written once"
++[[ $(cat "$home/.config/mpv/mpv.conf") == "$mpv_comment"$'\n'"$marker"$'\n'"vaapi-device=$moved"$'\n'"hwdec=vaapi" ]] ||
++  fail "the mpv pin goes back under Omarchy's comment, once" "$(cat "$home/.config/mpv/mpv.conf")"
+ [[ -z $(stale_check) ]] || fail "refreshed pins schedule no refresh at start"
+ machine 0000:64:00.0=0x10de:0x030000:1
+ printf 'vaapi-device=/dev/dri/renderD129\n' >>"$home/.config/mpv/mpv.conf"
+ HOME="$home" bash "$ROOT/bin/omarchy-refresh-hybrid-video"
+-! grep -qF "by-path" "$home/.config/chromium-flags.conf" "$home/.config/mpv/mpv.conf" || fail "with no iGPU the pins go"
++! grep -qF -e "by-path" -e "$marker" "$home/.config/chromium-flags.conf" "$home/.config/mpv/mpv.conf" ||
++  fail "with no iGPU the pins go, with their markers"
+ grep -qFx 'vaapi-device=/dev/dri/renderD129' "$home/.config/mpv/mpv.conf" || fail "a pin the user set by device number stays"
+ pass "stale render node pins are dropped and re-pinned, at Hyprland start only when needed"
++
++# A render node the user picked themselves is theirs, even one on the NVIDIA
++# GPU by its PCI path: it schedules no refresh at start and a refresh leaves it.
++machine "${g16[@]}"
++reset_home
++mkdir -p "$home/.config/mpv"
++dgpu="$test_tmp/by-path/pci-0000:64:00.0-render"
++printf '%s\n' "--render-node-override=$dgpu" >>"$home/.config/chromium-flags.conf"
++printf '%s\n' 'hwdec=vaapi' "vaapi-device=$dgpu" >"$home/.config/mpv/mpv.conf"
++cp "$home/.config/chromium-flags.conf" "$test_tmp/chromium-flags.user"
++cp "$home/.config/mpv/mpv.conf" "$test_tmp/mpv.user"
++run_migration
++[[ -z $(stale_check) ]] || fail "a render node the user chose schedules no refresh at start"
++HOME="$home" bash "$ROOT/bin/omarchy-refresh-hybrid-video"
++cmp -s "$test_tmp/chromium-flags.user" "$home/.config/chromium-flags.conf" ||
++  fail "a refresh keeps the user's NVIDIA render node for Chromium" "$(cat "$home/.config/chromium-flags.conf")"
++cmp -s "$test_tmp/mpv.user" "$home/.config/mpv/mpv.conf" ||
++  fail "a refresh keeps the user's NVIDIA render node for mpv" "$(cat "$home/.config/mpv/mpv.conf")"
++pass "a render node the user chose, even the NVIDIA GPU's, is never replaced"
+-- 
+2.55.0
+
