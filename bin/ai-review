@@ -426,7 +426,17 @@ def post(repo, num, res, roots):
 
 # ---------------------------------------------------------------- one PR
 def review_pr(repo, num, checkout=None, do_post=False, force=False):
-    pr = gh_json("pr", "view", str(num), "-R", repo, "--json", "headRefOid,baseRefOid,baseRefName,title,isCrossRepository")
+    fields = "headRefOid,baseRefOid,baseRefName,title,isCrossRepository"
+    pr = gh_json("pr", "view", str(num), "-R", repo, "--json", fields)
+    if checkout:  # the checkout must be the PR head; GitHub can lag a just-pushed head
+        local = run(["git", "-C", checkout, "rev-parse", "HEAD"]).stdout.strip()
+        for _ in range(6):
+            if pr["headRefOid"] == local:
+                break
+            time.sleep(5)
+            pr = gh_json("pr", "view", str(num), "-R", repo, "--json", fields)
+        if pr["headRefOid"] != local:
+            raise RuntimeError(f"--checkout {checkout} is at {local[:12]}, the PR head is {pr['headRefOid'][:12]}")
     head, base = pr["headRefOid"], pr["baseRefOid"]
     os.makedirs(DATA, exist_ok=True)
     cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}.json")
