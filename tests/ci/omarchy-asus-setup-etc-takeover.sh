@@ -162,7 +162,7 @@ echo "== 2. identical unowned drop-in, the upgrade fails"
 reset "$S/packaged.conf"
 : >"$S/upgrade-fails"
 run
-expect "$([[ $rc != 0 ]]; echo $?)" 0 "exits non-zero"
+expect "$((rc != 0))" 1 "exits non-zero"
 expect "$(same "$S/packaged.conf" "$DROP")" 0 "the original is back"
 expect "$(has "put back $P" "$S/out")" 0 "says it put it back"
 expect "$(exists "$SAVED")" 1 "no saved copy left"
@@ -170,7 +170,7 @@ expect "$(exists "$SAVED")" 1 "no saved copy left"
 echo "== 3. differing unowned drop-in"
 reset "$S/different.conf"
 run
-expect "$([[ $rc != 0 ]]; echo $?)" 0 "exits non-zero"
+expect "$((rc != 0))" 1 "exits non-zero"
 expect "$(has "$P" "$S/out")" 0 "names the path"
 expect "$(has "Nothing was changed" "$S/out")" 0 "says nothing was changed"
 expect "$(same "$S/different.conf" "$DROP")" 0 "the file is unchanged"
@@ -187,11 +187,25 @@ expect "$(same "$S/different.conf" "$DROP")" 0 "the file is untouched"
 expect "$(exists "$S/sudo.log")" 1 "nothing moved"
 
 echo "== 5. no omarchy-update"
-# A PATH without the stub, and without any real omarchy-update the host has.
+# A PATH without the stub, and without any real omarchy-update the host has. On an
+# Omarchy host that is /usr/bin, so a directory holding omarchy-update is replaced by a
+# copy of its links without omarchy-update and omarchy, rather than dropped with its tools.
 NO_UPDATE=$S/bin
 IFS=: read -ra dirs <<<"$BASE_PATH"
+n=0
 for d in "${dirs[@]}"; do
-    [[ -n $d && ! -x $d/omarchy-update ]] && NO_UPDATE+=:$d
+    [[ -n $d && -d $d ]] || continue
+    if [[ -x $d/omarchy-update ]]; then
+        n=$((n + 1))
+        mkdir -p "$S/shim$n"
+        for e in "$d"/*; do
+            case ${e##*/} in omarchy-update | omarchy) continue ;; esac
+            ln -s "$e" "$S/shim$n/${e##*/}"
+        done
+        NO_UPDATE+=:$S/shim$n
+    else
+        NO_UPDATE+=:$d
+    fi
 done
 reset "$S/packaged.conf"
 PATH=$NO_UPDATE
@@ -206,7 +220,7 @@ echo "== 6. bad signature"
 reset "$S/packaged.conf"
 : >"$S/badsig"
 run
-expect "$([[ $rc != 0 ]]; echo $?)" 0 "exits non-zero"
+expect "$((rc != 0))" 1 "exits non-zero"
 expect "$(has "does not verify" "$S/out")" 0 "says the signature does not verify"
 expect "$(exists "$S/omarchy.log")" 1 "omarchy update never ran"
 
