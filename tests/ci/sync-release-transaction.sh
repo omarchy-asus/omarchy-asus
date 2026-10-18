@@ -10,6 +10,8 @@
 #   g. a db someone else put on the release is refused; SYNC_ADOPT_REMOTE=1 takes over
 #   h. a sync that dies after its db upload, then another publish: the next sync is not
 #      refused as another publisher (each db is recorded before it goes up)
+#   i. no record yet (an upgraded host adopts the release) and the db upload fails before
+#      it replaces the release's db: the retry still knows that db as this host's
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -74,6 +76,8 @@ case $sub in
         done ;;
     upload)
         names=()
+        # FAKE_DB_UPLOAD_FAILS=1: a db upload fails before anything reaches the release
+        if [[ -n ${FAKE_DB_UPLOAD_FAILS:-} && " ${args[*]##*/} " == *" omarchy-asus.db "* ]]; then exit 1; fi
         for f in "${args[@]}"; do cp "$f" "$FAKE_REL/" || exit 1; names+=("$(basename "$f")"); done
         echo "upload ${names[*]}" >>"$FAKE_CALLS"
         # FAKE_DB_UPLOAD_DIES=1: the db lands on the release, then the caller dies
@@ -218,4 +222,13 @@ cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "th
 if [[ $(cat "$S/data/release-db.sha256") == "$(sha256sum "$R/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi
 expect "$r" 0 "a verified sync leaves only its own db in the record"
 if [[ -e $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 1 "sync-pending is cleared"
+
+echo "== i. an adopted release whose first db upload fails"
+rm -f "$S/data/release-db.sha256"
+newdb fourth
+out=$(FAKE_DB_UPLOAD_FAILS=1 run_sync); rc=$?
+if ((rc != 0)); then r=0; else r=1; fi; expect "$r" 0 "the failed db upload fails the sync (exit $rc)"
+cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 1 "the release still has the adopted db"
+out=$(run_sync); expect $? 0 "the retry is not refused as another publisher"
+cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the release's db is the local one"
 exit $fail

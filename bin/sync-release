@@ -437,6 +437,15 @@ if ((${#upload_db[@]})); then
     # Record this db before it goes up: if the run dies between the upload and the
     # verification below, the next sync still knows the release's db as this host's.
     if ((!dry)); then
+        # No record yet (the release was adopted as it is): record the adopted db too, so
+        # an upload that fails before replacing it does not make it look foreign later.
+        if [[ ! -e $DATA/release-db.sha256 && -n ${rsize[$REPO_NAME.db]:-} ]]; then
+            arc=0; adopted=$(remote_sum "$REPO_NAME.db") || arc=$?
+            ((arc == 0)) && [[ -n $adopted ]] ||
+                { echo "refusing: cannot hash the release's $REPO_NAME.db to record it; db not uploaded" >&2; exit 1; }
+            printf '%s\n' "$adopted" >>"$DATA/release-db.sha256" ||
+                { echo "refusing: cannot write $DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
+        fi
         printf '%s\n' "$db_sum" >>"$DATA/release-db.sha256" ||
             { echo "refusing: cannot write $DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
     fi
