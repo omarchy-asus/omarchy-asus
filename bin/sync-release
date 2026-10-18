@@ -20,7 +20,8 @@
 # ($PII_DENYLIST, default ~/.config/agent-pii/denylist), whole-word and
 # case-insensitive. A hit aborts the sync unless the package file matches a glob
 # in build/pii-allow-packages. Only denylist line numbers are printed, never the
-# entries or the matched text. A missing denylist aborts too (PII_SCAN=off skips
+# entries or the matched text. A missing denylist, an invalid regex in it or a
+# failed scan aborts too, never reads as clean (PII_SCAN=off skips
 # the scan, for a machine without one).
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
@@ -55,11 +56,29 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
     done <"$list"
     ((${#res[@]})) || return 0
     local pattern; pattern=$(IFS='|'; echo "${res[*]}")
+    # Fail closed: an invalid entry makes grep exit 2 without scanning, which must not
+    # read as "no hits". Check the combined pattern once; name bad lines, not entries.
+    local st=0 bad=()
+    grep -iE -- "$pattern" </dev/null >/dev/null 2>&1 || st=$?
+    if ((st > 1)); then
+        for i in "${!res[@]}"; do
+            st=0; grep -iE -- "${res[$i]}" </dev/null >/dev/null 2>&1 || st=$?
+            ((st > 1)) && bad+=("${nums[$i]}")
+        done
+        echo "PII denylist $list has an invalid regex (line(s) $(printf '%s\n' "${bad[@]:-?}" | sort -nu | paste -sd, -));" \
+            "refusing to upload" >&2
+        return 1
+    fi
     local f rc=0 m hit
     for f in "$@"; do
         declare -A seen=()
+        st=0
         { bsdtar -tf "$f" 2>/dev/null; bsdtar -xOf "$f" 2>/dev/null | strings -n 4; } |
-            grep -oiE -- "$pattern" >"$up/.hits" || true
+            grep -oiE -- "$pattern" >"$up/.hits" || st=${PIPESTATUS[1]}
+        if ((st > 1)); then  # 1 is "no match"; anything else is a scan error
+            echo "PII scan of $(basename "$f") failed (grep exit $st); refusing to upload" >&2
+            rm -f "$up/.hits"; return 1
+        fi
         [[ -s $up/.hits ]] || { unset seen; continue; }
         while IFS= read -r m; do
             for i in "${!res[@]}"; do
