@@ -36,8 +36,7 @@ change and Codex `gpt-6.1-sol` reviews it**. The author never reviews its own ch
 - Contributors' agents may pair the other way round (Codex writes, Opus reviews).
 - Pull requests from external contributors are reviewed by us, against these rules.
 - The required `ai-review` check on `main` is how this runs on a PR (`bin/ai-review`, #50).
-- `bin/auto-update` still uses one Claude run as both fixer and reviewer; #54 moves its review
-  to Codex Sol.
+- `bin/auto-update` follows it too: Claude only fixes, and ai-review (Codex Sol) gates (#54).
 
 ## Labels
 
@@ -88,3 +87,42 @@ gh issue comment N -R $R --body-file comment.md
 ```
 
 End the body with `Filed by <agent role>`.
+
+## Code Review Rules
+
+Every PR on every omarchy-asus repo needs the `ai-review` commit status (required check, admins
+included; it replaced CodeRabbit). Nobody runs it for you: **the agent that pushes reviews inline,
+and nothing goes to GitHub until you and the reviewer agree.**
+
+1. Open the PR, then review your local commit from a clean checkout (nothing to push yet):
+   `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout .`
+   Codex `gpt-6.1-sol` finds issues, and a fresh Codex Sol run tries to refute each one. The
+   findings come back to you (`items`, each with an `id`); nothing is posted. This takes 1-5 min.
+2. Settle every finding with the reviewer, still locally:
+   - fix it: commit (don't push), then run step 1 again (the new commit gets a fresh review);
+   - or answer it: `--reply answers.json` with `{"<id>": "why this is not a defect"}`. The reviewer
+     checks each answer against the code and withdraws the finding only if the code agrees.
+   Keep it short: at most 2-3 rounds. Fix every P0/P1. Fix a P2/P3 only when it's a one-liner;
+   otherwise file it (`bin/issue`) and move on. P2/P3 don't block the status.
+3. When you agree (no finding you still dispute; normally no blocking P0/P1 left), push once and
+   post once: `git push`, then `bin/ai-review pr N --repo omarchy-asus/<repo> --checkout . --post`. This puts one review
+   (findings, your answers, the reviewer's checks) and the status on the head. PRs that
+   don't target the default branch get the review but no status (a retarget means a new review). It never reviews
+   again, and it refuses a head that has no local review.
+4. For Codex-written work, review with Claude instead (`AI_REVIEWER=claude`): the author never
+   reviews its own change.
+5. Your own account's PRs merge with `gh pr merge N --squash --admin`. `--admin` only bypasses the
+   approval ruleset. Without it, the merge is refused, and nothing bypasses `ai-review`. Every review
+   thread must be resolved. PRs from any other account need the maintainer's approving review.
+6. Everything ai-review posts goes through the secret and PII scan first. A hit posts nothing and
+   sets the status to `error`; fix the text it came from (usually your code), not the scan.
+
+What reviewers flag:
+
+- Flag only what breaks: wrong behaviour with a concrete trigger, fail-open safety checks
+  (signing, checksums, the PII scan, merge/publish gates), privilege mistakes between root
+  and `BUILD_USER`, and packages that would conflict with or shadow stock Omarchy files.
+- Personal information in a tracked file or anything posted to GitHub is P1 (see rule 4).
+- Upstream content in a rebased recipe is upstream's: flag it only when it is unsafe to sign
+  and ship (new download hosts, disabled checksum or signature checks, new install scripts).
+- No style, naming or formatting findings; CI and shellcheck own those.

@@ -9,7 +9,8 @@
 #      network, nothing real is pushed, merged or published:
 #      a. the base branch changes the recipe before the merge: nothing is published
 #      b. the merged tree is the built one: published
-#      c. the agent's notes and reply contain a denylisted word: not posted verbatim
+#      c. the agent's notes and reply contain a denylisted word: not posted verbatim (the
+#         reply goes to ai-review, never to GitHub; ai-review PII-scans its one final post)
 #      d. the agent command fails: no absolute path in the PR comment or the status
 # The fake upstream is a local clone of Arch's hyprland packaging with two extra tags;
 # upstream versions are overridden with OMARCHY_ASUS_UPSTREAM_OVERRIDE. State goes to a
@@ -163,7 +164,7 @@ EOF
     cat >"$T/cfg/omarchy-asus/auto-update.conf" <<EOF
 GIT_URL=$T/hub.git
 EXTRA_PATH=$B
-CODERABBIT=off
+AI_REVIEW=off
 REVIEW_CMD=$B/agent
 MERGE_MODE=auto
 EOF
@@ -197,14 +198,15 @@ stub_case same 0 approve
 expect $rc 0 "clean run"
 grep -q '^publish .*fake-1.0-2.1' "$T/calls"; expect $? 0 "published"
 expect "$(last message)" "merged and published" "status says published"
-expect "$(cat "$T/posted/replies")" "no change needed (auto-update agent)" "a clean reply is posted as is"
+stat -- "$T/posted/replies" >/dev/null 2>&1; expect $? 1 "no reply goes to GitHub during the rounds"
+grep -qs 'no change needed (auto-update agent)' "$T"/data/auto-update/runs/*/fake.replies.json
+expect $? 0 "the fixer's answer goes to the reviewer (ai-review --reply)"
 
 echo "== 4c. the agent's notes and reply contain a denylisted word"
 stub_case pii 0 pii
 grep -qi zorblaxhost "$T/posted/comment.md"; expect $? 1 "the PR comment does not carry the denylisted word"
 grep -q "the agent's notes withheld: failed the PII scan, see run" "$T/posted/comment.md"; expect $? 0 "a placeholder replaces the notes"
-grep -qi zorblaxhost "$T/posted/replies"; expect $? 1 "the reply does not carry the denylisted word"
-grep -q 'withheld: failed the PII scan' "$T/posted/replies"; expect $? 0 "a placeholder reply is posted instead"
+stat -- "$T/posted/replies" >/dev/null 2>&1; expect $? 1 "the reply is not posted (it goes to the reviewer; ai-review scans its final post)"
 grep -q '^\[pii\] ' "$T/out"; expect $? 0 "the withheld bodies are logged"
 
 echo "== 4d. the agent command fails"

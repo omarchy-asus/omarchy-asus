@@ -7,7 +7,7 @@ A daily systemd timer keeps the omarchy-asus repo current with upstream:
 
 When upstream moves past a package's base version, the service has two outcomes:
 
-- It rebases our patches onto the new upstream recipe. The PR goes through a chroot build, CodeRabbit and an agent review. It merges and publishes only when every gate passes.
+- It rebases our patches onto the new upstream recipe. The PR goes through a chroot build, a verified AI review (`bin/ai-review`) and an agent review. It merges and publishes only when every gate passes.
 - Otherwise, it removes the package from the repo so the stock build flows through.
 
 Nothing here is installed by default. `bin/install-auto-update` prints what it would do. It changes the system only with `--apply`, run through sudo by the user.
@@ -45,13 +45,13 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
                        ├─ fails: unpublish + sync, status, exit 1
                        └─ ok: branch auto-update/<r>, push, PR (ready for review)
                              → chroot build of the PR head (root: makechrootpkg only)
-                             → wait for CodeRabbit's review of the head (commit status / review)
-                             → headless agent: fixes or answers CodeRabbit's threads (edits only
-                               recipes/<r>/, never our patches/DELTA), second-opinion verdict
-                             → fixes pushed? rebuild + CodeRabbit re-review (≤ MAX_FIX_ROUNDS)
+                             → bin/ai-review on the head: codex finds, a second model verifies (review + `ai-review` status)
+                             → headless Claude fixer: fixes or answers the blocking findings (edits only
+                               recipes/<r>/, never our patches/DELTA); Codex reviews its commits
+                             → fixes pushed? rebuild + ai-review of the new head (≤ MAX_FIX_ROUNDS)
                                (a fix outside NOTES.md is never auto-merged: a human merges)
                              → one PR comment with the results
-                             → gates all pass: squash-merge, bin/publish, bin/sync-release
+                             → gates all pass: squash-merge (--admin: bypasses only the approval ruleset), bin/publish, bin/sync-release
                                otherwise: PR stays open (next run resumes it), stale package
                                unpublished meanwhile
             build      recipe on the branch not in the repo db: build, publish, sync
@@ -94,8 +94,8 @@ bin/revdep-check --headers ~/.local/share/omarchy-asus/repo/x86_64/linux-omarchy
 - The agent's fix commits changed nothing in the recipe but `NOTES.md`. Its edit limits are only
   a prompt, so anything else (PKGBUILD, sources, checksums, install files) waits for a human.
 - There are no flags. A flag is raised when upstream merged or closed one of the PRs our patches carry (`UPSTREAM_PRS`). It is also raised when a release contains a fix that a `fixed-upstream` line names. And it is raised when an exact-version dependency of the recipe as proposed (`depends=(x=ver)`) no longer matches upstream; this is re-checked on every run.
-- CodeRabbit finished reviewing the head ("Review completed", not "Review skipped"), and none of its review threads is unresolved or still current.
-- The agent's second opinion approves (`REQUIRE_AGENT_APPROVAL=yes`). If `claude` is missing or `REVIEW_CMD` is empty, the PR waits for a human.
+- `bin/ai-review` reviewed the head, and no finding is blocking: a P0/P1 finding blocks unless the verifier refuted it, and an unverified one (verifier failed) blocks too.
+- Optionally (`REQUIRE_AGENT_APPROVAL=yes`) the Claude fixer's own verdict approves too. It is not the review: the fixer is the author of its fix commits, and the review gate is the Codex `ai-review` above. If `codex` is missing, ai-review fails and the PR waits for a human.
 - `MERGE_MODE=auto`.
 
 After the merge, the run publishes only if `recipes/<r>` in the merge commit is the tree it built.
@@ -124,11 +124,11 @@ Rebasing each recipe onto its current base reproduces the committed recipe. The 
 
 - **The code that runs as root is a root-owned copy.** `bin/install-auto-update --apply` copies the scripts to `/usr/local/lib/omarchy-asus/bin`, owned by root and not writable by group or others. `auto-update` refuses to run as root from anywhere else, so it never runs the user-writable workspace or the bot clone. Changes to `bin/` reach the service only when the user re-runs the installer after review. The run logs a note when the installed copy differs from the branch.
 - **The config is root-owned too.** `/etc/omarchy-asus/auto-update.conf` must be `root:root` and not group/world-writable, or the run refuses to start. It names `BUILD_USER` and holds no secrets.
-- **Every step except the chroot build runs as `BUILD_USER`** through `runuser -u BUILD_USER -- env -i ...`, with a fixed environment. That covers git, fetching upstream, rebase, `makepkg --nobuild`, gpg signing, `repo-add`, `gh`, CodeRabbit polling and the agent. The signing key, the local repo, the bot clone, logs and status stay in `~BUILD_USER/.local/share/omarchy-asus`, and root never writes there:
+- **Every step except the chroot build runs as `BUILD_USER`** through `runuser -u BUILD_USER -- env -i ...`, with a fixed environment. That covers git, fetching upstream, rebase, `makepkg --nobuild`, gpg signing, `repo-add`, `gh`, `bin/ai-review` (codex and the verifier, on the user's own logins) and the agent. The signing key, the local repo, the bot clone, logs and status stay in `~BUILD_USER/.local/share/omarchy-asus`, and root never writes there:
   - the log is written by a user-side `tee`
   - the lock is a user-side `flock`, held through a pipe to root's process
 - **The chroot build is the same as the interactive one.** `makechrootpkg -c -u -r /var/lib/omarchy-asus/chroot -U BUILD_USER` runs in the user's work dir with `SUDO_USER=BUILD_USER`, which is what `sudo makechrootpkg` sees today. makepkg runs as the user (or as the chroot's builduser), never as root. The recipe is copied and its PGP-verified sources are fetched as the user.
-- **GitHub access is scoped.** Under systemd, gh cannot reach the desktop keyring. Use a fine-grained token limited to omarchy-asus/omarchy-asus (Contents and Pull requests read/write) in a `0600` file owned by `BUILD_USER`, and set `GH_TOKEN_FILE`. Git pushes use it through `gh auth git-credential`.
+- **GitHub access is scoped.** Under systemd, gh cannot reach the desktop keyring. Use a fine-grained token limited to omarchy-asus/omarchy-asus (Contents, Pull requests and Commit statuses read/write; `bin/ai-review` posts the `ai-review` status) in a `0600` file owned by `BUILD_USER`, and set `GH_TOKEN_FILE`. Git pushes use it through `gh auth git-credential`.
 - **The agent cannot act on its own.** It runs as the user with read tools plus `Edit`/`Write` limited to `recipes/<r>/**`. It has no shell and no web access. Its verdict is one gate among several. The mechanical gates (our patches untouched, fuzz 0, build of the exact head) cannot be overridden by a review, so a prompt injection in upstream content can at most block a merge.
 - **Sandboxing is light.** The unit has no `ProtectSystem` or `NoNewPrivileges`, because nspawn, btrfs snapshots, bind mounts and `sudo -u` inside makechrootpkg need them off. It runs at `Nice=10` with idle I/O, the build itself at `nice 19` / `ionice -c3`. It is skipped on battery (`ConditionACPower`).
 
@@ -141,7 +141,7 @@ Throttling is the main external constraint, so every GitHub call is bounded:
 - **No change upstream:** no GitHub API calls. The upstream dbs are cached 1h. The `UPSTREAM_PRS` state comes from the unauthenticated API and is cached 24h. The bot clone does one `git fetch`.
 - **Per rebased recipe and run:**
   - one push, and one PR create (or a list call when the branch already exists)
-  - one CodeRabbit GraphQL query every 2 minutes while waiting (at most 15 in a run)
+  - per reviewed head: one PR view, one status read, two status writes, one review post (no polling)
   - at most `REPLY_LIMIT` thread replies
   - one summary comment and one merge
 - **`bin/sync-release`** reads the release assets once. It uploads only new or changed files: packages and signatures first, the db last. It deletes stale assets after the new db is up, and it refuses to overwrite an existing package filename that has different bytes.
@@ -154,8 +154,8 @@ Prerequisites:
 1. The build chroot: `bin/mkchroot` (once, with sudo).
 2. The signing key in `~/.local/share/omarchy-asus` (as today).
 3. `gh` access for the user (see `GH_TOKEN_FILE`).
-4. Optional: `claude` for the agent step.
-5. CodeRabbit enabled for the `main` base branch (`.coderabbit.yaml`).
+4. `codex` logged in with ChatGPT (`codex login`) for `bin/ai-review`, and `claude` for its verifier and the agent step.
+   `VERIFIER=openrouter:<model>` with `OPENROUTER_API_KEY_FILE` uses OpenRouter for verification instead.
 
 ```bash
 bin/install-auto-update                         # print the plan
@@ -182,3 +182,11 @@ sudo bin/install-auto-update --uninstall --apply
 ```
 
 This stops and disables the timer, removes the units and `/usr/local/lib/omarchy-asus`. It keeps the config, the chroot and the user's state.
+
+## ai-review on every PR
+
+`bin/ai-review` replaces CodeRabbit on every omarchy-asus repo. There is no review service: the
+agent that opens or updates a PR reviews it inline, from its own checkout, on the user's Codex
+login (see AGENTS.md, "Code Review Rules"). This pipeline does the same for its rebase PRs.
+The `ai-review` commit status is the required check on every default branch (enforce_admins on).
+`bin/ai-review sweep --dry-run` lists open PRs whose head has no `ai-review` status yet.
