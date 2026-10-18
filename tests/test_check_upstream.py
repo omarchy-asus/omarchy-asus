@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Offline tests for bin/check-upstream's db freshness handling (no network,
-no makepkg/vercmp).
+"""Offline tests for bin/check-upstream's db freshness handling and release-cohort
+dependency resolution (no network, no makepkg/vercmp).
 
   python3 -I tests/test_check_upstream.py
 """
@@ -173,6 +173,57 @@ class DbMaxStale(unittest.TestCase):
             os.environ[self.KEY] = bad
             with self.assertRaises(SystemExit, msg=bad):
                 mod.db_max_stale()
+
+
+COHORT = [["omarchy", "omarchy-settings"]]
+
+
+class LoadCohorts(unittest.TestCase):
+    def test_comments_and_blank_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "cohorts.conf")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("# release cohorts\n\n   \nomarchy  omarchy-settings  # published together\n# trailing\n")
+            self.assertEqual(mod.load_cohorts(path), [["omarchy", "omarchy-settings"]])
+
+    def test_missing_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(mod.load_cohorts(os.path.join(d, "cohorts.conf")), [])
+
+
+class ResolveDep(unittest.TestCase):
+    def test_cohort_partner_resolves_to_own_version(self):
+        # On main upstream's 4.0.5-1 was compared, so omarchy (pinned to
+        # omarchy-settings=4.0.5-1.2) was reported dep-mismatch forever.
+        have = mod.resolve_dep("omarchy", "4.0.5-1.2", "omarchy-settings", COHORT,
+                              [("omarchy", {"omarchy-settings": "4.0.5-1"})], {})
+        self.assertEqual(have, "4.0.5-1.2")
+
+    def test_rebased_cohort_member_resolves_to_its_new_version(self):
+        # A rebased omarchy (--recipe-path) pins omarchy-settings=4.0.6-1.1 while the
+        # base branch's omarchy-settings is still 4.0.5-1.2 (rebased in its own PR):
+        # that must not flag the rebase PR, or it could never auto-merge.
+        have = mod.resolve_dep("omarchy", "4.0.6-1.1", "omarchy-settings", COHORT,
+                              [("omarchy", {"omarchy-settings": "4.0.6-1"})], {"omarchy-settings": "4.0.5-1.2"})
+        self.assertEqual(have, "4.0.6-1.1")
+
+    def test_dep_outside_cohort_uses_upstream(self):
+        upstream = [("omarchy", {}), ("extra", {"nvidia-utils": "580.95.05-1"})]
+        have = mod.resolve_dep("nvidia-open-dkms", "580.82.09-1.1", "nvidia-utils", COHORT,
+                              upstream, {"nvidia-utils": "580.82.09-1.1"})
+        self.assertEqual(have, "580.95.05-1")
+
+    def test_first_upstream_repo_wins(self):
+        upstream = [("omarchy", {"x": "2-1"}), ("extra", {"x": "3-1"})]
+        self.assertEqual(mod.resolve_dep("y", "1-1", "x", [], upstream, {}), "2-1")
+
+    def test_dep_missing_upstream_uses_ours_repo(self):
+        have = mod.resolve_dep("foo", "1-1", "bar", COHORT,
+                              [("omarchy", {}), ("extra", {})], {"bar": "1.0-1.1"})
+        self.assertEqual(have, "1.0-1.1")
+
+    def test_dep_missing_everywhere_is_none(self):
+        self.assertIsNone(mod.resolve_dep("foo", "1-1", "bar", [], [("extra", {})], {}))
 
 
 if __name__ == "__main__":

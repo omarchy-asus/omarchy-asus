@@ -5,6 +5,9 @@
 # builds it in a staging copy of the repo, checks every signature there and only then
 # swaps it in. Any failure exits non-zero and leaves the live repo as it was.
 # Usage: bin/publish $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
+# Release cohort members (build/cohorts.conf, e.g. omarchy + omarchy-settings) are published
+# in one call, or next to a partner already in the db at the same version; otherwise this
+# refuses before anything is copied or signed (bin/release-cohort check-publish).
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 # shellcheck source=bin/publish-lib.sh
@@ -13,6 +16,15 @@ source "$(dirname "$0")/publish-lib.sh"
 names=()
 for f in "$@"; do names+=("$(basename "$f")"); done
 pub_lock
+# checked under the lock, against the live db, before anything is journaled or staged
+db_args=()
+if [[ -f "$REPO_DIR/$REPO_NAME.db.tar.gz" ]]; then
+    db_args=(--db "$REPO_DIR/$REPO_NAME.db.tar.gz")
+fi
+"$(dirname "$0")/release-cohort" check-publish "${db_args[@]}" "$@" || {
+    echo "publish: refusing: a release cohort member would ship without its partner (build/cohorts.conf)" >&2
+    exit 1
+}
 pub_mark_pending "publish ${names[*]}"
 pub_stage
 committed=0

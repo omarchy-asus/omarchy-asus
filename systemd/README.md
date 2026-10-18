@@ -107,6 +107,19 @@ bin/revdep-check --headers ~/.local/share/omarchy-asus/repo/x86_64/linux-omarchy
                  --dkms ~/.local/share/omarchy-asus/repo/x86_64/nvidia-open-dkms-<ver>-x86_64.pkg.tar.zst
 ```
 
+### Release cohorts
+
+`build/cohorts.conf` lists packages that ship only together (today: `omarchy` and
+`omarchy-settings`); members share one `pkgver-pkgrel`. A chroot build that passes its
+reverse-dependency checks writes `$STAGE_DIR/.staged-<r>` with the recipe tree it built.
+A member is published only once every partner is staged from its recipe on the base branch
+(the marker matches that tree) at the same version; then all members go out in one
+`bin/publish` call, which refuses an incomplete cohort on its own. Until then the built
+member is held back: nothing is published, the stale pair is unpublished so the stock
+packages flow through, and the recipe is recorded as attention, not failed. The next run
+publishes it from the staged build, without rebuilding, once the partner is built.
+`bin/unpublish` withdraws every member of a cohort, never one alone.
+
 ### Merge gates (all of them)
 
 - The chroot build of the exact PR head succeeded, including its reverse-dependency checks (below).

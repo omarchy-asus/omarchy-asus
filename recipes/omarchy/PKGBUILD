@@ -13,7 +13,7 @@ pkgname='omarchy'
 _tag='v4.0.5'
 _commit='94a8fbc2d67eec5673c7f16b8c5e8a9c8452ffdc'
 pkgver=4.0.5
-pkgrel=1.1
+pkgrel=1.2
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH'
 # The payload is architecture-independent, but the dependency set is not: the
 # boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
@@ -34,7 +34,9 @@ depends=(
   # package satisfy it, leaving a mixed dev/stable install. A versioned
   # dependency can only be satisfied by the real omarchy-settings built
   # from the same _commit, and forces the pair to upgrade together.
-  "omarchy-settings=${pkgver}"
+  # omarchy-asus: pinned to pkgver-pkgrel, so only the patched omarchy-settings from this
+  # same release satisfies it, never stock's same-pkgver build (#83).
+  "omarchy-settings=${pkgver}-${pkgrel}"
 
   # Wayland / Hyprland core
   'hyprland'

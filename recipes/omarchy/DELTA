@@ -3,11 +3,15 @@
 # The patches are the omarchy-asus fork's fixes backported onto the pinned release
 # (fork branch asus/v4-0-5). recipes/omarchy and recipes/omarchy-settings carry the
 # SAME patch list: both packages build from the same source tree, and omarchy pins
-# omarchy-settings=$pkgver. Keep the two DELTA files in lockstep.
+# omarchy-settings=$pkgver-$pkgrel, and the pair is one release cohort (build/cohorts.conf):
+# built, published and withdrawn together. Keep the two DELTA files in lockstep.
 # prepare() doesn't cd into the source, hence the "omarchy" directory argument.
 upstream omarchy-pkgs pkgbuilds/omarchy
 mode overlay
 keep NOTES.md
+# Pin omarchy-settings to pkgver-pkgrel, so stock's omarchy-settings of the same pkgver can't
+# satisfy the patched omarchy (#83).
+pkgbuild-patch pkgbuild-pin-settings-release.diff
 patch 0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch prepare omarchy
 patch 0002-Save-power-on-USB-C-chargers-on-ASUS-ROG-Zephyrus-la.patch prepare omarchy
 patch 0003-Let-another-power-manager-own-the-profile-on-plug-an.patch prepare omarchy

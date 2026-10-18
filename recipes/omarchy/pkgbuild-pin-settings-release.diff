@@ -1,0 +1,13 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -34,7 +34,9 @@
+   # package satisfy it, leaving a mixed dev/stable install. A versioned
+   # dependency can only be satisfied by the real omarchy-settings built
+   # from the same _commit, and forces the pair to upgrade together.
+-  "omarchy-settings=${pkgver}"
++  # omarchy-asus: pinned to pkgver-pkgrel, so only the patched omarchy-settings from this
++  # same release satisfies it, never stock's same-pkgver build (#83).
++  "omarchy-settings=${pkgver}-${pkgrel}"
+
+   # Wayland / Hyprland core
+   'hyprland'

@@ -3,18 +3,39 @@
 # Usage: bin/unpublish pkgname ...   (record the reason; bin/auto-update writes it to $DATA/status.json)
 # Same locked, verified transaction as bin/publish (bin/publish-lib.sh; exit 75 when
 # $DATA/publish.lock stays busy): any failure leaves the live repo as it was.
+# Release cohort partners (build/cohorts.conf, e.g. omarchy + omarchy-settings) that the db
+# holds are withdrawn with them (bin/release-cohort members).
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 # shellcheck source=bin/publish-lib.sh
 source "$(dirname "$0")/publish-lib.sh"
 : "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
 pub_lock
-pub_mark_pending "unpublish $*"
+# Cohort partners are resolved under the lock, against the live db.
+# set -e doesn't see a failed process substitution, so check the list is at least as long.
+names=()
+mapfile -t names < <("$(dirname "$0")/release-cohort" members --db "$REPO_DIR/$REPO_NAME.db.tar.gz" "$@")
+if (( ${#names[@]} < $# )); then
+    echo "unpublish: bin/release-cohort members failed; nothing removed" >&2
+    exit 1
+fi
+if (( ${#names[@]} > $# )); then
+    extra=()
+    for n in "${names[@]}"; do
+        found=0
+        for a in "$@"; do
+            [[ "$n" == "$a" ]] && { found=1; break; }
+        done
+        (( found )) || extra+=("$n")
+    done
+    echo "unpublish: also withdrawing release-cohort partner(s): ${extra[*]}" >&2
+fi
+pub_mark_pending "unpublish ${names[*]}"
 pub_stage
 committed=0
 trap 'if ((committed == 0)); then pub_abort; fi' EXIT
-repo-remove --sign --key "$SIGN_KEY" --verify "$PUB_STAGE/$REPO_NAME.db.tar.gz" "$@"
-for p in "$@"; do
+repo-remove --sign --key "$SIGN_KEY" --verify "$PUB_STAGE/$REPO_NAME.db.tar.gz" "${names[@]}"
+for p in "${names[@]}"; do
     # deleting the staging hardlink leaves the live file alone
     find "$PUB_STAGE" -maxdepth 1 -regextype posix-extended \
         -regex ".*/$p-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst(\.sig)?" -print -delete

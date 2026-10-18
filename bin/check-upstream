@@ -24,7 +24,10 @@ Text output, one line per package:  name ours upstream status
                    only not-built / repo-stale are reported, never bad-pkgrel
   dep-mismatch     an exact-version dependency (depends=(x=ver)) no longer matches the
                    version upstream ships, so installing ours would break the
-                   update (e.g. nvidia-open-dkms vs nvidia-utils)
+                   update (e.g. nvidia-open-dkms vs nvidia-utils); a dependency in
+                   the same release cohort (build/cohorts.conf) is compared against the
+                   package's own version, since the cohort is published together at one
+                   version
 rebuild-needed and dep-mismatch are urgent: pacman takes the FIRST repo that has a
 name regardless of version, so a lagging package here never yields to a newer stock
 one; it blocks or breaks `omarchy update` until it is rebuilt or unpublished.
@@ -257,6 +260,38 @@ def dep_satisfied(want, have):
     return vercmp(want, have) == 0
 
 
+def load_cohorts(path=None):
+    """[[recipe, ...]] from build/cohorts.conf, the same format bin/release-cohort reads:
+    one cohort per line, whitespace-separated recipe names, '#' comments and blank
+    lines ignored. A missing file means no cohorts."""
+    if path is None:
+        path = os.path.join(WORKSPACE, "build", "cohorts.conf")
+    cohorts = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                names = line.split("#", 1)[0].split()
+                if names:
+                    cohorts.append(names)
+    except FileNotFoundError:
+        return []
+    return cohorts
+
+
+def resolve_dep(name, ver, dep, cohorts, upstream, ours_repo):
+    """The version of `dep` to compare name's (at version `ver`) exact dependency against.
+
+    A cohort partner is only ever published together with `name`, at the same
+    [epoch:]pkgver-pkgrel (bin/publish refuses anything else, bin/release-cohort
+    check-recipes keeps the recipes in step), so it resolves to `ver` itself. That
+    also holds for a rebased copy (--recipe-path) whose partner is rebased in its
+    own PR: the partner on the base branch is still at the old version.
+    Otherwise: the first upstream repo that has it, else our repo db."""
+    if any(name in c and dep in c for c in cohorts):
+        return ver
+    return next((p[dep] for _, p in upstream if dep in p), None) or ours_repo.get(dep)
+
+
 def pr_states(cache_dir, refresh):
     """[(recipe_dir, 'owner/repo#N', state, merged_at)] for every UPSTREAM_PRS entry."""
     res = []
@@ -317,6 +352,7 @@ def main():
         with open(local_db, "rb") as f:
             ours_repo = parse_db(f.read())
 
+    cohorts = load_cohorts()
     recipes, inventory_errors = recipe_packages(args.recipe, args.recipe_path)
     rows, seen = [], set()
     extra = [] if args.recipe or args.recipe_path else [(None, n, v, []) for n, v in sorted(ours_repo.items())]
@@ -327,7 +363,7 @@ def main():
         up_repo, up_ver = next(((r, p[name]) for r, p in upstream if name in p), (None, None))
         mismatches = []
         for dn, want in exact_deps(deps):
-            have = next((p[dn] for _, p in upstream if dn in p), None) or ours_repo.get(dn)
+            have = resolve_dep(name, ver, dn, cohorts, upstream, ours_repo)
             if have is None or not dep_satisfied(want, have):
                 mismatches.append({"dep": dn, "want": want, "upstream": have})
         repo_ver = ours_repo.get(name)
