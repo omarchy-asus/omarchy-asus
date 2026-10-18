@@ -38,4 +38,5 @@ build flows through again. Until that automation is live, the check is run by ha
 - `bin/publish FILES`: signs the packages and runs `repo-add --sign --verify --remove`.
 - `bin/unpublish PKG`: drops a package so the stock build flows through.
 - `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release.
+- `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check, PII scan); agents read [AGENTS.md](AGENTS.md) first.
 - `bin/check-upstream [--json]`: compares each package with the version upstream currently ships and the state of the upstream PRs listed in `recipes/*/UPSTREAM_PRS`. Exits 10 when something needs action.
