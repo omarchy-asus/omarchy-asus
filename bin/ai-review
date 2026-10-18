@@ -753,6 +753,10 @@ def review_local(repo, root=".", base_ref=None, force=False):
     hub's main, fetched by URL). Nothing is written to GitHub."""
     root = os.path.realpath(root)
     head = git_clean_head(root, "the checkout")
+    # say which tree is reviewed (the default is the cwd); stderr only, never cached or posted
+    on = run(["git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    subject = run(["git", "-C", root, "log", "-1", "--format=%s", "HEAD"]).stdout.strip()
+    log(f"reviewing {root} at {head[:12]} ({'detached' if on == 'HEAD' else on}): {subject}")
     if base_ref:
         base = run(["git", "-C", root, "rev-parse", "--verify", f"{base_ref}^{{commit}}"]).stdout.strip()
     else:
@@ -984,7 +988,9 @@ def sweep(owners, limit, include_forks, do_post, dry=False):
             mine = is_ours(pr, ours)
             how = "stamp" if mine else "full review"
             if dry:
-                log(f"would review {repo}#{num} {pr['headRefOid'][:12]} ({how})")
+                # preview exactly what the real run does: post only with do_post
+                log(f"would review {repo}#{num} {pr['headRefOid'][:12]} "
+                    + (f"and post ({how})" if do_post else "(local only, nothing posted)"))
                 continue
             log(f"reviewing {repo}#{num} {pr['headRefOid'][:12]}" + (f" ({how})" if do_post else ""))
             res = review_pr(repo, num, do_post=do_post and not mine, do_stamp=do_post and mine, review_missing=True)

@@ -6,6 +6,8 @@
 #     unused-variable warnings off (the variables are for the sourcing script)
 #   pacman .install scriptlets: bash -n
 #   python (by .py suffix or a python shebang): py_compile
+# The shellcheck binary is checked up front: if "shellcheck --version" fails (missing or
+# broken binary), it stops with one "shellcheck not runnable" error.
 # PKGBUILDs are checked by ci/check-recipes (makepkg/namcap).
 # Usage: ci/lint-scripts
 set -uo pipefail
@@ -17,6 +19,12 @@ SOURCED=(bin/env.sh bin/publish-lib.sh recipes/omarchy-asus-g16-apply/hybrid-vid
 fail=0 n=0
 err() { echo "::error file=$1::$2"; fail=1; }
 pyc=$(mktemp -d); trap 'rm -rf "$pyc"' EXIT
+# A missing or broken shellcheck would otherwise show up as "shellcheck findings" on
+# every shell script; run it once up front (command -v misses a broken binary).
+if ! sc_ver=$(shellcheck --version 2>&1); then
+    echo "::error::shellcheck not runnable (install shellcheck, or fix the one on PATH): ${sc_ver%%$'\n'*}"
+    exit 1
+fi
 
 while IFS= read -r f; do
     [[ -f $f && ! -L $f ]] || continue

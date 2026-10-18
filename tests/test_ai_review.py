@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -350,6 +351,33 @@ class Sweep(unittest.TestCase):  # issue #62
         self.assertEqual(self.reviewed, [])
         self.assertIn(f"would review {REPO}#1", err.getvalue())
 
+    def dry_sweep(self, do_post, author="me"):
+        def gh(*args):
+            res = self.gh(*args)
+            if args[:2] == ("pr", "view"):
+                res["author"] = {"login": author}
+            return res
+        with Patch(gh_json=gh, merge_base=lambda *a: MB, final_status=lambda *a: None,
+                   ours_logins=lambda: {"me"}, review_pr=self.review_pr):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                ar.sweep(["owner"], 1, False, do_post, dry=True)
+        self.assertEqual(self.reviewed, [], "a dry run reviews nothing")
+        return err.getvalue()
+
+    def test_post_dry_run_says_ours_would_be_stamped(self):
+        self.assertIn(f"would review {REPO}#1 {self.head(1)[:12]} and post (stamp)", self.dry_sweep(True))
+
+    def test_post_dry_run_says_outside_prs_get_the_full_review(self):
+        self.assertIn(f"would review {REPO}#1 {self.head(1)[:12]} and post (full review)",
+                      self.dry_sweep(True, author="someone"))
+
+    def test_dry_run_without_post_posts_nothing(self):
+        out = self.dry_sweep(False)
+        self.assertIn(f"would review {REPO}#1", out)
+        self.assertIn("nothing posted", out)
+        self.assertNotIn("(stamp)", out)
+        self.assertNotIn("and post", out)
+
     def test_peek_cache_does_not_move_files(self):
         cache = self.cache(1)
         with open(cache, "w") as fh:
@@ -474,6 +502,30 @@ class Local(unittest.TestCase):
         out = io.StringIO()
         ar.print_local({**result([finding(3, "confirmed")]), "base_ref": "main"}, out)
         self.assertIn("CLEAN", out.getvalue())
+
+    def test_names_the_checkout_and_head_it_reviews(self):  # issue #89
+        repo = tempfile.mkdtemp(dir=TMP)
+        git = lambda *a: subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                         "-c", "commit.gpgsign=false", *a],
+                                        check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q")
+        for name, subject in (("a", "first commit"), ("b", "second commit on topic")):
+            if name == "b":
+                git("checkout", "-q", "-b", "topic")
+            with open(os.path.join(repo, name), "w") as fh:
+                fh.write(name)
+            git("add", name)
+            git("commit", "-q", "-m", subject)
+        first, second = git("rev-parse", "HEAD~1"), git("rev-parse", "HEAD")
+        ar.DATA = tempfile.mkdtemp(dir=TMP)
+        with Patch(review_tree=lambda root, base, title, diff: {**result([]), "reviewer": "x"}):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                ar.review_local(REPO, repo, base_ref=first)
+        text = err.getvalue()
+        self.assertIn(os.path.realpath(repo), text)
+        self.assertIn(second[:12], text)
+        self.assertIn("(topic)", text)
+        self.assertIn("second commit on topic", text)
 
 
 class MissingReviewer(unittest.TestCase):

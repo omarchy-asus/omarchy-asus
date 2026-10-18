@@ -11,9 +11,15 @@
 #      located pass cannot place is blocked
 #   5. a malformed rule (a bare asset glob) fails closed
 # No network, no gh; workspace and data dir are temp dirs.
-# Usage: tests/sync-release-pii-scan.sh [keep]   (keep: leave the temp dir for inspection)
+# Usage: tests/ci/sync-release-pii-scan.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
-W=$(cd "$(dirname "$0")/.." && pwd)
+W=$(cd "$(dirname "$0")/../.." && pwd)
+for t in bsdtar strings; do
+    command -v "$t" >/dev/null && continue
+    # CI installs every one of them (.github/workflows/lint.yml): a skip there is a failure
+    [[ -n ${CI:-} ]] && { echo "FAIL: $t missing on CI"; exit 1; }
+    echo "skip: $t missing"; exit 0
+done
 S=$(mktemp -d)
 [[ ${1:-} == keep ]] && echo "state: $S" || trap 'rm -rf "$S"' EXIT
 mkdir -p "$S/ws/build" "$S/data" "$S/pkg/clean" "$S/pkg/hit" "$S/pkg/name/zorbleplex"
