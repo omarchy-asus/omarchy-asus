@@ -16,3 +16,15 @@ linux-omarchy-headers-*.pkg.tar.zst  usr/lib/modules/*/build/*
 # above; only those kernel paths are allowed, each package's own list otherwise scanned.
 omarchy-asus.files  linux-omarchy-[0-9]*/files:usr/lib/modules/*/kernel/drivers/hid/*
 omarchy-asus.files  linux-omarchy-headers-*/files:usr/lib/modules/*/build/*
+# omarchy / omarchy-settings: unmodified stock Omarchy files whose text matches common
+# words or the private-address patterns on the denylist (DNS, firewall and Sunshine
+# scripts). The same hits, in byte-identical files, are in stock omarchy 4.0.5-1; our
+# patches add none.
+omarchy-[0-9]*.pkg.tar.zst           usr/share/omarchy/shell/plugins/dev-gallery/GalleryPanel.qml:*
+omarchy-[0-9]*.pkg.tar.zst           usr/bin/omarchy-bluetooth-device:*
+omarchy-[0-9]*.pkg.tar.zst           usr/bin/omarchy-dns:*
+omarchy-[0-9]*.pkg.tar.zst           usr/bin/omarchy-install-service-sunshine:*
+omarchy-[0-9]*.pkg.tar.zst           usr/bin/omarchy-remove-service-sunshine:*
+omarchy-[0-9]*.pkg.tar.zst           usr/share/omarchy/install/config/firewall.sh:*
+omarchy-settings-[0-9]*.pkg.tar.zst  etc/skel/.config/btop/btop.conf:*
+omarchy-settings-[0-9]*.pkg.tar.zst  usr/share/omarchy/config/btop/btop.conf:*
