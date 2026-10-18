@@ -2,10 +2,33 @@
 # Check every recipes/*/PKGBUILD without building it (run as root inside
 # ghcr.io/archlinux/archlinux:base-devel; the repo may be mounted read-only):
 #   bash -n and `makepkg --printsrcinfo` must succeed (fatal)
-#   namcap findings are reported as warnings (not fatal)
+#   namcap findings are reported as warnings (not fatal), except the known
+#   false positives in NAMCAP_IGNORE, which are printed but not annotated
 # Usage: ci/check-recipes
 set -uo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+
+# Known namcap false positives: "<recipe>|<message>", where <message> is the
+# exact text namcap prints after "W: " or "E: ". Exact, so a changed finding
+# (another package added to the list, say) warns again. Say why for each one.
+NAMCAP_IGNORE=(
+    # splitpkgmakedeps wants every split package's depends in the global
+    # makedepends. cpio is in hyprpm's depends only because hyprpm itself runs
+    # `make installheaders` (Makefile: find src ... | cpio -0dump) when it
+    # builds plugins, and checks for cpio first (hyprpm/src/core/PluginManager.cpp).
+    # Our build never runs cpio: build() is `make release` (cmake) and
+    # package_*() is `make install` (cmake --install). Arch's PKGBUILD, which
+    # ours overlays (recipes/hyprland/DELTA), is the same, so a makedepends
+    # entry would only be one more delta to carry for nothing.
+    "hyprland|Split PKGBUILD needs additional makedepends ['cpio'] to work properly"
+)
+ignored() {
+    local recipe=$1 msg=${2#* [WE]: } entry
+    for entry in "${NAMCAP_IGNORE[@]}"; do
+        [[ $entry == "$recipe|$msg" ]] && return 0
+    done
+    return 1
+}
 
 pacman -Syu --noconfirm --needed --noprogressbar namcap >/dev/null || exit 1
 id builder >/dev/null 2>&1 || useradd -m builder
@@ -25,6 +48,10 @@ for pkgbuild in "$repo"/recipes/*/PKGBUILD; do
     if [[ -n $out ]]; then
         echo "$out"
         while IFS= read -r line; do
+            if ignored "${rel#recipes/}" "$line"; then
+                echo "(known false positive, see NAMCAP_IGNORE in ci/check-recipes: $line)"
+                continue
+            fi
             echo "::warning file=$rel/PKGBUILD,title=namcap::$line"
         done <<<"$out"
     else
