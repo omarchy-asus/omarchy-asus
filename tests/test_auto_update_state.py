@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""bin/auto-update-state: plans on upstream db freshness (#81), revdep-withdraw and
-counterpart-key. Offline: hand-made check-upstream JSON, no vercmp needed (one row per
+"""bin/auto-update-state: plans on upstream db freshness (#81), revdep-withdraw (an
+unreadable conf fails, #89), forget and counterpart-key. Offline: hand-made check-upstream JSON, no vercmp needed (one row per
 recipe and no HOLD never reaches a version comparison).
 
 Run: python3 -I tests/test_auto_update_state.py
@@ -146,6 +146,47 @@ class RevdepWithdrawTest(unittest.TestCase):
         self.write("linux-g16 dkms:nvidia-open-dkms\n")
         self.assertEqual(self.withdraw("linux-g16-headers", "nvidia-open-dkms"),
                          "linux-g16-headers\tnvidia-open-dkms\n")
+
+    def test_unreadable_conf(self):
+        # Present but unreadable: exit 1, so bin/auto-update withdraws nothing (#89)
+        os.remove(self.conf)
+        os.mkdir(self.conf)
+        p = run("revdep-withdraw", self.conf, "linux-omarchy-headers", "nvidia-open-dkms")
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("cannot read", p.stderr)
+        self.assertEqual(p.stdout, "")
+
+
+class ForgetTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.status = os.path.join(self.tmp.name, "status.json")
+
+    def recipes(self):
+        with open(self.status) as f:
+            return json.load(f)["recipes"]
+
+    def test_forget_drops_entry(self):
+        p = run("record", self.status, "r1", "(upstream dbs)", "attention", "none", "message=x")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = run("record", self.status, "r1", "other", "ok", "build", "message=y")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("(upstream dbs)", self.recipes())
+        p = run("forget", self.status, "(upstream dbs)")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("(upstream dbs)", self.recipes())
+        self.assertIn("other", self.recipes())
+        p = run("summary", self.status, "r2", os.path.join(self.tmp.name, "status.md"))
+        self.assertNotIn("(upstream dbs)", p.stdout)
+        self.assertIn("other", p.stdout)
+
+    def test_forget_missing_recipe(self):
+        p = run("record", self.status, "r1", "other", "ok", "build")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = run("forget", self.status, "(dkms check)")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(list(self.recipes()), ["other"])
 
 
 class CounterpartKeyTest(unittest.TestCase):

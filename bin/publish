@@ -7,7 +7,9 @@
 # Usage: bin/publish $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
 # Release cohort members (build/cohorts.conf, e.g. omarchy + omarchy-settings) are published
 # in one call, or next to a partner already in the db at the same version; otherwise this
-# refuses before anything is copied or signed (bin/release-cohort check-publish).
+# refuses before anything is copied or signed (bin/release-cohort check-publish). The check
+# reads each archive's .PKGINFO (a file name that disagrees with it is refused) and refuses
+# a missing $WORKSPACE/build/cohorts.conf.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 # shellcheck source=bin/publish-lib.sh
@@ -21,7 +23,7 @@ db_args=()
 if [[ -f "$REPO_DIR/$REPO_NAME.db.tar.gz" ]]; then
     db_args=(--db "$REPO_DIR/$REPO_NAME.db.tar.gz")
 fi
-"$(dirname "$0")/release-cohort" check-publish "${db_args[@]}" "$@" || {
+"$(dirname "$0")/release-cohort" --workspace "$WORKSPACE" check-publish "${db_args[@]}" "$@" || {
     echo "publish: refusing: a release cohort member would ship without its partner (build/cohorts.conf)" >&2
     exit 1
 }

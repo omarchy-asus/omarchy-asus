@@ -1,8 +1,10 @@
 #!/bin/bash
 # bin/release-cohort keeps a release cohort (build/cohorts.conf) together: patched
 # omarchy is never published without the patched omarchy-settings of the same
-# pkgver-pkgrel (#83), and the recipes pin each other to the release. Offline: empty package
-# files and a hand-made repo db; needs bash, python3 and GNU tar only.
+# pkgver-pkgrel (#83), and the recipes pin each other to the release. check-publish reads
+# each archive's .PKGINFO and refuses a mislabelled archive or a missing cohorts file (#89).
+# Offline: tar archives holding only a .PKGINFO and a hand-made repo db; needs bash,
+# python3 and GNU tar only.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -30,9 +32,18 @@ mkdb() {  # mkdb <db file> <name-pkgver-pkgrel>...
     done
     tar -czf "$db" -C "$d" "$@"
 }
-pkg() {  # pkg <file name>: an empty package file, printed with its path
-    : >"$T/pkgs/$1"
-    echo "$T/pkgs/$1"
+status_ws() {  # status_ws <release-cohort args...>: the exit code, without --cohorts
+    "$RC" "$@" >/dev/null 2>&1
+    echo $?
+}
+pkg() {  # pkg <name> <pkgver-pkgrel> [file name]: a package archive holding only a .PKGINFO,
+    # named <file name> (default <name>-<ver>-x86_64.pkg.tar.zst), printed with its path.
+    # An uncompressed tar under a .zst name: release-cohort detects the format by content.
+    local d f=${3:-$1-$2-x86_64.pkg.tar.zst}
+    d=$(mktemp -d "$T/pkginfo.XXXXXX")
+    printf 'pkgname = %s\npkgver = %s\n' "$1" "$2" >"$d/.PKGINFO"
+    tar -cf "$T/pkgs/$f" -C "$d" .PKGINFO
+    echo "$T/pkgs/$f"
 }
 mkws() {  # mkws <name>: a workspace with copies of the cohort's PKGBUILDs
     local ws=$T/$1 r
@@ -59,10 +70,10 @@ expect "members --db --present, the whole cohort gone: nothing" \
     "$(members --db "$T/no-cohort.db.tar.gz" --present omarchy omarchy-settings)" ""
 expect "members --present without --db: usage error" "$(status members --present omarchy)" 64
 
-om=$(pkg omarchy-4.0.5-1.2-x86_64.pkg.tar.zst)
-st=$(pkg omarchy-settings-4.0.5-1.2-x86_64.pkg.tar.zst)
-st_old=$(pkg omarchy-settings-4.0.5-1.1-x86_64.pkg.tar.zst)
-hy=$(pkg hyprland-0.50-1.1-x86_64.pkg.tar.zst)
+om=$(pkg omarchy 4.0.5-1.2)
+st=$(pkg omarchy-settings 4.0.5-1.2)
+st_old=$(pkg omarchy-settings 4.0.5-1.1)
+hy=$(pkg hyprland 0.50-1.1)
 mkdb "$T/settings.db.tar.gz" omarchy-settings-4.0.5-1.2
 mkdb "$T/stock-settings.db.tar.gz" omarchy-settings-4.0.5-1
 expect "check-publish omarchy alone, no db: refused" "$(status check-publish "$om")" 1
@@ -73,6 +84,29 @@ expect "check-publish omarchy alone, settings of the same version in the db: ok"
 expect "check-publish omarchy alone, stock settings of the same pkgver in the db: refused" \
     "$(status check-publish --db "$T/stock-settings.db.tar.gz" "$om")" 1
 expect "check-publish hyprland alone: ok" "$(status check-publish "$hy")" 0
+
+# #89: the name and version come from the archive's .PKGINFO, not its file name
+mkdir -p "$T/pkgs/mislabelled-1" "$T/pkgs/mislabelled-2"
+fake_om=$(pkg hyprland 0.50-1.1 mislabelled-1/omarchy-4.0.5-1.2-x86_64.pkg.tar.zst)
+expect "check-publish, omarchy file name over a hyprland .PKGINFO, with its settings: refused" \
+    "$(status check-publish "$fake_om" "$st")" 64
+fake_hy=$(pkg omarchy 4.0.5-1.2 mislabelled-2/hyprland-0.50-1.1-x86_64.pkg.tar.zst)
+expect "check-publish, hyprland file name over an omarchy .PKGINFO: refused" \
+    "$(status check-publish "$fake_hy")" 64
+: >"$T/pkgs/hyprland-0.51-1.1-x86_64.pkg.tar.zst"
+expect "check-publish, an empty file with a package name: usage error" \
+    "$(status check-publish "$T/pkgs/hyprland-0.51-1.1-x86_64.pkg.tar.zst")" 64
+
+# #89: check-publish without a cohorts file would let every package through: refused
+expect "check-publish, --cohorts names a missing file: refused" \
+    "$(status_ws --cohorts "$T/missing.conf" check-publish "$hy")" 1
+mkdir -p "$T/empty-ws"
+expect "check-publish, a workspace without build/cohorts.conf: refused" \
+    "$(status_ws --workspace "$T/empty-ws" check-publish "$hy")" 1
+expect "members, a missing cohorts file: just the names" \
+    "$("$RC" --cohorts "$T/missing.conf" members omarchy hyprland 2>/dev/null | paste -sd' ')" "omarchy hyprland"
+expect "members, a missing cohorts file: exit 0" \
+    "$(status_ws --cohorts "$T/missing.conf" members omarchy)" 0
 
 expect "check-recipes on the real recipes: ok" \
     "$("$RC" --workspace "$W" check-recipes >/dev/null 2>&1; echo $?)" 0

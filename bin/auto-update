@@ -40,6 +40,7 @@
 #   (attention); past it every package overriding upstream is withdrawn (stock flows).
 #   Withdrawing a kernel first compiles our retained DKMS package against the stock headers
 #   and withdraws it too if that fails; cached builds are re-checked when that counterpart moved.
+#   An unreadable build/revdeps.conf withdraws nothing (attention); retried removals get the check too.
 #
 # Root vs user: run as root (systemd), only the chroot build runs as root; every other
 # step runs as BUILD_USER via runuser. Run as a normal user, the build uses sudo.
@@ -58,7 +59,7 @@ while (($#)); do
         --recipe) recipes+=("$2"); shift ;;
         --workspace) workspace_arg=$(realpath "$2"); shift ;;
         --config) config=$2; shift ;;
-        -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
     shift
@@ -207,14 +208,23 @@ repo_names() {  # repo_names: the package names in our repo db, one per line
     as_user bash -c 'bsdtar -tf "$1" 2>/dev/null | sed -n "s#^\([^/]*\)-[^-/]*-[^-/]*/\$#\1#p"' \
         _ "$REPO_DIR/$REPO_NAME.db.tar.gz"
 }
-unpublish_now() {  # unpublish_now <comma names|-> <reason>: 1 if bin/unpublish failed
-    local names=$1 reason=$2 pairs h d dfile one
+unpublish_now() {  # unpublish_now <comma names|-> <reason>: 1 if nothing was withdrawn (bin/unpublish
+                   # failed, or the retained DKMS packages could not be listed)
+    local names=$1 reason=$2 pairs h d dfile one msg
     [[ $names != - ]] || return 0
     # Withdrawing headers exposes the stock kernel to the DKMS package we keep publishing:
     # compile it against the stock headers first, and withdraw it too if that fails.
-    pairs=$(as_user "$LIB/auto-update-state" revdep-withdraw "$CLONE/build/revdeps.conf" "$names" \
-        "$(repo_names | paste -sd,)") ||
-        { note unpublish "cannot list the DKMS packages kept alongside ${names//,/ }"; pairs=; }
+    # Fail closed: when the pairs cannot be listed (build/revdeps.conf unreadable), withdraw
+    # nothing rather than leave a DKMS package published that was never checked. Names already
+    # pending stay pending (retry_unpublish), the plan re-plans the rest next run.
+    if ! pairs=$(as_user "$LIB/auto-update-state" revdep-withdraw "$CLONE/build/revdeps.conf" "$names" \
+            "$(repo_names | paste -sd,)"); then
+        msg="NOT withdrawing ${names//,/ }: cannot list the DKMS packages kept alongside (build/revdeps.conf unreadable?); fix it, the next run retries"
+        note unpublish "$msg"
+        if [[ $mode == full ]]; then record "(dkms check)" attention unpublish message="$msg" || true; fi
+        return 1
+    fi
+    if [[ $mode == full ]]; then as_user "$LIB/auto-update-state" forget "$STATUS" "(dkms check)" || true; fi
     while IFS=$'\t' read -r h d; do
         [[ -n $h && -n $d && ,$names, != *",$d,"* ]] || continue
         if [[ $mode != full ]]; then
@@ -246,18 +256,20 @@ unpublish_now() {  # unpublish_now <comma names|-> <reason>: 1 if bin/unpublish 
     return 1
 }
 retry_unpublish() {  # retry the removals a previous run could not do (names still in the db)
-    local want=() n
+    # Through unpublish_now, so a retried kernel or headers withdrawal gets the same
+    # retained-DKMS stock-header check (and pending/sync handling) as the first attempt.
+    local want=() gone=() n
     [[ -n $(as_user cat "$PENDING_UNPUB" 2>/dev/null) ]] || return 0
     local in_db; in_db=$(repo_names)
     while IFS= read -r n; do
-        [[ -n $n ]] && grep -qxF -- "$n" <<<"$in_db" && want+=("$n")
+        [[ -n $n ]] || continue
+        if grep -qxF -- "$n" <<<"$in_db"; then want+=("$n"); else gone+=("$n"); fi
     done < <(as_user cat "$PENDING_UNPUB")
     if ((${#want[@]} == 0)); then as_user rm -f "$PENDING_UNPUB"; return 0; fi
+    ((${#gone[@]} == 0)) || pending_edit drop "${gone[@]}"
     note unpublish "retrying the removal of ${want[*]} (failed in an earlier run)"
-    if as_user "$LIB/unpublish" "${want[@]}"; then
-        as_user rm -f "$PENDING_UNPUB"; as_user touch "$DATA/sync-pending"
-    else
-        note unpublish "bin/unpublish FAILED again for ${want[*]}"; failed=1
+    if ! unpublish_now "$(IFS=,; echo "${want[*]}")" "retry of a removal that failed in an earlier run"; then
+        note unpublish "removal of ${want[*]} FAILED again"; failed=1
     fi
 }
 srcinfo() {  # srcinfo <recipe dir>: makepkg --printsrcinfo in bin/recipe-sandbox (no network)
@@ -956,6 +968,28 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
     fi
 }
 
+upstream_dbs_check() { # upstream_dbs_check <check.json>
+    # An upstream db that could not be fetched was used from cache: say so (attention). Past
+    # DB_MAX_STALE it is "expired", and the plan withdraws what overrides upstream. Once
+    # check-upstream reports the dbs fresh again, the "(upstream dbs)" entry is dropped, so
+    # status.md does not keep showing it as an earlier run (an unreadable check keeps it).
+    local degraded dbmsg
+    degraded=$(as_user jq -r '.degraded // false' "$1" 2>/dev/null) || degraded=unknown
+    if [[ $degraded == true ]]; then
+        dbmsg=$(as_user jq -r '"stale upstream db(s): "
+            + ([.upstream_dbs[]? | select(.stale or .expired)
+                | "\(.repo) \(if .age == null then "?" else (.age / 3600 | floor | tostring) end)h"]
+               | if length > 0 then join(" ") else "?" end)
+            + "; expired: " + ((.expired // []) | if length > 0 then join(" ") else "none" end)' "$1") ||
+            dbmsg="stale upstream db(s): ? (unreadable check-upstream output)"
+        note upstream "$dbmsg"
+        attention=1
+        [[ $mode == plan ]] || record "(upstream dbs)" attention none message="$dbmsg"
+    elif [[ $degraded == false && $mode != plan ]]; then
+        as_user "$LIB/auto-update-state" forget "$STATUS" "(upstream dbs)" || true
+    fi
+}
+
 # ---------------------------------------------------------------- main
 if [[ $mode == crstate ]]; then
     as_user env GH_REPO="$GH_REPO" "$LIB/ai-review" pr "$cr_pr" --repo "$GH_REPO"
@@ -981,19 +1015,7 @@ crc=0
 recipe_args=(); for r in "${recipes[@]}"; do recipe_args+=(--recipe "$r"); done
 to_file "$check" "$LIB/check-upstream" --json "${recipe_args[@]}" || crc=$?
 ((crc == 0 || crc == 10)) || { echo "check-upstream failed (exit $crc)"; exit 1; }
-# An upstream db that could not be fetched was used from cache: say so (attention). Past
-# DB_MAX_STALE it is "expired", and the plan below withdraws what overrides upstream.
-if [[ $(as_user jq -r '.degraded // false' "$check") == true ]]; then
-    dbmsg=$(as_user jq -r '"stale upstream db(s): "
-        + ([.upstream_dbs[]? | select(.stale or .expired)
-            | "\(.repo) \(if .age == null then "?" else (.age / 3600 | floor | tostring) end)h"]
-           | if length > 0 then join(" ") else "?" end)
-        + "; expired: " + ((.expired // []) | if length > 0 then join(" ") else "none" end)' "$check") ||
-        dbmsg="stale upstream db(s): ? (unreadable check-upstream output)"
-    note upstream "$dbmsg"
-    attention=1
-    [[ $mode == plan ]] || record "(upstream dbs)" attention none message="$dbmsg"
-fi
+upstream_dbs_check "$check"
 plan=$(as_user env SKIP_RECIPES="$SKIP_RECIPES" BUILD_NOT_BUILT="$BUILD_NOT_BUILT" \
     KEEP_PUBLISHED="$KEEP_PUBLISHED" "$LIB/auto-update-state" plan "$check" "$STATUS")
 echo "plan:"
@@ -1021,7 +1043,7 @@ while IFS=$'\t' read -r r action target in_repo names pnote; do
                 if unpublish_now "$in_repo" "$pnote"; then
                     record "${r#(db) }" ok unpublish message="$pnote"
                 else
-                    record "${r#(db) }" failed unpublish class=unpublish message="bin/unpublish failed (retried next run): $pnote"
+                    record "${r#(db) }" failed unpublish class=unpublish message="not withdrawn: bin/unpublish failed or the retained-DKMS check could not run (retried next run): $pnote"
                 fi
                 ;;
             attention)

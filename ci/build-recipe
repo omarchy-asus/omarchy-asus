@@ -7,7 +7,41 @@
 # Output: the unsigned packages land in $OUT (default /out). The build tree
 # is $WORK/<recipe> (default /build), so it can live on a big disk.
 # Usage: ci/build-recipe <recipe>
+#
+# Why no bin/recipe-sandbox here (#79, #89): on the build host, recipe code
+# runs under bin/recipe-sandbox because that host holds the signing key and
+# the publish credentials. Here `makepkg -s` runs recipe code without it,
+# which is safe because this step holds no secrets:
+#   - The script runs only inside the `docker run --rm` started by
+#     .github/workflows/build-pr.yml, a `pull_request` workflow (never
+#     pull_request_target), so fork PRs get no secrets; its other trigger,
+#     `workflow_dispatch`, is started by a maintainer and gets the same
+#     read-only token and no secrets either.
+#   - The job token is read-only (`permissions: contents: read`,
+#     `actions: read`) and is only in the env of the separate "Look for an
+#     earlier build" step (ci/find-build), never in the build step.
+#   - docker run is given no -e/--env/--env-file, so the runner's environment
+#     (GITHUB_TOKEN, the ACTIONS_* tokens) does not reach the container; the
+#     guard below refuses to run if it ever does.
+#   - actions/checkout runs with persist-credentials: false, so /repo
+#     (mounted :ro) holds no git credentials.
+#   - The docker socket is not mounted.
+#   - No signing key exists on the runner: signing and publishing happen only
+#     on the build host (bin/build-pkg in the chroot, then bin/publish).
+# A sandbox is not possible here anyway: bwrap needs unprivileged user
+# namespaces, which the stock docker container lacks under the default
+# seccomp profile (enabling them needs --privileged or
+# --security-opt seccomp=unconfined, which weakens isolation), and
+# `makepkg -s` needs sudo pacman to install the build deps, which cannot run
+# inside bwrap --unshare-all.
+# tests/ci/build-recipe-no-secrets.sh enforces all of this.
 set -euo pipefail
+for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
+    if [[ -n ${!v:-} ]]; then
+        echo "::error::ci/build-recipe: credentials in the environment ($v); recipe code must not run with them" >&2
+        exit 1
+    fi
+done
 repo=$(cd "$(dirname "$0")/.." && pwd)
 name=${1:?usage: ci/build-recipe <recipe>}
 src=$repo/recipes/$name

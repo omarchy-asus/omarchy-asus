@@ -10,6 +10,7 @@
 #   e. unpublish with a stale db signature: refused, repo unchanged
 #   f. a good unpublish: the package's files are gone
 #   g. a swap killed between its two renames ($REPO_DIR only as .prev): recovered
+#   h. no build/cohorts.conf in the workspace: refused, repo unchanged (#89)
 # Throwaway gpg keys and stub repo-add/repo-remove (no pacman); no network, no sudo.
 # Usage: tests/ci/publish-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -29,6 +30,8 @@ cleanup() {
 }
 [[ ${1:-} == keep ]] && echo "state: $S" || trap cleanup EXIT
 mkdir -p "$S/ws" "$S/data" "$S/bin" "$S/pkgs"
+# bin/publish refuses a workspace without build/cohorts.conf (#89)
+mkdir -p "$S/ws/build" && printf '# test: no cohorts\n' >"$S/ws/build/cohorts.conf"
 mkdir -m 0700 "$S/data/gnupg"
 export OMARCHY_ASUS_WORKSPACE=$S/ws OMARCHY_ASUS_DATA=$S/data GNUPGHOME=$S/data/gnupg
 unset OMARCHY_ASUS_PUBLISH_LOCKED PUBLISH_LOCK_WAIT STUB_SIGN
@@ -181,5 +184,12 @@ publish "$S/pkgs/foo-1-1-x86_64.pkg.tar.zst"; expect $? 0 "publish after an inte
 grep -q 'recovered' "$S/out"; expect $? 0 "says it recovered"
 if [[ -e $REPO.prev || -e $REPO.new ]]; then r=0; else r=1; fi; expect "$r" 1 "no .prev or staging dir left"
 db_names foo-1-1-x86_64.pkg.tar.zst; expect $? 0 "the db names foo-1-1"
+
+echo "== h. no build/cohorts.conf in the workspace"
+before=$(listing)
+mv "$S/ws/build/cohorts.conf" "$S/ws/build/cohorts.conf.off"
+publish "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst"; nonzero $? "publish without a cohorts file is refused"
+unchanged "$before" "live repo unchanged"
+mv "$S/ws/build/cohorts.conf.off" "$S/ws/build/cohorts.conf"
 ((fail)) && { echo "--- last output:"; cat "$S/out"; }
 exit $fail
