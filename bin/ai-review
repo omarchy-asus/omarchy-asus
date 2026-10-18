@@ -491,7 +491,8 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
             got = run(["git", "-C", root, "rev-parse", "HEAD"]).stdout.strip()
             if got != head:
                 raise RuntimeError(f"--checkout {checkout} is at {got[:12]}, the PR head is {head[:12]}")
-            run(git_cred("-C", root, "fetch", "--quiet", "origin", base), check=False)
+            # by URL: an agent's checkout may call the hub remote anything (origin is often a fork)
+            run(git_cred("-C", root, "fetch", "--quiet", f"https://github.com/{repo}.git", base))
         else:
             src = cache_clone(repo)
             run(git_cred("-C", src, "fetch", "--quiet", "origin", base, f"pull/{num}/head"))
