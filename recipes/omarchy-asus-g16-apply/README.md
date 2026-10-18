@@ -40,8 +40,12 @@ command reports those fixes as `present`. If rtkit isn't installed yet,
 - **winlock:** `asus-rog-nkey-winlock` enables its unit itself.
 
 If this command added its Hyprland lines or asusd drop-in before you installed
-the patched omarchy, `--check` says they're now redundant. Remove them as
-described in [Undo](#undo).
+the patched omarchy, `--check` says they're now redundant. Delete the
+`omarchy-asus-g16-apply` lines from `hyprland.lua`, and the
+`20-omarchy-asus-power-profiles.conf` drop-in followed by
+`sudo systemctl daemon-reload` (see [Undo](#undo)). Keep the mpv and Chromium
+pins, which Omarchy now keeps up to date, and don't turn asusd's settings back
+on: the patched omarchy's drop-in wants them off.
 
 The command remains for stock Omarchy 4.0.5.
 
