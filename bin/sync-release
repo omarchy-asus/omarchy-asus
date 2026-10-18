@@ -23,6 +23,8 @@
 # entries or the matched text. A missing denylist, an invalid regex in it or a
 # failed scan aborts too, never reads as clean (PII_SCAN=off skips
 # the scan, for a machine without one).
+# --pii-scan also takes plain text files (bin/auto-update scans its PR comments and
+# replies with it): a file that is not an archive is scanned as text.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 dry=0 scan_only=0
@@ -69,12 +71,19 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
             "refusing to upload" >&2
         return 1
     fi
-    local f rc=0 m hit
+    local f rc=0 m hit archive
     for f in "$@"; do
         declare -A seen=()
-        st=0
-        { bsdtar -tf "$f" 2>/dev/null; bsdtar -xOf "$f" 2>/dev/null | strings -n 4; } |
-            grep -oiE -- "$pattern" >"$up/.hits" || st=${PIPESTATUS[1]}
+        st=0 archive=0
+        # An archive (package, db): its file names and the strings of its contents. Anything
+        # else (a PR comment, a reply) is scanned as text.
+        if bsdtar -tf "$f" >/dev/null 2>&1; then
+            archive=1
+            { bsdtar -tf "$f" 2>/dev/null; bsdtar -xOf "$f" 2>/dev/null | strings -n 4; } |
+                grep -oiE -- "$pattern" >"$up/.hits" || st=${PIPESTATUS[1]}
+        else
+            grep -aoiE -- "$pattern" "$f" >"$up/.hits" || st=$?   # unreadable: exit 2
+        fi
         if ((st > 1)); then  # 1 is "no match"; anything else is a scan error
             echo "PII scan of $(basename "$f") failed (grep exit $st); refusing to upload" >&2
             rm -f "$up/.hits"; return 1
@@ -90,7 +99,9 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
         rm -f "$up/.hits"
         hit="$(basename "$f"): denylist line(s) $(printf '%s\n' "${!seen[@]}" | sort -n | paste -sd, -)"
         local ok=0
-        for g in "${globs[@]}"; do [[ $(basename "$f") == $g ]] && ok=1; done
+        if ((archive)); then  # the allow list names packages, never a comment
+            for g in "${globs[@]}"; do [[ $(basename "$f") == $g ]] && ok=1; done
+        fi
         if ((ok)); then echo "PII scan: allowed by build/pii-allow-packages: $hit"
         else echo "PII scan: BLOCKED $hit" >&2; rc=1; fi
         unset seen

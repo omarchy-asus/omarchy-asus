@@ -98,6 +98,16 @@ bin/revdep-check --headers ~/.local/share/omarchy-asus/repo/x86_64/linux-omarchy
 - The agent's second opinion approves (`REQUIRE_AGENT_APPROVAL=yes`). If `claude` is missing or `REVIEW_CMD` is empty, the PR waits for a human.
 - `MERGE_MODE=auto`.
 
+After the merge, the run publishes only if `recipes/<r>` in the merge commit is the tree it built.
+`--match-head-commit` pins the PR head, not the base. If the base branch changed the same recipe
+during the build and review, the squash merge holds a recipe that was never built. Then nothing
+is published, the stale package is unpublished, and the next run builds the base branch's recipe.
+
+Every PR comment and thread reply goes through the same denylist scan as the release
+(`bin/sync-release --pii-scan`). If the body has a hit, the denylist is missing or the scan
+fails, a placeholder naming the run is posted instead. The original stays in the run dir as
+`<name>.withheld`. Messages name run files by run id and file name, never by absolute path.
+
 ### Recipe deltas
 
 `recipes/<r>/DELTA` declares how a recipe differs from upstream, so a rebase is mechanical. `bin/rebase-recipe --help` documents the format. There are three shapes today:
