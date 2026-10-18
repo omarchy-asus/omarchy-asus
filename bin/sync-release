@@ -126,34 +126,58 @@ pii_scan() {  # pii_scan <file>...: prints a line per file with hits, returns 1 
     done
     return $rc
 }
+pii_place() {  # pii_place <location> <file of hit lines> [line]: append '<location>\t<match>' to
+    # $up/.loc per match; with 'line', the location is '<location>:<that line>'
+    local l m s
+    while IFS= read -r l; do
+        s=0; grep -oiE -- "$pattern" <<<"$l" >"$up/.m" || s=$?
+        ((s > 1)) && return 1
+        while IFS= read -r m; do printf '%s\t%s\n' "${1//$'\t'/ }${3:+:${l//$'\t'/ }}" "$m"; done <"$up/.m"
+    done <"$2" >>"$up/.loc"
+}
 # pii_located <asset>: second pass, only for an asset that has allow rules. Unpacks it
 # and places every hit (the member path for a name hit, '<member>:<line>' for a
 # content hit); returns 0 only if every hit lies at a location a rule for this asset
 # allows AND the placed hits cover every distinct hit of the first pass ($up/.hits).
 # Otherwise sets pii_why (a count, never a location or the text) and returns 1.
 pii_located() {
-    local f=$1 base x m line loc i allowed nbad=0 d=$up/.x
+    local f=$1 base x m loc i allowed nbad=0 d=$up/.x
     base=$(basename "$f"); pii_why=''
     rm -rf "$d"; mkdir -p "$d"
     if ! bsdtar -xf "$f" -C "$d" 2>/dev/null; then
         pii_why="could not unpack it to place the hits"; chmod -R u+rwX "$d"; rm -rf "$d"; return 1
     fi
     chmod -R u+rwX "$d"  # read every member, and let rm remove read-only dirs
-    {   # name hits: the member path itself (no leading ./ or trailing /)
-        bsdtar -tf "$f" 2>/dev/null | grep -iE -- "$pattern" | while IFS= read -r x; do
-            loc=${x#./}; loc=${loc%/}
-            grep -oiE -- "$pattern" <<<"$x" | while IFS= read -r m; do printf '%s\t%s\n' "${loc//$'\t'/ }" "$m"; done
-        done
-        # content hits; the C-locale grep -l only narrows which files get read
+    # Every step is checked: a failed read must refuse the asset, not drop its hits.
+    local st=0 err=''
+    : >"$up/.loc"
+    # name hits: the member path itself (no leading ./ or trailing /)
+    bsdtar -tf "$f" >"$up/.names" 2>/dev/null || err="could not list it"
+    if [[ -z $err ]]; then
+        grep -iE -- "$pattern" "$up/.names" >"$up/.l" || st=$?
+        ((st > 1)) && err="name scan failed"
+    fi
+    if [[ -z $err ]]; then
+        while IFS= read -r x; do
+            x=${x#./}; x=${x%/}; printf '%s\n' "$x" >"$up/.one"
+            pii_place "$x" "$up/.one" || { err="name scan failed"; break; }
+        done <"$up/.l"
+    fi
+    # content hits, at '<member>:<line>'; the C-locale grep -l only narrows which files get read
+    if [[ -z $err ]]; then
+        st=0; LC_ALL=C grep -rlaiZE -- "$pattern" "$d" >"$up/.files" || st=$?
+        ((st > 1)) && err="content scan failed"
+    fi
+    if [[ -z $err ]]; then
         while IFS= read -r -d '' x; do
-            strings -n 4 "$x" | grep -iE -- "$pattern" | while IFS= read -r line; do
-                grep -oiE -- "$pattern" <<<"$line" | while IFS= read -r m; do
-                    printf '%s\t%s\n' "${x#"$d"/}:${line//$'\t'/ }" "$m"
-                done
-            done
-        done < <(LC_ALL=C grep -rlaiZE -- "$pattern" "$d")
-    } >"$up/.loc"
-    rm -rf "$d"
+            strings -n 4 "$x" >"$up/.s" || { err="content scan failed"; break; }
+            st=0; grep -iE -- "$pattern" "$up/.s" >"$up/.l" || st=$?
+            ((st > 1)) && { err="content scan failed"; break; }
+            pii_place "${x#"$d"/}" "$up/.l" line || { err="content scan failed"; break; }
+        done <"$up/.files"
+    fi
+    rm -rf "$d"; rm -f "$up/.names" "$up/.l" "$up/.one" "$up/.files" "$up/.s" "$up/.m"
+    if [[ -n $err ]]; then pii_why="$err; refusing"; rm -f "$up/.loc"; return 1; fi
     # Fail closed: a first-pass hit this pass did not place (say, a string that spans
     # two members) is not covered by any rule.
     if [[ -n $(comm -23 <(tr '[:upper:]' '[:lower:]' <"$up/.hits" | sort -u) \

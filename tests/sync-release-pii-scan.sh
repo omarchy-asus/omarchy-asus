@@ -95,6 +95,17 @@ out=$(scan "$S/good" "$S/db2.files"); expect $? 1 "files db: another line of the
 out=$(scan "$S/good" "$S/span.tar"); rc=$?
 expect $rc 1 "a hit the located pass cannot place is blocked, even under a catch-all rule"
 grep -q 'could not be placed' <<<"$out"; expect $? 0 "says why"
+# A read error in the located pass refuses the asset: the same word in an allowed and a
+# disallowed member, and a strings that fails on the disallowed one.
+mkdir -p "$S/pkg/rd" "$S/bin"
+printf 'zorbleplex\n' >"$S/pkg/rd/allowed"; printf 'zorbleplex\n' >"$S/pkg/rd/forbidden"
+bsdtar -cf "$S/rd.tar" -C "$S/pkg/rd" allowed forbidden
+printf 'rd.tar  allowed:*\n' >>"$S/ws/build/pii-allow-packages"
+printf '#!/bin/bash\n[[ ${*: -1} == */forbidden ]] && exit 2\nexec %q "$@"\n' "$(command -v strings)" >"$S/bin/strings"
+chmod +x "$S/bin/strings"
+out=$(PATH=$S/bin:$PATH scan "$S/good" "$S/rd.tar"); rc=$?
+expect $rc 1 "a failed read in the located pass is blocked"
+grep -q 'content scan failed' <<<"$out"; expect $? 0 "says why"
 out=$(scan "$S/good" "$S/hit.tar"); expect $? 1 "a package without rules is still blocked"
 out=$(scan "$S/bad" "$S/kern.tar"); expect $? 1 "allow list does not excuse an invalid denylist"
 
