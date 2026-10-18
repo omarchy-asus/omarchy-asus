@@ -56,6 +56,12 @@ DRY_RUN=0
 FORCE=0
 MODE=install
 
+# Test hooks, set only by tests/ci/omarchy-asus-setup-etc-takeover.sh: ROOT prefixes the
+# /etc paths the takeover checks and moves (pacman always gets the real path), TTY stands
+# in for the terminal.
+ROOT=${OMARCHY_ASUS_SETUP_ROOT:-}
+TTY=${OMARCHY_ASUS_SETUP_TTY:-/dev/tty}
+
 # Under `curl ... | bash`, $0 is "bash", not this file: fall back to the URL.
 if [[ -f $0 ]]; then
   SELF=$0
@@ -119,13 +125,20 @@ confirm() {
     return 0
   fi
   local answer
-  [[ -r /dev/tty ]] || die "no terminal to ask for confirmation on"
-  read -r -p "    $1 [y/N] " answer </dev/tty
+  [[ -r $TTY ]] || die "no terminal to ask for confirmation on"
+  read -r -p "    $1 [y/N] " answer <"$TTY"
   [[ $answer == [yY] || $answer == [yY][eE][sS] ]]
 }
 
+# The unpacked files database (empty: not available), the unowned /etc files the upgrade
+# takes over, and the ones run_upgrade has moved aside while it runs.
+FILES_DB=''
+TAKEOVER=()
+MOVED=()
+
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# restore_moved puts back any /etc file still moved aside when the script stops early.
+trap 'restore_moved || true; rm -rf "$TMP"' EXIT
 
 # custom-repos.conf without our section (other repos the user keeps there stay).
 snippet_without_repo() {
@@ -152,7 +165,7 @@ EOF
 check_user() {
   ((EUID != 0)) || die "run this as your normal user, not root; it calls sudo where needed"
   local cmd
-  for cmd in pacman pacman-key gpg curl awk bsdtar vercmp; do
+  for cmd in pacman pacman-key gpg curl awk bsdtar vercmp cmp diff; do
     command -v "$cmd" >/dev/null || die "missing command: $cmd"
   done
   [[ -f $CONF ]] || die "$CONF not found"
@@ -205,6 +218,21 @@ preview_repo() {
   fi
   if ! gpgv --keyring "$TMP/key.gpg" "$TMP/repo.db.sig" "$TMP/repo.db" 2>/dev/null; then
     die "the repo database signature does not verify with key $FPR"
+  fi
+  # The files database lists every file of every package; check_unowned_etc reads it.
+  local files_url=${DB_URL%.db}.files
+  if curl -fsSL --proto '=https' -o "$TMP/repo.files" "$files_url" &&
+    curl -fsSL --proto '=https' -o "$TMP/repo.files.sig" "$files_url.sig"; then
+    if ! gpgv --keyring "$TMP/key.gpg" "$TMP/repo.files.sig" "$TMP/repo.files" 2>/dev/null; then
+      die "the repo files database signature does not verify with key $FPR"
+    fi
+    if mkdir "$TMP/files.d" && bsdtar -xf "$TMP/repo.files" -C "$TMP/files.d"; then
+      FILES_DB=$TMP/files.d
+    else
+      warn "could not unpack the repo files database"
+    fi
+  else
+    warn "could not download the repo files database"
   fi
   local name version installed
   while read -r name version; do
@@ -350,20 +378,169 @@ install_keyring() {
   as_root pacman -Sy --needed --noconfirm "$KEYRING_PKG"
 }
 
+# One field (%NAME%, %VERSION%, %FILENAME%) of a package's desc file in the files database.
+desc_field() { awk -v key="%$2%" '$0 == key { getline v; print v; exit }' "$1/desc"; }
+
+# True when the /etc file at PATH is a regular file with the same bytes as PKG's copy.
+same_as_packaged() {
+  local pkg=$1 path=$2
+  [[ -f $ROOT$path && ! -L $ROOT$path ]] || return 1
+  if [[ -r $ROOT$path ]]; then
+    bsdtar -xOf "$pkg" "${path#/}" | cmp -s - "$ROOT$path"
+  elif ((!DRY_RUN)); then
+    cmp -s <(bsdtar -xOf "$pkg" "${path#/}") <(sudo cat "$ROOT$path")
+  else
+    return 1
+  fi
+}
+
+# Show how the /etc file at PATH differs from PKG's copy (at most 40 lines of diff).
+show_difference() {
+  local pkg=$1 path=$2 name=$3 line
+  if [[ -L $ROOT$path ]]; then
+    info "  a symlink (to $(readlink "$ROOT$path")), not a regular file"
+  elif [[ ! -f $ROOT$path ]]; then
+    info "  not a regular file"
+  elif [[ ! -r $ROOT$path ]] && ((DRY_RUN)); then
+    info "  not readable without sudo, so not compared under --dry-run"
+  else
+    # diff exits 1 on a difference, and head may close the pipe early.
+    diff -u --label "$name's copy" --label "$path" <(bsdtar -xOf "$pkg" "${path#/}") \
+      <(if [[ -r $ROOT$path ]]; then cat "$ROOT$path"; else sudo cat "$ROOT$path"; fi) 2>&1 |
+      head -n 40 | while IFS= read -r line; do info "  $line"; done || true
+  fi
+}
+
+# pacman refuses to install a file that already exists and no package owns, and it checks
+# that before any scriptlet runs. `omarchy update` passes --overwrite only for
+# /usr/share/omarchy/*, so an /etc file copied in by hand before a package shipped it (the
+# asusd drop-in from LAPTOP-SETUP.md, for one) stops the whole upgrade. This finds those
+# files for every installed package the repo upgrades, from the signed files database (so
+# it also works under --dry-run, before pacman has the repo). A file identical to the
+# signed package's copy goes into TAKEOVER, which run_upgrade hands over to the package;
+# any other one stops the script here, before anything is overwritten.
+check_unowned_etc() {
+  step "Checking /etc for unowned files the upgrade would install"
+  if [[ -z $FILES_DB ]]; then
+    warn "could not check /etc files against the repo; if the upgrade stops on a file conflict, see LAPTOP-SETUP.md"
+    return 0
+  fi
+  local dir name version installed path url pkg found=0
+  local -a unowned different=()
+  for dir in "$FILES_DB"/*/; do
+    dir=${dir%/}
+    [[ -f $dir/desc && -f $dir/files ]] || continue
+    name=$(desc_field "$dir" NAME)
+    version=$(desc_field "$dir" VERSION)
+    [[ -n $name && -n $version ]] || continue
+    installed=$(pacman -Q "$name" 2>/dev/null) || continue
+    installed=${installed#* }
+    [[ $(vercmp "$version" "$installed") == 1 ]] || continue
+    unowned=()
+    while IFS= read -r path; do
+      path=/$path
+      [[ -e $ROOT$path || -L $ROOT$path ]] || continue
+      pacman -Qo "$path" >/dev/null 2>&1 && continue
+      unowned+=("$path")
+    done < <(awk '$0 == "%FILES%" { on = 1; next } /^%.*%$/ { on = 0 } on && /^etc\// && !/\/$/' "$dir/files")
+    ((${#unowned[@]})) || continue
+    found=1
+    # -dd: only this package's URL, not its dependencies'. A cached package prints a
+    # file:// URL, and under --dry-run pacman has no sync database for the repo yet: both
+    # use the release URL instead.
+    url=$(pacman -Sddp --print-format '%l' "$REPO/$name" 2>/dev/null) || url=''
+    url=${url##*$'\n'}
+    if [[ $url != https://* ]]; then
+      url=$(desc_field "$dir" FILENAME)
+      [[ -n $url ]] || die "the files database has no file name for $name"
+      url=https://github.com/$GH_REPO/releases/download/x86_64/$url
+    fi
+    pkg=$TMP/${url##*/}
+    if ! curl -fsSL --proto '=https' -o "$pkg" "$url" ||
+      ! curl -fsSL --proto '=https' -o "$pkg.sig" "$url.sig"; then
+      die "could not download $url to compare its /etc files; nothing was changed"
+    fi
+    if ! gpgv --keyring "$TMP/key.gpg" "$pkg.sig" "$pkg" 2>/dev/null; then
+      die "the signature of ${url##*/} does not verify with key $FPR"
+    fi
+    for path in "${unowned[@]}"; do
+      if same_as_packaged "$pkg" "$path"; then
+        TAKEOVER+=("$path")
+        info "$path: not owned by any package and identical to $name's copy; the upgrade takes it over"
+      else
+        different+=("$path")
+        info "$path: not owned by any package and different from $name's copy:"
+        show_difference "$pkg" "$path" "$name"
+      fi
+    done
+  done
+  if ((${#different[@]})); then
+    die "these files are not owned by any package, differ from the packaged copies and would stop the upgrade:
+$(printf '         %s\n' "${different[@]}")
+       Nothing was changed in /etc and the system is not upgraded (the package databases are
+       synced, so don't install anything else first). Move or delete each file (or make it
+       match the packaged copy), then run this script again."
+  fi
+  ((found)) || ok "no unowned /etc files in the way of the upgrade"
+}
+
+# Where run_upgrade keeps the files it moves aside. Outside the live directory, as in
+# Omarchy's omarchy-update-system-pkgs-when-conflicted: systemd reads a copy left beside it.
+REPLACED=/var/lib/omarchy-asus/replaced
+
+# Settle the files run_upgrade moved aside: where the upgrade installed the package's copy,
+# the saved one goes; where the path is still missing, the saved copy goes back. Runs after
+# the upgrade, and from the traps when the script stops during it.
+restore_moved() {
+  local p saved
+  for p in "${MOVED[@]}"; do
+    saved=$ROOT$REPLACED$p
+    if [[ -e $ROOT$p || -L $ROOT$p ]]; then
+      as_root rm -f "$saved" || warn "could not remove the saved copy $saved"
+      ok "took over $p (identical to the packaged copy)"
+    elif as_root mv -T "$saved" "$ROOT$p"; then
+      warn "put back $p (the upgrade didn't install it)"
+    else
+      warn "could not put back $p; the saved copy is $saved"
+    fi
+  done
+  MOVED=()
+}
+
 # The upgrade goes through `omarchy update`, not a bare `pacman -Su`: since
 # Omarchy 4.0.5 a pacman hook (omarchy-update-pacman-guard) aborts direct system
 # upgrades, and `omarchy update` also takes the snapshot, updates the keyrings
 # and runs the migrations. It asks for its own confirmation. Without Omarchy's
 # updater, fall back to pacman with the guard's documented override.
+# The files in TAKEOVER (see check_unowned_etc) go to the package: pacman gets an
+# --overwrite for each, and since `omarchy update` takes no pacman arguments, they are
+# moved aside for it instead and put back if the upgrade doesn't install them.
 run_upgrade() {
+  local p rc=0
   if command -v omarchy-update >/dev/null; then
     if ((DRY_RUN)); then
+      for p in "${TAKEOVER[@]}"; do
+        as_root mkdir -p "$ROOT$REPLACED${p%/*}"
+        as_root mv -T "$ROOT$p" "$ROOT$REPLACED$p"
+      done
       info "[dry-run] omarchy update"
-    else
-      omarchy update </dev/tty
+      return 0
     fi
+    trap 'restore_moved; exit 130' INT TERM
+    for p in "${TAKEOVER[@]}"; do
+      info "moving $p aside to $REPLACED$p for the upgrade"
+      as_root mkdir -p "$ROOT$REPLACED${p%/*}"
+      as_root mv -T "$ROOT$p" "$ROOT$REPLACED$p"
+      MOVED+=("$p")
+    done
+    omarchy update <"$TTY" || rc=$?
+    restore_moved
+    trap - INT TERM
+    return "$rc"
   else
-    as_root env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Su
+    local overwrite=()
+    for p in "${TAKEOVER[@]}"; do overwrite+=(--overwrite "$p"); done
+    as_root env OMARCHY_ALLOW_DIRECT_PACMAN=1 pacman -Su "${overwrite[@]}"
   fi
 }
 
@@ -534,6 +711,7 @@ do_install() {
   apply_hook
   install_keyring
   prepare_power_owner
+  check_unowned_etc
   offer_upgrade
   offer_g16_fixes
   step "Done"
@@ -645,6 +823,9 @@ do_uninstall() {
 
   offer_leftover_removal "${snapshot[@]}"
 }
+
+# Tests source this file to call its functions; they stop here, before anything runs.
+[[ ${OMARCHY_ASUS_SETUP_SOURCE_ONLY:-0} == 1 ]] && return 0
 
 ((DRY_RUN)) && printf '%s(dry run: privileged commands and file writes are printed, not run)%s\n' "$Y" "$N"
 case $MODE in
