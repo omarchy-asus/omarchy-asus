@@ -46,7 +46,9 @@ pipeline (bin/auto-update) and the sweep never review the same commit twice.
 
 `sweep` reviews every open PR of the given owners (default: the authenticated user and
 its organisations) whose head has no `ai-review` status yet, to catch up on PRs nobody
-reviewed inline. Fork PRs are skipped unless --include-forks. With --post, our PRs
+reviewed inline. PRs whose head and merge-base already have a cached review (posted, when
+--post) are skipped and do not count toward --limit. Fork PRs are skipped unless
+--include-forks. With --post, our PRs
 (author in AI_REVIEW_OURS, or a body signed "Filed by <agent>") are stamped and everyone
 else's get the full review.
 
@@ -641,6 +643,13 @@ def local_cache_path(repo, head, mb):
     return os.path.join(DATA, f"{slug(repo)}-local-{head}-{mb[:12]}-{reviewer()}.json")
 
 
+def pr_cache_path(repo, num, head, mb, base_ref_name):
+    """`pr N` results, by PR, head, merge-base, base branch and reviewer family."""
+    # keyed by reviewer too: AI_REVIEWER=claude must never reuse a Codex review
+    target = re.sub(r"[^A-Za-z0-9._-]", "_", base_ref_name)  # a retarget can keep the merge-base
+    return os.path.join(DATA, f"{slug(repo)}-{num}-{head}-{mb[:12]}-{target}-{reviewer()}.json")
+
+
 def save_json(path, res):
     """Atomic write, stamped with the save time: load_cache prefers the newest copy."""
     res["saved_at"] = time.time()
@@ -673,6 +682,45 @@ def load_cache(cache):
     if os.path.exists(unposted):
         os.remove(unposted)
     return cur
+
+
+def peek_cache(cache):
+    """load_cache without side effects (the sweep holds no lock): the newer of <cache> and
+    <cache>.unposted, or None; None too while <cache>.forced marks a discarded review (#60)."""
+    if os.path.exists(cache + ".forced"):
+        return None
+
+    def read(p):
+        try:
+            with open(p) as fh:
+                res = json.load(fh)
+            return res, res.get("saved_at", os.path.getmtime(p))
+        except (OSError, ValueError, AttributeError):
+            return None, None
+
+    (cur, t_cur), (alt, t_alt) = read(cache), read(cache + ".unposted")
+    if alt is not None and (cur is None or t_alt >= t_cur):
+        return alt
+    return cur
+
+
+def cached_review(repo, num, head, mb, base_ref_name, do_post):
+    """True when the sweep need not count this PR: review_pr would only serve it from the
+    cache. Without do_post, any finished review of this head and merge-base will do; with
+    do_post only a posted PR result does (anything else still has to be published)."""
+    local, cache = local_cache_path(repo, head, mb), pr_cache_path(repo, num, head, mb, base_ref_name)
+    # a discarded review (#60): review_pr reviews again and ignores the local result too
+    if os.path.exists(local + ".forced") or os.path.exists(cache + ".forced"):
+        return False
+    res = peek_cache(cache)
+    lres = peek_cache(local)
+    if not (lres and lres.get("head") == head and lres.get("merge_base") == mb):
+        lres = None
+    if not do_post:
+        return bool(res or lres)
+    if lres and (res is None or lres.get("saved_at", 0) > res.get("saved_at", 0)):
+        return False  # a newer local review supersedes the PR result and gets published
+    return bool(res and res.get("posted"))
 
 
 def forget(cache):
@@ -790,9 +838,7 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
     else:
         mb = merge_base(repo, base, head)  # a retargeted PR (same head, new diff) is reviewed again
     os.makedirs(DATA, exist_ok=True)
-    # keyed by reviewer too: AI_REVIEWER=claude must never reuse a Codex review
-    target = re.sub(r"[^A-Za-z0-9._-]", "_", pr["baseRefName"])  # a retarget can keep the merge-base
-    cache = os.path.join(DATA, f"{slug(repo)}-{num}-{head}-{mb[:12]}-{target}-{reviewer()}.json")
+    cache = pr_cache_path(repo, num, head, mb, pr["baseRefName"])
     lock = open(cache + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     local_cache = local_cache_path(repo, head, mb)
@@ -913,10 +959,16 @@ def sweep(owners, limit, include_forks, do_post, dry=False):
             break
         try:
             pr = gh_json("pr", "view", str(num), "-R", repo, "--json",
-                         "headRefOid,baseRefOid,isCrossRepository,author,body")
+                         "headRefOid,baseRefOid,baseRefName,isCrossRepository,author,body")
             if pr["isCrossRepository"] and not include_forks:
                 continue
-            if final_status(repo, pr["headRefOid"], merge_base(repo, pr["baseRefOid"], pr["headRefOid"])) in ("success", "failure"):
+            mb = merge_base(repo, pr["baseRefOid"], pr["headRefOid"])
+            if final_status(repo, pr["headRefOid"], mb) in ("success", "failure"):
+                continue
+            # a cached review (posted, with do_post) would be a no-op: it must not use up the limit
+            if cached_review(repo, num, pr["headRefOid"], mb, pr["baseRefName"], do_post):
+                if dry:
+                    log(f"{repo}#{num} {pr['headRefOid'][:12]}: already reviewed (cached)")
                 continue
             done += 1
             if ours is None:
@@ -968,7 +1020,7 @@ def main():
     s.add_argument("--dry-run", action="store_true", help="list what would be reviewed")
     o = ap.parse_args()
     if o.cmd == "sweep":
-        return sweep(o.owner, o.limit, o.include_forks, o.post and not o.dry_run, o.dry_run)
+        return sweep(o.owner, o.limit, o.include_forks, o.post, o.dry_run)  # dry: no writes, same candidates
     if o.effort:
         os.environ["AI_REVIEW_EFFORT"] = o.effort
     if o.cmd == "local":

@@ -276,6 +276,92 @@ class ReviewPR(unittest.TestCase):
                 ar.review_pr(REPO, NUM, do_post=True)
 
 
+class Sweep(unittest.TestCase):  # issue #62
+    def setUp(self):
+        ar.DATA = tempfile.mkdtemp(dir=TMP)
+        self.reviewed = []
+
+    @staticmethod
+    def head(n):
+        return str(n) * 40
+
+    def gh(self, *args):
+        if args[:2] == ("search", "prs"):
+            return [{"number": n, "repository": {"nameWithOwner": REPO}, "url": "u"} for n in (1, 2, 3)]
+        if args[:2] == ("pr", "view"):
+            return {"headRefOid": self.head(int(args[2])), "baseRefOid": MB, "baseRefName": "main",
+                    "isCrossRepository": False, "author": {"login": "me"}, "body": ""}
+        raise AssertionError(f"unexpected gh call {args}")
+
+    def review_pr(self, repo, num, *a, **k):
+        self.reviewed.append(num)
+        return {"findings": [], "blocking": 0, "seconds": 0}
+
+    def cache(self, n):
+        return ar.pr_cache_path(REPO, n, self.head(n), MB, "main")
+
+    def sweep(self, limit, do_post):
+        with Patch(gh_json=self.gh, merge_base=lambda *a: MB, final_status=lambda *a: None,
+                   ours_logins=lambda: {"me"}, review_pr=self.review_pr):
+            with contextlib.redirect_stderr(io.StringIO()):
+                return ar.sweep(["owner"], limit, False, do_post)
+
+    def test_cached_unposted_reviews_do_not_consume_limit(self):
+        for n in (1, 2):
+            ar.save_json(self.cache(n), result([], head=self.head(n), pr=n))
+        self.assertEqual(self.sweep(1, False), 0)
+        self.assertEqual(self.reviewed, [3])
+
+    def test_post_skips_only_posted_results(self):
+        ar.save_json(self.cache(1), result([], head=self.head(1), pr=1, posted=True))
+        ar.save_json(self.cache(2), result([], head=self.head(2), pr=2))
+        self.assertEqual(self.sweep(1, True), 0)
+        self.assertEqual(self.reviewed, [2], "the unposted result still counts and gets published")
+
+    def test_forced_cache_is_not_skipped(self):
+        ar.save_json(self.cache(1), result([], head=self.head(1), pr=1))
+        ar.forget(self.cache(1))
+        self.sweep(1, False)
+        self.assertEqual(self.reviewed, [1])
+
+    def test_local_review_counts_unless_the_pr_review_was_forced(self):
+        ar.save_json(ar.local_cache_path(REPO, self.head(1), MB), result([], head=self.head(1)))
+        self.sweep(1, False)
+        self.assertEqual(self.reviewed, [2], "a local review of the same diff is cached")
+        self.reviewed = []
+        ar.forget(self.cache(1))  # `pr 1 --force` whose review then crashed: review_pr ignores the local one
+        self.sweep(1, False)
+        self.assertEqual(self.reviewed, [1])
+
+    def test_post_dry_run_previews_the_post_candidates(self):
+        seen = []
+        argv, sys.argv = sys.argv, ["ai-review", "sweep", "--post", "--dry-run", "--limit", "1"]
+        try:
+            with Patch(sweep=lambda *a, **k: seen.append(a) or 0):
+                ar.main()
+        finally:
+            sys.argv = argv
+        self.assertTrue(seen[0][3], "--post --dry-run filters the cache like --post")
+        ar.save_json(self.cache(1), result([], head=self.head(1), pr=1))
+        with Patch(gh_json=self.gh, merge_base=lambda *a: MB, final_status=lambda *a: None,
+                   ours_logins=lambda: {"me"}, review_pr=self.review_pr):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                ar.sweep(["owner"], 1, False, True, dry=True)
+        self.assertEqual(self.reviewed, [])
+        self.assertIn(f"would review {REPO}#1", err.getvalue())
+
+    def test_peek_cache_does_not_move_files(self):
+        cache = self.cache(1)
+        with open(cache, "w") as fh:
+            json.dump({"v": "old", "saved_at": 1}, fh)
+        with open(cache + ".unposted", "w") as fh:
+            json.dump({"v": "new", "saved_at": 2}, fh)
+        self.assertEqual(ar.peek_cache(cache)["v"], "new")
+        self.assertTrue(os.path.exists(cache))
+        self.assertTrue(os.path.exists(cache + ".unposted"))
+        self.assertEqual(json.load(open(cache))["v"], "old")
+
+
 class Stamp(unittest.TestCase):
     def run_stamp(self, res, post=None):
         gh = FakeGH()
