@@ -70,10 +70,10 @@ Signing key: [`keys/omarchy-asus.asc`](keys/omarchy-asus.asc), fingerprint
 ## How it works
 
 1. **Fix it in upstream's shape.** Omarchy fixes are written in
-   `omarchy-asus/omarchy` (coming soon), a fork of
+   [`omarchy-asus/omarchy`](https://github.com/omarchy-asus/omarchy), a fork of
    [basecamp/omarchy](https://github.com/basecamp/omarchy), the way Omarchy itself would
    write them: a hardware detector, a leaf gated on it, a migration and a test. Package
-   changes go through `omarchy-asus/omarchy-pkgs` (coming soon), a fork of
+   changes go through [`omarchy-asus/omarchy-pkgs`](https://github.com/omarchy-asus/omarchy-pkgs), a fork of
    [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs).
 2. **Package it.** When a fix needs a patched build (a kernel, a driver, a compositor), the
    recipe lives here. Every version is upstream's plus `.1`, for example `615.78.08-1.1`, so
