@@ -212,11 +212,19 @@ case "${1:-get}" in
       asusctl leds set "$3" >/dev/null 2>&1
       exit $?
     fi
+    ok=true
     case "$2" in
-      ac)      conf_set KBD_AC "$3" ;;
-      battery) conf_set KBD_BATTERY "$3" ;;
-      both)    conf_set KBD_AC "$3"; conf_set KBD_BATTERY "$3" ;;
+      ac)      conf_set KBD_AC "$3" || ok=false ;;
+      battery) conf_set KBD_BATTERY "$3" || ok=false ;;
+      both)    { conf_set KBD_AC "$3" && conf_set KBD_BATTERY "$3"; } || ok=false ;;
     esac
+    if [ "$ok" != true ]; then
+      # A restart would re-apply the old saved level. Set the hardware for now
+      # and fail, so the caller knows the level was not saved.
+      asusctl leds set "$3" >/dev/null 2>&1
+      echo "kbd-level: cannot write power-tune.conf; level set for this session only" >&2
+      exit 1
+    fi
     # Restarting re-sources the conf and runs apply(), which sets the hardware.
     # Without this the unit keeps enforcing the levels it started with.
     systemctl --user restart power-tune >/dev/null 2>&1 \

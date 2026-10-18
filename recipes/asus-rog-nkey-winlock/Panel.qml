@@ -272,7 +272,13 @@ Panel {
     runCmd([root.helper, "kbd-color", hex])
   }
 
+  // Flag toggles set their property first, like the on/off switches, so a
+  // second click before the next `get` toggles back instead of repeating.
   function setKbdPower(flag, value) {
+    if (flag === "boot") root.kbdBoot = value
+    else if (flag === "awake") root.kbdAwake = value
+    else if (flag === "sleep") root.kbdSleep = value
+    else if (flag === "shutdown") root.kbdShutdown = value
     runCmd([root.helper, "kbd-power", flag, value ? "true" : "false"])
   }
 
@@ -293,6 +299,11 @@ Panel {
   }
 
   function setSlashFlag(name, value) {
+    var prop = ({ ShowOnBoot: "showOnBoot", ShowOnShutdown: "showOnShutdown",
+                  ShowOnSleep: "showOnSleep", ShowOnBattery: "showOnBattery",
+                  ShowBatteryWarning: "showBatteryWarning",
+                  ShowOnLidClosed: "showOnLidClosed" })[name]
+    if (prop) root[prop] = value
     runCmd([root.helper, "slash-flag", name, value ? "true" : "false"])
   }
 
@@ -674,6 +685,7 @@ Panel {
 
                 Text {
                   anchors.verticalCenter: slashHeader.verticalCenter
+                  anchors.right: parent.right
                   text: root.slashPercent + "%"
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
