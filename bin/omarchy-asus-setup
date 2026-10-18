@@ -557,9 +557,14 @@ repo_installed() {
 # After going back: the packages from the repo that no other repo has. Once the repo is
 # gone they never update. Removing them is offered, defaulting to no.
 offer_leftover_removal() {
-  local snapshot=("$@") leftovers=() elsewhere pkg
+  local snapshot=("$@") leftovers=() elsewhere sl pkg
   step "Packages only the $REPO repo had"
-  elsewhere=" $(pacman -Sl 2>/dev/null | awk -v repo="$REPO" '$1 != repo { print $2 }' | tr '\n' ' ' || true) "
+  # Without a full listing, stock replacements (linux-omarchy) would look repo-only.
+  if ! sl=$(pacman -Sl 2>/dev/null) || [[ -z $sl ]]; then
+    warn "could not list the configured repos (pacman -Sl); skipping the leftover check."
+    return 0
+  fi
+  elsewhere=" $(awk -v repo="$REPO" '$1 != repo { print $2 }' <<<"$sl" | tr '\n' ' ') "
   for pkg in "${snapshot[@]}"; do
     [[ $elsewhere == *" $pkg "* ]] && continue
     pacman -Q "$pkg" >/dev/null 2>&1 || continue
