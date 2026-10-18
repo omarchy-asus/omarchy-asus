@@ -24,6 +24,8 @@ expect $? 125 "missing bwrap refuses to run the command"
 
 if ! type -P bwrap >/dev/null || ! bwrap --ro-bind / / true 2>/dev/null; then
     echo "skip: bwrap unavailable"
+    # On CI the skip passes, but as an annotation on the run rather than in silence
+    [[ -n ${CI:-} ]] && echo "::warning file=tests/ci/recipe-sandbox.sh::bwrap unavailable on this runner: sandbox cases 2-6 skipped"
     exit $fail
 fi
 

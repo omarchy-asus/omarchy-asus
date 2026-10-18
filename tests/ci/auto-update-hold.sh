@@ -2,10 +2,28 @@
 # A recipe with recipes/<r>/HOLD is never built or published by bin/auto-update:
 # bin/auto-update-state plans "attention" for it, and "unpublish" when a stale copy
 # of it is in the repo db. Offline: a hand-made check-upstream JSON.
+#
+# CI runs this with plain bash on ubuntu-24.04, which has no vercmp. The hold branch of
+# bin/auto-update-state compares the repo copy with upstream (VerKey.__lt__ runs vercmp),
+# so where vercmp is missing a sort -V stub stands in for it: enough for the plain
+# versions below, not a general pacman vercmp.
 set -u
-W=$(cd "$(dirname "$0")/.." && pwd)
+W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
+if ! command -v vercmp >/dev/null; then
+    mkdir -p "$T/bin"
+    cat >"$T/bin/vercmp" <<'EOF'
+#!/bin/bash
+if [[ $1 == "$2" ]]; then echo 0
+elif [[ $(printf '%s\n' "$1" "$2" | sort -V | head -1) == "$1" ]]; then echo -1
+else echo 1
+fi
+EOF
+    chmod +x "$T/bin/vercmp"
+    export PATH=$T/bin:$PATH
+    echo "note: vercmp missing, using a sort -V stub"
+fi
 fails=0
 row() {  # row <recipe> <status> <repo version or null> [hold] [ours] [upstream]
     local hold=${4:+\"$4\"}

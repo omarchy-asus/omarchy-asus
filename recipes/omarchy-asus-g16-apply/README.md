@@ -9,12 +9,51 @@ aren't files a package can own. The fork applies them through an install leaf
 or a migration: lines in your Hyprland, mpv and Chromium config, a mixer level,
 a package to install, a drop-in in `/etc`, a user service to enable, or an
 `/etc` file that Omarchy's installer wrote. `omarchy-asus-g16-apply` does the
-same things, on request, on a stock Omarchy 4.0.5 install. It doesn't edit any
-file of Omarchy's, and it doesn't need an `omarchy` rebuild.
+same things, on request, on a stock Omarchy 4.0.5 install, where they would
+otherwise need the fork. It doesn't edit any file of Omarchy's. With the
+patched omarchy from this repo, the migrations do most of this (see below).
 
 Installing the package changes nothing. It ships the command, the fork's files
 it uses (unchanged), and one opt-in system unit that stays disabled until you
 ask for it.
+
+## With the patched omarchy (4.0.5-1.1 or later)
+
+The `omarchy` and `omarchy-settings` packages from this repo (#58) carry the
+fork's fixes. Their migrations and default files apply these during
+`omarchy update`:
+
+- hybrid-video: migration `1792123636` (`omarchy-refresh-hybrid-video`).
+- hdmi-cursor: `default/hypr/hybrid-cursor.lua`.
+- rtkit: migration `1789747667`.
+- asusd-power-profiles: `omarchy-settings`' `10-omarchy-power-profiles.conf`
+  drop-in, migration `1792122579`.
+- initramfs-no-nvidia: migration `1787683023`.
+
+Nothing needs to run at login, and there is no login service (#45). This
+command reports those fixes as `present` once they're in place. If rtkit isn't
+installed yet, `--check` notes that its migration installs it at the next
+`omarchy update`. hybrid-video is the same: it's `present` only once
+`omarchy update` has run migration `1792123636` (its marker is under
+`~/.local/state/omarchy/migrations`). Until then it's `missing`, and applying
+it writes the pins in Omarchy's marked form, which the migration then leaves.
+
+- **audio-master:** the migration only notifies, on purpose: raising the level
+  during an update would make the speakers jump. Run
+  `omarchy-asus-g16-apply audio-master` if you want it.
+- **winlock:** `asus-rog-nkey-winlock` enables its unit itself.
+
+If this command added its Hyprland lines or asusd drop-in before you installed
+the patched omarchy, `--check` says they're now redundant. Delete the
+`omarchy-asus-g16-apply` lines from `hyprland.lua`, and the
+`20-omarchy-asus-power-profiles.conf` drop-in followed by
+`sudo systemctl daemon-reload` (see [Undo](#undo)). Don't turn asusd's
+settings back on: the patched omarchy's drop-in wants them off. Keep the mpv
+and Chromium pins: `--check` shows this command's older ones as `needs repair`,
+and applying hybrid-video hands them over to Omarchy (see
+[hybrid-video](#hybrid-video-video-decode-on-the-igpu)).
+
+The command remains for stock Omarchy 4.0.5.
 
 ## Use
 
@@ -74,6 +113,29 @@ with the Chromium marker and the mpv comment block, so a later switch back
 shows `missing` and pins again.
 A pin you wrote yourself is never changed.
 
+With the patched omarchy, Omarchy owns the pins. It repins or removes only a
+pin right under its marker comment
+(`# Omarchy repins the next line if the iGPU moves. ...`), at Hyprland start
+and in `omarchy-refresh-hybrid-video`. So each pin has one owner:
+
+- Reported as present once `omarchy update` has run migration `1792123636`
+  (its marker is `~/.local/state/omarchy/migrations/1792123636.sh`). Pins
+  already in Omarchy's marked form are Omarchy's, so they're never listed or
+  touched here, even when they name an old node.
+- Before that (pacman installed the patched omarchy, `omarchy update` hasn't
+  run yet, or the migration was skipped), it's `missing` unless the pins are
+  already in Omarchy's form or a setting of yours is there. Applying writes
+  them in Omarchy's form (`hwdec=vaapi`, then the marker above
+  `vaapi-device=<iGPU node>` under the mpv comment, and the marker above each
+  `--render-node-override`). Nothing is added to `hyprland.lua`, because the
+  patched omarchy's default files handle `LIBVA_DRIVER_NAME`.
+- Pins this command wrote earlier (under its own Chromium marker, or the
+  unmarked `vaapi-device` in the mpv comment's block) show `needs repair`.
+  Applying repins them first if they're stale, then hands them over: in the
+  Chromium files this command's marker is replaced with Omarchy's, and in
+  `mpv.conf` Omarchy's marker goes above the `vaapi-device` line. From then
+  on, `omarchy-refresh-hybrid-video` keeps them up to date.
+
 **Why:** stock 4.0.5 sets `LIBVA_DRIVER_NAME=nvidia` because its display check
 misses the Krackan iGPU (a non-VGA display controller with no `boot_vga`), and
 render node numbering puts the RTX first. Every browser video and mpv clip then
@@ -117,6 +179,9 @@ Omarchy's own format.
 software only while a monitor on the NVIDIA card is connected, and back to auto
 when it's unplugged. A value you set yourself is left alone.
 
+With the patched omarchy: reported as present (its
+`default/hypr/hybrid-cursor.lua`).
+
 **Why:** every hardware cursor update on the RTX's HDMI output fails ("cursor
 blit failed", about 230 a minute) and grows Hyprland's memory.
 
@@ -153,6 +218,9 @@ only tells existing installs about it; this command runs only when you ask.)
 `systemctl --user try-restart pipewire.service pipewire-pulse.service wireplumber.service`
 (errors ignored). If rtkit was already installed, nothing is restarted.
 
+With the patched omarchy: reported as present once migration `1789747667` has
+installed it at `omarchy update`.
+
 **Why:** nothing pulls rtkit in on x86_64, so PipeWire runs with no realtime
 threads.
 
@@ -176,6 +244,9 @@ and no check.
 (same content as the fork's `10-omarchy-power-profiles.conf`; a basename no
 Omarchy package uses), reloads systemd, and turns the three settings off in the
 running asusd, as the fork's migration does.
+
+With the patched omarchy: reported as present (`omarchy-settings`'
+`10-omarchy-power-profiles.conf` drop-in, migration `1792122579`).
 
 **Why:** asusd switches the platform profile on every plug and unplug and
 rewrites the EPP after every profile change, racing Omarchy's own restore.

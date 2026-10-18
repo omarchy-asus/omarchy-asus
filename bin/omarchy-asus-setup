@@ -9,7 +9,7 @@
 #   omarchy-asus-setup               set up the repo, then offer the upgrade and the G16 fixes
 #   omarchy-asus-setup --uninstall   undo it and go back to the stock builds
 #   omarchy-asus-setup --dry-run     print every privileged command instead of running it
-#   omarchy-asus-setup --force       skip the GA605 model check
+#   omarchy-asus-setup --force       skip the GA605 model check, and upgrade even when no snapshot could be taken
 set -euo pipefail
 
 REPO=omarchy-asus
@@ -22,7 +22,9 @@ KEYRING_PKG=omarchy-asus-keyring
 # Offered as the optional last step on a fresh install.
 G16_PKGS=(omarchy-asus-g16 asus-rog-nkey-winlock omarchy-asus-g16-apply)
 # Packages only the repo ships (no stock build): left behind by --uninstall unless removed.
-REPO_ONLY_PKGS=(omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock asus-zephyrus-g16-control hyprpm)
+# Not hyprpm: recipes/hyprland builds it as a split package of stock hyprland, which has one
+# too (repo_installed still finds it through the repo's package list).
+REPO_ONLY_PKGS=(omarchy-asus-g16 omarchy-asus-g16-apply asus-rog-nkey-winlock asus-zephyrus-g16-control)
 
 # The overrides exist for the offline test (tests/ci/setup-uninstall.sh).
 CONF=${OMARCHY_ASUS_PACMAN_CONF:-/etc/pacman.conf}
@@ -61,6 +63,10 @@ MODE=install
 # in for the terminal.
 ROOT=${OMARCHY_ASUS_SETUP_ROOT:-}
 TTY=${OMARCHY_ASUS_SETUP_TTY:-/dev/tty}
+# Also test hooks, for tests/ci/setup-way-back.sh: the boot menu the fallback kernel check
+# reads, and the snapper config take_snapshot needs.
+LIMINE_CONF=${OMARCHY_ASUS_LIMINE_CONF:-$ROOT/boot/limine.conf}
+SNAPPER_CONFIG=${OMARCHY_ASUS_SNAPPER_CONFIG:-$ROOT/etc/snapper/configs/root}
 
 # Under `curl ... | bash`, $0 is "bash", not this file: fall back to the URL.
 if [[ -f $0 ]]; then
@@ -87,12 +93,17 @@ for arg in "$@"; do
   esac
 done
 
-if [[ -t 1 ]]; then B=$'\e[1m' R=$'\e[31m' Y=$'\e[33m' G=$'\e[32m' N=$'\e[0m'; else B='' R='' Y='' G='' N=''; fi
-step() { printf '\n%s==> %s%s\n' "$B" "$*" "$N"; }
+# Prefixed names: tests source this file, and one-letter globals would clobber theirs.
+if [[ -t 1 ]]; then
+  CLR_BOLD=$'\e[1m' CLR_RED=$'\e[31m' CLR_YELLOW=$'\e[33m' CLR_GREEN=$'\e[32m' CLR_OFF=$'\e[0m'
+else
+  CLR_BOLD='' CLR_RED='' CLR_YELLOW='' CLR_GREEN='' CLR_OFF=''
+fi
+step() { printf '\n%s==> %s%s\n' "$CLR_BOLD" "$*" "$CLR_OFF"; }
 info() { printf '    %s\n' "$*"; }
-ok() { printf '    %sok:%s %s\n' "$G" "$N" "$*"; }
-warn() { printf '    %swarning:%s %s\n' "$Y" "$N" "$*" >&2; }
-die() { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+ok() { printf '    %sok:%s %s\n' "$CLR_GREEN" "$CLR_OFF" "$*"; }
+warn() { printf '    %swarning:%s %s\n' "$CLR_YELLOW" "$CLR_OFF" "$*" >&2; }
+die() { printf '%serror:%s %s\n' "$CLR_RED" "$CLR_OFF" "$*" >&2; exit 1; }
 
 # Privileged command: run through sudo, or print it under --dry-run.
 as_root() {
@@ -153,7 +164,7 @@ first_repo_line() { grep -nE '^\[(omarchy|core)\]$' "$CONF" | head -n1 | cut -d:
 banner() {
   cat <<EOF
 
-${R}${B}EXPERIMENTAL. Built for and only meant for the ASUS ROG Zephyrus G16 GA605 (GA605KM).${N}
+${CLR_RED}${CLR_BOLD}EXPERIMENTAL. Built for and only meant for the ASUS ROG Zephyrus G16 GA605 (GA605KM).${CLR_OFF}
 Nobody has installed these packages yet. The kernel carries untested patches, including an
 experimental scheduler series that is compiled in but switched off.
 Don't add this repo to any other machine. On a G16, use it only if you can recover from a
@@ -250,6 +261,89 @@ preview_repo() {
     awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n, v }' | sort)
 }
 
+# Whether the fallback kernel K is really a way back (#85): headers for DKMS, an NVIDIA DKMS
+# build for its release, a Limine boot entry, and an earlier boot. Warns only, never stops,
+# and asks for no password (the boot menu is read with sudo -n or not at all).
+check_fallback_kernel() {
+  local k=$1 files='' krel='' status='' conf='' boots='' bad=0
+  if ! pacman -Q "$k-headers" >/dev/null 2>&1; then
+    warn "$k-headers is not installed, so DKMS can't build the NVIDIA module for $k: sudo pacman -S $k-headers"
+    bad=1
+  fi
+  # The release from the package's own file list (no root needed): /usr/lib/modules/<release>/vmlinuz.
+  files=$(pacman -Qlq "$k" 2>/dev/null) || files=''
+  krel=$(awk -F/ '/^\/usr\/lib\/modules\/[^\/]+\/vmlinuz$/ { print $5; exit }' <<<"$files")
+  if [[ -z $krel ]]; then
+    warn "could not find the kernel release of $k (no /usr/lib/modules/<release>/vmlinuz in pacman -Ql $k);"
+    warn "skipping its NVIDIA DKMS and boot history checks."
+    bad=1
+  fi
+
+  # A fallback without the NVIDIA module boots to a console at best on the G16.
+  if [[ -n $krel ]] && pacman -Q nvidia-open-dkms >/dev/null 2>&1; then
+    if ! command -v dkms >/dev/null; then
+      warn "dkms is not installed, so nvidia-open-dkms has no module for $k ($krel)"
+      bad=1
+    else
+      status=$(dkms status 2>/dev/null) || status=''
+      # A line like "nvidia/615.78.08, 7.2.8-arch1-1, x86_64: installed" (fixed strings: the
+      # release has dots).
+      if ! K=$krel awk 'index($0, "nvidia") &&
+          (index($0, ", " ENVIRON["K"] ", ") || index($0, ", " ENVIRON["K"] ":")) &&
+          /: installed( \(.*\))?$/ { found = 1 }
+          END { exit !found }' <<<"$status"; then
+        warn "no DKMS nvidia build is installed for $k ($krel): the fallback boots without the NVIDIA driver."
+        warn "Once $k-headers is installed: sudo dkms autoinstall -k $krel"
+        bad=1
+      fi
+    fi
+  fi
+
+  local limine_read=1
+  if [[ -r $LIMINE_CONF ]]; then
+    conf=$(<"$LIMINE_CONF")
+  elif conf=$(sudo -n cat "$LIMINE_CONF" 2>/dev/null); then
+    :
+  else
+    warn "could not read $LIMINE_CONF without a password; check that the boot menu lists $k"
+    bad=1
+    limine_read=0
+    conf=''
+  fi
+  # vmlinuz-linux must not count for linux-lts, nor vmlinuz-linux-lts for linux.
+  # An empty but readable config has no entry either.
+  if ((limine_read)) && ! grep -qE "vmlinuz-${k}([^-A-Za-z0-9_]|$)" <<<"$conf"; then
+    warn "Limine has no entry for $k ($LIMINE_CONF): run 'sudo limine-update', then check the boot menu"
+    bad=1
+  fi
+
+  # A heuristic: the reboot records name the kernel release that booted.
+  if [[ -n $krel ]]; then
+    local history=1
+    if command -v last >/dev/null; then
+      # -w: the release column is cut at 16 characters without it.
+      boots=$(last -w -x reboot 2>/dev/null) || true
+    elif command -v wtmpdb >/dev/null; then
+      boots=$(wtmpdb last reboot 2>/dev/null) || true
+    else
+      warn "neither last nor wtmpdb is installed, so the boot history of $k can't be checked"
+      bad=1
+      history=0
+    fi
+    if ((history)) && ! K=$krel awk '{ for (i = 1; i <= NF; i++) if ($i == ENVIRON["K"]) found = 1 }
+        END { exit !found }' <<<"$boots"; then
+      warn "$k ($krel) has never booted on this machine (no boot in the login records; they can be"
+      warn "rotated). Boot it once from the Limine menu before the switch."
+      bad=1
+    fi
+  fi
+
+  if ((!bad)); then
+    ok "$k $krel: headers, NVIDIA DKMS build, boot entry and an earlier boot found"
+  fi
+  return 0
+}
+
 preflight_warnings() {
   local k fallback=''
   for k in linux linux-lts linux-zen linux-hardened; do
@@ -257,6 +351,9 @@ preflight_warnings() {
   done
   if [[ -n $fallback ]]; then
     ok "fallback kernel installed:$fallback"
+    for k in $fallback; do
+      check_fallback_kernel "$k"
+    done
   else
     warn "no fallback kernel (linux, linux-lts, ...) is installed. This repo replaces linux-omarchy"
     warn "with a build whose patches have not been booted on hardware yet."
@@ -268,8 +365,11 @@ preflight_warnings() {
       warn "the system has pending upgrades, so installing a kernel now would be a partial upgrade."
       warn "Run 'omarchy update' first, then 'sudo pacman -S linux linux-headers', before you reboot."
     elif confirm "Install Arch's 'linux' kernel (and its headers) now as a boot fallback (recommended)?"; then
-      as_root pacman -S --needed --noconfirm linux linux-headers ||
+      if as_root pacman -S --needed --noconfirm linux linux-headers; then
+        ((DRY_RUN)) || check_fallback_kernel linux
+      else
         warn "could not install linux; install a fallback kernel before you reboot"
+      fi
     else
       warn "no fallback kernel: install one (sudo pacman -S linux) before you reboot into the new kernel."
     fi
@@ -419,14 +519,67 @@ show_difference() {
 # it also works under --dry-run, before pacman has the repo). A file identical to the
 # signed package's copy goes into TAKEOVER, which run_upgrade hands over to the package;
 # any other one stops the script here, before anything is overwritten.
+#
+# unowned_etc_of DIR NAME USE: the unowned /etc files of the files-database entry DIR
+# (package NAME), compared with the signed package. Identical ones are appended to the
+# caller's `identical` array (USE says what then happens to them), the others to the
+# caller's `different` array, each with its difference shown. Returns 1 when there are
+# none, and 2 when the package can't be downloaded or verified (the reason in UNOWNED_ERR).
+UNOWNED_ERR=''
+unowned_etc_of() {
+  local dir=$1 name=$2 use=$3 path url pkg
+  local -a unowned=()
+  while IFS= read -r path; do
+    path=/$path
+    [[ -e $ROOT$path || -L $ROOT$path ]] || continue
+    pacman -Qo "$path" >/dev/null 2>&1 && continue
+    unowned+=("$path")
+  done < <(awk '$0 == "%FILES%" { on = 1; next } /^%.*%$/ { on = 0 } on && /^etc\// && !/\/$/' "$dir/files")
+  ((${#unowned[@]})) || return 1
+  # -dd: only this package's URL, not its dependencies'. A cached package prints a
+  # file:// URL, and under --dry-run pacman has no sync database for the repo yet: both
+  # use the release URL instead.
+  url=$(pacman -Sddp --print-format '%l' "$REPO/$name" 2>/dev/null) || url=''
+  url=${url##*$'\n'}
+  if [[ $url != https://* ]]; then
+    url=$(desc_field "$dir" FILENAME)
+    if [[ -z $url ]]; then
+      UNOWNED_ERR="the files database has no file name for $name"
+      return 2
+    fi
+    url=https://github.com/$GH_REPO/releases/download/x86_64/$url
+  fi
+  pkg=$TMP/${url##*/}
+  if ! curl -fsSL --proto '=https' -o "$pkg" "$url" ||
+    ! curl -fsSL --proto '=https' -o "$pkg.sig" "$url.sig"; then
+    UNOWNED_ERR="could not download $url to compare its /etc files; nothing was changed"
+    return 2
+  fi
+  if ! gpgv --keyring "$TMP/key.gpg" "$pkg.sig" "$pkg" 2>/dev/null; then
+    UNOWNED_ERR="the signature of ${url##*/} does not verify with key $FPR"
+    return 2
+  fi
+  for path in "${unowned[@]}"; do
+    if same_as_packaged "$pkg" "$path"; then
+      identical+=("$path")
+      info "$path: not owned by any package and identical to $name's copy; $use"
+    else
+      different+=("$path")
+      info "$path: not owned by any package and different from $name's copy:"
+      show_difference "$pkg" "$path" "$name"
+    fi
+  done
+  return 0
+}
+
 check_unowned_etc() {
   step "Checking /etc for unowned files the upgrade would install"
   if [[ -z $FILES_DB ]]; then
     warn "could not check /etc files against the repo; if the upgrade stops on a file conflict, see LAPTOP-SETUP.md"
     return 0
   fi
-  local dir name version installed path url pkg found=0
-  local -a unowned different=()
+  local dir name version installed rc found=0
+  local -a identical=() different=()
   for dir in "$FILES_DB"/*/; do
     dir=${dir%/}
     [[ -f $dir/desc && -f $dir/files ]] || continue
@@ -436,44 +589,12 @@ check_unowned_etc() {
     installed=$(pacman -Q "$name" 2>/dev/null) || continue
     installed=${installed#* }
     [[ $(vercmp "$version" "$installed") == 1 ]] || continue
-    unowned=()
-    while IFS= read -r path; do
-      path=/$path
-      [[ -e $ROOT$path || -L $ROOT$path ]] || continue
-      pacman -Qo "$path" >/dev/null 2>&1 && continue
-      unowned+=("$path")
-    done < <(awk '$0 == "%FILES%" { on = 1; next } /^%.*%$/ { on = 0 } on && /^etc\// && !/\/$/' "$dir/files")
-    ((${#unowned[@]})) || continue
-    found=1
-    # -dd: only this package's URL, not its dependencies'. A cached package prints a
-    # file:// URL, and under --dry-run pacman has no sync database for the repo yet: both
-    # use the release URL instead.
-    url=$(pacman -Sddp --print-format '%l' "$REPO/$name" 2>/dev/null) || url=''
-    url=${url##*$'\n'}
-    if [[ $url != https://* ]]; then
-      url=$(desc_field "$dir" FILENAME)
-      [[ -n $url ]] || die "the files database has no file name for $name"
-      url=https://github.com/$GH_REPO/releases/download/x86_64/$url
-    fi
-    pkg=$TMP/${url##*/}
-    if ! curl -fsSL --proto '=https' -o "$pkg" "$url" ||
-      ! curl -fsSL --proto '=https' -o "$pkg.sig" "$url.sig"; then
-      die "could not download $url to compare its /etc files; nothing was changed"
-    fi
-    if ! gpgv --keyring "$TMP/key.gpg" "$pkg.sig" "$pkg" 2>/dev/null; then
-      die "the signature of ${url##*/} does not verify with key $FPR"
-    fi
-    for path in "${unowned[@]}"; do
-      if same_as_packaged "$pkg" "$path"; then
-        TAKEOVER+=("$path")
-        info "$path: not owned by any package and identical to $name's copy; the upgrade takes it over"
-      else
-        different+=("$path")
-        info "$path: not owned by any package and different from $name's copy:"
-        show_difference "$pkg" "$path" "$name"
-      fi
-    done
+    rc=0
+    unowned_etc_of "$dir" "$name" "the upgrade takes it over" || rc=$?
+    if ((rc == 2)); then die "$UNOWNED_ERR"; fi
+    if ((rc == 0)); then found=1; fi
   done
+  TAKEOVER+=("${identical[@]}")
   if ((${#different[@]})); then
     die "these files are not owned by any package, differ from the packaged copies and would stop the upgrade:
 $(printf '         %s\n' "${different[@]}")
@@ -482,6 +603,47 @@ $(printf '         %s\n' "${different[@]}")
        match the packaged copy), then run this script again."
   fi
   ((found)) || ok "no unowned /etc files in the way of the upgrade"
+}
+
+# The same check for the packages offer_g16_fixes installs that aren't installed yet: pacman
+# refuses an unowned /etc file there too. A file identical to the signed package's copy goes
+# into INSTALL_OVERWRITE, which offer_g16_fixes passes to pacman as one --overwrite each.
+# Any other file, or a package that can't be checked, returns 1 before anything changes.
+INSTALL_OVERWRITE=()
+check_unowned_etc_install() {
+  step "Checking /etc for unowned files the G16 packages would install"
+  INSTALL_OVERWRITE=()
+  if [[ -z $FILES_DB ]]; then
+    warn "could not check /etc files against the repo; if the install stops on a file conflict, see LAPTOP-SETUP.md"
+    return 0
+  fi
+  local want dir rc found=0
+  local -a identical=() different=()
+  for want in "$@"; do
+    pacman -Q "$want" >/dev/null 2>&1 && continue
+    for dir in "$FILES_DB"/*/; do
+      dir=${dir%/}
+      [[ -f $dir/desc && -f $dir/files ]] || continue
+      [[ $(desc_field "$dir" NAME) == "$want" ]] || continue
+      rc=0
+      unowned_etc_of "$dir" "$want" "the install overwrites it" || rc=$?
+      if ((rc == 2)); then
+        warn "$UNOWNED_ERR"
+        return 1
+      fi
+      if ((rc == 0)); then found=1; fi
+      break
+    done
+  done
+  if ((${#different[@]})); then
+    warn "these files are not owned by any package, differ from the packaged copies and would stop the install:
+$(printf '         %s\n' "${different[@]}")
+       Nothing was changed. Move or delete each file (or make it match the packaged copy),
+       then run this script again."
+    return 1
+  fi
+  INSTALL_OVERWRITE=("${identical[@]}")
+  ((found)) || ok "no unowned /etc files in the way of the install"
 }
 
 # Where run_upgrade keeps the files it moves aside. Outside the live directory, as in
@@ -602,9 +764,48 @@ aside_path() {
   echo "$base.$n"
 }
 
+# True when FILE is a mode.conf exactly as `g16ctl winlock-mode` (G16 Control) writes it
+# for the packaged unit.
+written_by_g16ctl() {
+  local f=$1
+  [[ -f $f && ! -L $f ]] || return 1
+  [[ $(<"$f") == $'[Service]\nEnvironment=G16_WINLOCK_MODE=toast' ||
+    $(<"$f") == $'[Service]\nEnvironment=G16_WINLOCK_MODE=unlock' ]]
+}
+
+# True when drop-in DIR holds a *.conf file that g16ctl did not write (a hand-made one).
+dropin_has_own_conf() {
+  local f
+  for f in "$1"/*.conf; do
+    [[ -e $f || -L $f ]] || continue
+    written_by_g16ctl "$f" || return 0
+  done
+  return 1
+}
+
+# True when nothing in drop-in DIR changed after the newest unit backup was made. Moving
+# the unit aside updated the backup's ctime, so a drop-in written later (for the packaged
+# unit) has a newer mtime and is not a leftover of the hand-made setup.
+dropin_predates_unit_backup() {
+  local dir=$1 f t moved=0 newest
+  for f in "$WINLOCK_LOCAL".before-omarchy-asus*; do
+    [[ -e $f || -L $f ]] || continue
+    t=$(stat -c %Z -- "$f") || return 1
+    if ((t > moved)); then moved=$t; fi
+  done
+  newest=$(stat -c %Y -- "$dir") || return 1
+  for f in "$dir"/* "$dir"/.*; do
+    [[ -f $f && ! -L $f ]] || continue
+    t=$(stat -c %Y -- "$f") || return 1
+    if ((t > newest)); then newest=$t; fi
+  done
+  ((newest <= moved))
+}
+
 retire_local_winlock() {
   pacman -Q asus-rog-nkey-winlock >/dev/null 2>&1 || ((DRY_RUN)) || return 0
   local unit='' dropin='' links=() rules=() files=() undo=() l f p a line moved_rule=0
+  local keep_mode=0 shadow_bin=0 how
   local comment='^[[:space:]]*([#;]|$)'
   if [[ -f $WINLOCK_LOCAL && ! -L $WINLOCK_LOCAL ]]; then unit=$WINLOCK_LOCAL; fi
   # Links that enabled the local unit: dangling ones, or ones that resolve to it. A link to
@@ -613,23 +814,31 @@ retire_local_winlock() {
     [[ -L $l ]] || continue
     if [[ ! -e $l ]] || [[ -n $unit && $l -ef $unit ]]; then links+=("$l"); fi
   done
-  # The drop-in only belongs to a hand-made setup when one is still here, or when an older
-  # version of this script moved the unit aside but not the drop-in. The G16 Control widget
-  # writes the same mode.conf for the packaged unit; that one stays.
-  if [[ -d $WINLOCK_DROPIN ]]; then
-    if [[ -n $unit ]] || ((${#links[@]})) ||
-      { compgen -G "$WINLOCK_LOCAL.before-omarchy-asus*" >/dev/null &&
-        ! compgen -G "$WINLOCK_DROPIN.before-omarchy-asus*" >/dev/null; }; then
+  # The drop-in only belongs to a hand-made setup when it holds a file g16ctl did not write
+  # (G16 Control writes mode.conf for the packaged unit; a drop-in of only that always
+  # stays), and either the hand-made unit or its links are still here, or an older version
+  # of this script moved the unit aside but not the drop-in and nothing in the drop-in
+  # changed since. A g16ctl mode.conf inside a retired drop-in is put back after the move.
+  if [[ -d $WINLOCK_DROPIN ]] && dropin_has_own_conf "$WINLOCK_DROPIN"; then
+    if [[ -n $unit ]] || ((${#links[@]})); then
+      dropin=$WINLOCK_DROPIN
+    elif compgen -G "$WINLOCK_LOCAL.before-omarchy-asus*" >/dev/null &&
+      ! compgen -G "$WINLOCK_DROPIN.before-omarchy-asus*" >/dev/null &&
+      dropin_predates_unit_backup "$WINLOCK_DROPIN"; then
       dropin=$WINLOCK_DROPIN
     fi
+    if [[ -n $dropin ]] && written_by_g16ctl "$dropin/mode.conf"; then keep_mode=1; fi
   fi
   for f in "$WINLOCK_UDEV_DIR"/*g16-winlock*.rules; do
     if [[ -f $f && ! -L $f ]]; then rules+=("$f"); fi
   done
-  [[ -n $unit$dropin ]] || ((${#links[@]} + ${#rules[@]})) || return 0
+  if [[ -f $WINLOCK_LOCAL_BIN && -x $WINLOCK_LOCAL_BIN ]]; then shadow_bin=1; fi
+  [[ -n $unit$dropin ]] || ((${#links[@]} + ${#rules[@]} + shadow_bin)) || return 0
 
   step "Your local Win-lock setup"
-  info "These shadow or duplicate what asus-rog-nkey-winlock now installs:"
+  if [[ -n $unit$dropin ]] || ((${#links[@]} + ${#rules[@]})); then
+    info "These shadow or duplicate what asus-rog-nkey-winlock now installs:"
+  fi
   if [[ -n $unit ]]; then
     info "  ${unit/#$HOME/\~}: your own unit, used instead of the packaged one"
   fi
@@ -650,7 +859,7 @@ retire_local_winlock() {
   for f in "${rules[@]}"; do
     info "  $f: your udev rule, next to the packaged 70-g16-winlock-hidraw.rules"
   done
-  if [[ -f $WINLOCK_LOCAL_BIN && -x $WINLOCK_LOCAL_BIN ]]; then
+  if ((shadow_bin)); then
     warn "${WINLOCK_LOCAL_BIN/#$HOME/\~} shadows /usr/bin/g16-winlock on your PATH when you run"
     warn "g16-winlock by hand. It is left in place; remove it to use the packaged one."
   fi
@@ -675,7 +884,19 @@ retire_local_winlock() {
           warn "could not move ${p/#$HOME/\~}; it stays in place"
           continue
         fi
-        undo+=("${p/#$HOME/\~} -> ${a##*/}; undo: mv ${a/#$HOME/\~} ${p/#$HOME/\~}")
+        how="mv ${a/#$HOME/\~} ${p/#$HOME/\~}"
+        # The mode chosen in G16 Control applies to the packaged unit too: put it back.
+        if [[ $p == "$dropin" ]] && ((keep_mode)); then
+          if ((DRY_RUN)); then
+            info "[dry-run] would run: mkdir -p ${p/#$HOME/\~} && cp -p ${a/#$HOME/\~}/mode.conf ${p/#$HOME/\~}/mode.conf"
+          elif mkdir -p "$p" && cp -p "$a/mode.conf" "$p/mode.conf"; then
+            info "kept the Win-lock mode set in G16 Control (${p/#$HOME/\~}/mode.conf)"
+          else
+            warn "could not put back ${p/#$HOME/\~}/mode.conf; set the Win-lock mode in G16 Control again"
+          fi
+          how="rm -r ${p/#$HOME/\~} && $how"
+        fi
+        undo+=("${p/#$HOME/\~} -> ${a##*/}; undo: $how")
       done
       for l in "${links[@]}"; do
         if ((DRY_RUN)); then
@@ -728,10 +949,59 @@ retire_local_winlock() {
   return 0
 }
 
+# The way back from a bad driver or migration: a snapper snapshot taken (and seen in the
+# list) right before the upgrade. 'omarchy update' tries one too, but carries on without it
+# (#85). Returns 0 only when the snapshot it just took exists.
+take_snapshot() {
+  step "Taking a snapshot before the upgrade"
+  if ! command -v snapper >/dev/null || [[ ! -f $SNAPPER_CONFIG ]]; then
+    warn "snapper has no root config, so no snapshot can be taken"
+    return 1
+  fi
+  if ((DRY_RUN)); then
+    as_root snapper -c root create -c number -d 'before omarchy-asus' --print-number
+    info "[dry-run] would check that the new snapshot appears in snapper -c root list"
+    return 0
+  fi
+  local num list
+  if ! num=$(sudo snapper -c root create -c number -d 'before omarchy-asus' --print-number); then
+    warn "snapper could not create a snapshot"
+    return 1
+  fi
+  num=${num//[[:space:]]/}
+  if [[ ! $num =~ ^[0-9]+$ ]]; then
+    warn "snapper did not print a snapshot number"
+    return 1
+  fi
+  # CSV, one number per line: the table output draws its columns with Unicode box
+  # characters in a UTF-8 locale, so splitting it on '|' would never find the number.
+  list=$(sudo snapper --csvout -c root list --columns number 2>/dev/null) || list=''
+  if ! N=$num awk '{ f = $0; gsub(/[[:space:]"]/, "", f); if (f == ENVIRON["N"]) found = 1 }
+      END { exit !found }' <<<"$list"; then
+    warn "snapshot $num does not appear in snapper list"
+    return 1
+  fi
+  ok "snapshot $num taken (before omarchy-asus)"
+  info "Limine lists it as a boot entry once limine-snapper-sync picks it up."
+}
+
+# Take the snapshot; without one, stop short of the upgrade unless --force. Returns 0 to go on.
+snapshot_gate() {
+  take_snapshot && return 0
+  if ((FORCE)); then
+    warn "no snapshot: upgrading anyway because of --force. A bad driver or migration then has no way back."
+    return 0
+  fi
+  warn "not upgraded: without a snapshot, a bad driver or omarchy migration has no way back ('omarchy update' carries on without one)."
+  warn "Fix snapper (sudo snapper -c root create -d test), or run again with --force. The package databases are synced but the system is not upgraded: run 'omarchy update' before you install anything else."
+  return 1
+}
+
 offer_upgrade() {
   step "What the system upgrade would change"
   if ((DRY_RUN)); then
     info "[dry-run] would list: pacman -Qu, with the packages coming from [$REPO] marked"
+    snapshot_gate || return 0
     confirm "Upgrade now?"
     run_upgrade
     return 0
@@ -745,11 +1015,12 @@ offer_upgrade() {
   fi
   while read -r name _; do
     if [[ $repo_pkgs == *" $name "* ]]; then
-      printf '    %s[%s]%s %s\n' "$B" "$REPO" "$N" "$(grep -m1 "^$name " <<<"$updates")"
+      printf '    %s[%s]%s %s\n' "$CLR_BOLD" "$REPO" "$CLR_OFF" "$(grep -m1 "^$name " <<<"$updates")"
     else
       printf '                   %s\n' "$(grep -m1 "^$name " <<<"$updates")"
     fi
   done <<<"$updates"
+  snapshot_gate || return 0
   if confirm "Upgrade now with 'omarchy update'? (it asks once more before it starts)"; then
     run_upgrade
   else
@@ -780,9 +1051,15 @@ offer_g16_fixes() {
   info "Packages: ${G16_PKGS[*]}. omarchy-asus-g16-apply then lists the fixes that"
   info "live in your config or /etc (video decode on the iGPU, HDMI cursor, speaker level, rtkit,"
   info "asusd, Win-lock service) and applies the missing ones. Settings you already have are kept."
+  local overwrite=() p
   if ((DRY_RUN)); then
     confirm "Install them and review the fixes?"
-    as_root pacman -S --needed "${G16_PKGS[@]}"
+    if ! check_unowned_etc_install "${G16_PKGS[@]}"; then
+      warn "the G16 packages were not installed."
+      return 0
+    fi
+    for p in "${INSTALL_OVERWRITE[@]}"; do overwrite+=(--overwrite "$p"); done
+    as_root pacman -S --needed "${overwrite[@]}" "${G16_PKGS[@]}"
     retire_local_winlock
     info "[dry-run] would run: omarchy-asus-g16-apply ${apply_opts[*]} --check, ask, then omarchy-asus-g16-apply ${apply_opts[*]} --yes"
     return 0
@@ -805,7 +1082,13 @@ offer_g16_fixes() {
     info "skipped. Later: 'sudo pacman -S ${G16_PKGS[*]}', then 'omarchy-asus-g16-apply'."
     return 0
   fi
-  as_root pacman -S --needed "${available[@]}" || { warn "install failed; skipping the fixes"; return 0; }
+  # Identical means overwrite, different means stop, as for the upgrade (check_unowned_etc).
+  if ! check_unowned_etc_install "${available[@]}"; then
+    warn "the G16 packages were not installed. Later: 'sudo pacman -S ${available[*]}', then 'omarchy-asus-g16-apply'."
+    return 0
+  fi
+  for p in "${INSTALL_OVERWRITE[@]}"; do overwrite+=(--overwrite "$p"); done
+  as_root pacman -S --needed "${overwrite[@]}" "${available[@]}" || { warn "install failed; skipping the fixes"; return 0; }
   retire_local_winlock
   command -v omarchy-asus-g16-apply >/dev/null || return 0
   omarchy-asus-g16-apply "${apply_opts[@]}" --check || rc=$?
@@ -950,7 +1233,7 @@ do_uninstall() {
 # Tests source this file to call its functions; they stop here, before anything runs.
 [[ ${OMARCHY_ASUS_SETUP_SOURCE_ONLY:-0} == 1 ]] && return 0
 
-((DRY_RUN)) && printf '%s(dry run: privileged commands and file writes are printed, not run)%s\n' "$Y" "$N"
+((DRY_RUN)) && printf '%s(dry run: privileged commands and file writes are printed, not run)%s\n' "$CLR_YELLOW" "$CLR_OFF"
 case $MODE in
   install) do_install ;;
   uninstall) do_uninstall ;;

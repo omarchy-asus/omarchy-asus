@@ -10,12 +10,19 @@
 # `omarchy-asus-g16-apply`, and a fix the user already has in any form of their
 # own is reported and left alone. See README.md.
 #
+# With the patched omarchy and omarchy-settings from this repo (4.0.5-1.1 or
+# later), their migrations and default files apply hybrid-video, hdmi-cursor,
+# rtkit and the asusd drop-in during 'omarchy update', and the command reports
+# them as present once they're in place (hybrid-video once 'omarchy update' has
+# run its migration; the command hands its older pins over to Omarchy). Its
+# migration only notifies about audio-master.
+#
 # A local package with no upstream build to track, so pkgrel does not use the
 # repo's "<upstream>.1" scheme.
 
 pkgname=omarchy-asus-g16-apply
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='Apply the ASUS ROG Zephyrus G16 GA605KM fixes that live in user config or /etc, on request (EXPERIMENTAL)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -40,7 +47,7 @@ source=('omarchy-asus-g16-apply'
         'omarchy-powerprofiles-asus-quiet-fans'
         'README.md'
         'LICENSE')
-sha256sums=('991d4725012680d806d4623f06ecd59bfb5bdb591689770761fd2b67c09956ac'
+sha256sums=('79798e582c45acbcd42f3809e9fa183c75f4e677afdf11ecb76461b40494ac37'
             '1c02bdc6b3055649bd8bee1394c68cd26af05a0fefefcd6190f164cd8fc0ab13'
             'eadf7a74b73aec5c63fb2164908dc0f0f28a40411f9c696761265a96c76e6fc9'
             '54997bee5a950335bb8ce471c72c79923133dc777a1ea61f7a311540582e0be5'
@@ -50,7 +57,7 @@ sha256sums=('991d4725012680d806d4623f06ecd59bfb5bdb591689770761fd2b67c09956ac'
             '1f5f1b0f51d2a12db84e2125ca56b704a41ce78d8a4787d862bdbaae4aa0404b'
             'e781d8e218dcb06ab49627ab567fafbad652a45f706ad65e7a8f728429c8915a'
             '336a30e3ca249944448ac35ffe45154f1bd83f81c4bfa34fa7b489ff152d3e00'
-            '0465845eb6726dc7c339cc25b2e2c01926d06c4266c84d09316476f705befac2'
+            'fc2658683eaa9a449033a7e052bb96b0e7f39f0c0d9f0aab15a4f018306490e5'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 package() {

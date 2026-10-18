@@ -126,6 +126,8 @@ jobs:
           { echo "### $RECIPE (not rebuilt)"; echo
             echo "Same tree ($LABEL) already built by run [$RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID); reusing its packages."
             echo; echo '```'; (cd out && ls -l -- *.pkg.tar.zst); echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # No -e/--env, no docker socket: the container holds no credentials
+      # (ci/build-recipe header, tests/ci/build-recipe-no-secrets.sh).
       - name: Build ${{ matrix.recipe }}
         if: steps.prev.outputs.run_id == ''
         env:
@@ -213,6 +215,8 @@ jobs:
           { echo "### linux-omarchy (not rebuilt)"; echo
             echo "Same tree ($LABEL) already built by run [$RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID); reusing its packages."
             echo; echo '```'; ls -l "$DIR/out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # No -e/--env, no docker socket: the container holds no credentials
+      # (ci/build-recipe header, tests/ci/build-recipe-no-secrets.sh).
       - name: Build linux-omarchy
         if: steps.prev.outputs.run_id == ''
         env:

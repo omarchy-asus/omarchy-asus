@@ -14,6 +14,14 @@
 # already have in your own form (any setting of your own for the same thing) is
 # reported as "present (local)" and left alone; nothing is overwritten. Run it as
 # your normal user; it calls sudo for the system steps.
+#
+# With the patched omarchy and omarchy-settings from the omarchy-asus repo
+# (4.0.5-1.1 or later), their migrations and default files apply hybrid-video,
+# hdmi-cursor, rtkit and the asusd drop-in during 'omarchy update', and --check
+# reports them as present once they have (hybrid-video: once 'omarchy update' has
+# run its migration; this command's older pins are handed over to Omarchy). This
+# command is then for stock Omarchy, for audio-master (the migration only tells
+# you about it) and for the opt-ins.
 # check_<fix> and apply_<fix> run by name (check_fix, the apply loop).
 # shellcheck disable=SC2329
 set -uo pipefail
@@ -44,7 +52,7 @@ declare -A DESC=(
 DRY_RUN=0 CHECK=0 YES=0 FORCE=0
 SELECTED=()
 
-usage() { sed -n '2,16s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,24s/^# \{0,1\}//p' "$0"; }
 
 is_fix() {
   local f
@@ -145,6 +153,19 @@ power_owner() {
   return 1
 }
 
+# The omarchy-asus patched omarchy and omarchy-settings (4.0.5-1.1 or later):
+# their migrations ship to /usr/share/omarchy/migrations/<id>.sh and their
+# default files to /usr/share/omarchy/default/.
+PATCHED_OMARCHY_MIGRATIONS=/usr/share/omarchy/migrations
+PATCHED_HYBRID_CURSOR=/usr/share/omarchy/default/hypr/hybrid-cursor.lua
+omarchy_has_migration() { [[ -f $(r "$PATCHED_OMARCHY_MIGRATIONS/$1.sh") ]]; }
+patched_omarchy() { omarchy_has_migration 1792123636 || [[ -f $(r "$PATCHED_HYBRID_CURSOR") ]]; }
+# A shipped migration hasn't necessarily run: pacman installs it, and the next
+# 'omarchy update' (omarchy-migrate) runs it and records it per user under
+# OMARCHY_STATE_MIGRATIONS/<id>.sh (a skipped one under skipped/<id>.sh).
+OMARCHY_STATE_MIGRATIONS=$HOME/.local/state/omarchy/migrations
+omarchy_ran_migration() { [[ -e $OMARCHY_STATE_MIGRATIONS/$1.sh ]]; }
+
 # Non-comment lines of the user's Hyprland config matching an ERE, not counting
 # the lines this command adds. Prints the first file. Follows symlinks: dotfile
 # managers often link hyprland.lua, or the whole hypr directory, from elsewhere.
@@ -228,6 +249,12 @@ ST='' DETAIL=''
 # pins under it, and the vaapi-device line in the block under the fork's mpv
 # comment, are ever changed again; a pin you wrote yourself is never touched.
 HYBRID_VIDEO_PIN_MARKER="# omarchy-asus-g16-apply hybrid-video: decode on the iGPU (kept up to date by the command; delete this line and the next to undo)"
+# The patched omarchy's marker: it repins or removes only the pin on the line
+# right under it, above --render-node-override in the Chromium-family flags
+# files and above vaapi-device in mpv.conf. A pin under it is Omarchy's, never
+# this command's. Keep in step with recipes/omarchy 0020, default/hypr/nvidia.lua
+# and install/helpers/hybrid-video-decode.sh.
+OMARCHY_HYBRID_VIDEO_PIN_MARKER="# Omarchy repins the next line if the iGPU moves. Delete this comment to keep the line as your own."
 
 # The render node pins this command wrote, one "FILE<TAB>LINE<TAB>NODE" each.
 hybrid_video_managed_pins() {
@@ -240,11 +267,14 @@ hybrid_video_managed_pins() {
   done
   [[ -f $HYBRID_VIDEO_MPV_CONF ]] || return 0
   # The fork's hybrid_video_pin_mpv writes its comment, then the options, then a
-  # blank line ahead of what was there before.
-  awk -v m="$HYBRID_VIDEO_MPV_COMMENT" -v f="$HYBRID_VIDEO_MPV_CONF" '
-    $0 == m { block = 1; next }
+  # blank line ahead of what was there before. The patched omarchy writes the
+  # same comment, with its marker above the vaapi-device line: that pin is
+  # Omarchy's (its start-time check and omarchy-refresh-hybrid-video keep it).
+  awk -v m="$HYBRID_VIDEO_MPV_COMMENT" -v om="$OMARCHY_HYBRID_VIDEO_PIN_MARKER" -v f="$HYBRID_VIDEO_MPV_CONF" '
+    $0 == m { block = 1; prev = $0; next }
     block && (/^[[:space:]]*$/ || /^[[:space:]]*\[/) { exit }
-    block && /^vaapi-device=[^[:space:]]+$/ { print f "\t" NR "\t" substr($0, 14) }' "$HYBRID_VIDEO_MPV_CONF"
+    block && prev != om && /^vaapi-device=[^[:space:]]+$/ { print f "\t" NR "\t" substr($0, 14) }
+    { prev = $0 }' "$HYBRID_VIDEO_MPV_CONF"
 }
 
 # Managed pins that don't name NODE (any of them when NODE is empty), as
@@ -297,6 +327,47 @@ hybrid_video_repair_pins() {
   done
 }
 
+# With the patched omarchy installed, hands this command's pins over to it, so
+# each pin has one owner. The stale ones are repinned to NODE first, or removed
+# when NODE is empty, as hybrid_video_repair_pins does. Then each remaining pin
+# is rewritten in Omarchy's form: in a Chromium-family flags file this
+# command's marker becomes Omarchy's, and in mpv.conf Omarchy's marker goes
+# right above the vaapi-device line. From then on Omarchy's start-time check
+# and omarchy-refresh-hybrid-video keep them up to date, and this command no
+# longer lists them. Rewrites in place, which keeps a symlinked config pointing
+# where it did.
+hybrid_video_hand_over_pins() {
+  local node=$1 file line out mpv
+  local -A lines=()
+  hybrid_video_repair_pins "$node"
+  [[ -n $node ]] || return 0
+  # Repinning keeps the line numbers, so a dry run lists the same lines.
+  while IFS=$'\t' read -r file line _; do
+    lines[$file]+="$line "
+  done < <(hybrid_video_managed_pins)
+  for file in "${!lines[@]}"; do
+    if ((DRY_RUN)); then
+      printf '    [dry-run] hand over the pin in %s (line %s) to the patched omarchy\n' "$(tilde "$file")" "${lines[$file]% }"
+      continue
+    fi
+    mpv=0
+    [[ $file == "$HYBRID_VIDEO_MPV_CONF" ]] && mpv=1
+    out=$(awk -v lines="${lines[$file]}" -v mpv="$mpv" -v m="$HYBRID_VIDEO_PIN_MARKER" \
+      -v om="$OMARCHY_HYBRID_VIDEO_PIN_MARKER" '
+      BEGIN { n = split(lines, a, " "); for (i = 1; i <= n; i++) fix[a[i]] = 1 }
+      { buf[NR] = $0 }
+      END {
+        for (i = 1; i <= NR; i++) {
+          if (!mpv && fix[i + 1] && buf[i] == m) { print om; continue }
+          if (mpv && fix[i]) print om
+          print buf[i]
+        }
+      }' "$file"; echo x)
+    printf '%s' "${out%x}" >"$file"
+    info "handed the pin in $(tilde "$file") over to the patched omarchy (omarchy-refresh-hybrid-video keeps it up to date)"
+  done
+}
+
 # Removes the fork's mpv comment and the lines of its block this command
 # manages (hwdec=vaapi, vaapi-device=...), and the blank line after the block
 # when nothing else is left in it. Other lines in the block stay.
@@ -318,14 +389,32 @@ hybrid_video_mpv_drop_block() {
 # hybrid_video_pin_mpv. With the comment already there (a block emptied by an
 # older cleanup), the options go inside its block, right under the comment, so
 # the pin is recognized as this command's later.
+# With MARKER (Omarchy's), the marker line goes right above vaapi-device, which
+# is the patched omarchy's form: '<comment>', 'hwdec=vaapi', '<marker>',
+# 'vaapi-device=NODE', then a blank line ahead of what was there before. The
+# fork's hybrid_video_pin_mpv writes no marker, so it isn't used for that form.
 hybrid_video_pin_mpv_in_block() {
-  local node=$1 out opts=""
-  if ! { [[ -f $HYBRID_VIDEO_MPV_CONF ]] && grep -qxF "$HYBRID_VIDEO_MPV_COMMENT" "$HYBRID_VIDEO_MPV_CONF"; }; then
-    hybrid_video_pin_mpv
-    return
-  fi
+  local node=$1 marker=${2:-} out opts="" existing=""
   hybrid_video_mpv_sets hwdec || opts+="hwdec=vaapi"$'\n'
-  hybrid_video_mpv_sets vaapi-device || opts+="vaapi-device=$node"$'\n'
+  if ! hybrid_video_mpv_sets vaapi-device; then
+    [[ -z $marker ]] || opts+="$marker"$'\n'
+    opts+="vaapi-device=$node"$'\n'
+  fi
+  if ! { [[ -f $HYBRID_VIDEO_MPV_CONF ]] && grep -qxF "$HYBRID_VIDEO_MPV_COMMENT" "$HYBRID_VIDEO_MPV_CONF"; }; then
+    if [[ -z $marker ]]; then
+      hybrid_video_pin_mpv
+      return
+    fi
+    [[ -n $opts ]] || return 0
+    mkdir -p "$(dirname "$HYBRID_VIDEO_MPV_CONF")"
+    [[ -f $HYBRID_VIDEO_MPV_CONF ]] && existing=$(<"$HYBRID_VIDEO_MPV_CONF")
+    # Rewrite in place, which keeps a symlinked config pointing where it did.
+    {
+      printf '%s\n%s' "$HYBRID_VIDEO_MPV_COMMENT" "$opts"
+      [[ -z $existing ]] || printf '\n%s\n' "$existing"
+    } >"$HYBRID_VIDEO_MPV_CONF"
+    return 0
+  fi
   [[ -n $opts ]] || return 0
   out=$(awk -v m="$HYBRID_VIDEO_MPV_COMMENT" -v opts="${opts%$'\n'}" '
     { print }
@@ -333,15 +422,75 @@ hybrid_video_pin_mpv_in_block() {
   printf '%s' "${out%x}" >"$HYBRID_VIDEO_MPV_CONF"
 }
 
-# The fork's hybrid_video_pin_chromium, with the marker line above the pin.
+# The fork's hybrid_video_pin_chromium, with a marker line above the pin: this
+# command's, or MARKER (Omarchy's, for the patched omarchy's form).
 hybrid_video_pin_chromium_marked() {
-  local node=$1 conf
+  local node=$1 marker=${2:-$HYBRID_VIDEO_PIN_MARKER} conf
   for conf in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
     [[ -f $conf ]] || continue
     grep -q -- '^[[:space:]]*--render-node-override=' "$conf" && continue
     [[ -s $conf && -n $(tail -c1 "$conf") ]] && echo >>"$conf"
-    printf '%s\n--render-node-override=%s\n' "$HYBRID_VIDEO_PIN_MARKER" "$node" >>"$conf"
+    printf '%s\n--render-node-override=%s\n' "$marker" "$node" >>"$conf"
   done
+}
+
+# The patched omarchy installed, its migration 1792123636 not run yet (pacman
+# upgraded it, and 'omarchy update' hasn't run since) or skipped: checks the
+# files as they are. Sets ST and DETAIL for check_hybrid_video.
+hybrid_video_check_pending() {
+  local node=$1 f mpv_pinned=0 chromium_pinned=1 local_parts=() joined
+  if [[ -f $HYBRID_VIDEO_MPV_CONF ]] && awk -v om="$OMARCHY_HYBRID_VIDEO_PIN_MARKER" '
+    prev == om && /^vaapi-device=[^[:space:]]+$/ { found = 1; exit }
+    { prev = $0 }
+    END { exit !found }' "$HYBRID_VIDEO_MPV_CONF"; then
+    mpv_pinned=1
+  fi
+  if f=$(libva_set_by_user); then local_parts+=("LIBVA_DRIVER_NAME set in $(tilde "$f")"); fi
+  if ((!mpv_pinned)) && { hybrid_video_mpv_sets hwdec || hybrid_video_mpv_sets vaapi-device; }; then
+    local_parts+=("hwdec/vaapi-device set in $(tilde "$HYBRID_VIDEO_MPV_CONF")")
+  fi
+  for f in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
+    [[ -f $f ]] || continue
+    if ! grep -q -- '^[[:space:]]*--render-node-override=' "$f"; then
+      chromium_pinned=0
+    elif ! grep -qxF -- "$OMARCHY_HYBRID_VIDEO_PIN_MARKER" "$f"; then
+      local_parts+=("--render-node-override set in $(tilde "$f")")
+    fi
+  done
+  if ((mpv_pinned && chromium_pinned)); then
+    ST=present DETAIL="decode is pinned in Omarchy's form (under its marker); the patched omarchy's migration 1792123636 leaves it, and omarchy-refresh-hybrid-video keeps it up to date"
+  elif ((${#local_parts[@]})); then
+    printf -v joined '%s; ' "${local_parts[@]}"
+    ST=local DETAIL="${joined}left alone"
+  elif [[ -e $OMARCHY_STATE_MIGRATIONS/skipped/1792123636.sh ]]; then
+    ST=missing DETAIL="not applied; the patched omarchy's migration 1792123636 was skipped (applying pins decode to $node now, in Omarchy's form)"
+  else
+    ST=missing DETAIL="not applied yet; the patched omarchy's migration 1792123636 pins decode to $node at the next 'omarchy update' (applying pins it now, in Omarchy's form)"
+  fi
+}
+
+# Pins mpv and the Chromium-family flags files to NODE in the patched omarchy's
+# form (under its marker), so its migration leaves them and its start-time
+# check and omarchy-refresh-hybrid-video keep them up to date. LIBVA is left to
+# the patched omarchy's default files: nothing is added to hyprland.lua.
+hybrid_video_pin_omarchy_form() {
+  local node=$1 f
+  if ((DRY_RUN)); then
+    local opts=()
+    hybrid_video_mpv_sets hwdec || opts+=("hwdec=vaapi")
+    hybrid_video_mpv_sets vaapi-device || opts+=("vaapi-device=$node")
+    ((${#opts[@]})) &&
+      printf '    [dry-run] prepend to %s: %s (vaapi-device under Omarchy'\''s marker comment)\n' "$(tilde "$HYBRID_VIDEO_MPV_CONF")" "${opts[*]}"
+    for f in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
+      [[ -f $f ]] && ! grep -q -- '^[[:space:]]*--render-node-override=' "$f" &&
+        printf '    [dry-run] append to %s, under Omarchy'\''s marker comment: --render-node-override=%s\n' "$(tilde "$f")" "$node"
+    done
+    return 0
+  fi
+  echo "    Detected a hybrid GPU with the display on the iGPU. Decoding video on $node, in the patched omarchy's form."
+  hybrid_video_pin_mpv_in_block "$node" "$OMARCHY_HYBRID_VIDEO_PIN_MARKER"
+  hybrid_video_pin_chromium_marked "$node" "$OMARCHY_HYBRID_VIDEO_PIN_MARKER"
+  info "restart mpv and the browser for the pins; omarchy-refresh-hybrid-video keeps them up to date"
 }
 
 check_hybrid_video() {
@@ -354,6 +503,33 @@ check_hybrid_video() {
       ST=repair DETAIL="no iGPU-driven display now (MUX or firmware change), but this command's pins remain (${stale[*]}); applying removes them"
     else
       ST=n/a DETAIL="no iGPU-driven display next to an NVIDIA GPU (omarchy-hw-igpu-render-node)"
+    fi
+    return
+  fi
+  # The patched omarchy owns the pins: this command's older ones are handed
+  # over to it, and hybrid-video is present once 'omarchy update' has run its
+  # migration (pacman alone only installs it).
+  if omarchy_has_migration 1792123636; then
+    local file line managed=() redundant=""
+    if hypr_has_line hybrid-video-env.lua; then
+      redundant="; this command's hybrid-video lines in $(tilde "$HYPR_CONF") are now redundant: delete them"
+    fi
+    while IFS=$'\t' read -r file line _; do
+      managed+=("$(tilde "$file"):$line")
+    done < <(hybrid_video_managed_pins)
+    if ((${#managed[@]})); then
+      ST=repair DETAIL="this command's older pins remain (${managed[*]})"
+      if ((${#stale[@]})); then
+        DETAIL+=", some naming an old render node (${stale[*]}); applying repins them to $node and hands them over"
+      else
+        DETAIL+="; applying hands them over"
+      fi
+      DETAIL+=" to the patched omarchy (rewritten under its marker), so omarchy-refresh-hybrid-video keeps them up to date$redundant"
+    elif omarchy_ran_migration 1792123636; then
+      ST=present DETAIL="the patched omarchy's migration 1792123636 and omarchy-refresh-hybrid-video pin decode to $node$redundant"
+    else
+      hybrid_video_check_pending "$node"
+      DETAIL+=$redundant
     fi
     return
   fi
@@ -398,6 +574,26 @@ check_hybrid_video() {
 apply_hybrid_video() {
   local node="" f
   node=$(omarchy-hw-igpu-render-node 2>/dev/null) || node=""
+  # The patched omarchy pins mpv and Chromium itself and stops forcing VA-API.
+  # This command's older pins are handed over to it (repinned or removed first
+  # when stale), so each pin has one owner. Until 'omarchy update' has run the
+  # migration, a missing pin is written in Omarchy's form, which the migration
+  # leaves and omarchy-refresh-hybrid-video keeps up to date.
+  if omarchy_has_migration 1792123636; then
+    local handed=0
+    [[ -z $(hybrid_video_managed_pins) ]] || handed=1
+    hybrid_video_hand_over_pins "$node"
+    [[ -n $node ]] || return 0
+    omarchy_ran_migration 1792123636 && return 0
+    if ((DRY_RUN)); then
+      ((handed == 0)) || return 0
+    else
+      check_fix hybrid-video
+      [[ $ST == missing ]] || return 0
+    fi
+    hybrid_video_pin_omarchy_form "$node"
+    return
+  fi
   # Stale pins of this command's first: repinned to the current iGPU node, or
   # removed when there is none (the fork's hybrid_video_unpin_stale, limited to
   # the pins this command wrote).
@@ -440,6 +636,13 @@ check_hdmi_cursor() {
   local f
   if [[ ! -f $HYPR_CONF ]]; then ST=n/a DETAIL="no $(tilde "$HYPR_CONF")"; return; fi
   if ! drm_hybrid; then ST=n/a DETAIL="not a hybrid NVIDIA laptop (DRM sysfs)"; return; fi
+  if [[ -f $(r "$PATCHED_HYBRID_CURSOR") ]]; then
+    ST=present DETAIL="the patched omarchy loads hybrid-cursor.lua from default/hypr/nvidia.lua"
+    if hypr_has_line hybrid-cursor.lua; then
+      DETAIL+="; this command's hdmi-cursor lines in $(tilde "$HYPR_CONF") are now redundant: delete them"
+    fi
+    return
+  fi
   if hypr_has_line hybrid-cursor.lua; then
     ST=applied DETAIL="hybrid-cursor.lua loaded from $(tilde "$HYPR_CONF")"
   elif f=$(hypr_sets 'no_hardware_cursors'); then
@@ -471,7 +674,12 @@ check_audio_master() {
   level=$(amixer -c "$card" sget Master 2>/dev/null | grep -o '\[[0-9]*%\]' | head -1 | tr -d '[]%')
   case $level in
     100) ST=present DETAIL="Master at 100 % on card $card" ;;
-    80) ST=missing DETAIL="Master at 80 % (Omarchy's install value): the slider's 100 % is 12.75 dB below full scale" ;;
+    80)
+      ST=missing DETAIL="Master at 80 % (Omarchy's install value): the slider's 100 % is 12.75 dB below full scale"
+      if omarchy_has_migration 1792162887; then
+        DETAIL+="; the patched omarchy's migration only tells you (it never raises the level during an update): run this command to raise it"
+      fi
+      ;;
     '') ST=n/a DETAIL="card $card has no Master control" ;;
     *) ST=local DETAIL="Master at $level % on card $card (your setting); left alone" ;;
   esac
@@ -492,6 +700,8 @@ apply_audio_master() {
 check_rtkit() {
   if pacman -Q rtkit >/dev/null 2>&1; then
     ST=present DETAIL="rtkit $(pacman -Q rtkit | cut -d' ' -f2) installed"
+  elif omarchy_has_migration 1789747667; then
+    ST=missing DETAIL="not installed yet; the patched omarchy's migration 1789747667 installs it at the next 'omarchy update'"
   else
     ST=missing DETAIL="nothing pulls rtkit in on x86_64; PipeWire runs without realtime threads"
   fi
@@ -534,7 +744,11 @@ check_asusd_power_profiles() {
   fi
   if [[ -f $(r "$ASUSD_DROPIN") ]]; then
     if cmp -s "$(r "$ASUSD_DROPIN")" "$SHARE/system/asusd-power-profiles.conf"; then
-      ST=applied DETAIL="$ASUSD_DROPIN"
+      if [[ -f $(r /etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf) ]]; then
+        ST=present DETAIL="omarchy-settings ships /etc/systemd/system/asusd.service.d/10-omarchy-power-profiles.conf; this command's $ASUSD_DROPIN is now redundant (sudo rm it, then sudo systemctl daemon-reload)"
+      else
+        ST=applied DETAIL="$ASUSD_DROPIN"
+      fi
     else
       ST=local DETAIL="$ASUSD_DROPIN differs from the packaged copy; left alone"
     fi
@@ -871,7 +1085,7 @@ if ((CHECK)); then
   step "Packages ('omarchy update' with the omarchy-asus repo; report only)"
   info_rows
   step "Fixes this command applies"
-  missing_default=0
+  missing_default=0 any_redundant=0
   for fix in "${DEFAULT_FIXES[@]}" "${OPTIN_FIXES[@]}"; do
     check_fix "$fix"
     status=$ST
@@ -881,7 +1095,16 @@ if ((CHECK)); then
     fi
     row "$fix" "$status" "$DETAIL"
     [[ $status == missing || $status == repair ]] && missing_default=1
+    [[ $DETAIL == *redundant* ]] && any_redundant=1
   done
+  if patched_omarchy; then
+    step "Patched omarchy installed"
+    info "its migrations apply hybrid-video, hdmi-cursor, rtkit and the asusd drop-in on 'omarchy update';"
+    info "no login service is needed. hybrid-video is present once 'omarchy update' has run its migration,"
+    info "and this command hands its older mpv and Chromium pins over to it. audio-master is only notified"
+    info "by its migration: run this command to raise it."
+    if ((any_redundant)); then info "Lines this command added earlier show as redundant above: delete them."; fi
+  fi
   ((DRY_RUN)) || exit $((missing_default ? 10 : 0))
 fi
 
