@@ -38,7 +38,7 @@ env:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       recipes: ${{ steps.plan.outputs.recipes }}
@@ -73,7 +73,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.recipes != '[]'
     name: build (${{ matrix.recipe }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -105,7 +105,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.kernel == 'true'
     name: build (linux-omarchy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
       # The kernel tree, its objects and the packages need ~30 GB; a stock
@@ -158,7 +158,7 @@ jobs:
       !cancelled() && needs.changes.outputs.nvidia_compat == 'true' &&
       needs.build.result != 'failure' && needs.kernel.result != 'failure'
     name: nvidia-open-dkms vs linux-omarchy-headers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -185,7 +185,7 @@ jobs:
   result:
     needs: [changes, build, kernel, nvidia-compat]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - env:
           CHANGES: ${{ needs.changes.result }}
