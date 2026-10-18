@@ -1,0 +1,9 @@
+# Release assets whose PII-scan hits are known upstream content (see bin/sync-release).
+# Kernel packages: upstream module and config names (HID device drivers) match
+# hardware words on the denylist. Our own kernel patches are scanned when
+# committed (.pii-allow / publish hook).
+linux-omarchy-*.pkg.tar.zst
+linux-omarchy-headers-*.pkg.tar.zst
+# The files database lists every file of every package, so it inherits the
+# kernel's module names; each package is scanned on its own.
+omarchy-asus.files
