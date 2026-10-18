@@ -188,52 +188,98 @@ def toast(message: str, *, icon: str = ICON_LOCKED, duration_ms: int = 2000) -> 
         print(f"toast FAILED: no OSD/notifier for {message!r}", flush=True)
 
 
+class _DeviceLost(Exception):
+    """The hidraw node went away (unplug, resume, driver rebind)."""
+
+
+def _reopen_with_backoff() -> tuple[int, Path]:
+    """Wait for the keyboard to come back, polling with backoff up to 30 s."""
+    delay = 1.0
+    while True:
+        try:
+            return open_hidraw(writable=False)
+        except (FileNotFoundError, SystemExit, OSError) as e:
+            # SystemExit: the node is back but its uaccess ACL is not yet.
+            print(f"waiting for keyboard ({e}); retry in {delay:.0f}s", flush=True)
+        time.sleep(delay)
+        delay = min(delay * 2, 30.0)
+
+
 def watch(mode: str) -> None:
-    """Read Win-lock state notifications passed through to hidraw."""
-    fd, path = open_hidraw(writable=False)
-    print(f"watching {path} ({mode} mode)… Ctrl-C to stop", flush=True)
+    """Read Win-lock state notifications passed through to hidraw.
+
+    No keyboard within ~10 s of startup: exit 0, since the unit is enabled for every user
+    and most machines lack one. Losing the node later (unplug, resume): wait
+    for it to come back instead of crashing into systemd's restart limit.
+    """
+    for attempt in range(6):  # ~10 s grace in case the node is still settling
+        try:
+            fd, path = open_hidraw(writable=False)
+            break
+        except FileNotFoundError as e:
+            if attempt == 5:
+                print(f"{e}; nothing to watch", flush=True)
+                return
+            time.sleep(2)
     # Ignore the next N "off" lines after we ourselves unlock (SetFeature echoes).
     suppress_off = 0
     try:
         while True:
-            select.select([fd], [], [])
+            print(f"watching {path} ({mode} mode)… Ctrl-C to stop", flush=True)
             try:
-                data = os.read(fd, REPORT_LEN)
-            except BlockingIOError:
-                continue
-            if not data:
-                raise OSError(f"{path} disconnected")
-            if len(data) < 4 or data[:3] != bytes([0x5D, 0xBF, 0x01]):
-                continue
-            locked = bool(data[3])
-            state = "on" if locked else "off"
-            ts = time.strftime("%H:%M:%S")
-            print(f"[{ts}] Win-lock {state}", flush=True)
-            if mode == "toast":
-                if locked:
-                    toast("Super locked", icon=ICON_LOCKED)
-                else:
-                    toast("Super unlocked", icon=ICON_UNLOCKED)
-            elif mode == "unlock":
-                if locked:
-                    toast("Super auto-unlocked", icon=ICON_AUTO_UNLOCK)
-                    try:
-                        suppress_off += 1
-                        set_lock(False)
-                    except SystemExit as e:
-                        suppress_off = max(0, suppress_off - 1)
-                        toast(f"Super unlock failed: {e}", icon=ICON_FAIL, duration_ms=4000)
-                        print(e, file=sys.stderr)
-                else:
-                    if suppress_off > 0:
-                        suppress_off -= 1
-                        print(f"[{ts}] suppressed echo unlock notify", flush=True)
-                        continue
-                    toast("Super unlocked", icon=ICON_UNLOCKED)
+                suppress_off = _watch_node(fd, path, mode, suppress_off)
+            except _DeviceLost as e:
+                print(f"{e}; waiting for it to return", flush=True)
+                os.close(fd)
+                fd = -1
+                suppress_off = 0
+                fd, path = _reopen_with_backoff()
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
+
+
+def _watch_node(fd: int, path: Path, mode: str, suppress_off: int) -> int:
+    """Handle reports from one open node until it disappears (raises _DeviceLost)."""
+    while True:
+        try:
+            select.select([fd], [], [])
+            data = os.read(fd, REPORT_LEN)
+        except BlockingIOError:
+            continue
+        except OSError as e:  # ENODEV/EIO once the node is removed
+            raise _DeviceLost(f"{path}: {e.strerror or e}") from e
+        if not data:
+            raise _DeviceLost(f"{path} disconnected")
+        if len(data) < 4 or data[:3] != bytes([0x5D, 0xBF, 0x01]):
+            continue
+        locked = bool(data[3])
+        state = "on" if locked else "off"
+        ts = time.strftime("%H:%M:%S")
+        print(f"[{ts}] Win-lock {state}", flush=True)
+        if mode == "toast":
+            if locked:
+                toast("Super locked", icon=ICON_LOCKED)
+            else:
+                toast("Super unlocked", icon=ICON_UNLOCKED)
+        elif mode == "unlock":
+            if locked:
+                toast("Super auto-unlocked", icon=ICON_AUTO_UNLOCK)
+                try:
+                    suppress_off += 1
+                    set_lock(False)
+                except (SystemExit, OSError) as e:
+                    suppress_off = max(0, suppress_off - 1)
+                    toast(f"Super unlock failed: {e}", icon=ICON_FAIL, duration_ms=4000)
+                    print(e, file=sys.stderr)
+            else:
+                if suppress_off > 0:
+                    suppress_off -= 1
+                    print(f"[{ts}] suppressed echo unlock notify", flush=True)
+                    continue
+                toast("Super unlocked", icon=ICON_UNLOCKED)
 
 
 def main() -> None:
