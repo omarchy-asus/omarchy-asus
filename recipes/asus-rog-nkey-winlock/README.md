@@ -84,6 +84,17 @@ The bar widget (`asus-zephyrus-g16-control`) is separate and optional:
    The link follows package upgrades. Remove it before you uninstall the
    package.
 
+### omarchy-power-tune is optional
+
+Two parts of the widget defer to `omarchy-power-tune`, a personal power script
+that this repo does not ship: the per-power-source keyboard levels ("On AC" /
+"On battery", stored as `KBD_AC`/`KBD_BATTERY` in
+`~/.config/omarchy/power-tune.conf`) and the refresh-rate switch. Without
+`omarchy-power-tune` on `PATH` (or in `~/.local/bin`), both sections are hidden,
+and the keyboard on/off switch calls `asusctl leds set` directly. Everything else
+works the same. The widget also works without asusd's Aura object: the keyboard
+and Slash tabs hide, and the charge limit and Fn+Super switch stay.
+
 ## Moving from a manual install
 
 Local copies win over the packaged files, so installing the packages changes
@@ -165,9 +176,9 @@ ones above it.
    systemctl --user stop g16-winlock.service
    g16-winlock watch --mode=toast             # press Fn+Super twice
    ```
-   No `Win-lock` lines means the kernel (step 1), or that `watch` opened a
-   19b6 hidraw node other than the one that carries report `0x5d` (step 2
-   lists them all).
+   The first line names the node `watch` opened: the 19b6 hidraw node whose
+   report descriptor declares report ID `0x5d` (the first 19b6 node if no
+   descriptor can be read). No `Win-lock` lines means the kernel (step 1).
 5. The OSD on its own: `omarchy-osd -m test`.
 
 ## Why the rule is `70-`, not `99-`
