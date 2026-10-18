@@ -391,7 +391,7 @@ def set_status(repo, head, state, desc, url=None):
 
 
 def post(repo, num, res, roots):
-    ok_lines = res.pop("_commentable")
+    ok_lines = res.get("_commentable", {})
     shown = [f for f in res["findings"] if f["verdict"] != "refuted"]
     comments, extra = [], []
     for f in shown:
@@ -430,8 +430,8 @@ def post(repo, num, res, roots):
             pii_check(review["body"])
             json.dump(review, open(fh.name, "w"))
             p = run(["gh", "api", "-X", "POST", f"repos/{repo}/pulls/{num}/reviews", "--input", fh.name])
-        elif p.returncode != 0:
-            raise RuntimeError(f"posting the review failed: {p.stderr.strip()[:200]}")
+        elif p.returncode != 0:  # gh prints GitHub's error document on stdout
+            raise RuntimeError(f"posting the review failed: {(p.stdout or p.stderr).strip()[:300]}")
         rv = json.loads(p.stdout)
     finally:
         os.unlink(fh.name)
@@ -471,6 +471,8 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
     cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}-{mb[:12]}.json")
     lock = open(cache + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
+    if not os.path.exists(cache) and os.path.exists(cache + ".unposted") and not force:
+        os.replace(cache + ".unposted", cache)  # reviewed, posting failed: post it, don't review again
     if os.path.exists(cache) and not force:
         res = json.load(open(cache))
         if not do_post or res.get("posted"):
@@ -541,7 +543,8 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
             post(repo, num, res, roots)
         except Exception as e:
             set_status(repo, head, "error", f"posting failed: {e}"[:140])
-            json.dump({k: v for k, v in res.items() if k != "_commentable"}, open(cache + ".unposted", "w"), indent=1)
+            json.dump({**res, "_commentable": {k: sorted(v) for k, v in res.get("_commentable", {}).items()}},
+                      open(cache + ".unposted", "w"), indent=1)
             raise
         res["posted"] = True
     res["_commentable"] = {k: sorted(v) for k, v in res.get("_commentable", {}).items()}
