@@ -52,7 +52,6 @@ real bugs on this hardware.
   52 interrupts per report today) and GA605KM power limits for `asus-armoury`.
 - **G16 hardware package:** touchpad wake and hibernate settings for the GA605KM.
 - **Win-lock helper and G16 Control widget:** a toast when Fn+Super locks or unlocks the key.
-- **Keyring and one-step setup:** one package to trust the key and add the repo.
 - **Daily auto-update pipeline:** rebuild and publish on a schedule, and withdraw anything
   that fails.
 
@@ -60,7 +59,8 @@ real bugs on this hardware.
 
 Read the warning above first. Then follow [LAPTOP-SETUP.md](LAPTOP-SETUP.md): import and
 locally sign the key, add the repo ahead of `[omarchy]` and `[core]`, and run
-`omarchy update`. It also covers how to back out.
+`omarchy update`. [`bin/omarchy-asus-setup`](bin/omarchy-asus-setup) does those steps in one
+go (`--dry-run` to preview, `--uninstall` to undo). LAPTOP-SETUP.md also covers how to back out.
 
 Signing key: [`keys/omarchy-asus.asc`](keys/omarchy-asus.asc), fingerprint
 `0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88`.
@@ -126,6 +126,9 @@ Where our fixes are headed:
 
 - `recipes/<pkg>/`: PKGBUILDs, patches and a `NOTES.md` for each package (base, changes,
   upstream status, how to rebase).
+- `recipes/omarchy-asus-keyring/`: keyring package (`pacman-key --populate omarchy-asus`),
+  packaged like omarchy-keyring. Its `omarchy-asus.gpg` is a copy of `keys/omarchy-asus.asc`.
+- `bin/omarchy-asus-setup`: the one-step setup a user runs on a G16. See LAPTOP-SETUP.md.
 - `recipes/*/UPSTREAM_PRS`: upstream pull requests a recipe carries; `bin/check-upstream`
   reports their state.
 - `build/pacman.conf`: package sources for the build chroot (the Omarchy stable snapshot plus

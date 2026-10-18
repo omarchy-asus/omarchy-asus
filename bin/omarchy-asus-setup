@@ -1,0 +1,400 @@
+#!/bin/bash
+# omarchy-asus-setup: switch a stock Omarchy install on an ASUS ROG Zephyrus G16
+# GA605 to the EXPERIMENTAL omarchy-asus pacman repo (or back, with --uninstall).
+#
+# Run it as your normal user; it calls sudo for the privileged steps. It does
+# the same thing as the manual steps in LAPTOP-SETUP.md, with the same file
+# contents, and is safe to run again.
+#
+#   omarchy-asus-setup               set up the repo, then offer the upgrade
+#   omarchy-asus-setup --uninstall   undo it and go back to the stock builds
+#   omarchy-asus-setup --dry-run     print every privileged command instead of running it
+#   omarchy-asus-setup --force       skip the GA605 model check
+set -euo pipefail
+
+REPO=omarchy-asus
+FPR=0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
+GH_REPO=omarchy-asus/omarchy-asus
+GH_BRANCH=main
+KEY_URL=https://raw.githubusercontent.com/$GH_REPO/$GH_BRANCH/keys/omarchy-asus.asc
+DB_URL=https://github.com/$GH_REPO/releases/download/x86_64/$REPO.db
+KEYRING_PKG=omarchy-asus-keyring
+
+CONF=/etc/pacman.conf
+SNIPPET=/etc/pacman.d/custom-repos.conf
+MARKER="Include = $SNIPPET"
+HOOK_DIR=$HOME/.config/omarchy/hooks/pre-refresh-pacman.d
+HOOK=$HOOK_DIR/add-omarchy-asus-repo
+
+# The repo section of /etc/pacman.d/custom-repos.conf (LAPTOP-SETUP.md section 2).
+# shellcheck disable=SC2016 # $arch is expanded by pacman, not by this script
+REPO_BLOCK='[omarchy-asus]
+SigLevel = Required
+Server = https://github.com/omarchy-asus/omarchy-asus/releases/download/$arch'
+
+# The pre-refresh hook (LAPTOP-SETUP.md section 3).
+# shellcheck disable=SC2016 # written out verbatim
+HOOK_CONTENT='#!/bin/bash
+# Put the omarchy-asus repo ahead of every other repo so its patched builds win
+# over the stock ones. See LAPTOP-SETUP.md in
+# https://github.com/omarchy-asus/omarchy-asus.
+CONF=/etc/pacman.conf
+SNIPPET=/etc/pacman.d/custom-repos.conf
+MARKER="Include = $SNIPPET"
+
+[[ -r $SNIPPET ]] || exit 0
+grep -qxF "$MARKER" "$CONF" && exit 0
+
+sudo sed -i -E "0,/^\[(omarchy|core)\]$/s||$MARKER\n\n&|" "$CONF"'
+
+DRY_RUN=0
+FORCE=0
+MODE=install
+
+usage() { sed -n '2,14s/^# \{0,1\}//p' "$0"; }
+
+for arg in "$@"; do
+  case $arg in
+    --uninstall) MODE=uninstall ;;
+    --dry-run) DRY_RUN=1 ;;
+    --force) FORCE=1 ;;
+    -h | --help) usage; exit 0 ;;
+    *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -t 1 ]]; then B=$'\e[1m' R=$'\e[31m' Y=$'\e[33m' G=$'\e[32m' N=$'\e[0m'; else B='' R='' Y='' G='' N=''; fi
+step() { printf '\n%s==> %s%s\n' "$B" "$*" "$N"; }
+info() { printf '    %s\n' "$*"; }
+ok() { printf '    %sok:%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '    %swarning:%s %s\n' "$Y" "$N" "$*" >&2; }
+die() { printf '%serror:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+# Privileged command: run through sudo, or print it under --dry-run.
+as_root() {
+  if ((DRY_RUN)); then
+    local arg q="'\\''" line='    [dry-run] sudo'
+    for arg in "$@"; do
+      if [[ $arg =~ ^[A-Za-z0-9_./=:@%+-]+$ ]]; then line+=" $arg"; else line+=" '${arg//\'/$q}'"; fi
+    done
+    printf '%s\n' "$line"
+  else
+    sudo "$@"
+  fi
+}
+
+# Write CONTENT to a root-owned FILE (mode 644), or show it under --dry-run.
+write_root() {
+  local file=$1 content=$2
+  if ((DRY_RUN)); then
+    printf '    [dry-run] sudo tee %s <<EOF\n%s\nEOF\n' "$file" "$content"
+  else
+    printf '%s\n' "$content" | sudo tee "$file" >/dev/null
+    sudo chmod 644 "$file"
+  fi
+}
+
+# Ask a yes/no question on the terminal (works under `curl | bash` too).
+confirm() {
+  if ((DRY_RUN)); then
+    printf '    %s [y/N] [dry-run: assuming yes]\n' "$1"
+    return 0
+  fi
+  local answer
+  [[ -r /dev/tty ]] || die "no terminal to ask for confirmation on"
+  read -r -p "    $1 [y/N] " answer </dev/tty
+  [[ $answer == [yY] || $answer == [yY][eE][sS] ]]
+}
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# custom-repos.conf without our section (other repos the user keeps there stay).
+snippet_without_repo() {
+  [[ -f $SNIPPET ]] || return 0
+  awk -v sec="[$REPO]" '$0 == sec { skip = 1; next } /^\[/ { skip = 0 } !skip' "$SNIPPET"
+}
+
+# Line numbers of the Include line and of the first [omarchy]/[core] header (0 = absent).
+include_line() { grep -nxF "$MARKER" "$CONF" | head -n1 | cut -d: -f1 || true; }
+first_repo_line() { grep -nE '^\[(omarchy|core)\]$' "$CONF" | head -n1 | cut -d: -f1 || true; }
+
+banner() {
+  cat <<EOF
+
+${R}${B}EXPERIMENTAL. Built for and only meant for the ASUS ROG Zephyrus G16 GA605 (GA605KM).${N}
+Nobody has installed these packages yet. The kernel carries untested patches, including an
+experimental scheduler series that is compiled in but switched off.
+Don't add this repo to any other machine. On a G16, use it only if you can recover from a
+kernel or driver that won't boot (this repo replaces linux-omarchy, so keep a second kernel
+such as Arch's linux installed as a boot fallback).
+EOF
+}
+
+check_user() {
+  ((EUID != 0)) || die "run this as your normal user, not root; it calls sudo where needed"
+  local cmd
+  for cmd in pacman pacman-key gpg curl awk bsdtar vercmp; do
+    command -v "$cmd" >/dev/null || die "missing command: $cmd"
+  done
+  [[ -f $CONF ]] || die "$CONF not found"
+  grep -qE '^\[(omarchy|core)\]$' "$CONF" || die "$CONF has neither an [omarchy] nor a [core] section"
+  grep -qx '\[omarchy\]' "$CONF" || warn "$CONF has no [omarchy] section; this doesn't look like an Omarchy install"
+}
+
+check_model() {
+  local product board
+  product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
+  board=$(cat /sys/class/dmi/id/board_name 2>/dev/null || true)
+  step "Checking the machine model"
+  if [[ $product == *GA605* || $board == *GA605* ]]; then
+    ok "ASUS ROG Zephyrus G16 GA605 ($product / $board)"
+  elif ((FORCE)); then
+    warn "not a GA605 (product_name='$product', board_name='$board'); continuing because of --force"
+  else
+    die "this is not an ASUS ROG Zephyrus G16 GA605 (product_name='$product', board_name='$board').
+       omarchy-asus is only for that model. Use --force only if you know why it should run here."
+  fi
+}
+
+# Download the repo key over HTTPS and check that it is exactly the key whose
+# fingerprint is hardcoded above.
+fetch_key() {
+  step "Downloading and checking the repo signing key"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$TMP/key.asc" "$KEY_URL" || die "could not download $KEY_URL"
+  mkdir -m 700 "$TMP/gnupg"
+  local fprs
+  fprs=$(GNUPGHOME=$TMP/gnupg gpg --batch --with-colons --show-keys "$TMP/key.asc" 2>/dev/null |
+    awk -F: '$1 == "pub" { want = 1; next } $1 == "fpr" && want { print $10; want = 0 }')
+  [[ $fprs == "$FPR" ]] || die "the downloaded key is not the expected one.
+       expected: $FPR
+       got:      ${fprs:-<no key>}"
+  GNUPGHOME=$TMP/gnupg gpg --batch --quiet --dearmor -o "$TMP/key.gpg" "$TMP/key.asc"
+  ok "key fingerprint $FPR"
+  info "This check only proves the key matches the fingerprint in this script, which comes from"
+  info "the same GitHub account. Compare the fingerprint with one you got another way (for example"
+  info "the README on github.com/$GH_REPO, or from the maintainer) before you trust it."
+}
+
+# Show which installed packages the repo would replace, from its signed database
+# (read-only: nothing on the system changes).
+preview_repo() {
+  step "Packages in the $REPO repo (signed database, read-only check)"
+  if ! curl -fsSL --proto '=https' -o "$TMP/repo.db" "$DB_URL" ||
+    ! curl -fsSL --proto '=https' -o "$TMP/repo.db.sig" "$DB_URL.sig"; then
+    warn "could not download the repo database; skipping the preview"
+    return 0
+  fi
+  if ! gpgv --keyring "$TMP/key.gpg" "$TMP/repo.db.sig" "$TMP/repo.db" 2>/dev/null; then
+    die "the repo database signature does not verify with key $FPR"
+  fi
+  local name version installed
+  while read -r name version; do
+    if installed=$(pacman -Q "$name" 2>/dev/null); then
+      installed=${installed#* }
+      case $(vercmp "$version" "$installed") in
+        1) info "$name  $installed -> $version" ;;
+        0) info "$name  $version (already installed)" ;;
+        *) info "$name  $installed installed is newer than the repo's $version (stays)" ;;
+      esac
+    else
+      info "$name  $version (not installed, not pulled in)"
+    fi
+  done < <(bsdtar -xOf "$TMP/repo.db" '*/desc' |
+    awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n, v }' | sort)
+}
+
+preflight_warnings() {
+  local k fallback=''
+  for k in linux linux-lts linux-zen linux-hardened; do
+    pacman -Q "$k" >/dev/null 2>&1 && fallback+=" $k"
+  done
+  if [[ -n $fallback ]]; then
+    ok "fallback kernel installed:$fallback"
+  else
+    warn "no fallback kernel (linux, linux-lts, ...) is installed. This repo replaces linux-omarchy;"
+    warn "install one first (sudo pacman -S linux) so you can boot if the patched kernel fails."
+  fi
+  if grep -nE '^[[:space:]]*IgnorePkg' "$CONF" | grep -qE 'nvidia|hyprland|hyprpm|aquamarine|linux-omarchy'; then
+    warn "$CONF has IgnorePkg lines for packages this repo ships; remove them, or the repo builds won't install:"
+    grep -nE '^[[:space:]]*IgnorePkg' "$CONF" | sed 's/^/        /' >&2
+  fi
+}
+
+install_key() {
+  step "Trusting the repo key in pacman's keyring"
+  as_root pacman-key --add "$TMP/key.asc"
+  as_root pacman-key --lsign-key "$FPR"
+}
+
+install_snippet() {
+  step "Writing $SNIPPET"
+  local rest new
+  rest=$(snippet_without_repo)
+  if [[ -n ${rest//[[:space:]]/} ]]; then
+    info "keeping the other repos already in $SNIPPET"
+    new=$rest$'\n\n'$REPO_BLOCK
+  else
+    new=$REPO_BLOCK
+  fi
+  if [[ -f $SNIPPET && $(<"$SNIPPET") == "$new" ]]; then
+    ok "already up to date"
+  else
+    write_root "$SNIPPET" "$new"
+  fi
+}
+
+install_hook() {
+  step "Installing the Omarchy pre-refresh hook"
+  if [[ -f $HOOK && $(<"$HOOK") == "$HOOK_CONTENT" && -x $HOOK ]]; then
+    ok "$HOOK already up to date"
+  elif ((DRY_RUN)); then
+    printf '    [dry-run] write %s (mode 755):\n%s\n' "$HOOK" "$HOOK_CONTENT"
+  else
+    mkdir -p "$HOOK_DIR"
+    printf '%s\n' "$HOOK_CONTENT" >"$HOOK"
+    chmod 755 "$HOOK"
+    ok "wrote $HOOK"
+  fi
+  local other
+  for other in "$HOOK_DIR"/*; do
+    [[ -f $other && $other != "$HOOK" && $other != *.sample ]] || continue
+    if grep -qF "$SNIPPET" "$other"; then
+      warn "$other also inserts the $SNIPPET Include line. Hooks run in name order, so if it puts"
+      warn "the line below [omarchy], the omarchy-asus builds lose to the stock ones. Remove it, or make"
+      warn "it insert above whichever of [omarchy]/[core] comes first, like $HOOK does."
+    fi
+  done
+}
+
+# Apply the hook now. Deliberately not `omarchy refresh pacman`: that ends in
+# `pacman -Syyuu --noconfirm`, which would upgrade before you saw the list.
+# The result in /etc/pacman.conf is the same, and later refreshes run the hook.
+apply_hook() {
+  step "Adding the Include line to $CONF"
+  local inc first
+  inc=$(include_line)
+  first=$(first_repo_line)
+  if [[ -n $inc && $inc -lt $first ]]; then
+    ok "already above the first of [omarchy]/[core] (line $inc)"
+    return 0
+  fi
+  if [[ -n $inc ]]; then
+    warn "the Include line is at line $inc, below [omarchy]/[core]; moving it up"
+    # shellcheck disable=SC2016 # sed program, same as LAPTOP-SETUP.md section 5
+    as_root sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{N;/\n$/d;s|.*\n||}' "$CONF"
+  fi
+  if ((DRY_RUN)); then
+    as_root sed -i -E "0,/^\[(omarchy|core)\]$/s||$MARKER\n\n&|" "$CONF"
+    return 0
+  fi
+  bash "$HOOK"
+  inc=$(include_line)
+  first=$(first_repo_line)
+  [[ -n $inc && $inc -lt $first ]] || die "the Include line did not land above [omarchy]/[core]; check $CONF"
+  ok "Include line at line $inc, above the first of [omarchy]/[core] (line $first)"
+}
+
+install_keyring() {
+  step "Installing $KEYRING_PKG"
+  info "This syncs the package databases (pacman -Sy) and installs only the keyring, the same way"
+  info "Arch updates archlinux-keyring before a system upgrade."
+  as_root pacman -Sy --needed --noconfirm "$KEYRING_PKG"
+}
+
+offer_upgrade() {
+  step "What a system upgrade (pacman -Su) would change"
+  if ((DRY_RUN)); then
+    info "[dry-run] would list: pacman -Qu, with the packages coming from [$REPO] marked"
+    confirm "Upgrade now?"
+    as_root pacman -Su
+    return 0
+  fi
+  local repo_pkgs updates name
+  repo_pkgs=" $(pacman -Slq "$REPO" 2>/dev/null | tr '\n' ' ') "
+  updates=$(pacman -Qu 2>/dev/null || true)
+  if [[ -z $updates ]]; then
+    ok "nothing to upgrade"
+    return 0
+  fi
+  while read -r name _; do
+    if [[ $repo_pkgs == *" $name "* ]]; then
+      printf '    %s[%s]%s %s\n' "$B" "$REPO" "$N" "$(grep -m1 "^$name " <<<"$updates")"
+    else
+      printf '                   %s\n' "$(grep -m1 "^$name " <<<"$updates")"
+    fi
+  done <<<"$updates"
+  if confirm "Upgrade now? (pacman shows its own summary and asks once more)"; then
+    as_root pacman -Su
+  else
+    warn "not upgraded. The package databases are synced but the system is not upgraded:"
+    warn "run 'omarchy update' (or 'sudo pacman -Su') before you install anything else."
+  fi
+}
+
+do_install() {
+  banner
+  check_user
+  check_model
+  preflight_warnings
+  confirm "Switch this machine to the EXPERIMENTAL omarchy-asus repo?" || die "cancelled"
+  fetch_key
+  preview_repo
+  install_key
+  install_snippet
+  install_hook
+  apply_hook
+  install_keyring
+  offer_upgrade
+  step "Done"
+  info "Later 'omarchy refresh pacman' runs keep the repo in place through the hook."
+  info "Undo with: $0 --uninstall"
+}
+
+do_uninstall() {
+  check_user
+  step "Removing the omarchy-asus repo"
+  info "This removes the hook, the repo section, the keyring package and the key, then runs"
+  info "pacman -Syuu so the omarchy-asus builds go back to the stock ones."
+  confirm "Continue?" || die "cancelled"
+
+  step "Removing the pre-refresh hook"
+  if [[ -e $HOOK ]]; then
+    if ((DRY_RUN)); then info "[dry-run] rm $HOOK"; else rm -f "$HOOK" && ok "removed $HOOK"; fi
+  else
+    ok "not present"
+  fi
+
+  step "Removing the repo from $SNIPPET and $CONF"
+  local rest
+  rest=$(snippet_without_repo)
+  if [[ -n ${rest//[[:space:]]/} ]]; then
+    info "other repos remain in $SNIPPET; keeping the file and its Include line"
+    [[ $(<"$SNIPPET") == "$rest" ]] || write_root "$SNIPPET" "$rest"
+  else
+    if grep -qxF "$MARKER" "$CONF"; then
+      # shellcheck disable=SC2016 # sed program, same as LAPTOP-SETUP.md section 5
+      as_root sed -i '\|^Include = /etc/pacman.d/custom-repos.conf$|{N;/\n$/d;s|.*\n||}' "$CONF"
+    fi
+    if [[ -e $SNIPPET ]]; then as_root rm -f "$SNIPPET"; else ok "$SNIPPET not present"; fi
+  fi
+
+  step "Removing $KEYRING_PKG and the repo key"
+  if pacman -Q "$KEYRING_PKG" >/dev/null 2>&1; then
+    as_root pacman -R --noconfirm "$KEYRING_PKG"
+  fi
+  as_root pacman-key --delete "$FPR" || warn "key $FPR was not in pacman's keyring"
+
+  step "Going back to the stock builds"
+  if confirm "Run 'pacman -Syuu' now? (-uu downgrades the omarchy-asus builds to stock)"; then
+    as_root pacman -Syuu
+  else
+    warn "skipped. Run 'sudo pacman -Syuu' to go back to the stock builds."
+  fi
+}
+
+((DRY_RUN)) && printf '%s(dry run: privileged commands and file writes are printed, not run)%s\n' "$Y" "$N"
+case $MODE in
+  install) do_install ;;
+  uninstall) do_uninstall ;;
+esac
