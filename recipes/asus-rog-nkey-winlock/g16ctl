@@ -205,6 +205,8 @@ case "${1:-get}" in
   # kbd-level <ac|battery|both> <off|low|med|high>
   kbd-level)
     case "$2" in ac|battery|both) ;; *) echo "bad scope: $2" >&2; exit 2 ;; esac
+    # Validated before it reaches power-tune.conf (and the sed in conf_set).
+    case "${3:-}" in off|low|med|high) ;; *) echo "bad level: ${3:-}" >&2; exit 2 ;; esac
     if [ "$HAS_POWERTUNE" != true ]; then
       # No power-tune to revert it: a direct write is durable.
       asusctl leds set "$3" >/dev/null 2>&1
