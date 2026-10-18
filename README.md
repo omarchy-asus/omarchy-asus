@@ -1,5 +1,10 @@
 # omarchy-asus pacman repo
 
+> [!WARNING]
+> **EXPERIMENTAL. Built for and only meant for the ASUS ROG Zephyrus G16 GA605 (GA605KM).**
+> Nobody has installed these packages yet. The kernel carries untested patches, including an experimental scheduler series that is compiled in but switched off.
+> Don't add this repo to any other machine. On a G16, use it only if you can recover from a kernel or driver that won't boot (this repo replaces `linux-omarchy`, so keep a second kernel such as Arch's `linux` installed as a boot fallback).
+
 This branch holds build recipes and tooling for `omarchy-asus`, a signed pacman repo of ASUS
 hardware fixes for Omarchy. It was developed on an ROG Zephyrus G16 GA605 (Ryzen AI 300 and an
 RTX 50-series laptop GPU).

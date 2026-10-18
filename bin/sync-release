@@ -12,8 +12,8 @@ for f in "$REPO_DIR"/*; do
 done
 if ! gh release view "$GH_TAG" -R "$GH_REPO" >/dev/null 2>&1; then
     gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
-        --title "omarchy-asus pacman repo ($GH_TAG)" \
-        --notes "Signed pacman repo of ASUS-patched builds. Assets are replaced as packages are rebuilt. Setup: see LAPTOP-SETUP.md on the $GH_BRANCH branch."
+        --prerelease --title "EXPERIMENTAL omarchy-asus pacman repo ($GH_TAG) - ROG Zephyrus G16 GA605 only" \
+        --notes-file "$WORKSPACE/build/release-notes.md"
 fi
 # packages first, db last, so the db never names a package that isn't uploaded yet
 gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "$up"/*.pkg.tar.zst "$up"/*.pkg.tar.zst.sig
