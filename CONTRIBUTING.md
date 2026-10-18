@@ -67,6 +67,8 @@ Every change is reviewed by someone other than its author.
 - **Pull requests from external contributors** are reviewed by the maintainers, against these
   rules, [AGENTS.md](AGENTS.md) and [PRINCIPLES.md](PRINCIPLES.md).
 
+This review comes on top of the required CodeRabbit check on `main`.
+
 ## Agents
 
 Claude, Codex and other coding agents file and update issues through `bin/issue`, which

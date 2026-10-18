@@ -30,10 +30,14 @@ and fixes that only exist upstream. Every Claude/Codex session files here.
 For the maintainer's own work (this account and its agents), **Claude Opus 5.5 writes the
 change and Codex `gpt-6.1-sol` reviews it**. The author never reviews its own change.
 
-- Run the review on the diff before asking for a merge: `codex exec -m gpt-6.1-sol -s read-only`.
+- Run the review on the branch before asking for a merge:
+  `codex exec review -m gpt-6.1-sol --base main` (add review instructions as the last argument).
 - Fix or answer every finding, and say in the PR that the review ran and what came of it.
 - Contributors' agents may pair the other way round (Codex writes, Opus reviews).
 - Pull requests from external contributors are reviewed by us, against these rules.
+- This adds to the required CodeRabbit check on `main`; it doesn't replace it.
+- `bin/auto-update` still uses one Claude run as both fixer and reviewer; #54 moves its review
+  to Codex Sol.
 
 ## Labels
 
