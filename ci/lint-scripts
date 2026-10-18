@@ -1,0 +1,50 @@
+#!/bin/bash
+# Static checks for every tracked script (runs on the CI host or locally):
+#   shell (by .sh suffix or a sh/bash shebang): bash -n or sh -n,
+#     then "shellcheck -x -S warning" (infos and style notes do not fail)
+#   sourced shell without a shebang (bin/env.sh): shellcheck --shell=bash,
+#     unused-variable warnings off (the variables are for the sourcing script)
+#   pacman .install scriptlets: bash -n
+#   python (by .py suffix or a python shebang): py_compile
+# PKGBUILDs are checked by ci/check-recipes (makepkg/namcap).
+# Usage: ci/lint-scripts
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+SOURCED=(bin/env.sh)
+fail=0 n=0
+err() { echo "::error file=$1::$2"; fail=1; }
+pyc=$(mktemp -d); trap 'rm -rf "$pyc"' EXIT
+
+while IFS= read -r f; do
+    [[ -f $f && ! -L $f ]] || continue
+    case $f in recipes/*/PKGBUILD|*.patch|*.sig|*.asc|*.md) continue ;; esac
+    first=$(head -c 200 "$f" | head -1)
+    kind=
+    if [[ " ${SOURCED[*]} " == *" $f "* ]]; then kind=sourced
+    elif [[ $f == *.install ]]; then kind=install
+    elif [[ $f == *.py || $first =~ ^#!.*python ]]; then kind=python
+    elif [[ $f == *.sh || $first =~ ^#!.*/(env\ +)?(ba)?sh([[:space:]]|$) ]]; then kind=shell
+    fi
+    [[ -n $kind ]] || continue
+    n=$((n + 1))
+    case $kind in
+        shell)
+            sh=bash; [[ $first =~ ^#!.*/(env\ +)?sh([[:space:]]|$) ]] && sh="sh"
+            $sh -n "$f" || err "$f" "$sh -n failed"
+            shellcheck -x -S warning "$f" || err "$f" "shellcheck findings"
+            ;;
+        sourced)
+            bash -n "$f" || err "$f" "bash -n failed"
+            shellcheck -x -S warning --shell=bash -e SC2034 "$f" || err "$f" "shellcheck findings"
+            ;;
+        install) bash -n "$f" || err "$f" "bash -n failed" ;;
+        python)
+            python3 -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' \
+                "$f" "$pyc/out.pyc" || err "$f" "py_compile failed"
+            ;;
+    esac
+    echo "  $kind: $f"
+done < <(git ls-files)
+
+echo "==> checked $n scripts"
+exit $fail

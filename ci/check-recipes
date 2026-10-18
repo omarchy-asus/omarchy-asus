@@ -1,0 +1,36 @@
+#!/bin/bash
+# Check every recipes/*/PKGBUILD without building it (run as root inside
+# ghcr.io/archlinux/archlinux:base-devel; the repo may be mounted read-only):
+#   bash -n and `makepkg --printsrcinfo` must succeed (fatal)
+#   namcap findings are reported as warnings (not fatal)
+# Usage: ci/check-recipes
+set -uo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+
+pacman -Syu --noconfirm --needed --noprogressbar namcap >/dev/null || exit 1
+id builder >/dev/null 2>&1 || useradd -m builder
+fail=0
+for pkgbuild in "$repo"/recipes/*/PKGBUILD; do
+    dir=$(dirname "$pkgbuild"); rel=recipes/$(basename "$dir")
+    work=$(mktemp -d); cp -a "$dir"/. "$work"/; chown -R builder: "$work"
+    echo "::group::$rel"
+    if ! bash -n "$work/PKGBUILD"; then
+        echo "::error file=$rel/PKGBUILD::bash -n failed"; fail=1
+    elif ! runuser -u builder -- env -C "$work" makepkg --printsrcinfo >"$work/.SRCINFO"; then
+        echo "::error file=$rel/PKGBUILD::makepkg --printsrcinfo failed"; fail=1
+    else
+        grep -E '^(pkgbase|	pkgver|	pkgrel|pkgname) = ' "$work/.SRCINFO"
+    fi
+    out=$(runuser -u builder -- env -C "$work" namcap PKGBUILD 2>&1)
+    if [[ -n $out ]]; then
+        echo "$out"
+        while IFS= read -r line; do
+            echo "::warning file=$rel/PKGBUILD,title=namcap::$line"
+        done <<<"$out"
+    else
+        echo "namcap: no findings"
+    fi
+    echo "::endgroup::"
+    rm -rf "$work"
+done
+exit $fail

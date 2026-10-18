@@ -1,0 +1,67 @@
+#!/bin/bash
+# Plan a PR build: which recipes to build and which follow-up checks to run.
+#   ci/changed-recipes BASE HEAD    recipes the PR changes (diff from the merge base of BASE and HEAD)
+#   ci/changed-recipes --list "a b" an explicit list (workflow_dispatch)
+# Rules:
+#   - recipes/<r>/ changes when any file under it changes; only directories
+#     with a PKGBUILD in the checked-out tree are buildable (deleted or
+#     reference-only recipes are skipped)
+#     (exception: *.md files under recipes/linux-omarchy don't trigger the kernel)
+#   - a change to the shared build inputs (build/pacman.conf, bin/build-pkg)
+#     rebuilds every recipe except the kernel, which builds only when
+#     recipes/linux-omarchy itself changes (or is listed explicitly)
+# Prints GITHUB_OUTPUT lines:
+#   recipes=<JSON list of non-kernel recipes>   kernel=true|false
+#   nvidia_built=true|false (nvidia-open-dkms is in recipes)
+#   nvidia_compat=true|false (kernel or nvidia-open-dkms builds: compile NVIDIA against the headers)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+KERNEL=linux-omarchy NVIDIA=nvidia-open-dkms
+SHARED_INPUTS=(build/pacman.conf bin/build-pkg)
+
+buildable() { [[ -f recipes/$1/PKGBUILD ]]; }
+all_small() { for d in recipes/*/PKGBUILD; do d=${d%/PKGBUILD}; d=${d#recipes/}; [[ $d == "$KERNEL" ]] || echo "$d"; done; }
+
+if [[ ${1:-} == --list ]]; then
+    names=()
+    for n in ${2:-}; do
+        n=${n#recipes/}; n=${n%/}
+        buildable "$n" || { echo "::error::no such recipe: $n" >&2; exit 1; }
+        names+=("$n")
+    done
+    echo "==> requested: ${names[*]:-(none)}" >&2
+else
+    base=${1:?usage: ci/changed-recipes BASE HEAD | --list "names"} head=${2:?}
+    files=$(git diff --name-only "$base...$head")
+    echo "==> files changed by the PR:" >&2
+    sed 's/^/    /' <<<"$files" >&2
+    # Documentation-only changes to the kernel recipe (NOTES.md) don't cost a
+    # multi-hour kernel build; every other recipe builds on any change.
+    mapfile -t names < <(awk -F/ -v k="$KERNEL" '$1=="recipes" && NF>2 && !($2==k && $NF ~ /\.md$/) {print $2}' <<<"$files" | sort -u)
+    for f in "${SHARED_INPUTS[@]}"; do
+        if grep -qxF "$f" <<<"$files"; then
+            echo "==> $f changed: rebuilding every recipe except $KERNEL" >&2
+            mapfile -t -O "${#names[@]}" names < <(all_small)
+            break
+        fi
+    done
+fi
+
+kernel=false nvidia_built=false small=()
+for n in $(printf '%s\n' "${names[@]}" | sort -u); do
+    if ! buildable "$n"; then echo "==> skipping recipes/$n (no PKGBUILD)" >&2; continue; fi
+    case $n in
+        "$KERNEL") kernel=true ;;
+        "$NVIDIA") nvidia_built=true; small+=("$n") ;;
+        *) small+=("$n") ;;
+    esac
+done
+nvidia_compat=false
+[[ $kernel == true || $nvidia_built == true ]] && nvidia_compat=true
+
+json=$(printf '%s\n' "${small[@]}" | python3 -c 'import json,sys; print(json.dumps([l for l in sys.stdin.read().split() if l]))')
+echo "==> plan: recipes=$json kernel=$kernel nvidia_compat=$nvidia_compat" >&2
+echo "recipes=$json"
+echo "kernel=$kernel"
+echo "nvidia_built=$nvidia_built"
+echo "nvidia_compat=$nvidia_compat"

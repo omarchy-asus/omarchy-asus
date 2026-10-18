@@ -1,0 +1,63 @@
+name: Lint
+
+# Cheap static checks on every PR and on main: scripts (shellcheck, bash -n,
+# py_compile), workflows (actionlint) and every PKGBUILD (makepkg
+# --printsrcinfo, namcap as warnings). No secrets, read-only token.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck, bash -n, py_compile
+        run: |
+          shellcheck --version | sed -n 2p
+          ci/lint-scripts
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball=actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$tarball"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      # Offline tests: tests/test_*.py (python unittest, e.g. bin/issue's) and
+      # tests/ci/*.sh (hermetic shell tests opt in by living there).
+      # tests/auto-update-simulate.sh (PR #6) needs network and local repo state.
+      - name: Offline tests
+        run: |
+          shopt -s nullglob
+          py=(tests/test_*.py) sh=(tests/ci/*.sh)
+          if (( ${#py[@]} + ${#sh[@]} == 0 )); then echo "no offline tests on this branch"; exit 0; fi
+          for t in "${py[@]}"; do echo "==> $t"; python3 -I "$t"; done
+          for t in "${sh[@]}"; do echo "==> $t"; bash "$t"; done
+
+  recipes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: makepkg --printsrcinfo and namcap (archlinux container)
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" ghcr.io/archlinux/archlinux:base-devel /repo/ci/check-recipes

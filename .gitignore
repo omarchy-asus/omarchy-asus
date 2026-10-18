@@ -20,3 +20,4 @@ recipes/cores-kernel/
 REVIEW.md
 .claude/
 issues-pending/
+__pycache__/
