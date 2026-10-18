@@ -53,5 +53,8 @@ BUILD_USER=
 #KEEP_PUBLISHED=
 # Unpublish after this many consecutive runs without access to the upstream recipe.
 #FETCH_FAIL_UNPUBLISH_AFTER=2
+# Upstream dbs that cannot be fetched are used from cache for at most this many seconds;
+# past it, every package overriding upstream is withdrawn so stock flows.
+#DB_MAX_STALE=86400
 # Also fail the unit (systemctl --failed) when something only needs attention.
 #FAIL_ON_ATTENTION=no

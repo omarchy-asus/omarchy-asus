@@ -79,6 +79,25 @@ otherwise `dkms build` is re-run for an exit code and make.log is logged.
 - **A DKMS build** (`nvidia-open-dkms`) compiles against the headers of the kernel we
   publish, or stock `linux-omarchy-headers` from `[omarchy]` if we carry none. If that
   fails, it is not published.
+- **A cached build** (a resumed PR's head, or a merged tree built for its PR) is reused only
+  while its counterpart is the one it was checked against: the DKMS package file for a
+  kernel, the published headers file or the stock headers version for a DKMS package. The
+  stage markers record a key of that counterpart; when it changed, the checks run again
+  before the build counts as good or is published.
+- **Withdrawing our kernel** (a failed build or rebase, a stale pin) would hand users the
+  stock kernel with the DKMS package we still publish. So the retained DKMS package is first
+  compiled against the stock headers; if that fails (or its file is missing), it is
+  withdrawn together with the kernel.
+
+### Upstream db freshness
+
+`bin/check-upstream` reads the upstream pacman dbs to see what users would get without us.
+When a fetch fails it uses the cached copy and marks the run **degraded**: the run notes
+which dbs are stale and how old they are, and records an attention item. A cached copy
+older than `DB_MAX_STALE` seconds (default 86400, set in `auto-update.conf`) is
+**expired**: nothing is built or rebased on it, and every published package that overrides
+upstream is withdrawn so the stock build flows through (local-only recipes, with a
+`LOCAL_ONLY` file, are not affected). Once the db is reachable again, the usual plan builds them back.
 
 `bin/auto-update --plan` lists the checks a pending build would trigger. To run one by
 hand (it uses sudo for the chroot steps):

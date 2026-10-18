@@ -12,6 +12,13 @@
   review VERDICT_JSON                parse a headless review's JSON output: prints
                                      "approve" or "reject" on line 1, the notes after
   replies VERDICT_JSON               the review's thread replies, "id<TAB>reply" per line
+  revdep-withdraw REVDEPS_CONF WITHDRAWN_CSV REPO_NAMES_CSV
+                                     "headers<TAB>dkms" for each build/revdeps.conf pair whose
+                                     headers package is withdrawn while its DKMS package stays
+                                     in the repo (CSVs may be empty or "-")
+  counterpart-key ITEM...            one key (sha256) for a revdep check's counterparts: each
+                                     ITEM is a package file (basename + content hash) or
+                                     "stock:NAME=VERSION"; "none" with no items
 
 Plan actions:
   rebase     upstream moved past our base: rebase the recipe onto TARGET (= upstream)
@@ -22,6 +29,10 @@ Plan actions:
              build flows through
   attention  needs a human (upstream merged/closed one of our PRs, upstream older than
              our base, bad pkgrel, not in any upstream repo); no automatic change
+An upstream db that check-upstream could not fetch past its grace period ("expired" in its
+JSON) withdraws every overriding package (unpublish; attention when not in the repo), so the
+stock build flows through instead of a pin planned on stale data; local-only recipes are not
+affected. A db that is merely stale ("degraded") only adds a note to non-current lines.
 Config via env: SKIP_RECIPES (space separated), BUILD_NOT_BUILT (yes/no),
 KEEP_PUBLISHED (space separated package names kept despite having no recipe).
 While check-upstream reports inventory_errors (or the check JSON has no inventory_errors
@@ -30,6 +41,7 @@ dep-mismatch, upstream-older), as before #82.
 A recipe with a HOLD file (first non-comment line: the reason) is never built or published;
 a stale published copy of it is unpublished.
 """
+import hashlib
 import json
 import os
 import re
@@ -71,6 +83,19 @@ def plan(check_path, status_path):
     prs = {}
     for p in check.get("prs", []):
         prs.setdefault(p["recipe"], []).append(p)
+    # Upstream db freshness (bin/check-upstream --json; all keys optional for older output).
+    dbs = [d for d in check.get("upstream_dbs") or [] if isinstance(d, dict)]
+    expired = list(check.get("expired") or [])
+    expired_note = degraded_note = None
+    if expired:
+        age = db_age_text([d for d in dbs if d.get("repo") in expired])
+        expired_note = (f"upstream db(s) {', '.join(map(str, expired))} unreachable past the "
+                        f"{db_hours(check.get('db_max_stale'))} grace" + (f" ({age})" if age else ""))
+    elif check.get("degraded"):
+        stale = [d for d in dbs if d.get("stale") or d.get("expired")] or [d for d in dbs if d.get("error")]
+        names = ", ".join(str(d.get("repo")) for d in stale) or "?"
+        age = db_age_text(stale)
+        degraded_note = f"upstream db(s) {names} stale (fetch failed" + (f", {age})" if age else ")")
     out = []
     for recipe, rows in sorted(by_recipe.items(), key=lambda kv: (kv[0] in HEAVY, kv[0])):
         statuses = {r["status"] for r in rows}
@@ -87,6 +112,14 @@ def plan(check_path, status_path):
         hold = next((r.get("hold") for r in rows if r.get("hold")), None)
         if recipe in skip:
             action, notes = "attention", notes + [f"skipped by SKIP_RECIPES ({', '.join(sorted(statuses))})"]
+        elif expired and not all(r.get("local_only") for r in rows):
+            # Planned on a db copy past its grace: withdraw the override rather than keep or build it.
+            if in_repo:
+                action = "unpublish"
+                notes.append(f"{expired_note}: withdrawn so the stock build flows through")
+            else:
+                action = "attention"
+                notes.append(f"{expired_note}: not built or rebased on stale data")
         elif hold and in_repo and (statuses & {"rebuild-needed", "dep-mismatch"} or any(
                 r["repo"] and r["upstream"] and VerKey(re.sub(r"\.\d+$", "", r["repo"])) < VerKey(r["upstream"])
                 for r in rows)):
@@ -127,12 +160,77 @@ def plan(check_path, status_path):
             action = "attention"
         else:
             action = "current"
+        if degraded_note and action != "current":
+            notes.append(degraded_note)
         out.append("\t".join([recipe, action, target, ",".join(in_repo) or "-", ",".join(names),
                               "; ".join(notes) or "-"]))
     print("\n".join(out))
 
 
 HEAVY = {"linux-omarchy"}  # built last: an hour of chroot time
+
+
+def db_hours(seconds):
+    """'24h' for a number of seconds; '?' when unknown."""
+    try:
+        return f"{int(seconds) // 3600}h"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def db_age_text(entries):
+    """'cached copy 73h old' for the oldest known age among upstream_dbs entries, else ''."""
+    ages = []
+    for d in entries:
+        try:
+            ages.append(int(d.get("age")))
+        except (TypeError, ValueError):
+            pass
+    return f"cached copy {max(ages) // 3600}h old" if ages else ""
+
+
+def csv_set(text):
+    return {x for x in (text or "").split(",") if x and x != "-"}
+
+
+def revdep_withdraw(conf, withdrawn_csv, repo_csv):
+    """Pairs of build/revdeps.conf (parsed like bin/auto-update's revdep_lines) whose headers
+    package is withdrawn while the DKMS package stays published: "headers<TAB>dkms"."""
+    withdrawn, repo = csv_set(withdrawn_csv), csv_set(repo_csv)
+    if not os.path.isfile(conf):
+        return
+    with open(conf) as f:
+        lines = f.read().splitlines()
+    for line in lines:
+        parts = line.split(None, 2)
+        if not parts or parts[0].startswith("#") or len(parts) < 2 or not parts[1].startswith("dkms:"):
+            continue
+        src, dkms = parts[0], parts[1][len("dkms:"):]
+        opt = parts[2].strip() if len(parts) > 2 else ""
+        hdr = opt[len("headers="):] if opt.startswith("headers=") else f"{src}-headers"
+        if hdr in withdrawn and dkms not in withdrawn and dkms in repo:
+            print(f"{hdr}\t{dkms}")
+
+
+def counterpart_key(items):
+    """sha256 over '<basename> <sha256>' per file and the 'stock:NAME=VERSION' items as given."""
+    if not items:
+        print("none")
+        return 0
+    parts = []
+    for item in items:
+        if item.startswith("stock:"):
+            parts.append(item)
+            continue
+        try:
+            with open(item, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+        except OSError as e:
+            print(f"counterpart-key: cannot read {item}: {e}", file=sys.stderr)
+            return 1
+        parts.append(f"{os.path.basename(item)} {digest}")
+    print(hashlib.sha256("\n".join(parts).encode()).hexdigest())
+    return 0
 
 
 class VerKey:
@@ -263,6 +361,10 @@ def main(argv):
         review(a[0])
     elif cmd == "replies" and len(a) == 1:
         replies(a[0])
+    elif cmd == "revdep-withdraw" and len(a) == 3:
+        revdep_withdraw(*a)
+    elif cmd == "counterpart-key":
+        return counterpart_key(a)
     else:
         print(__doc__)
         return 1
