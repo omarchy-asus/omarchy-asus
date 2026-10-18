@@ -79,8 +79,13 @@ On a pull request this review is the required `ai-review` check (`bin/ai-review`
 
 ## Agents
 
-Claude, Codex and other coding agents file and update issues through `bin/issue`, which
-checks for duplicates and scans for personal information before anything is posted. The
-rules are in [AGENTS.md](AGENTS.md).
+Agents work through clud's built-in workflow: `clud do <issue>` for one issue and `clud grind`
+for a list. Each change goes plan, work, review, integrate, land, and then publish for
+packages. The stages, who fills each role (Opus writes, Codex Sol reviews), and the gates
+between them (`ai-review`, Lint and Build required on `main`) are in
+[AGENTS.md, "Workflow"](AGENTS.md#workflow-from-issue-to-published-package).
+
+Agents file and update issues through `bin/issue`, which checks for duplicates and scans for
+personal information before anything is posted.
 
 See also [PRINCIPLES.md](PRINCIPLES.md).
