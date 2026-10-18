@@ -33,10 +33,12 @@ fork's fixes. Their migrations and default files apply these during
 Nothing needs to run at login, and there is no login service (#45). This
 command reports those fixes as `present` once they're in place. If rtkit isn't
 installed yet, `--check` notes that its migration installs it at the next
-`omarchy update`. hybrid-video is the same: it's `present` only once
-`omarchy update` has run migration `1792123636` (its marker is under
-`~/.local/state/omarchy/migrations`). Until then it's `missing`, and applying
-it writes the pins in Omarchy's marked form, which the migration then leaves.
+`omarchy update`. hybrid-video is `present` only once its mpv and Chromium
+pins are actually in place. The marker of migration `1792123636` (under
+`~/.local/state/omarchy/migrations`) isn't enough: a user created after
+install gets every marker from `/etc/skel` although nothing pinned their
+configs. Until the pins are there it's `missing`, and applying it writes them
+in Omarchy's marked form, which the migration then leaves.
 
 - **audio-master:** the migration only notifies, on purpose: raising the level
   during an update would make the speakers jump. Run
@@ -118,13 +120,17 @@ pin right under its marker comment
 (`# Omarchy repins the next line if the iGPU moves. ...`), at Hyprland start
 and in `omarchy-refresh-hybrid-video`. So each pin has one owner:
 
-- Reported as present once `omarchy update` has run migration `1792123636`
-  (its marker is `~/.local/state/omarchy/migrations/1792123636.sh`). Pins
-  already in Omarchy's marked form are Omarchy's, so they're never listed or
-  touched here, even when they name an old node.
-- Before that (pacman installed the patched omarchy, `omarchy update` hasn't
-  run yet, or the migration was skipped), it's `missing` unless the pins are
-  already in Omarchy's form or a setting of yours is there. Applying writes
+- Reported as present once the pins are in Omarchy's marked form: `mpv.conf`
+  has `vaapi-device` under its marker, and every Chromium-family flags file
+  you have has a `--render-node-override`. Pins already in Omarchy's marked
+  form are Omarchy's, so they're never listed or touched here, even when they
+  name an old node.
+- Otherwise it's `missing` unless a setting of yours is there: pacman
+  installed the patched omarchy and `omarchy update` hasn't run yet, the
+  migration was skipped, or its marker
+  (`~/.local/state/omarchy/migrations/1792123636.sh`) says it ran although
+  nothing pinned your configs, as for a user created after install, who gets
+  every marker from `/etc/skel`. Applying writes
   them in Omarchy's form (`hwdec=vaapi`, then the marker above
   `vaapi-device=<iGPU node>` under the mpv comment, and the marker above each
   `--render-node-override`). Nothing is added to `hyprland.lua`, because the

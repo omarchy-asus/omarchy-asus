@@ -17,6 +17,11 @@
 #   8. differing unowned rule: names the path, installs nothing, the file is unchanged,
 #      and the script goes on (exit 0)
 #   9. identical, under --dry-run: the printed pacman -S line has the --overwrite
+# asus-rog-nkey-winlock depending on a second repo package that isn't installed either
+# (omarchy-asus-dep-test>=1, its udev rule copied in by hand), which pacman -S pulls in (#111):
+#  10. identical unowned rule of the dependency: pacman -S gets --overwrite for its real path
+#  11. differing unowned rule of the dependency: names the path, installs nothing, the file
+#      is unchanged, and the script goes on (exit 0)
 # Usage: tests/ci/omarchy-asus-setup-etc-takeover.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -216,6 +221,8 @@ run_g16() {
         set --
         export OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 OMARCHY_ASUS_SETUP_ROOT=$S/root OMARCHY_ASUS_SETUP_TTY=/dev/null
         export HOME=$S/home PATH=$NO_APPLY
+        # retire_local_winlock reads the user unit dir from XDG_CONFIG_HOME: keep it under HOME.
+        unset XDG_CONFIG_HOME
         # shellcheck source=/dev/null
         . "$W/bin/omarchy-asus-setup"
         touch "$TMP/key.gpg"
@@ -326,6 +333,67 @@ expect "$rc" 0 "exits 0"
 expect "$(has "[dry-run] sudo pacman -S --needed --overwrite $WP asus-rog-nkey-winlock" "$S/out")" 0 \
     "prints pacman -S with the --overwrite"
 expect "$(exists "$S/sudo.log")" 1 "nothing ran through sudo"
+
+# From here on, asus-rog-nkey-winlock depends on a second repo package that isn't installed
+# (never in $S/installed). glibc is in no repo database here, so it is left out of the check.
+DP=/etc/udev/rules.d/71-dep-test.rules
+DRULE=$S/root$DP
+mkdir -p "$S/fx/db/omarchy-asus-dep-test-1-1" "$S/fx/dpkg${DP%/*}"
+printf 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", GROUP="input"\n' >"$S/dpackaged.rules"
+printf 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0b05", GROUP="users"\n' >"$S/ddifferent.rules"
+cp "$S/dpackaged.rules" "$S/fx/dpkg$DP"
+cat >"$S/fx/db/omarchy-asus-dep-test-1-1/desc" <<'EOF'
+%NAME%
+omarchy-asus-dep-test
+
+%VERSION%
+1-1
+
+%FILENAME%
+omarchy-asus-dep-test-1-1-any.pkg.tar.zst
+EOF
+cat >"$S/fx/db/omarchy-asus-dep-test-1-1/files" <<'EOF'
+%FILES%
+etc/
+etc/udev/
+etc/udev/rules.d/
+etc/udev/rules.d/71-dep-test.rules
+EOF
+# The versioned form: the check must strip it down to the package name.
+printf '\n%%DEPENDS%%\nglibc\nomarchy-asus-dep-test>=1\n' >>"$S/fx/db/asus-rog-nkey-winlock-1-1/desc"
+tar -cf "$S/fixtures/omarchy-asus.files" -C "$S/fx/db" omarchy-settings-4.0.5-1.1 asus-rog-nkey-winlock-1-1 \
+    omarchy-asus-dep-test-1-1
+cp "$S/fixtures/omarchy-asus.files" "$S/fixtures/omarchy-asus.db"
+tar -cf "$S/fixtures/omarchy-asus-dep-test-1-1-any.pkg.tar.zst" -C "$S/fx/dpkg" "${DP#/}"
+echo signature >"$S/fixtures/omarchy-asus-dep-test-1-1-any.pkg.tar.zst.sig"
+# dep_rule <content file>: the hand-copied udev rule of the dependency.
+dep_rule() {
+    mkdir -p "${DRULE%/*}"
+    cp "$1" "$DRULE"
+}
+
+echo "== 10. G16 install, identical unowned udev rule of a repo dependency"
+reset "$S/packaged.conf"
+dep_rule "$S/dpackaged.rules"
+run_g16
+expect "$rc" 0 "exits 0"
+expect "$(has "omarchy-asus-dep-test-1-1-any.pkg.tar.zst" "$S/curl.log")" 0 "the dependency's package is checked"
+expect "$(has "$DP: not owned by any package and identical to omarchy-asus-dep-test's copy" "$S/out")" 0 \
+    "check names the path and the dependency"
+expect "$(has "pacman -S --needed --overwrite $DP asus-rog-nkey-winlock" "$S/sudo.log")" 0 \
+    "pacman -S overwrites the dependency's real path"
+expect "$(same "$S/dpackaged.rules" "$DRULE")" 0 "the file is in place"
+
+echo "== 11. G16 install, differing unowned udev rule of a repo dependency"
+reset "$S/packaged.conf"
+dep_rule "$S/ddifferent.rules"
+run_g16
+expect "$rc" 0 "exits 0 (the upgrade already ran)"
+expect "$(has "$DP: not owned by any package and different" "$S/out")" 0 "names the path"
+expect "$(has "were not installed" "$S/out")" 0 "says the G16 packages were not installed"
+expect "$(same "$S/ddifferent.rules" "$DRULE")" 0 "the file is unchanged"
+n=$(grep -cF 'pacman -S ' "$S/sudo.log" 2>/dev/null)
+expect "${n:-0}" 0 "nothing installed"
 
 ((fail)) && { echo "FAILED"; cat "$S/out"; exit 1; }
 echo "all passed"
