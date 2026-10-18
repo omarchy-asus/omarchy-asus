@@ -577,6 +577,14 @@ for p in sys.stdin.read().split():
         if [[ $cr_note != "CodeRabbit gate off"* ]]; then
             [[ -s $cr && $(as_user jq -r .reviewed "$cr" 2>/dev/null) == true && $(as_user jq -r '.head // ""' "$cr") == "$(ugit rev-parse HEAD)" ]] ||
                 reasons+=("CodeRabbit has not reviewed the head")
+    # The agent's limits are only a prompt. Auto-merge ships exactly what bin/rebase-recipe
+    # produced: if the fix commits (everything after the branch's first, rebase commit)
+    # touched anything in the recipe but NOTES.md, a human merges.
+    local rebase_commit agent_files=
+    rebase_commit=$(ugit rev-list --reverse "origin/$BASE_BRANCH..HEAD" | head -1)
+    [[ -z $rebase_commit ]] || agent_files=$(ugit diff --name-only "$rebase_commit" HEAD -- "recipes/$r" |
+        grep -vxF "recipes/$r/NOTES.md" || true)
+    [[ -z $agent_files ]] || reasons+=("review fixes changed recipe files (a human merges): $(echo $agent_files)")
             [[ ! -s $cr || $(as_user jq -r '.threads | length' "$cr") == 0 ]] || reasons+=("unresolved CodeRabbit threads")
         fi
         if [[ $REQUIRE_AGENT_APPROVAL == yes ]]; then

@@ -49,6 +49,7 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
                              → headless agent: fixes or answers CodeRabbit's threads (edits only
                                recipes/<r>/, never our patches/DELTA), second-opinion verdict
                              → fixes pushed? rebuild + CodeRabbit re-review (≤ MAX_FIX_ROUNDS)
+                               (a fix outside NOTES.md is never auto-merged: a human merges)
                              → one PR comment with the results
                              → gates all pass: squash-merge, bin/publish, bin/sync-release
                                otherwise: PR stays open (next run resumes it), stale package
@@ -90,7 +91,9 @@ bin/revdep-check --headers ~/.local/share/omarchy-asus/repo/x86_64/linux-omarchy
 - The chroot build of the exact PR head succeeded, including its reverse-dependency checks (below).
 - Every patch applied at fuzz 0 (offsets are fine).
 - The change is a recipe bump. Our patch files and `DELTA` are byte-identical to the base branch.
-- There are no flags. A flag is raised when upstream merged or closed one of the PRs our patches carry (`UPSTREAM_PRS`). It is also raised when a release contains a fix that a `fixed-upstream` line names.
+- The agent's fix commits changed nothing in the recipe but `NOTES.md`. Its edit limits are only
+  a prompt, so anything else (PKGBUILD, sources, checksums, install files) waits for a human.
+- There are no flags. A flag is raised when upstream merged or closed one of the PRs our patches carry (`UPSTREAM_PRS`). It is also raised when a release contains a fix that a `fixed-upstream` line names. And it is raised when an exact-version dependency of the recipe as proposed (`depends=(x=ver)`) no longer matches upstream; this is re-checked on every run.
 - CodeRabbit finished reviewing the head ("Review completed", not "Review skipped"), and none of its review threads is unresolved or still current.
 - The agent's second opinion approves (`REQUIRE_AGENT_APPROVAL=yes`). If `claude` is missing or `REVIEW_CMD` is empty, the PR waits for a human.
 - `MERGE_MODE=auto`.
