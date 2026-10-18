@@ -116,6 +116,17 @@ printf 'dup.tar  allowed:*\n' >>"$S/ws/build/pii-allow-packages"
 out=$(scan "$S/good" "$S/dup.tar"); rc=$?
 expect $rc 1 "a repeated member path is blocked"
 grep -q 'repeats a member path' <<<"$out"; expect $? 0 "says why"
+# The same through an alias (././forbidden), and a hardlink that copies an allowed hit.
+bsdtar -cf "$S/alias.tar" -C "$S/pkg/dup1" allowed forbidden -C "$S/pkg/dup2" ././forbidden
+bsdtar -tf "$S/alias.tar" | grep -qx '\./\./forbidden'; expect $? 0 "fixture keeps the ././ alias"
+printf 'alias.tar  allowed:*\nhl.tar  allowed*\n' >>"$S/ws/build/pii-allow-packages"
+out=$(scan "$S/good" "$S/alias.tar"); rc=$?
+expect $rc 1 "an aliased member path is blocked"
+mkdir -p "$S/pkg/hl"; printf 'zorbleplex\n' >"$S/pkg/hl/allowed"; ln "$S/pkg/hl/allowed" "$S/pkg/hl/allowed2"
+bsdtar -cf "$S/hl.tar" -C "$S/pkg/hl" allowed allowed2
+out=$(scan "$S/good" "$S/hl.tar"); rc=$?
+expect $rc 1 "a hardlink in an allowed asset is blocked"
+grep -q 'has a hardlink' <<<"$out"; expect $? 0 "says why"
 # A sort that fails in the coverage check (only the stdin 'sort -u' it uses) refuses too,
 # on a package whose stray .PKGINFO hit would otherwise be counted.
 mkdir -p "$S/bin2"

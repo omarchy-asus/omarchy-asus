@@ -153,12 +153,24 @@ pii_located() {
     : >"$up/.loc"
     # name hits: the member path itself (no leading ./ or trailing /)
     bsdtar -tf "$f" >"$up/.names" 2>/dev/null || err="could not list it"
-    # A repeated member path is overwritten on extraction, so its earlier contents would
-    # go unread here (the first pass streams them all): refuse such an asset.
+    # The unpacked tree must be a 1:1 image of the archive, or a member the first pass
+    # streamed could go unread here (overwritten by a repeat or an alias like ././x, or
+    # a hardlink that duplicates data). So: canonical paths only, none repeated, no
+    # hardlinks, and as many regular files on disk as regular entries in the archive.
     if [[ -z $err ]]; then
-        local dups
-        if ! dups=$(sed -e 's,^\./,,' -e 's,/$,,' "$up/.names" | sort | uniq -d); then err="could not list it"
-        elif [[ -n $dups ]]; then err="it repeats a member path"; fi
+        local canon nreg nfiles
+        if ! { bsdtar -tvf "$f" >"$up/.long" 2>/dev/null &&
+               canon=$(sed -e 's,^\./,,' -e 's,/$,,' "$up/.names" | grep -v '^\.\?$' | sort) &&
+               nreg=$(awk '/^-/ {n++} END {print n + 0}' "$up/.long") &&
+               nfiles=$(find "$d" -type f | wc -l); }; then
+            err="could not list it"
+        elif (($(wc -l <"$up/.long") != $(wc -l <"$up/.names"))); then err="its listing is ambiguous"
+        elif grep -qE '^/|//|(^|/)\.\.?(/|$)' <<<"$canon"; then err="it has a non-canonical member path"
+        elif [[ -n $(uniq -d <<<"$canon") ]]; then err="it repeats a member path"
+        elif grep -q ' link to ' "$up/.long"; then err="it has a hardlink"
+        elif ((nreg != nfiles)); then err="it did not unpack 1:1"
+        fi
+        rm -f "$up/.long"
     fi
     if [[ -z $err ]]; then
         grep -iE -- "$pattern" "$up/.names" >"$up/.l" || st=$?
