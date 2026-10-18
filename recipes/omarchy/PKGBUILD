@@ -113,7 +113,8 @@ else
         0015-Read-every-udev-record-before-asking-the-webcams.patch
         0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch
         0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch
-        0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch)
+        0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch
+        0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch)
   sha256sums=('ce413d3fb5b90fab5b2e5cec66552a0562bc1fa3503e3b02e6c067c9a7a7a687'
               '13bad35cf1cc779ade5304debb026327026a3e165848aba62c6b3f3995562503'
               '29c1d4fdf427d9c389d25228c07ca564271c140653b622cf1e760c93677454b0'
@@ -132,7 +133,8 @@ else
               '57fec2dda1bf51bb985c431b15304c1a7077abf534e2fe1d6347cb10bf67dee0'
               '105eef9c0431df70e0a1a80a739f7bb97ba91759bf8b028beb1f9c827ea54f6e'
               '1ebd57eaec1d9ffdad97b24f50ae9be86ce79dd259ae2c29a0fd7580d6a2aeec'
-              '6468816ed154cf9eb6ae74f0e1af0a861346719b848f927336187fd8fa2db465')
+              '6468816ed154cf9eb6ae74f0e1af0a861346719b848f927336187fd8fa2db465'
+              '64c86dd99a4b5a71df44f287ccdd1e4469d9eb69811fb89dcbce690e5896dd93')
 fi
 
 prepare() {
@@ -159,6 +161,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch"
 }
 
 package() {

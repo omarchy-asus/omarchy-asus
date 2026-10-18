@@ -27,7 +27,7 @@ commit (`Backport-of:`) and any adaptation.
 | 0002 | USB-C chargers save power on ROG laptops; charger-swap monitor | #22 | omacom/omarchy#15668 |
 | 0003 | another power manager can own the profile on plug and unplug | #23 | omacom/omarchy#15669 |
 | 0004 | GA605KM fans stop at idle on battery (sudoers grant for the helper) | #24 | not submitted |
-| 0005 | software cursor while an NVIDIA-driven monitor is plugged in (hybrid) | #25 | not submitted |
+| 0005, 0019 | software cursor while an NVIDIA-driven monitor is plugged in (hybrid; 0019 picks the connected card when both GPUs have the connector name) | #25 | not submitted |
 | 0006-0008 | video decode on the iGPU of hybrid laptops (LIBVA, mpv, Chromium) | #26 | not submitted |
 | 0009 | ALC285 Master at full scale under the soft mixer | #27 | not submitted |
 | 0010-0011 | rtkit on x86_64; restart the portal, then PipeWire | #28 | omacom/omarchy#12428 (another contributor's PR, taken as is) |
@@ -36,6 +36,11 @@ commit (`Backport-of:`) and any adaptation.
 | 0016 | Tailscale panel polls status only while closed | #31 | omacom/omarchy#15671 |
 | 0017 | clamshell state from logind events instead of a 2 s poll | #32 | not submitted |
 | 0018 | launcher icon index rescanned at most once a minute | #33 | not submitted |
+
+**PKGBUILD change (omarchy-settings only):** `pkgbuild-source-monitor-unit.diff` installs the
+charger-swap monitor user unit (from 0002) in `/usr/lib/systemd/user`. omarchy-settings installs
+user units from an explicit list, so without it first-run and migration `1792174852` would
+enable a unit systemd can't find. Same change as fork pkgs branch `omarchy-settings-source-monitor`.
 
 **Left out on purpose:** the GA605KM touchpad wake, `HibernateMode=shutdown` and the
 nvidia-powerd start limit (shipped by `omarchy-asus-g16` under `/usr/lib`, no `/etc`
