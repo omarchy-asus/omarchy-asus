@@ -17,6 +17,7 @@
 # PACKAGER still comes from the chroot's own /etc/makepkg.conf.d.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+lib=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
 recipe=$(realpath "$1"); shift
 name=$(basename "$recipe")
 
@@ -40,9 +41,13 @@ log=$LOG_DIR/$name-$(date +%Y%m%d-%H%M%S).log
 # Copy and verify as the user: root never reads the recipe tree itself.
 # Recipes with keys/pgp (validpgpkeys): download and verify sources here, with
 # a keyring holding only the recipe's keys, then let the chroot build skip
-# the PGP step (checksums are still checked there).
+# the PGP step (checksums are still checked there). makepkg --verifysource runs
+# the recipe's PKGBUILD (in bin/auto-update, an unreviewed PR head), so it runs
+# in bin/recipe-sandbox: network, the work dir and that keyring only -- no
+# signing key, no gh logins, no home dir, no inherited environment. A sandbox
+# failure (125: bwrap missing) fails the build; there is no unsandboxed fallback.
 as_user bash -euo pipefail -c '
-    recipe=$1 work=$2 log=$3 name=$4 data=$5
+    recipe=$1 work=$2 log=$3 name=$4 data=$5 lib=$6
     cp -a "$recipe"/. "$work"/
     rm -rf "$work"/{src,pkg} "$work"/*.pkg.tar.zst
     cd "$work"
@@ -50,8 +55,9 @@ as_user bash -euo pipefail -c '
         export GNUPGHOME=$data/verify-gnupg/$name
         rm -rf "$GNUPGHOME"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
         gpg --batch --quiet --import keys/pgp/*.asc
-        makepkg --verifysource 2>&1 | tee "$log.verify"
-    fi' _ "$recipe" "$work" "$log" "$name" "$DATA"
+        "$lib/recipe-sandbox" --net --rw "$work" --rw "$GNUPGHOME" --setenv GNUPGHOME "$GNUPGHOME" \
+            --chdir "$work" -- makepkg --verifysource 2>&1 | tee "$log.verify"
+    fi' _ "$recipe" "$work" "$log" "$name" "$DATA" "$lib"
 makepkg_args=()
 [[ -d $work/keys/pgp ]] && makepkg_args=(-- --skippgpcheck)
 

@@ -1,0 +1,140 @@
+#!/bin/bash
+# Run one command that evaluates recipe code inside a bubblewrap sandbox.
+#
+# Usage: bin/recipe-sandbox [--net] [--ro PATH]... [--rw PATH]... [--setenv NAME VALUE]...
+#                           [--chdir DIR] -- CMD [ARG]...
+#
+#   --net      keep the network (downloads for makepkg --verifysource / --nobuild);
+#              without it the sandbox has only loopback
+#   --ro PATH  bind PATH read-only at the same place (repeatable)
+#   --rw PATH  bind PATH read-write at the same place (repeatable)
+#   --setenv   set NAME=VALUE inside (the environment is otherwise cleared); names that
+#              carry credentials (GH_*, GITHUB_TOKEN, SSH_AUTH_SOCK, *TOKEN*, *API_KEY*,
+#              *SECRET*) are refused. GNUPGHOME is allowed: callers pass a keyring that
+#              holds only the recipe's keys ($DATA/verify-gnupg/<name>).
+#   --chdir    working directory inside
+#
+# Why: a PKGBUILD is shell code from upstream (Arch packaging, AUR, a rebased recipe), and
+# makepkg --printsrcinfo, --nobuild and --verifysource run it at top level and in
+# prepare()/pkgver(). Run as the maintainer or the build user, that code sees the signing
+# key ($DATA/gnupg), the gh and codex logins, GH_TOKEN and the token files, and can write
+# anywhere in the home. Here it sees only /usr, /etc, the pacman db and the paths given:
+# /home, /root, /tmp, /run and /var are empty tmpfs mounts, HOME is /tmp/home, the
+# environment is cleared, and every namespace is unshared (network too, unless --net).
+# Extra secrets outside those dirs (a GH_TOKEN_FILE under /etc, ...) are hidden through
+# OMARCHY_ASUS_SANDBOX_HIDE (colon-separated paths: a file is covered with /dev/null, a
+# directory with an empty tmpfs; these mounts go after the --ro/--rw binds, so a bind of a
+# parent directory does not uncover them).
+# Binding /, the home or any parent of it, the data dir or any parent of it, or the
+# data dir's gnupg (or anything in it) is refused. Other dirs under the data dir (run dirs,
+# srcdest, verify-gnupg/<name>, work-*) are fine.
+# No variable or option turns the sandbox off: without bwrap (package bubblewrap) the
+# command is not run.
+#
+# Exit status: CMD's own (bwrap is exec'd); 125 when bwrap is missing; 64 on bad usage or
+# a refused path/variable.
+set -euo pipefail
+
+die() { echo "recipe-sandbox: $1" >&2; exit "${2:-64}"; }
+
+bwrap=$(type -P bwrap) || true
+[[ -n $bwrap ]] || die "bwrap not found (install bubblewrap); not running the command unsandboxed" 125
+
+net=0 chdir=
+binds=() envs=()
+while (($#)); do
+    case $1 in
+        --net) net=1; shift ;;
+        --ro|--rw)
+            (($# >= 2)) || die "$1 needs a PATH"
+            binds+=("$1" "$2"); shift 2 ;;
+        --setenv)
+            (($# >= 3)) || die "--setenv needs NAME VALUE"
+            envs+=("$2" "$3"); shift 3 ;;
+        --chdir)
+            (($# >= 2)) || die "--chdir needs a DIR"
+            chdir=$2; shift 2 ;;
+        --) shift; break ;;
+        *) die "unknown option: $1 (usage: recipe-sandbox [--net] [--ro P]... [--rw P]... [--setenv N V]... [--chdir D] -- CMD [ARG]...)" ;;
+    esac
+done
+# Without "--" the loop only ends when the arguments run out: no CMD either way.
+(($#)) || die "missing -- CMD"
+
+# Environment names that carry credentials never go in.
+for ((i = 0; i < ${#envs[@]}; i += 2)); do
+    name=${envs[i]}
+    [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--setenv: invalid name: $name"
+    case ${name^^} in
+        GNUPGHOME) ;;
+        GH_*|GITHUB_TOKEN|SSH_AUTH_SOCK|*TOKEN*|*API_KEY*|*SECRET*)
+            die "--setenv $name refused: credentials stay out of the sandbox" ;;
+    esac
+done
+
+# Paths that must never be bound: /, the home and its parents, the data dir and its
+# parents, the signing keyring and anything in it. Compare resolved paths.
+home_raw=${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}
+[[ -n $home_raw ]] || die "cannot tell the home directory"
+data_raw=${OMARCHY_ASUS_DATA:-$home_raw/.local/share/omarchy-asus}
+home=$(realpath -m -- "$home_raw")
+data=$(realpath -m -- "$data_raw")
+gnupg=$(realpath -m -- "$data_raw/gnupg")
+# is_self_or_parent P X: P is X or a directory above X
+is_self_or_parent() { [[ $1 == / || $2 == "$1" || $2 == "$1"/* ]]; }
+
+bind_args=()
+for ((i = 0; i < ${#binds[@]}; i += 2)); do
+    opt=${binds[i]} raw=${binds[i + 1]}
+    p=$(realpath -e -- "$raw" 2>/dev/null) || die "$opt $raw: no such path"
+    if [[ $p == / ]] || is_self_or_parent "$p" "$home"; then
+        die "$opt $raw refused: the home directory (or a parent of it) stays out of the sandbox"
+    fi
+    if is_self_or_parent "$p" "$data"; then
+        die "$opt $raw refused: the data dir (or a parent of it) stays out of the sandbox"
+    fi
+    if is_self_or_parent "$gnupg" "$p"; then
+        die "$opt $raw refused: the signing keyring stays out of the sandbox"
+    fi
+    if [[ $opt == --rw ]]; then bind_args+=(--bind "$p" "$p"); else bind_args+=(--ro-bind "$p" "$p"); fi
+done
+
+if [[ -n $chdir ]]; then
+    chdir=$(realpath -e -- "$chdir" 2>/dev/null) || die "--chdir: no such directory"
+    [[ -d $chdir ]] || die "--chdir $chdir: not a directory"
+fi
+
+hide_args=()
+IFS=: read -r -a hide <<<"${OMARCHY_ASUS_SANDBOX_HIDE:-}"
+for h in "${hide[@]}"; do
+    [[ -n $h ]] || continue
+    h=$(realpath -e -- "$h" 2>/dev/null) || continue
+    if [[ -d $h ]]; then hide_args+=(--tmpfs "$h")
+    elif [[ -e $h ]]; then hide_args+=(--ro-bind /dev/null "$h")
+    fi
+done
+
+args=(--unshare-all)
+((net)) && args+=(--share-net)
+args+=(--die-with-parent --new-session --clearenv
+    --ro-bind /usr /usr
+    --symlink usr/bin /bin --symlink usr/bin /sbin --symlink usr/lib /lib --symlink usr/lib /lib64
+    --ro-bind /etc /etc
+    --proc /proc --dev /dev
+    --tmpfs /tmp --tmpfs /home --tmpfs /root --tmpfs /run --tmpfs /var
+    --ro-bind-try /var/lib/pacman /var/lib/pacman)
+# resolv.conf is often a symlink into /run/systemd/resolve
+((net)) && args+=(--ro-bind-try /run/systemd/resolve /run/systemd/resolve)
+args+=(--dir /tmp/home)
+# User binds come after the tmpfs mounts (bwrap creates their mount points there); the
+# hidden paths come after the user binds, so a bind of a parent cannot uncover them.
+args+=("${bind_args[@]}" "${hide_args[@]}")
+user=$(id -un)
+args+=(--setenv HOME /tmp/home --setenv PATH /usr/bin --setenv LANG C.UTF-8
+    --setenv USER "$user" --setenv LOGNAME "$user")
+for ((i = 0; i < ${#envs[@]}; i += 2)); do
+    args+=(--setenv "${envs[i]}" "${envs[i + 1]}")
+done
+[[ -z $chdir ]] || args+=(--chdir "$chdir")
+
+exec "$bwrap" "${args[@]}" -- "$@"

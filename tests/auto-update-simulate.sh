@@ -12,8 +12,12 @@
 #      c. the agent's notes and reply contain a denylisted word: not posted verbatim (the
 #         reply goes to ai-review, never to GitHub; ai-review PII-scans its one final post)
 #      d. the agent command fails: no absolute path in the PR comment or the status
-#      e. the PII scan fails closed (bin/sync-release --pii-scan-text only, no full run)
+#      e. the PII scan fails closed (missing denylist, scan error, unreadable body)
 #      f. ai-review cannot run (codex missing): the PR is left open, nothing merged or published
+#      g. the rebase commit carries a denylisted word: nothing pushed, no PR, class=pii
+#      h. the fixer's edit carries a denylisted word: not pushed, not merged
+#      Section 4 needs bubblewrap (recipe code runs in bin/recipe-sandbox); it is skipped
+#      when bwrap cannot run.
 # The fake upstream is a local clone of Arch's hyprland packaging with two extra tags;
 # upstream versions are overridden with OMARCHY_ASUS_UPSTREAM_OVERRIDE. State goes to a
 # temp dir; the real repo db is only read (through a symlink). Downloads the Hyprland
@@ -74,7 +78,11 @@ fi
 # ---------------------------------------------------------------- 4. stubbed full runs
 # A copy of bin/ in which every step that builds, signs, publishes or calls a network is a
 # stub that logs its call to $T/calls. bin/sync-release --pii-scan(-text) stays the real one.
-stub_case() {  # stub_case <name> <base changes the recipe: 0|1> <agent: approve|pii|fail> [review: off|nocodex]
+if ! bwrap --ro-bind / / true >/dev/null 2>&1; then
+    echo "skip: section 4 needs bubblewrap (bwrap) with unprivileged user namespaces"
+    exit $fail
+fi
+stub_case() {  # stub_case <name> <base changes the recipe: 0|1> <agent: approve|pii|pii-edit|fail> [review: off|nocodex] [rebase: clean|pii]
     local name=$1 race=$2 agent=$3 review=${4:-off}
     T=$S/stub-$name
     local L=$T/lib B=$T/bin
@@ -95,7 +103,8 @@ EOF
     fi
     mv "$L/sync-release" "$L/sync-release.real"
     : >"$T/calls"
-    export T
+    STUB_REBASE=${5:-clean}
+    export T STUB_REBASE
     for s in build-pkg publish unpublish rebase-recipe check-upstream sync-release; do
         cat >"$L/$s" <<'EOF'
 #!/bin/bash
@@ -113,6 +122,7 @@ case $me in
         out= report=; while (($#)); do case $1 in --out) out=$2 ;; --report) report=$2 ;; esac; shift; done
         cp -a "$OMARCHY_ASUS_WORKSPACE/recipes/fake" "$out"
         sed -i 's/^pkgrel=.*/pkgrel=2.1/' "$out/PKGBUILD"
+        [[ ${STUB_REBASE:-clean} != pii ]] || echo 'built on zorblaxhost' >>"$out/NOTES.md"
         cat >"$report" <<'J'
 {"from": "1.0-1.1", "to": "1.0-2.1", "fuzz": false, "flags": [], "verify_offset_hunks": 0,
  "upstream_source": {"url": "file:///nowhere", "ref": "1.0-2"}, "files_added": [], "files_removed": [], "patches": []}
@@ -127,12 +137,16 @@ esac
 EOF
         chmod +x "$L/$s"
     done
-    # The agent: approves; approves with a denylisted word in its notes and reply; or fails.
+    # The agent: approves; approves with a denylisted word in its notes and reply; approves
+    # after an edit (in its cwd, the clone) that carries a denylisted word; or fails.
     cat >"$B/agent" <<EOF
 #!/bin/bash
 cat >/dev/null
 case $agent in
     fail) exit 1 ;;
+    pii-edit)
+        echo 'fixed on zorblaxhost' >>recipes/fake/NOTES.md
+        echo '{"result": "{\"verdict\": \"approve\", \"notes\": \"mechanical bump\", \"replies\": [{\"id\": 101, \"reply\": \"noted\"}]}"}' ;;
     pii) echo '{"result": "{\"verdict\": \"approve\", \"notes\": \"built fine on zorblaxhost\", \"replies\": [{\"id\": 101, \"reply\": \"#mtree checked on zorblaxhost\"}]}"}' ;;
     *) echo '{"result": "{\"verdict\": \"approve\", \"notes\": \"mechanical bump\", \"replies\": [{\"id\": 101, \"reply\": \"no change needed\"}]}"}' ;;
 esac
@@ -253,4 +267,22 @@ PII_DENYLIST=$T/bad-denylist "$W/bin/sync-release" --pii-scan-text "$T/text.md" 
 PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan-text "$T/no-such-file.md" >/dev/null 2>&1; expect $? 1 "an unreadable body is a hit"
 printf '#mtree\n# built on zorblaxhost\n' >"$T/text.md"   # bsdtar would read this as an archive
 PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan-text "$T/text.md" >/dev/null 2>&1; expect $? 1 "text that looks like an mtree archive is still scanned as text"
+
+echo "== 4g. the rebase commit carries a denylisted word"
+stub_case piirebase 0 approve off pii
+expect $rc 1 "a rebase commit that fails the PII scan fails the run"
+git -C "$T/hub.git" rev-parse --verify -q refs/heads/auto-update/fake >/dev/null; expect $? 1 "nothing is pushed"
+grep -q '^gh pr create' "$T/calls"; expect $? 1 "no PR is opened"
+expect "$(last class)" pii "status records class=pii"
+grep -q '^unpublish fake' "$T/calls"; expect $? 0 "the stale package is unpublished (stock flows through)"
+grep -q '^\[pii\] ' "$T/out"; expect $? 0 "the scan hit is logged"
+
+echo "== 4h. the fixer's edit carries a denylisted word"
+stub_case piifix 0 pii-edit
+git -C "$T/hub.git" show main:recipes/fake/NOTES.md 2>/dev/null | grep -qi zorblaxhost
+expect $? 1 "the fixer's edit is neither pushed nor merged"
+git -C "$T/hub.git" log --all --format=%B 2>/dev/null | grep -q 'auto-update fixer'
+expect $? 1 "no fixer commit reached the hub"
+grep -q '^gh pr merge ' "$T/calls"; expect $? 1 "a PR whose fixer edits were withheld is not auto-merged"
+grep -q '^\[pii\] ' "$T/out"; expect $? 0 "the scan hit is logged"
 exit $fail

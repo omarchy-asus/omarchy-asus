@@ -44,7 +44,10 @@ for this step.
 
 --verify runs `makepkg --nobuild --nodeps` on a scratch copy: sources are fetched
 and checked, and prepare() applies every patch. A hunk applied with fuzz is
-reported (fuzz=true) and is not counted as a clean rebase.
+reported (fuzz=true) and is not counted as a clean rebase. It runs in
+bin/recipe-sandbox: no credentials, no home directory, network only for the source
+download. Every other evaluation of recipe code (makepkg --printsrcinfo) runs there
+too, without network; there is no unsandboxed fallback (no bwrap: exit 1).
 
 Exit: 0 ok; 2 patches don't apply / prepare() failed; 3 upstream fetch failed;
 4 delta or checksum inconsistency; 1 other error. --report writes a JSON summary
@@ -74,6 +77,12 @@ OMARCHY_PKGS_GIT_URL = os.environ.get("OMARCHY_ASUS_OMARCHY_PKGS_GIT_URL", "http
 SUM_ALGOS = ("cksums", "md5sums", "sha1sums", "sha224sums", "sha256sums", "sha384sums", "sha512sums", "b2sums")
 DEFAULT_SKIP = (".git", ".SRCINFO", ".nvchecker.toml")
 BUILD_JUNK = ("src", "pkg")
+SANDBOX = os.path.join(os.path.dirname(os.path.realpath(__file__)), "recipe-sandbox")
+# makepkg refuses to start unless BUILDDIR, PKGDEST and SRCDEST are writable (default: the
+# recipe dir, bound read-only for --printsrcinfo): point them at the sandbox's own /tmp.
+SRCINFO_SCRATCH = ["--setenv", "BUILDDIR", "/tmp/makepkg", "--setenv", "PKGDEST", "/tmp/makepkg",
+                   "--setenv", "SRCDEST", "/tmp/makepkg"]
+NO_SANDBOX = "bin/recipe-sandbox: bubblewrap (bwrap) is missing; recipe code is never run outside the sandbox"
 
 
 class Fail(Exception):
@@ -315,7 +324,10 @@ def get_var(lines, name):
 # ---------------------------------------------------------------- checksums
 
 def srcinfo(d):
-    r = run(["makepkg", "--printsrcinfo"], cwd=d, check=False)
+    d = os.path.realpath(d)
+    r = run([SANDBOX, "--ro", d, *SRCINFO_SCRATCH, "--chdir", d, "--", "makepkg", "--printsrcinfo"], check=False)
+    if r.returncode == 125:
+        raise Fail(1, "sandbox", NO_SANDBOX)
     if r.returncode != 0:
         raise Fail(4, "delta", f"makepkg --printsrcinfo failed in {d}: {r.stdout.strip()[-500:]}")
     arrays = {}
@@ -413,34 +425,43 @@ def rewrite_sums(new_dir, up_dir, report):
 # ---------------------------------------------------------------- verify
 
 def verify(new_dir, work, report):
-    """makepkg --nobuild in a scratch copy. Returns (ok, fuzz)."""
+    """makepkg --nobuild in a scratch copy, inside bin/recipe-sandbox. Returns (ok, fuzz)."""
+    work = os.path.realpath(work)
     build = os.path.join(work, "verify")
     shutil.rmtree(build, ignore_errors=True)
     shutil.copytree(new_dir, build)
-    env = dict(os.environ)
-    srcdest = os.path.join(data_dir(), "srcdest")
-    os.makedirs(srcdest, exist_ok=True)
-    env.update(SRCDEST=srcdest, BUILDDIR=os.path.join(work, "verify-build"), PKGDEST=os.path.join(work, "verify-pkg"))
+    srcdest = os.path.realpath(os.path.join(data_dir(), "srcdest"))
+    verify_build = os.path.join(work, "verify-build")
+    verify_pkg = os.path.join(work, "verify-pkg")
+    for p in (srcdest, verify_build, verify_pkg):
+        os.makedirs(p, exist_ok=True)
+    # The sandbox clears the environment and sees only the paths bound here.
+    cmd = [SANDBOX, "--net", "--rw", build, "--rw", verify_build, "--rw", verify_pkg, "--rw", srcdest,
+           "--setenv", "SRCDEST", srcdest, "--setenv", "BUILDDIR", verify_build, "--setenv", "PKGDEST", verify_pkg]
     args = ["makepkg", "--nobuild", "--nodeps", "--noconfirm", "--cleanbuild"]
     if os.path.isdir(os.path.join(build, "keys", "pgp")):
         gh = os.path.join(work, "verify-gnupg")
         shutil.rmtree(gh, ignore_errors=True)
         os.makedirs(gh, mode=0o700)
-        env["GNUPGHOME"] = gh
         keys = [os.path.join(build, "keys", "pgp", k) for k in os.listdir(os.path.join(build, "keys", "pgp"))]
-        run(["gpg", "--batch", "--quiet", "--import", *keys], env=env)
+        # importing the recipe's own keys runs no recipe code: outside the sandbox
+        run(["gpg", "--batch", "--quiet", "--import", *keys], env=dict(os.environ, GNUPGHOME=gh))
+        cmd += ["--rw", gh, "--setenv", "GNUPGHOME", gh]
     elif re.search(r"^validpgpkeys=", open(os.path.join(build, "PKGBUILD")).read(), re.M):
         args.append("--skippgpcheck")
+    cmd += ["--chdir", build, "--"] + args
     log = os.path.join(work, "verify.log")
     with open(log, "w") as lf:
-        r = subprocess.run(args, cwd=build, env=env, stdout=lf, stderr=subprocess.STDOUT, text=True)
+        r = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, text=True)
+    if r.returncode == 125:
+        raise Fail(1, "sandbox", NO_SANDBOX)
     text = open(log, errors="replace").read()
     fuzz = sorted(set(re.findall(r"^Hunk #\d+ succeeded at \d+ with fuzz \d+.*$", text, re.M)))
     offsets = len(re.findall(r"^Hunk #\d+ succeeded at \d+ \(offset", text, re.M))
     report["verify_log"] = log
     report["verify_fuzz"] = fuzz
     report["verify_offset_hunks"] = offsets
-    shutil.rmtree(os.path.join(work, "verify-build"), ignore_errors=True)  # kernel trees are large
+    shutil.rmtree(verify_build, ignore_errors=True)  # kernel trees are large
     shutil.rmtree(build, ignore_errors=True)
     if r.returncode != 0:
         tail = "\n".join(text.strip().splitlines()[-25:])
