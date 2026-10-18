@@ -106,18 +106,34 @@ while IFS=$'\t' read -r n s d; do
     rsize[$n]=$s; rdigest[$n]=$d
 done <<<"$assets"
 
-same() {  # same <local file>: remote asset of that name has the same bytes
-    local n; n=$(basename "$1")
+remote_dl=$(mktemp -d); trap 'rm -rf "$up" "$remote_dl"' EXIT
+same() {  # same <local file>: 0 the remote asset of that name has the same bytes, 1 it differs
+          # (or is absent), 2 unknown (no digest from the API and the download failed)
+    local n sum; n=$(basename "$1")
     [[ -n ${rsize[$n]:-} ]] || return 1
     [[ ${rsize[$n]} == "$(stat -c %s "$1")" ]] || return 1
-    [[ -z ${rdigest[$n]} || ${rdigest[$n]} == "sha256:$(sha256sum "$1" | cut -d' ' -f1)" ]]
+    sum=$(sha256sum "$1" | cut -d' ' -f1)
+    if [[ -n ${rdigest[$n]} ]]; then
+        [[ ${rdigest[$n]} == "sha256:$sum" ]]; return
+    fi
+    # No digest (older assets, or the API left it out): an equal size proves nothing,
+    # so fetch the asset and hash it. Fail closed when that is not possible.
+    rm -f "$remote_dl/$n"
+    gh release download "$GH_TAG" -R "$GH_REPO" -p "$n" -D "$remote_dl" --clobber >/dev/null 2>&1 &&
+        [[ -f $remote_dl/$n ]] || { echo "cannot download release asset $n to compare it" >&2; return 2; }
+    [[ $(sha256sum "$remote_dl/$n" | cut -d' ' -f1) == "$sum" ]]
+    local rc=$?; rm -f "$remote_dl/$n"; return $rc
 }
 
 new_pkgs=() upload_pkgs=() upload_db=()
 for f in "$up"/*.pkg.tar.zst; do
     [[ -e $f ]] || continue
     n=$(basename "$f")
-    if same "$f"; then :
+    rc=0; same "$f" || rc=$?
+    if ((rc == 0)); then :
+    elif ((rc == 2)); then
+        echo "refusing: cannot verify that the release's $n has the same bytes; nothing uploaded" >&2
+        exit 1
     elif [[ -n ${rsize[$n]:-} ]]; then
         echo "refusing: $n is already in the release with different bytes; bump pkgrel instead" >&2
         exit 1
@@ -125,6 +141,7 @@ for f in "$up"/*.pkg.tar.zst; do
         new_pkgs+=("$f"); upload_pkgs+=("$f")
     fi
     # A signature may differ for unchanged package bytes (re-signed); both verify.
+    # Unknown (2) counts as different: re-uploading a .sig or the db is harmless.
     same "$f.sig" || upload_pkgs+=("$f.sig")
 done
 for n in "${dbfiles[@]}"; do same "$up/$n" || upload_db+=("$up/$n"); done
