@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""G16 / ROG N-Key Win-lock helper (ASUS 0b05:19b6).
+
+Modes for `watch`:
+  toast   — bottom-center Omarchy OSD when Fn+Super toggles Win-lock
+  unlock  — same OSD, then immediately SetFeature-unlock (Active Guard)
+
+Also: lock | unlock | status | toggle  (one-shot HID control)
+
+Depends on the patched hid-asus passing 5D BF Win-lock notifications through
+to hidraw instead of dropping them with the AURA echo stream.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import glob
+import os
+import json
+import select
+import shutil
+import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+VID, PID = 0x0B05, 0x19B6
+REPORT_LEN = 64
+# linux/hidraw.h HIDIOC{S,G}FEATURE(64)
+HIDIOCSFEATURE = 0xC0404806
+HIDIOCGFEATURE = 0xC0404807
+
+# OSD icons (bottom-center omarchy-osd). Locked uses the color-emoji lock
+# because Omarchy OSD paints Nerd Font glyphs with popup text color only.
+ICON_LOCKED = "🔒"       # red lock — stays locked (toast mode)
+ICON_UNLOCKED = "󰌿"     # lock-open — Super cleared
+ICON_AUTO_UNLOCK = "󰕥"  # shield-check — unlock mode blocked Fn+Super
+ICON_FAIL = "󰀦"
+
+
+def find_hidraw() -> Path:
+    for uevent in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
+        text = Path(uevent).read_text(errors="replace")
+        if f"{VID:08X}:{PID:08X}" in text.upper().replace("0000", "0000") or (
+            "00000B05" in text.upper() and "000019B6" in text.upper()
+        ):
+            name = Path(uevent).parts[-3]  # hidrawN
+            return Path("/dev") / name
+    # Fallback: match HID_ID line loosely
+    for uevent in glob.glob("/sys/class/hidraw/hidraw*/device/uevent"):
+        text = Path(uevent).read_text(errors="replace").upper()
+        if "0B05" in text and "19B6" in text:
+            return Path("/dev") / Path(uevent).parts[-3]
+    raise FileNotFoundError("No hidraw for ASUS 0b05:19b6 (ITE N-Key)")
+
+
+def open_hidraw(*, writable: bool = True) -> tuple[int, Path]:
+    path = find_hidraw()
+    try:
+        access = os.O_RDWR if writable else os.O_RDONLY
+        fd = os.open(path, access | os.O_NONBLOCK)
+    except PermissionError as e:
+        raise SystemExit(
+            f"Cannot open {path} ({e}). Install the udev rule "
+            f"(system/udev/99-g16-winlock-hidraw.rules) and replug/reload, "
+            f"or run via pkexec."
+        ) from e
+    return fd, path
+
+
+def set_lock(locked: bool) -> None:
+    """SetFeature 5D BF 00 xx + output write 01 01 (AsusWinKeyActiveGuard)."""
+    fd, path = open_hidraw()
+    try:
+        buf = bytearray(REPORT_LEN)
+        buf[0], buf[1], buf[2], buf[3] = 0x5D, 0xBF, 0x00, 0x01 if locked else 0x00
+        fcntl.ioctl(fd, HIDIOCSFEATURE, buf, True)
+        # Commit must be a WRITE of output report 01 01 — not another SetFeature
+        os.write(fd, bytes([0x01, 0x01]))
+    finally:
+        os.close(fd)
+    print(f"{path}: Win-lock {'on' if locked else 'off'}")
+
+
+def get_status() -> bool | None:
+    """Best-effort GetFeature; byte[3] is lock flag when report is BF-shaped."""
+    fd, path = open_hidraw()
+    try:
+        buf = bytearray(REPORT_LEN)
+        buf[0] = 0x5D
+        try:
+            fcntl.ioctl(fd, HIDIOCGFEATURE, buf, True)
+        except OSError as e:
+            print(f"{path}: GetFeature failed: {e}", file=sys.stderr)
+            return None
+        # Expect 5D BF ?? xx or at least byte3 meaningful after AWKAG pattern
+        locked = bool(buf[3])
+        print(
+            f"{path}: feature={buf[:8].hex(' ')} "
+            f"→ infer locked={locked} (byte3)"
+        )
+        return locked
+    finally:
+        os.close(fd)
+
+
+def toast(message: str, *, icon: str = ICON_LOCKED, duration_ms: int = 2000) -> None:
+    """Bottom-center Omarchy OSD (same channel as Pixel Buds volume), not top-right notifications."""
+    osd = shutil.which("omarchy-osd")
+    if osd:
+        r = subprocess.run(
+            [osd, "-i", icon, "-m", message, "-d", str(duration_ms)],
+            capture_output=True,
+            text=True,
+        )
+        print(f"osd rc={r.returncode} msg={message!r} err={r.stderr.strip()!r}", flush=True)
+        return
+    shell = shutil.which("omarchy-shell")
+    if shell:
+        payload = json.dumps({"icon": icon, "message": message, "duration": duration_ms})
+        r = subprocess.run(
+            [shell, "osd", "show", payload],
+            capture_output=True,
+            text=True,
+        )
+        print(f"osd-shell rc={r.returncode} msg={message!r} err={r.stderr.strip()!r}", flush=True)
+        return
+    # Last resort only — top-right notification, not the preferred toast.
+    send = shutil.which("omarchy-notification-send") or shutil.which("notify-send")
+    if send:
+        subprocess.run([send, message], check=False)
+        print(f"toast FALLBACK notify msg={message!r}", flush=True)
+    else:
+        print(f"toast FAILED: no OSD/notifier for {message!r}", flush=True)
+
+
+def watch(mode: str) -> None:
+    """Read Win-lock state notifications passed through to hidraw."""
+    fd, path = open_hidraw(writable=False)
+    print(f"watching {path} ({mode} mode)… Ctrl-C to stop", flush=True)
+    # Ignore the next N "off" lines after we ourselves unlock (SetFeature echoes).
+    suppress_off = 0
+    try:
+        while True:
+            select.select([fd], [], [])
+            try:
+                data = os.read(fd, REPORT_LEN)
+            except BlockingIOError:
+                continue
+            if not data:
+                raise OSError(f"{path} disconnected")
+            if len(data) < 4 or data[:3] != bytes([0x5D, 0xBF, 0x01]):
+                continue
+            locked = bool(data[3])
+            state = "on" if locked else "off"
+            ts = time.strftime("%H:%M:%S")
+            print(f"[{ts}] Win-lock {state}", flush=True)
+            if mode == "toast":
+                if locked:
+                    toast("Super locked", icon=ICON_LOCKED)
+                else:
+                    toast("Super unlocked", icon=ICON_UNLOCKED)
+            elif mode == "unlock":
+                if locked:
+                    toast("Super auto-unlocked", icon=ICON_AUTO_UNLOCK)
+                    try:
+                        suppress_off += 1
+                        set_lock(False)
+                    except SystemExit as e:
+                        suppress_off = max(0, suppress_off - 1)
+                        toast(f"Super unlock failed: {e}", icon=ICON_FAIL, duration_ms=4000)
+                        print(e, file=sys.stderr)
+                else:
+                    if suppress_off > 0:
+                        suppress_off -= 1
+                        print(f"[{ts}] suppressed echo unlock notify", flush=True)
+                        continue
+                    toast("Super unlocked", icon=ICON_UNLOCKED)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        os.close(fd)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status", help="GetFeature probe of lock byte")
+    sub.add_parser("lock", help="SetFeature lock + commit write")
+    sub.add_parser("unlock", help="SetFeature unlock + commit write")
+    sub.add_parser("toggle", help="Invert inferred lock state")
+
+    w = sub.add_parser("watch", help="Follow kernel Win-lock lines")
+    w.add_argument(
+        "--mode",
+        choices=("toast", "unlock"),
+        default=os.environ.get("G16_WINLOCK_MODE", "toast"),
+        help="toast = OSD only; unlock = OSD + auto-unlock (default: toast or $G16_WINLOCK_MODE)",
+    )
+
+    args = p.parse_args()
+    if args.cmd == "status":
+        get_status()
+    elif args.cmd == "lock":
+        set_lock(True)
+    elif args.cmd == "unlock":
+        set_lock(False)
+    elif args.cmd == "toggle":
+        cur = get_status()
+        if cur is None:
+            raise SystemExit("Cannot toggle without a readable status")
+        set_lock(not cur)
+    elif args.cmd == "watch":
+        watch(args.mode)
+
+
+if __name__ == "__main__":
+    main()

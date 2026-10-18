@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# Unified control for every LED on this GA605 -- the keyboard backlight (asusd's
+# xyz.ljones.Aura) and the lid Slash bar (xyz.ljones.Slash). Both interfaces hang
+# off the SAME asusd object, which is why one helper can serve the whole panel.
+#
+# Two hard-won rules are baked in here:
+#
+# 1. Slash goes over D-Bus, never `asusctl slash`. On asusd 6.3.8 `--mode` only
+#    rewrites /etc/asusd/slash.ron without touching the daemon, and Mode and
+#    Interval are one shared register, so `--interval N` reprograms the live
+#    pattern to index N.
+#
+# 2. Keyboard BRIGHTNESS is not ours to set directly. omarchy-power-tune
+#    (power-tune.service, user unit) calls `asusctl leds set` on every UPower
+#    event and on a 30s backstop poll, so a direct write is reverted within
+#    ~30s. The conf is sourced once at startup, so the only durable path is:
+#    rewrite KBD_AC/KBD_BATTERY in power-tune.conf, then restart the unit --
+#    whose own startup apply() then sets the hardware. Colour and power-state
+#    flags are untouched by power-tune, so those go straight over D-Bus.
+set -u
+
+SVC=xyz.ljones.Asusd
+AURA=xyz.ljones.Aura
+SLASH=xyz.ljones.Slash
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/power-tune.conf"
+POWERTUNE="$(command -v omarchy-power-tune 2>/dev/null || echo "$HOME/.local/bin/omarchy-power-tune")"
+
+P="$(busctl --system tree "$SVC" 2>/dev/null \
+      | grep -o '/xyz/ljones/aura/[A-Za-z0-9_]*' | head -1)"
+[ -n "$P" ] || { echo "HasAura=false"; echo "HasSlash=false"; exit 0; }
+
+getp() { busctl --system get-property "$SVC" "$P" "$1" "$2" 2>/dev/null; }
+# busctl wants every struct field as its OWN argv entry -- passing them as one
+# space-joined string parses as a single malformed value and fails silently.
+setp() {
+  local iface="$1" prop="$2" sig="$3"; shift 3
+  busctl --system set-property "$SVC" "$P" "$iface" "$prop" "$sig" "$@" >/dev/null 2>&1
+}
+
+# "au 4 0 1 2 3" -> "0 1 2 3"; the leading count is dropped.
+arrayvals() { awk '{ for (i = 3; i <= NF; i++) printf "%s ", $i }'; }
+
+modes() { asusctl slash --list 2>/dev/null | sed 's/"//g' | sed '/^$/d'; }
+
+conf_val() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1; }
+
+# Rewrites a KBD_* key in place, appending it if the conf never had one.
+conf_set() {
+  local key="$1" val="$2"
+  [ -w "$CONF" ] || return 1
+  if grep -q "^$key=" "$CONF"; then
+    sed -i "s/^$key=.*/$key=$val/" "$CONF"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$CONF"
+  fi
+}
+
+
+WINLOCK_BIN="$(command -v g16-winlock 2>/dev/null || true)"
+[ -n "$WINLOCK_BIN" ] || WINLOCK_BIN=/usr/bin/g16-winlock
+WINLOCK_DROPIN="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/g16-winlock.service.d"
+WINLOCK_MODE_CONF="$WINLOCK_DROPIN/mode.conf"
+
+winlock_mode_get() {
+  local m=toast
+  if [ -r "$WINLOCK_MODE_CONF" ]; then
+    m="$(sed -n 's/^Environment=G16_WINLOCK_MODE=//p' "$WINLOCK_MODE_CONF" | tail -1 | tr -d '"' )"
+  fi
+  case "$m" in toast|unlock) printf '%s\n' "$m" ;; *) printf 'toast\n' ;; esac
+}
+
+winlock_state() {
+  if [ -x "$WINLOCK_BIN" ]; then
+    echo "HasWinlock=true"
+  else
+    echo "HasWinlock=false"
+    return 0
+  fi
+  echo "WinlockMode=$(winlock_mode_get)"
+  echo "WinlockService=$(systemctl --user is-active g16-winlock.service 2>/dev/null || echo inactive)"
+  # Best-effort lock bit from GetFeature (may be flaky); unlocked is what we care about.
+  if out="$("$WINLOCK_BIN" status 2>/dev/null)"; then
+    case "$out" in
+      *locked=True*)  echo "WinlockLocked=true" ;;
+      *locked=False*) echo "WinlockLocked=false" ;;
+      *)              echo "WinlockLocked=unknown" ;;
+    esac
+  else
+    echo "WinlockLocked=unknown"
+  fi
+}
+
+
+state() {
+  local lmd power supported
+
+  echo "HasAura=true"
+  echo "KbdBrightness=$(getp $AURA Brightness | awk '{print $2}')"
+
+  # (uu(yyy)(yyy)ss) mode zone r1 g1 b1 r2 g2 b2 "speed" "direction"
+  lmd="$(getp $AURA LedModeData)"
+  printf 'KbdColor=%02X%02X%02X\n' \
+    "$(echo "$lmd" | awk '{print $4}')" \
+    "$(echo "$lmd" | awk '{print $5}')" \
+    "$(echo "$lmd" | awk '{print $6}')"
+
+  # Static-only hardware still reports the list; the panel hides the section
+  # when there is nothing to choose between.
+  supported="$(getp $AURA SupportedBasicModes | arrayvals)"
+  echo "SupportedModeCount=$(echo $supported | wc -w)"
+
+  # (a(ubbbb)) count zone boot awake sleep shutdown
+  power="$(getp $AURA LedPower)"
+  echo "KbdZone=$(echo "$power" | awk '{print $3}')"
+  echo "KbdBoot=$(echo "$power" | awk '{print $4}')"
+  echo "KbdAwake=$(echo "$power" | awk '{print $5}')"
+  echo "KbdSleep=$(echo "$power" | awk '{print $6}')"
+  echo "KbdShutdown=$(echo "$power" | awk '{print $7}')"
+
+  # The levels power-tune will re-apply, which are the values that actually stick.
+  echo "KbdAC=$(conf_val KBD_AC)"
+  echo "KbdBattery=$(conf_val KBD_BATTERY)"
+  if [ "$(busctl --system get-property org.freedesktop.UPower /org/freedesktop/UPower \
+            org.freedesktop.UPower OnBattery 2>/dev/null)" = "b true" ]; then
+    echo "OnBattery=true"
+  else
+    echo "OnBattery=false"
+  fi
+  echo "PowerTune=$(systemctl --user is-active power-tune 2>/dev/null)"
+
+  if busctl --system introspect "$SVC" "$P" "$SLASH" >/dev/null 2>&1; then
+    echo "HasSlash=true"
+    busctl --system introspect "$SVC" "$P" "$SLASH" 2>/dev/null \
+      | awk '$2=="property"{sub(/^\./,"",$1); print "Slash"$1"="$4}'
+    idx="$(getp $SLASH Interval | awk '{print $2}')"
+    echo "SlashPattern=${idx:-0}"
+    echo "SlashPatternName=$(modes | sed -n "$(( ${idx:-0} + 1 ))p")"
+  else
+    echo "HasSlash=false"
+  fi
+
+  # ---- display refresh ----
+  # power-tune owns the modeset: monitors.lua is re-applied on hotplug and on
+  # `hyprctl reload`, so a raw mode set here would be silently reverted.
+  # Last line only: power-tune may print a resolve log before "HZ override".
+  hz_line="$("$POWERTUNE" hz get 2>/dev/null | awk 'NF{line=$0} END{print line}')"
+  echo "RefreshHz=$(echo "$hz_line" | awk '{print $1+0}')"
+  echo "RefreshOverride=$(echo "$hz_line" | awk '{v=$2; print (v=="" ? "auto" : v)}')"
+
+  # ---- battery charge ceiling ----
+  # Read from sysfs rather than inferred: asusctl has no query verb.
+  cl=0
+  for b in /sys/class/power_supply/BAT*; do
+    [ -r "$b/charge_control_end_threshold" ] || continue
+    cl="$(cat "$b/charge_control_end_threshold" 2>/dev/null || echo 0)"
+    break
+  done
+  echo "ChargeLimit=$cl"
+
+  winlock_state
+}
+
+case "${1:-get}" in
+  get) state ;;
+  list-modes) modes ;;
+
+  # kbd-level <ac|battery|both> <off|low|med|high>
+  kbd-level)
+    case "$2" in
+      ac)      conf_set KBD_AC "$3" ;;
+      battery) conf_set KBD_BATTERY "$3" ;;
+      both)    conf_set KBD_AC "$3"; conf_set KBD_BATTERY "$3" ;;
+      *) echo "bad scope: $2" >&2; exit 2 ;;
+    esac
+    # Restarting re-sources the conf and runs apply(), which sets the hardware.
+    # Without this the unit keeps enforcing the levels it started with.
+    systemctl --user restart power-tune >/dev/null 2>&1 \
+      || asusctl leds set "$3" >/dev/null 2>&1
+    ;;
+
+  # kbd-color RRGGBB -- preserves mode/zone/colour2/speed/direction.
+  kbd-color)
+    hex="${2#\#}"
+    r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+    lmd="$(getp $AURA LedModeData)"
+    mode="$(echo "$lmd" | awk '{print $2}')"
+    zone="$(echo "$lmd" | awk '{print $3}')"
+    r2="$(echo "$lmd" | awk '{print $7}')"
+    g2="$(echo "$lmd" | awk '{print $8}')"
+    b2="$(echo "$lmd" | awk '{print $9}')"
+    spd="$(echo "$lmd" | awk '{gsub(/"/,"",$10); print $10}')"
+    dir="$(echo "$lmd" | awk '{gsub(/"/,"",$11); print $11}')"
+    setp $AURA LedModeData "(uu(yyy)(yyy)ss)" \
+      "$mode" "$zone" "$r" "$g" "$b" "$r2" "$g2" "$b2" "$spd" "$dir"
+    ;;
+
+  # kbd-power <boot|awake|sleep|shutdown> <true|false>
+  kbd-power)
+    power="$(getp $AURA LedPower)"
+    zone="$(echo "$power" | awk '{print $3}')"
+    boot="$(echo "$power" | awk '{print $4}')"
+    awake="$(echo "$power" | awk '{print $5}')"
+    sleep_="$(echo "$power" | awk '{print $6}')"
+    shut="$(echo "$power" | awk '{print $7}')"
+    case "$2" in
+      boot) boot="$3" ;; awake) awake="$3" ;;
+      sleep) sleep_="$3" ;; shutdown) shut="$3" ;;
+      *) echo "bad flag: $2" >&2; exit 2 ;;
+    esac
+    setp $AURA LedPower "(a(ubbbb))" 1 "$zone" "$boot" "$awake" "$sleep_" "$shut"
+    ;;
+
+  # refresh <60|240|auto>
+  refresh)          "$POWERTUNE" hz "$2" >/dev/null 2>&1 ;;
+
+  # battery-limit <percent> -- asusctl writes charge_control_end_threshold
+  battery-limit)    asusctl battery limit "$2" >/dev/null 2>&1 ;;
+
+  slash-enabled)    setp $SLASH Enabled b "$2" ;;
+  slash-brightness) setp $SLASH Brightness y "$2" ;;
+  slash-flag)       setp $SLASH "$2" b "$3" ;;
+  slash-pattern)
+    setp $SLASH Interval y "$2"
+    name="$(modes | sed -n "$(( $2 + 1 ))p")"
+    [ -n "$name" ] && asusctl slash --mode "$name" >/dev/null 2>&1
+    ;;
+
+  # winlock-mode <toast|unlock>
+  winlock-mode)
+    case "$2" in toast|unlock) ;; *) echo "bad winlock mode: $2" >&2; exit 2 ;; esac
+    mkdir -p "$WINLOCK_DROPIN"
+    printf '%s\n' '[Service]' "Environment=G16_WINLOCK_MODE=$2" >"$WINLOCK_MODE_CONF"
+    systemctl --user daemon-reload >/dev/null 2>&1
+    systemctl --user enable --now g16-winlock.service >/dev/null 2>&1
+    systemctl --user restart g16-winlock.service >/dev/null 2>&1
+    ;;
+  winlock-lock)   "$WINLOCK_BIN" lock ;;
+  winlock-unlock) "$WINLOCK_BIN" unlock ;;
+  winlock-toggle) "$WINLOCK_BIN" toggle ;;
+  *)
+    echo "usage: g16ctl get|list-modes|kbd-level|kbd-color|kbd-power|refresh|battery-limit|winlock-*|slash-*" >&2
+    exit 2 ;;
+esac
