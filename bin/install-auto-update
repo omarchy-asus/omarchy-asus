@@ -15,7 +15,7 @@ src=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
 LIB=/usr/local/lib/omarchy-asus
 UNITS=/etc/systemd/system
 CONF=/etc/omarchy-asus/auto-update.conf
-scripts=(ai-review auto-update auto-update-state build-pkg check-upstream env.sh mkchroot publish rebase-recipe revdep-check sync-release unpublish issue)
+scripts=(ai-review auto-update auto-update-state build-pkg check-upstream env.sh mkchroot publish publish-lib.sh rebase-recipe revdep-check sync-release unpublish issue)
 units=(omarchy-asus-auto-update.service omarchy-asus-auto-update.timer)
 
 apply=0 enable=0 uninstall=0
@@ -49,7 +49,7 @@ fi
 echo "source: $src ($(cd "$src" && git rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout'))"
 do_ install -d -o root -g root -m 0755 "$LIB" "$LIB/bin" "$LIB/systemd" /etc/omarchy-asus
 for s in "${scripts[@]}"; do
-    mode=0755; [[ $s == env.sh ]] && mode=0644
+    mode=0755; [[ $s == env.sh || $s == publish-lib.sh ]] && mode=0644
     do_ install -o root -g root -m "$mode" "$src/bin/$s" "$LIB/bin/$s"
 done
 do_ install -o root -g root -m 0644 "$src/systemd/README.md" "$src/systemd/auto-update.conf.example" "$LIB/systemd/"

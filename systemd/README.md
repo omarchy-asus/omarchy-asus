@@ -146,7 +146,13 @@ Throttling is the main external constraint, so every GitHub call is bounded:
   - per reviewed head: one PR view, one status read, two status writes, one review post (no polling)
   - at most `REPLY_LIMIT` thread replies
   - one summary comment and one merge
-- **`bin/sync-release`** reads the release assets once. It uploads only new or changed files: packages and signatures first, the db last. It deletes stale assets after the new db is up, and it refuses to overwrite an existing package filename that has different bytes.
+- **`bin/sync-release`** reads the release assets once. It uploads only new or changed files: packages and signatures first, the db last. It refuses to overwrite an existing package filename that has different bytes, and it refuses a local db whose signature does not verify against the signing key.
+- **One publication at a time.** `bin/publish`, `bin/unpublish` and `bin/sync-release` share one lock (`publish.lock` in the data dir). A second caller waits up to `PUBLISH_LOCK_WAIT` seconds, then exits 75 without touching the repo or the release.
+- **Publish and unpublish are staged.** They build the new repo next to the current one and check every signature before they swap it in. If a step fails, the previous repo stays in place as it was.
+- **A journal marks a release that may lag.** `bin/publish` and `bin/unpublish` write `sync-pending` in the data dir before they change the local repo. `bin/sync-release` removes it only after it has checked that the release matches the local repo. While it exists, `auto-update` syncs first on its next run and reports the run as failed, so a crash between publish and sync is retried.
+- **One publisher per release.** `bin/sync-release` records the release db it last uploaded in `release-db.sha256` in the data dir (each db is recorded before its upload, so a sync that dies mid-upload is not taken for another publisher). If the release's db has changed since then (another host or a manual upload), it refuses to sync. After checking the release by hand, `SYNC_ADOPT_REMOTE=1 bin/sync-release` adopts it. `auto-update` never sets this.
+- **The PII scan fails closed.** An archive that the scan cannot read counts as a hit, and nothing is uploaded.
+- **Superseded assets are kept for a while.** Release assets that the new db no longer lists are deleted only after `PRUNE_GRACE_HOURS` (default 72 h), so a client that still has the previous db can download what it lists.
 - **Upstream recipe fetches:** Arch's GitLab (not GitHub). omarchy-pkgs is a blobless clone with one fetch, run only when the kernel needs a rebase.
 
 ## Install

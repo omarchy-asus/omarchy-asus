@@ -2,7 +2,7 @@
 # Static checks for every tracked script (runs on the CI host or locally):
 #   shell (by .sh suffix or a sh/bash shebang): bash -n or sh -n,
 #     then "shellcheck -x -S warning" (infos and style notes do not fail)
-#   sourced shell without a shebang (bin/env.sh): shellcheck --shell=bash,
+#   sourced shell without a shebang (bin/env.sh, bin/publish-lib.sh): shellcheck --shell=bash,
 #     unused-variable warnings off (the variables are for the sourcing script)
 #   pacman .install scriptlets: bash -n
 #   python (by .py suffix or a python shebang): py_compile
@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.." || exit 1
 # Sourced libraries without a shebang. hybrid-video-decode.sh is a byte-identical
 # copy of the fork's helper, so it is linted as is: its functions' callers live
 # elsewhere (SC2119/SC2120 don't apply).
-SOURCED=(bin/env.sh recipes/omarchy-asus-g16-apply/hybrid-video-decode.sh)
+SOURCED=(bin/env.sh bin/publish-lib.sh recipes/omarchy-asus-g16-apply/hybrid-video-decode.sh)
 fail=0 n=0
 err() { echo "::error file=$1::$2"; fail=1; }
 pyc=$(mktemp -d); trap 'rm -rf "$pyc"' EXIT

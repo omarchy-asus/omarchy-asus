@@ -1,15 +1,34 @@
 #!/bin/bash
 # Sign staged packages and add them to the repo db (signed). Removes superseded files.
+# One locked, verified transaction (bin/publish-lib.sh): it waits for $DATA/publish.lock
+# (PUBLISH_LOCK_WAIT seconds, then exit 75), journals the change in $DATA/sync-pending,
+# builds it in a staging copy of the repo, checks every signature there and only then
+# swaps it in. Any failure exits non-zero and leaves the live repo as it was.
 # Usage: bin/publish $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+source "$(dirname "$0")/publish-lib.sh"
 : "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
-mkdir -p "$REPO_DIR"
+names=()
+for f in "$@"; do names+=("$(basename "$f")"); done
+pub_lock
+pub_mark_pending "publish ${names[*]}"
+pub_stage
+committed=0
+trap 'if ((committed == 0)); then pub_abort; fi' EXIT
 added=()
 for f in "$@"; do
     b=$(basename "$f")
-    cp -v "$f" "$REPO_DIR/$b"
-    gpg --batch --yes --local-user "$SIGN_KEY" --detach-sign --no-armor "$REPO_DIR/$b"
-    added+=("$REPO_DIR/$b")
+    # may be hardlinks into the live repo: replace, never write through them
+    rm -f "$PUB_STAGE/$b" "$PUB_STAGE/$b.sig"
+    cp -v "$f" "$PUB_STAGE/$b"
+    gpg --batch --yes --local-user "$SIGN_KEY" --detach-sign --no-armor "$PUB_STAGE/$b"
+    pub_verify_sig "$PUB_STAGE/$b"
+    added+=("$PUB_STAGE/$b")
 done
-repo-add --sign --key "$SIGN_KEY" --verify --remove "$REPO_DIR/$REPO_NAME.db.tar.gz" "${added[@]}"
+repo-add --sign --key "$SIGN_KEY" --verify --remove "$PUB_STAGE/$REPO_NAME.db.tar.gz" "${added[@]}"
+# repo-add can exit 0 after a GPG failure and leave the previous .sig beside the new
+# db: its exit status is not trusted, the staged repo is checked instead.
+pub_verify_repo "$PUB_STAGE"
+pub_commit
+committed=1

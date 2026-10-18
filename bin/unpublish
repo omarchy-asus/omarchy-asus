@@ -1,11 +1,24 @@
 #!/bin/bash
 # Drop packages from the repo db so the stock build flows through again.
 # Usage: bin/unpublish pkgname ...   (record the reason; bin/auto-update writes it to $DATA/status.json)
+# Same locked, verified transaction as bin/publish (bin/publish-lib.sh; exit 75 when
+# $DATA/publish.lock stays busy): any failure leaves the live repo as it was.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+source "$(dirname "$0")/publish-lib.sh"
 : "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
-repo-remove --sign --key "$SIGN_KEY" --verify "$REPO_DIR/$REPO_NAME.db.tar.gz" "$@"
+pub_lock
+pub_mark_pending "unpublish $*"
+pub_stage
+committed=0
+trap 'if ((committed == 0)); then pub_abort; fi' EXIT
+repo-remove --sign --key "$SIGN_KEY" --verify "$PUB_STAGE/$REPO_NAME.db.tar.gz" "$@"
 for p in "$@"; do
-    find "$REPO_DIR" -maxdepth 1 -regextype posix-extended \
+    # deleting the staging hardlink leaves the live file alone
+    find "$PUB_STAGE" -maxdepth 1 -regextype posix-extended \
         -regex ".*/$p-[^-]+-[^-]+-[^-]+\.pkg\.tar\.zst(\.sig)?" -print -delete
 done
+# repo-remove's exit status does not cover a failed signature: check the result
+pub_verify_repo "$PUB_STAGE"
+pub_commit
+committed=1
