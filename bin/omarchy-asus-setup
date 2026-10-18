@@ -299,6 +299,7 @@ check_fallback_kernel() {
     fi
   fi
 
+  local limine_read=1
   if [[ -r $LIMINE_CONF ]]; then
     conf=$(<"$LIMINE_CONF")
   elif conf=$(sudo -n cat "$LIMINE_CONF" 2>/dev/null); then
@@ -306,10 +307,12 @@ check_fallback_kernel() {
   else
     warn "could not read $LIMINE_CONF without a password; check that the boot menu lists $k"
     bad=1
+    limine_read=0
     conf=''
   fi
   # vmlinuz-linux must not count for linux-lts, nor vmlinuz-linux-lts for linux.
-  if [[ -n $conf ]] && ! grep -qE "vmlinuz-${k}([^-A-Za-z0-9_]|$)" <<<"$conf"; then
+  # An empty but readable config has no entry either.
+  if ((limine_read)) && ! grep -qE "vmlinuz-${k}([^-A-Za-z0-9_]|$)" <<<"$conf"; then
     warn "Limine has no entry for $k ($LIMINE_CONF): run 'sudo limine-update', then check the boot menu"
     bad=1
   fi
