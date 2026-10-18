@@ -318,6 +318,16 @@ class Stamp(unittest.TestCase):
         self.assertEqual(len(called), 1)
         self.assertEqual(statuses, [])
 
+    def test_missing_denylist_fails_closed_even_when_clean(self):
+        def no_denylist(text):
+            raise RuntimeError("PII denylist missing")
+        statuses = []
+        with Patch(gh_json=FakeGH(), pii_check=no_denylist, minimize_previous=lambda *a, **k: [],
+                   set_status=lambda *a, **k: statuses.append(a)):
+            with self.assertRaisesRegex(RuntimeError, "denylist"):
+                ar.stamp(REPO, NUM, result([]), [None])
+        self.assertEqual(statuses, [])
+
     def test_non_default_base_gets_no_status(self):
         gh, statuses, _ = self.run_stamp(result([], default_base=False))
         self.assertEqual(statuses, [])

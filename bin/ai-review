@@ -520,9 +520,9 @@ def stamp(repo, num, res, roots):
     if not res.get("default_base", True):  # as in post: no status for a non-default base
         log("the PR does not target the default branch: no status (a retarget means a new review)")
         return
-    set_status(repo, res["head"], "success",
-               f"0 blocking, {len(shown)} non-blocking, {refuted} refuted (stamp) | mb {res['merge_base'][:12]} by {reviewer()}",
-               res.get("comment_url"))
+    desc = f"0 blocking, {len(shown)} non-blocking, {refuted} refuted (stamp) | mb {res['merge_base'][:12]} by {reviewer()}"
+    pii_check(desc)  # as --post always does: a missing or unreadable denylist fails closed
+    set_status(repo, res["head"], "success", desc, res.get("comment_url"))
 
 
 PREVIOUS = """query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){
