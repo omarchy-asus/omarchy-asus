@@ -150,6 +150,8 @@ Where our fixes are headed:
   the state of its upstream PRs. Exits 10 when something needs action.
 - `bin/rebase-recipe`: rebuilds a recipe from a new upstream release plus its `DELTA` and
   checks it with `makepkg --nobuild`.
+- `bin/revdep-check`: builds a DKMS package against a kernel headers package in a throwaway
+  chroot; `build/revdeps.conf` lists the pairs checked before publishing either one.
 - `bin/auto-update`: the daily pipeline (rebase PR, chroot build, reviews, merge and
   publish, or unpublish on failure).
 - `bin/install-auto-update` and `systemd/`: the service and timer units and their installer;

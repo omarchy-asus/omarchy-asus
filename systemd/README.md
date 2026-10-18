@@ -59,9 +59,35 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
                        our patches' PRs: flagged, never dropped automatically)
 ```
 
+### Reverse-dependency CI
+
+`build/revdeps.conf` maps a kernel recipe to the DKMS packages that must compile against
+it (today: `linux-omarchy  dkms:nvidia-open-dkms`). After every chroot build,
+`bin/revdep-check` runs in a throwaway snapshot of the clean chroot. It installs `dkms`,
+then the DKMS package (with `-dd`, because its runtime dependencies such as
+`nvidia-utils=<ver>` don't matter for compiling), then the headers. The dkms pacman hook
+builds the module for that kernel, and `dkms status` must report it installed;
+otherwise `dkms build` is re-run for an exit code and make.log is logged.
+
+- **A kernel build** compiles every listed DKMS package against its new headers. It uses
+  our published package, or the staged build of the DKMS recipe. If the module doesn't
+  build, the kernel counts as a failed build: it is not published, the PR stays open, and
+  the stale kernel is unpublished.
+- **A DKMS build** (`nvidia-open-dkms`) compiles against the headers of the kernel we
+  publish, or stock `linux-omarchy-headers` from `[omarchy]` if we carry none. If that
+  fails, it is not published.
+
+`bin/auto-update --plan` lists the checks a pending build would trigger. To run one by
+hand (it uses sudo for the chroot steps):
+
+```bash
+bin/revdep-check --headers ~/.local/share/omarchy-asus/repo/x86_64/linux-omarchy-headers-<ver>-x86_64.pkg.tar.zst \
+                 --dkms ~/.local/share/omarchy-asus/repo/x86_64/nvidia-open-dkms-<ver>-x86_64.pkg.tar.zst
+```
+
 ### Merge gates (all of them)
 
-- The chroot build of the exact PR head succeeded.
+- The chroot build of the exact PR head succeeded, including its reverse-dependency checks (below).
 - Every patch applied at fuzz 0 (offsets are fine).
 - The change is a recipe bump. Our patch files and `DELTA` are byte-identical to the base branch.
 - There are no flags. A flag is raised when upstream merged or closed one of the PRs our patches carry (`UPSTREAM_PRS`). It is also raised when a release contains a fix that a `fixed-upstream` line names.

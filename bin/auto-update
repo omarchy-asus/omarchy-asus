@@ -167,14 +167,84 @@ recipe_version() {  # recipe_version <recipe dir>: [epoch:]pkgver-pkgrel
         awk '/^\tepoch = /{e=$3":"} /^\tpkgver = /{v=$3} /^\tpkgrel = /{r=$3} END{print e v "-" r}'
 }
 tree_hash() { ugit rev-parse "HEAD:recipes/$1" 2>/dev/null || echo none; }
-build_recipe() {  # build_recipe <recipe>: chroot build of $CLONE/recipes/<recipe>; log path in $build_log
-    local r=$1
+build_recipe() {  # build_recipe <recipe>: chroot build of $CLONE/recipes/<recipe> + reverse-dep checks
+    local r=$1 ver
     build_log=$RUN/$r.build.log
     if [[ $EUID -eq 0 ]]; then
-        "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 | as_user tee "$build_log" >/dev/null
+        "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 | as_user tee "$build_log" >/dev/null || return 1
     else
-        as_user "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 | as_user tee "$build_log" >/dev/null
+        as_user "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 | as_user tee "$build_log" >/dev/null || return 1
     fi
+    ver=$(recipe_version "$CLONE/recipes/$r")
+    revdep_checks "$r" "$ver"
+}
+
+# ---------------------------------------------------------------- reverse-dependency CI
+# build/revdeps.conf: "<kernel recipe> dkms:<dkms recipe> [headers=<pkgname>]". A kernel
+# build is only good if every listed DKMS module compiles against its new headers; a
+# DKMS build only if it compiles against the kernel we publish (or stock [omarchy]).
+revdep_lines() {  # revdep_lines <recipe>: "role kernel dkms headers" for each pair involving it
+    local conf=$CLONE/build/revdeps.conf src dep opt hdr
+    [[ -f $conf ]] || return 0
+    while read -r src dep opt; do
+        [[ -z $src || $src == \#* || $dep != dkms:* ]] && continue
+        hdr=$src-headers; [[ $opt == headers=* ]] && hdr=${opt#headers=}
+        [[ $src == "$1" ]] && echo "kernel $src ${dep#dkms:} $hdr"
+        [[ ${dep#dkms:} == "$1" ]] && echo "dkms $src ${dep#dkms:} $hdr"
+    done <"$conf"
+    return 0
+}
+pkg_file() {  # pkg_file <dir> <pkgname> [version]: that package's file (newest by vercmp), or nothing
+    as_user bash -c '
+        best=
+        for f in "$1/$2"-${3:-[0-9]}*.pkg.tar.zst; do
+            [[ -e $f ]] || continue
+            n=$(bsdtar -xOf "$f" .PKGINFO | sed -n "s/^pkgname = //p")
+            [[ $n == "$2" ]] || continue
+            [[ -z $best || $(vercmp "${f##*/}" "${best##*/}") -gt 0 ]] && best=$f
+        done
+        [[ -n $best ]] && echo "$best"; true' _ "$@"
+}
+revdep_plan() {  # revdep_plan <recipe>: one line per check that a build of <recipe> triggers
+    local role k d h f
+    while read -r role k d h; do
+        if [[ $role == kernel ]]; then
+            f=$(pkg_file "$REPO_DIR" "$d")
+            f=${f:+${f##*/}}
+            echo "compile dkms:$d (${f:-the staged build of recipes/$d}) against the new $h"
+        else
+            f=$(pkg_file "$REPO_DIR" "$h")
+            f=${f:+${f##*/}}
+            echo "compile the new $d against ${f:-stock:$h from [omarchy]}"
+        fi
+    done < <(revdep_lines "$1")
+}
+revdep_checks() {  # revdep_checks <recipe> <version>: 0 if every reverse-dep check passes
+    local r=$1 ver=$2 role k d h hfile dfile rc=0 one
+    while read -r role k d h; do
+        if [[ $role == kernel ]]; then
+            hfile=$(pkg_file "$STAGE_DIR" "$h" "$ver")
+            dfile=$(pkg_file "$REPO_DIR" "$d")
+            [[ -n $dfile ]] || dfile=$(pkg_file "$STAGE_DIR" "$d" "$(recipe_version "$CLONE/recipes/$d")")
+            [[ -n $hfile ]] || { note "$r" "revdep: no staged $h $ver"; rc=1; continue; }
+            [[ -n $dfile ]] || { note "$r" "revdep: no package of $d to test (not in the repo, not staged)"; rc=1; continue; }
+        else
+            dfile=$(pkg_file "$STAGE_DIR" "$d" "$ver")
+            hfile=$(pkg_file "$REPO_DIR" "$h")
+            [[ -n $hfile ]] || hfile=stock:$h
+            [[ -n $dfile ]] || { note "$r" "revdep: no staged $d $ver"; rc=1; continue; }
+        fi
+        note "$r" "revdep: $(basename "$dfile") against ${hfile##*/}"
+        one=0
+        if [[ $EUID -eq 0 ]]; then
+            "$LIB/revdep-check" --headers "$hfile" --dkms "$dfile" --log "$build_log" >/dev/null || one=$?
+        else
+            as_user "$LIB/revdep-check" --headers "$hfile" --dkms "$dfile" --log "$build_log" >/dev/null || one=$?
+        fi
+        if ((one)); then note "$r" "revdep: FAILED ($d against ${hfile##*/}, exit $one; see $build_log)"; rc=1
+        else note "$r" "revdep: ok"; fi
+    done < <(revdep_lines "$r")
+    return $rc
 }
 
 # ---------------------------------------------------------------- review (CodeRabbit + agent)
@@ -336,6 +406,7 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
 
     if [[ $mode != full ]]; then
         note dry "would commit to $branch, push, open a PR (ready for review), build in the chroot,"
+        while read -r line; do [[ -n $line ]] && note dry "  then $line"; done < <(revdep_plan "$r")
         note dry "wait for CodeRabbit, run the agent fixer/second opinion, then gate"
         note dry "rebased recipe: $out; diff: $diff"
         [[ -n $changed ]] && note dry "not a pure recipe bump, changes our files: $(echo $changed)"
@@ -489,6 +560,7 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
     ver=$(recipe_version "$CLONE/recipes/$r")
     if [[ $mode != full ]]; then
         note dry "would build recipes/$r $ver in the chroot, publish and sync ($3)"
+        while read -r line; do [[ -n $line ]] && note dry "  before publishing: $line"; done < <(revdep_plan "$r")
         record "$r" ok build-dry-run version="$ver" message="$3"
         return 0
     fi
@@ -533,7 +605,11 @@ plan=$(as_user env SKIP_RECIPES="$SKIP_RECIPES" BUILD_NOT_BUILT="$BUILD_NOT_BUIL
     "$LIB/auto-update-state" plan "$check" "$STATUS")
 echo "plan:"
 { printf 'recipe\taction\tupstream\tin repo\tpackages\tnotes\n'; printf '%s\n' "$plan"; } |
-    column -t -s $'\t' | sed 's/^/  /' 
+    column -t -s $'\t' | sed 's/^/  /'
+while IFS=$'\t' read -r r action _; do
+    [[ $action == rebase || $action == build ]] || continue
+    while read -r line; do [[ -n $line ]] && echo "  $r: reverse-dep check: $line"; done < <(revdep_plan "$r")
+done <<<"$plan"
 [[ $mode == plan ]] && exit 0
 
 # Each recipe runs in a subshell with errexit on: an unexpected error (git, gh, network)
