@@ -6,7 +6,7 @@
 # the same thing as the manual steps in LAPTOP-SETUP.md, with the same file
 # contents, and is safe to run again.
 #
-#   omarchy-asus-setup               set up the repo, then offer the upgrade
+#   omarchy-asus-setup               set up the repo, then offer the upgrade and the G16 fixes
 #   omarchy-asus-setup --uninstall   undo it and go back to the stock builds
 #   omarchy-asus-setup --dry-run     print every privileged command instead of running it
 #   omarchy-asus-setup --force       skip the GA605 model check
@@ -19,6 +19,8 @@ GH_BRANCH=main
 KEY_URL=https://raw.githubusercontent.com/$GH_REPO/$GH_BRANCH/keys/omarchy-asus.asc
 DB_URL=https://github.com/$GH_REPO/releases/download/x86_64/$REPO.db
 KEYRING_PKG=omarchy-asus-keyring
+# Offered as the optional last step on a fresh install.
+G16_PKGS=(omarchy-asus-g16 asus-rog-nkey-winlock omarchy-asus-g16-apply)
 
 CONF=/etc/pacman.conf
 SNIPPET=/etc/pacman.d/custom-repos.conf
@@ -362,6 +364,52 @@ offer_upgrade() {
   fi
 }
 
+# Optional last step: the G16 fix packages, then the fixes that live in your own
+# config or in /etc (omarchy-asus-g16-apply). Nothing happens unless you say yes,
+# and omarchy-asus-g16-apply leaves alone any fix you already have in your own form.
+offer_g16_fixes() {
+  step "Optional: G16 fixes for a fresh install"
+  info "Packages: ${G16_PKGS[*]}. omarchy-asus-g16-apply then lists the fixes that"
+  info "live in your config or /etc (video decode on the iGPU, HDMI cursor, speaker level, rtkit,"
+  info "asusd, Win-lock service) and applies the missing ones. Settings you already have are kept."
+  if ((DRY_RUN)); then
+    confirm "Install them and review the fixes?"
+    as_root pacman -S --needed "${G16_PKGS[@]}"
+    info "[dry-run] would run: omarchy-asus-g16-apply --check, ask, then omarchy-asus-g16-apply --yes"
+    return 0
+  fi
+  if [[ -n $(pacman -Qu 2>/dev/null) ]]; then
+    warn "the system isn't fully upgraded, and installing packages now would be a partial upgrade."
+    warn "Later: 'omarchy update', then 'sudo pacman -S ${G16_PKGS[*]}' and 'omarchy-asus-g16-apply'."
+    return 0
+  fi
+  local available=() pkg rc=0
+  for pkg in "${G16_PKGS[@]}"; do
+    if pacman -Si "$REPO/$pkg" >/dev/null 2>&1; then
+      available+=("$pkg")
+    else
+      warn "$pkg is not in the $REPO repo yet; skipping it"
+    fi
+  done
+  ((${#available[@]})) || return 0
+  if ! confirm "Install ${available[*]} and review the fixes?"; then
+    info "skipped. Later: 'sudo pacman -S ${G16_PKGS[*]}', then 'omarchy-asus-g16-apply'."
+    return 0
+  fi
+  as_root pacman -S --needed "${available[@]}" || { warn "install failed; skipping the fixes"; return 0; }
+  command -v omarchy-asus-g16-apply >/dev/null || return 0
+  omarchy-asus-g16-apply --check || rc=$?
+  if ((rc == 10)); then
+    if confirm "Apply the missing default fixes listed above?"; then
+      omarchy-asus-g16-apply --yes || warn "some fixes failed; run 'omarchy-asus-g16-apply' again to retry"
+    else
+      info "skipped. Run 'omarchy-asus-g16-apply' whenever you like ('--check' changes nothing)."
+    fi
+  elif ((rc == 0)); then
+    ok "every default fix is in place"
+  fi
+}
+
 do_install() {
   banner
   check_user
@@ -376,6 +424,7 @@ do_install() {
   apply_hook
   install_keyring
   offer_upgrade
+  offer_g16_fixes
   step "Done"
   info "Later 'omarchy refresh pacman' runs keep the repo in place through the hook."
   info "Undo with: $SELF --uninstall"

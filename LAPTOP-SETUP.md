@@ -47,6 +47,10 @@ The script:
    upgrades only if you say yes. The upgrade runs through `omarchy update`, which asks once more,
    takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
    `pacman -Syu`, so the script doesn't run one.
+8. Optional, and only if the system is fully upgraded: offers to install `omarchy-asus-g16`,
+   `asus-rog-nkey-winlock` and `omarchy-asus-g16-apply`, shows `omarchy-asus-g16-apply --check`,
+   and applies the missing default fixes if you say yes. Fixes you already have in your own form
+   are left alone. See [`recipes/omarchy-asus-g16-apply/README.md`](recipes/omarchy-asus-g16-apply/README.md).
 
 > [!IMPORTANT]
 > The fingerprint check is trust on first use. The script, the key and this page all come from
