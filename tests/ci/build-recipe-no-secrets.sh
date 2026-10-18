@@ -48,7 +48,9 @@ expect "c: every actions/checkout has persist-credentials: false within 3 lines"
         END { if (pending) bad++; print bad + 0 }' "$WF")" 0
 
 # d. no secrets at all
-expect "d: no secrets. reference in build-pr.yml" "$(grep -c 'secrets\.' "$WF")" 0
+# (YAML comment lines skipped: they name tests/ci/build-recipe-no-secrets.sh)
+expect "d: no secrets. reference in build-pr.yml" \
+    "$(grep -v -E '^[[:space:]]*#' "$WF" | grep -c -E '(^|[^-A-Za-z0-9_])secrets[.[]')" 0
 
 # e. the steps that run ci/build-recipe carry no token in their own env. A step block
 # starts at "      - " (step indentation) and ends at the next step or job/top-level key.
