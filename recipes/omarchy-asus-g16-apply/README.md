@@ -38,6 +38,7 @@ offers it as its last step on a fresh install.
 | `present` | the fix is in place from somewhere else (a package, the fork, the right value already) |
 | `present (local)` | you have your own setting for the same thing: **left alone**, whatever its value |
 | `missing` | applying would add it (`missing (opt-in)`: only when named) |
+| `needs repair` | something this command wrote is out of date (a render node pin after a BIOS or MUX change); applying updates or removes it |
 | `n/a` | not this hardware, or the package it needs isn't installed |
 | `upstream PR only` | can't be done without changing Omarchy's own scripts |
 
@@ -47,10 +48,12 @@ Hyprland config, a `vaapi-device` in `mpv.conf`, any
 `cursor.no_hardware_cursors`, a Master level other than Omarchy's 80 %, your
 own asusd drop-in, a power manager that owns the profile, a local
 `g16-winlock.service`, a renamed `nvidia.conf`), the whole fix is reported as
-`present (local)` and skipped. On a machine that already carries these fixes by
+`present (local)` and skipped. Hyprland configs are found through symlinks
+(a dotfile manager's linked `hyprland.lua` or `hypr` directory counts as
+yours). On a machine that already carries these fixes by
 hand, `--check` shows `present (local)` and applying does nothing.
 
-`--check` exits 10 when a default fix is missing, 0 otherwise.
+`--check` exits 10 when a default fix is missing or needs repair, 0 otherwise.
 
 ## Default fixes
 
@@ -60,7 +63,15 @@ hand, `--check` shows `present (local)` and applying does nothing.
 `/usr/share/omarchy-asus-g16-apply/hypr/hybrid-video-env.lua`, then runs the
 fork's leaf: `hwdec=vaapi` and `vaapi-device=<iGPU node>` at the top of
 `~/.config/mpv/mpv.conf`, and `--render-node-override=<iGPU node>` in each
-Chromium-family flags file you have.
+Chromium-family flags file you have, under a
+`# omarchy-asus-g16-apply hybrid-video: ...` marker comment.
+
+The pins are checked against the iGPU node every run. A pin this command
+wrote (the Chromium line under its marker, the `vaapi-device` line in the
+block under the mpv comment) that names another node, after a BIOS update
+moves the PCI address, shows `needs repair`, and applying repins it in place.
+After a MUX switch to the RTX (no iGPU node) those pins are removed instead.
+A pin you wrote yourself is never changed.
 
 **Why:** stock 4.0.5 sets `LIBVA_DRIVER_NAME=nvidia` because its display check
 misses the Krackan iGPU (a non-VGA display controller with no `boot_vga`), and
@@ -71,7 +82,8 @@ YouTube on battery about 9 W instead of 12 W).
 **Mirrors:** fork branch `asus/hybrid-video-decode` (`c0b4e886`). The mpv and
 Chromium edits are the fork's `install/helpers/hybrid-video-decode.sh` and
 `omarchy-hw-igpu-render-node`, shipped unchanged and run as the leaf
-`install/user/hardware/hybrid-video-decode.sh` runs them.
+`install/user/hardware/hybrid-video-decode.sh` runs them, except that the
+Chromium pin gets the marker line above it.
 
 **Difference from the fork:** the fork changes `default/hypr/nvidia.lua` so it
 no longer sets the variable. This package can't change that file, and a later
@@ -79,7 +91,9 @@ Hyprland config line can't unset a variable, so the Lua file sets
 `LIBVA_DRIVER_NAME=radeonsi` (Mesa's AMD driver) under the same
 `omarchy-hw-igpu-render-node` check, only for an AMD iGPU. The fork's
 stale-pin cleanup at Hyprland start isn't mirrored: after a BIOS update or a
-MUX switch, run the command again. `omarchy refresh chromium` rewrites
+MUX switch, `--check` shows `needs repair` and running the command again fixes
+the pins (only its own, unlike the fork's cleanup, which drops any stale
+by-path pin). `omarchy refresh chromium` rewrites
 `chromium-flags.conf` and drops the pin; run the command again after it. Stock
 4.0.5's `omarchy-cmd-browser-handoff` doesn't know `--render-node-override`, so
 with the pin it opens links by starting a browser process (about 165 ms)

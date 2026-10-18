@@ -142,7 +142,8 @@ power_owner() {
 }
 
 # Non-comment lines of the user's Hyprland config matching an ERE, not counting
-# the lines this command adds. Prints the first file.
+# the lines this command adds. Prints the first file. Follows symlinks: dotfile
+# managers often link hyprland.lua, or the whole hypr directory, from elsewhere.
 hypr_sets() {
   local f
   [[ -d $HOME/.config/hypr ]] || return 1
@@ -151,7 +152,7 @@ hypr_sets() {
       printf '%s\n' "$f"
       return 0
     fi
-  done < <(find "$HOME/.config/hypr" -maxdepth 3 -type f \( -name '*.lua' -o -name '*.conf' \) 2>/dev/null | sort)
+  done < <(find -L "$HOME/.config/hypr" -maxdepth 3 -type f \( -name '*.lua' -o -name '*.conf' \) 2>/dev/null | sort)
   return 1
 }
 
@@ -208,21 +209,111 @@ pci_has_nvidia_display() {
   return 1
 }
 
-# Each check sets ST (applied, present, local, missing or n/a) and DETAIL.
-# applied: the change this command makes is in place. present: the fix is in
-# place from somewhere else. local: you have your own setting for it, which is
-# left alone. missing: applying would add it. n/a: not this hardware, or a
-# prerequisite package is not installed.
+# Each check sets ST (applied, present, local, missing, repair or n/a) and
+# DETAIL. applied: the change this command makes is in place. present: the fix
+# is in place from somewhere else. local: you have your own setting for it,
+# which is left alone. missing: applying would add it. repair: a change this
+# command made is out of date, and applying updates or removes it. n/a: not
+# this hardware, or a prerequisite package is not installed.
 ST='' DETAIL=''
 
 # ---------------------------------------------------------------------------
 # hybrid-video
 
+# The marker line written above each Chromium-family pin this command adds. Only
+# pins under it, and the vaapi-device line in the block under the fork's mpv
+# comment, are ever changed again; a pin you wrote yourself is never touched.
+HYBRID_VIDEO_PIN_MARKER="# omarchy-asus-g16-apply hybrid-video: decode on the iGPU (kept up to date by the command; delete this line and the next to undo)"
+
+# The render node pins this command wrote, one "FILE<TAB>LINE<TAB>NODE" each.
+hybrid_video_managed_pins() {
+  local f
+  for f in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
+    [[ -f $f ]] || continue
+    awk -v m="$HYBRID_VIDEO_PIN_MARKER" -v f="$f" '
+      prev == m && /^--render-node-override=[^[:space:]]+$/ { print f "\t" NR "\t" substr($0, 24) }
+      { prev = $0 }' "$f"
+  done
+  [[ -f $HYBRID_VIDEO_MPV_CONF ]] || return 0
+  # The fork's hybrid_video_pin_mpv writes its comment, then the options, then a
+  # blank line ahead of what was there before.
+  awk -v m="$HYBRID_VIDEO_MPV_COMMENT" -v f="$HYBRID_VIDEO_MPV_CONF" '
+    $0 == m { block = 1; next }
+    block && (/^[[:space:]]*$/ || /^[[:space:]]*\[/) { exit }
+    block && /^vaapi-device=[^[:space:]]+$/ { print f "\t" NR "\t" substr($0, 14) }' "$HYBRID_VIDEO_MPV_CONF"
+}
+
+# Managed pins that don't name NODE (any of them when NODE is empty), as
+# "~/file:line" words.
+hybrid_video_stale_pins() {
+  local node=$1 file line pin
+  while IFS=$'\t' read -r file line pin; do
+    [[ -n $node && $pin == "$node" ]] || printf '%s:%s\n' "$(tilde "$file")" "$line"
+  done < <(hybrid_video_managed_pins)
+}
+
+# Repoints the stale managed pins at NODE, or removes them (and a Chromium pin's
+# marker) when NODE is empty. Rewrites in place, which keeps a symlinked config
+# pointing where it did.
+hybrid_video_repair_pins() {
+  local node=$1 file line pin out
+  local -A lines=()
+  while IFS=$'\t' read -r file line pin; do
+    [[ -n $node && $pin == "$node" ]] || lines[$file]+="$line "
+  done < <(hybrid_video_managed_pins)
+  for file in "${!lines[@]}"; do
+    if ((DRY_RUN)); then
+      if [[ -n $node ]]; then
+        printf '    [dry-run] repin to %s in %s (line %s)\n' "$node" "$(tilde "$file")" "${lines[$file]% }"
+      else
+        printf '    [dry-run] remove the pin from %s (line %s)\n' "$(tilde "$file")" "${lines[$file]% }"
+      fi
+      continue
+    fi
+    out=$(awk -v lines="${lines[$file]}" -v node="$node" -v m="$HYBRID_VIDEO_PIN_MARKER" '
+      BEGIN { n = split(lines, a, " "); for (i = 1; i <= n; i++) fix[a[i]] = 1 }
+      { buf[NR] = $0 }
+      END {
+        for (i = 1; i <= NR; i++) {
+          if (node == "" && fix[i + 1] && buf[i] == m) continue
+          if (fix[i]) {
+            if (node == "") continue
+            sub(/=.*/, "=" node, buf[i])
+          }
+          print buf[i]
+        }
+      }' "$file"; echo x)
+    printf '%s' "${out%x}" >"$file"
+    if [[ -n $node ]]; then info "repinned $(tilde "$file") to $node"; else info "removed the pin from $(tilde "$file")"; fi
+  done
+}
+
+# The fork's hybrid_video_pin_chromium, with the marker line above the pin.
+hybrid_video_pin_chromium_marked() {
+  local node=$1 conf
+  for conf in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
+    [[ -f $conf ]] || continue
+    grep -q -- '^[[:space:]]*--render-node-override=' "$conf" && continue
+    [[ -s $conf && -n $(tail -c1 "$conf") ]] && echo >>"$conf"
+    printf '%s\n--render-node-override=%s\n' "$HYBRID_VIDEO_PIN_MARKER" "$node" >>"$conf"
+  done
+}
+
 check_hybrid_video() {
-  local node f local_parts=() env_ours=0 mpv_ours=0 unpinned=()
+  local node="" f local_parts=() env_ours=0 mpv_ours=0 unpinned=() stale=()
   if [[ ! -f $HYPR_CONF ]]; then ST=n/a DETAIL="no $(tilde "$HYPR_CONF")"; return; fi
-  if ! node=$(omarchy-hw-igpu-render-node 2>/dev/null); then
-    ST=n/a DETAIL="no iGPU-driven display next to an NVIDIA GPU (omarchy-hw-igpu-render-node)"
+  node=$(omarchy-hw-igpu-render-node 2>/dev/null) || node=""
+  mapfile -t stale < <(hybrid_video_stale_pins "$node")
+  if [[ -z $node ]]; then
+    if ((${#stale[@]})); then
+      ST=repair DETAIL="no iGPU-driven display now (MUX or firmware change), but this command's pins remain (${stale[*]}); applying removes them"
+    else
+      ST=n/a DETAIL="no iGPU-driven display next to an NVIDIA GPU (omarchy-hw-igpu-render-node)"
+    fi
+    return
+  fi
+  if ((${#stale[@]})); then
+    ST=repair DETAIL="this command's pins name an old render node (${stale[*]}); applying repins them to $node"
     return
   fi
   hypr_has_line hybrid-video-env.lua && env_ours=1
@@ -234,7 +325,9 @@ check_hybrid_video() {
   fi
   for f in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
     [[ -f $f ]] || continue
-    if grep -q -- '^[[:space:]]*--render-node-override=' "$f"; then
+    if grep -qxF -- "$HYBRID_VIDEO_PIN_MARKER" "$f"; then
+      :
+    elif grep -q -- '^[[:space:]]*--render-node-override=' "$f"; then
       ((env_ours || mpv_ours)) || local_parts+=("--render-node-override set in $(tilde "$f")")
     else
       unpinned+=("$(tilde "$f")")
@@ -252,8 +345,22 @@ check_hybrid_video() {
 }
 
 apply_hybrid_video() {
-  local node f
-  node=$(omarchy-hw-igpu-render-node) || return 1
+  local node="" f
+  node=$(omarchy-hw-igpu-render-node 2>/dev/null) || node=""
+  # Stale pins of this command's first: repinned to the current iGPU node, or
+  # removed when there is none (the fork's hybrid_video_unpin_stale, limited to
+  # the pins this command wrote).
+  local stale=()
+  mapfile -t stale < <(hybrid_video_stale_pins "$node")
+  hybrid_video_repair_pins "$node"
+  [[ -n $node ]] || return 0
+  # Then the rest of the fix, unless it is in place or a setting of yours is.
+  if ((DRY_RUN)); then
+    ((${#stale[@]} == 0)) || return 0
+  else
+    check_fix hybrid-video
+    [[ $ST == missing ]] || return 0
+  fi
   hypr_has_line hybrid-video-env.lua ||
     hypr_append hybrid-video hybrid-video-env.lua "VA-API on the iGPU instead of the RTX" || return 1
   # The fork's leaf (install/user/hardware/hybrid-video-decode.sh).
@@ -264,13 +371,13 @@ apply_hybrid_video() {
     ((${#opts[@]})) && printf '    [dry-run] prepend to %s: %s\n' "$(tilde "$HYBRID_VIDEO_MPV_CONF")" "${opts[*]}"
     for f in "${HYBRID_VIDEO_CHROMIUM_FLAGS_FILES[@]}"; do
       [[ -f $f ]] && ! grep -q -- '^[[:space:]]*--render-node-override=' "$f" &&
-        printf '    [dry-run] append to %s: --render-node-override=%s\n' "$(tilde "$f")" "$node"
+        printf '    [dry-run] append to %s, under a marker comment: --render-node-override=%s\n' "$(tilde "$f")" "$node"
     done
     return 0
   fi
   echo "    Detected a hybrid GPU with the display on the iGPU. Decoding video on $node."
   hybrid_video_pin_mpv
-  hybrid_video_pin_chromium
+  hybrid_video_pin_chromium_marked "$node"
   info "log out and back in for LIBVA_DRIVER_NAME; restart mpv and the browser for the pins"
   info "'omarchy refresh chromium' rewrites chromium-flags.conf; run this again after it"
 }
@@ -643,6 +750,7 @@ info_rows() {
 label() {
   case $1 in
     local) echo "present (local)" ;;
+    repair) echo "needs repair" ;;
     upstream) echo "upstream PR only" ;;
     *) echo "$1" ;;
   esac
@@ -652,7 +760,7 @@ row() {
   local color=''
   case $2 in
     applied | present | local) color=$G ;;
-    missing) color=$Y ;;
+    missing | repair) color=$Y ;;
   esac
   printf '  %-22s %s%-18s%s %s\n' "$1" "$color" "$(label "$2")" "$N" "$3"
 }
@@ -689,7 +797,7 @@ if ((CHECK)); then
       continue
     fi
     row "$fix" "$status" "$DETAIL"
-    [[ $status == missing ]] && missing_default=1
+    [[ $status == missing || $status == repair ]] && missing_default=1
   done
   ((DRY_RUN)) || exit $((missing_default ? 10 : 0))
 fi
@@ -701,7 +809,7 @@ TODO=()
 for fix in "${SELECTED[@]}"; do
   check_fix "$fix"
   ((CHECK)) || row "$fix" "$ST" "$DETAIL"
-  [[ $ST == missing ]] && TODO+=("$fix")
+  [[ $ST == missing || $ST == repair ]] && TODO+=("$fix")
 done
 
 if ((${#TODO[@]} == 0)); then
