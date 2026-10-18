@@ -26,6 +26,10 @@ pick() {
 headers=$(pick linux-omarchy-headers)
 nvidia=$(pick nvidia-open-dkms)
 
+# Trust the repo key as the laptop does, so pacman also accepts the published
+# package's .sig (a build from this run is unsigned: LocalFileSigLevel=Optional).
+pacman-key --add "$repo/keys/omarchy-asus.asc" >/dev/null
+pacman-key --lsign-key 0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88 >/dev/null
 pacman -U --noconfirm --needed --noprogressbar "$headers"
 # Only the module sources: the package's runtime deps (nvidia-utils=<ver>)
 # don't matter for a compile test, and extracting skips the dkms install hook.
