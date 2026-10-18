@@ -55,9 +55,17 @@ as_user bash -euo pipefail -c '
 makepkg_args=()
 [[ -d $work/keys/pgp ]] && makepkg_args=(-- --skippgpcheck)
 
+# Distributed compiles (optional): if a compile-only SSH key for a distcc
+# helper exists, mount it read-only at /distcc. The chroot's
+# /etc/makepkg.conf.d/distcc.conf (local, not in this repo) points distcc at
+# the helper; without the key or helper, distcc falls back to local compiles.
+distcc_dir=${DISTCC_KEY_DIR:-$DATA/distcc}
+distcc_bind=()
+[[ -r $distcc_dir/id_ed25519 ]] && distcc_bind=(-D "$distcc_dir:/distcc")
+
 # -c: fresh copy of the root chroot; -u: update it first.
 cd "$work"
-as_root nice -n 19 ionice -c 3 makechrootpkg -c -u -r "$CHROOT" "${chroot_user[@]}" "$@" "${makepkg_args[@]}" 2>&1 |
+as_root nice -n 19 ionice -c 3 makechrootpkg -c -u -r "$CHROOT" "${chroot_user[@]}" "${distcc_bind[@]}" "$@" "${makepkg_args[@]}" 2>&1 |
     as_user tee "$log"
 as_user bash -c 'mv -v "$1"/*.pkg.tar.zst "$2"/ && rm -rf "$1"' _ "$work" "$STAGE_DIR"
 echo "log: $log"
