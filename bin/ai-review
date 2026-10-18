@@ -536,8 +536,12 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False, reply=None, 
                 pr = gh_json("pr", "view", str(num), "-R", repo, "--json", fields)
             if pr["headRefOid"] != local:
                 raise RuntimeError(f"push first: the PR head is {pr['headRefOid'][:12]}, the checkout is at {local[:12]}")
-        head, base = local, pr["baseRefOid"]
-        run(git_cred("-C", checkout, "fetch", "--quiet", f"https://github.com/{repo}.git", base))
+        # The base branch's current tip, by name: the PR's baseRefOid only refreshes when the
+        # PR is updated, so before the push it can be stale (and the post would not match).
+        run(git_cred("-C", checkout, "fetch", "--quiet", f"https://github.com/{repo}.git",
+                     f"refs/heads/{pr['baseRefName']}"))
+        head = local
+        base = run(["git", "-C", checkout, "rev-parse", "FETCH_HEAD"]).stdout.strip()
         mb = run(["git", "-C", checkout, "merge-base", base, head]).stdout.strip()
     else:
         mb = merge_base(repo, base, head)  # a retargeted PR (same head, new diff) is reviewed again
