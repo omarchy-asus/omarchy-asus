@@ -295,7 +295,8 @@ cr_state() {  # cr_state <pr number> <out json>: CodeRabbit's state for the PR h
     to_file "$out.raw" gh api graphql --paginate -F owner="$owner" -F name="$name" -F number="$num" -f query='
 query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){
   headRefOid
-  commits(last:1){nodes{commit{oid status{contexts{context state description creator{__typename login}}}}}}
+  commits(last:1){nodes{commit{oid status{contexts{context state description creator{__typename login}}}
+    checkSuites(first:20){nodes{app{slug} checkRuns(first:20){nodes{name status conclusion title}}}}}}}
   reviews(last:30){nodes{author{__typename login} state commit{oid} body}}
   reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{isResolved isOutdated
     comments(first:1){nodes{databaseId author{__typename login} body path line url}}}}}}}' || return 1
@@ -320,8 +321,13 @@ bot = lambda a: (a or {}).get("__typename") == "Bot" and a.get("login") in ("cod
 ctx = [c for n in raw["commits"]["nodes"] for c in ((n["commit"].get("status") or {}).get("contexts") or [])
        if "coderabbit" in c["context"].lower() and bot(c.get("creator"))]
 # "Review completed" counts; "Review skipped: ..." (e.g. base branch not enabled) does not
-status_done = any(c["state"] == "SUCCESS" and "skipped" not in (c.get("description") or "").lower() for c in ctx)
-status_pending = any(c["state"] == "PENDING" for c in ctx)
+# CodeRabbit reports progress as a commit status, or as check runs of its app
+runs = [cr for n in raw["commits"]["nodes"] for s in (((n["commit"].get("checkSuites") or {}).get("nodes")) or [])
+        if ((s.get("app") or {}).get("slug") or "") == "coderabbitai" for cr in ((s.get("checkRuns") or {}).get("nodes") or [])]
+status_done = (any(c["state"] == "SUCCESS" and "skipped" not in (c.get("description") or "").lower() for c in ctx)
+               or any(cr["status"] == "COMPLETED" and cr.get("conclusion") == "SUCCESS"
+                      and "skipped" not in (cr.get("title") or "").lower() for cr in runs))
+status_pending = any(c["state"] == "PENDING" for c in ctx) or any(cr["status"] != "COMPLETED" for cr in runs)
 reviewed = status_done or any(bot(r["author"]) and (r.get("commit") or {}).get("oid") == head
                               for r in raw["reviews"]["nodes"])
 threads = []
@@ -330,7 +336,7 @@ for t in all_threads:
     if c and bot(c["author"]) and not t["isResolved"] and not t["isOutdated"]:
         threads.append({"id": c["databaseId"], "path": c["path"], "line": c["line"], "url": c["url"],
                         "body": c["body"][:4000]})
-json.dump({"head": head, "reviewed": reviewed and not status_pending and complete, "seen": bool(ctx) or reviewed,
+json.dump({"head": head, "reviewed": reviewed and not status_pending and complete, "seen": bool(ctx) or bool(runs) or reviewed,
            "threads": threads}, open(sys.argv[2], "w"), indent=2)' "$out.raw" "$out"
 }
 wait_coderabbit() {  # wait_coderabbit <pr number> <out json>: 0 when CodeRabbit finished on the head
@@ -571,12 +577,6 @@ for p in sys.stdin.read().split():
     [[ $build_ok == yes ]] || reasons+=("chroot build failed")
     [[ $(as_user jq -r '.fuzz' "$report") == false ]] || reasons+=("a patch applied with fuzz")
     [[ -z $changed ]] || reasons+=("changes our patches or DELTA: $(echo $changed)")
-    flags=$(current_flags "$flags" "$pnote" "$CLONE/recipes/$r")
-    [[ -z $flags ]] || reasons+=("flags: $flags")
-    if [[ $build_ok == yes ]]; then
-        if [[ $cr_note != "CodeRabbit gate off"* ]]; then
-            [[ -s $cr && $(as_user jq -r .reviewed "$cr" 2>/dev/null) == true && $(as_user jq -r '.head // ""' "$cr") == "$(ugit rev-parse HEAD)" ]] ||
-                reasons+=("CodeRabbit has not reviewed the head")
     # The agent's limits are only a prompt. Auto-merge ships exactly what bin/rebase-recipe
     # produced: if the fix commits (everything after the branch's first, rebase commit)
     # touched anything in the recipe but NOTES.md, a human merges.
@@ -585,6 +585,12 @@ for p in sys.stdin.read().split():
     [[ -z $rebase_commit ]] || agent_files=$(ugit diff --name-only "$rebase_commit" HEAD -- "recipes/$r" |
         grep -vxF "recipes/$r/NOTES.md" || true)
     [[ -z $agent_files ]] || reasons+=("review fixes changed recipe files (a human merges): $(echo $agent_files)")
+    flags=$(current_flags "$flags" "$pnote" "$CLONE/recipes/$r")
+    [[ -z $flags ]] || reasons+=("flags: $flags")
+    if [[ $build_ok == yes ]]; then
+        if [[ $cr_note != "CodeRabbit gate off"* ]]; then
+            [[ -s $cr && $(as_user jq -r .reviewed "$cr" 2>/dev/null) == true && $(as_user jq -r '.head // ""' "$cr") == "$(ugit rev-parse HEAD)" ]] ||
+                reasons+=("CodeRabbit has not reviewed the head")
             [[ ! -s $cr || $(as_user jq -r '.threads | length' "$cr") == 0 ]] || reasons+=("unresolved CodeRabbit threads")
         fi
         if [[ $REQUIRE_AGENT_APPROVAL == yes ]]; then
