@@ -30,12 +30,25 @@ bash omarchy-asus-setup
 
 The script:
 
-1. Stops unless the DMI product or board name contains `GA605`. Use `--force` to skip this check.
+1. Stops unless the DMI product or board name contains `GA605`. `--force` skips this check, and
+   also lets the upgrade in step 8 go ahead when no snapshot could be taken.
 2. Prints the EXPERIMENTAL warning and asks you to confirm. If no fallback kernel is installed, it
    offers to install Arch's `linux` and `linux-headers` first (from the databases you already have,
    so no partial upgrade), and DKMS builds the NVIDIA module for both kernels. It also warns if
    `IgnorePkg` holds back a package this repo ships, and about an out-of-tree hid-asus DKMS source
    in `/usr/src` (see step 4 of [Switching an existing install](#switching-an-existing-install)).
+
+   For each fallback kernel you have installed (`linux`, `linux-lts`, `linux-zen`,
+   `linux-hardened`), it warns when:
+   - its `-headers` package is missing;
+   - `dkms status` shows no installed NVIDIA build for its kernel release;
+   - `/boot/limine.conf` has no entry for it (read with `sudo -n`, so it never asks for a
+     password);
+   - the login records (`last -x reboot`, or `wtmpdb last reboot`) show it has never booted. It
+     suggests you boot it once before the switch.
+
+   These only warn and don't stop the script: login records can be rotated, and a kernel that has
+   never booted may still be fine.
 3. Downloads `keys/omarchy-asus.asc` over HTTPS. If the key isn't exactly the one with fingerprint
    `0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88` (hardcoded in the script), it stops. Otherwise it runs
    `pacman-key --add` and `pacman-key --lsign-key`.
@@ -56,7 +69,16 @@ The script:
    takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
    `pacman -Syu`, so the script doesn't run one.
 
-   Before the upgrade, the script checks every `/etc` file that the repo's upgraded packages install
+   Before it offers the upgrade, the script takes its own snapper snapshot
+   (`snapper -c root create -c number -d 'before omarchy-asus'`) and checks that it appears in
+   `snapper -c root list`. If snapper has no `root` config or the snapshot fails, it doesn't offer
+   the upgrade (`--force` overrides this). `omarchy update` carries on without a snapshot when its
+   own fails, and the snapshot is the only way back from a bad driver or Omarchy migration: every
+   kernel shares `nvidia-open-dkms`, Hyprland and the omarchy packages, so a fallback kernel doesn't
+   help there. `--dry-run` prints the snapper command, and still refuses when snapper isn't
+   configured.
+
+   Before the upgrade, the script also checks every `/etc` file that the repo's upgraded packages install
    against the repo's signed files database. A file that no package owns stops pacman's upgrade with
    an `exists in filesystem` conflict, and `omarchy update` passes `--overwrite` only for
    `/usr/share/omarchy`. An example is the asusd drop-in
@@ -132,8 +154,17 @@ Do it in this order on a G16 that already runs stock Omarchy. The script does st
 at the end of step 3. Do the rest by hand: in particular, remove the `IgnorePkg` entries yourself
 before you run the script. The script only warns about them.
 
-0. **Make sure you can boot if this fails.** Keep a fallback kernel installed (`sudo pacman -S linux`).
-   Check that the Limine boot menu lists snapshot entries; `sudo snapper list` shows the snapshots.
+0. **Make sure you can get back if this fails.** Keep a fallback kernel installed with its headers
+   (`sudo pacman -S linux linux-headers`). Check that `dkms status` lists an installed nvidia build
+   for it and that the Limine boot menu has an entry for it, then boot it once before the switch.
+
+   A fallback kernel only covers a bad kernel. The driver, Hyprland and the omarchy packages are
+   shared by every kernel, so for those the snapshot taken before the upgrade is the only way back.
+   Check `sudo snapper list` and take one (`sudo snapper -c root create -d 'before omarchy-asus'`);
+   the script does this itself before it offers the upgrade.
+
+   Section 4 of [`bin/g16-check`](bin/g16-check) ("Way back") reports all of this read-only, as
+   PASS or WARN, including whether a snapshot newer than the last pacman transaction exists.
 1. **Read-only audit.** Write down what you have now:
 
    ```bash
