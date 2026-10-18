@@ -24,6 +24,8 @@
 #   unpublish: stale with nothing to rebuild from (exact-version dependency moved, ...), or
 #              a repo-db package that no recipe ships any more (recipe removed;
 #              KEEP_PUBLISHED exempts names)
+#   cohorts:   release cohorts (build/cohorts.conf) are published in one bin/publish call once
+#              every member is built at the same version, and are withdrawn together.
 #   On a failed rebase/build the affected packages are unpublished and the release
 #   synced at once (stock flows through: a stale pin blocks or breaks updates, because
 #   pacman takes the first repo that has the name), and the reason goes to
@@ -56,7 +58,7 @@ while (($#)); do
         --recipe) recipes+=("$2"); shift ;;
         --workspace) workspace_arg=$(realpath "$2"); shift ;;
         --config) config=$2; shift ;;
-        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
     shift
@@ -269,7 +271,11 @@ publish_files() {  # publish_files <recipe dir> <version>: publish the staged pa
     # set merge_mismatch=yes otherwise. --match-head-commit pins the head, not the base: a
     # base-branch commit to the same recipe during the build and review would otherwise ship
     # a recipe that was never built.
-    local dir=$1 ver=$2 files=() n info
+    # Release cohorts (build/cohorts.conf, bin/release-cohort): every partner of this recipe's
+    # packages must be staged from its recipe on $BASE_BRANCH (the first field of the
+    # .staged-<p> marker holds that tree) at the same version; then all of them go out in one bin/publish call.
+    # Returns 3 (nothing published) while a partner is not ready, 1 on failure.
+    local dir=$1 ver=$2 files=() own=() n info
     if [[ -n ${merged_pr:-} && $(merged_tree "$merged_pr" "${dir##*/}") != "${built_tree:-}" ]]; then
         merge_mismatch=yes
         note publish "the merge commit of $merged_pr does not hold the built recipes/${dir##*/} (or is unknown): not publishing"
@@ -277,11 +283,49 @@ publish_files() {  # publish_files <recipe dir> <version>: publish the staged pa
     fi
     info=$(srcinfo "$dir") ||
         { note publish "makepkg --printsrcinfo failed in bin/recipe-sandbox for $dir"; return 1; }
-    for n in $(sed -n 's/^pkgname = //p' <<<"$info"); do
+    mapfile -t own < <(sed -n 's/^pkgname = //p' <<<"$info")
+    ((${#own[@]})) || { note publish "cannot read the package names of $dir"; return 1; }
+    for n in "${own[@]}"; do
         mapfile -t -O "${#files[@]}" files < <(as_user bash -c 'ls "$1"/"$2"-"$3"-*.pkg.tar.zst 2>/dev/null' _ "$STAGE_DIR" "$n" "$ver")
     done
     ((${#files[@]})) || { note publish "no staged packages for $dir $ver"; return 1; }
-    as_user "$LIB/publish" "${files[@]}" || return 1
+    local members partners=() p ptree pmark pfiles=() fetched=no
+    members=$(as_user "$LIB/release-cohort" members "${own[@]}") ||
+        { note publish "bin/release-cohort failed for ${own[*]}: not publishing"; return 1; }
+    while IFS= read -r p; do
+        [[ -n $p ]] || continue
+        printf '%s\n' "${own[@]}" | grep -qxF -- "$p" || partners+=("$p")
+    done <<<"$members"
+    for p in "${partners[@]}"; do
+        if [[ $fetched == no ]]; then
+            # a stale origin/$BASE_BRANCH could approve a partner whose recipe changed (or got a HOLD)
+            ugit fetch --quiet origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" ||
+                { note publish "cannot fetch $BASE_BRANCH to check the cohort partners of ${dir##*/}: not publishing"; return 1; }
+            fetched=yes
+        fi
+        ptree=$(ugit rev-parse --verify --quiet "origin/$BASE_BRANCH:recipes/$p" 2>/dev/null) || ptree=
+        pfiles=() pmark=
+        read -r pmark _ < <(as_user cat "$STAGE_DIR/.staged-$p" 2>/dev/null || true) || true
+        if [[ -n $ptree && ${pmark:-} == "$ptree" ]]; then
+            mapfile -t pfiles < <(as_user bash -c 'ls "$1"/"$2"-"$3"-*.pkg.tar.zst 2>/dev/null' _ "$STAGE_DIR" "$p" "$ver")
+        fi
+        if ((${#pfiles[@]} == 0)); then
+            note publish "$p is not built from $BASE_BRANCH at $ver yet: holding ${dir##*/} back (release cohort, build/cohorts.conf)"
+            return 3
+        fi
+        files+=("${pfiles[@]}")
+    done
+    # A partner's turn earlier in this run may have published the whole cohort already: then
+    # every file is in the repo with the same bytes and in the db, and signing it again would
+    # only change the .sig the release already has.
+    if as_user bash -c 'r=$1 db=$2; shift 2; in_db=$(bsdtar -tf "$db" 2>/dev/null) || exit 1
+            for f; do b=${f##*/}
+                cmp -s "$f" "$r/$b" && grep -qxF -- "${b%-*.pkg.tar.zst}/" <<<"$in_db" || exit 1
+            done' _ "$REPO_DIR" "$REPO_DIR/$REPO_NAME.db.tar.gz" "${files[@]}"; then
+        note publish "${files[*]##*/} already published"
+    else
+        as_user "$LIB/publish" "${files[@]}" || return 1
+    fi
     local names=() f; for f in "${files[@]}"; do f=${f##*/}; names+=("${f%-*-*-*}"); done
     pending_edit drop "${names[@]}"
     sync_now
@@ -341,8 +385,13 @@ outgoing_ok() {  # outgoing_ok <recipe> <base rev> <what> [<title> <body>]: 0 if
     pii_ok "$f" "$what"
 }
 build_recipe() {  # build_recipe <recipe>: chroot build of $CLONE/recipes/<recipe> + reverse-dep checks
-    local r=$1 ver
+    # On success, $STAGE_DIR/.staged-<recipe> holds "<tree> <revdep key>": the recipe tree that
+    # was built (release cohorts publish a partner only from it) and the counterparts its
+    # reverse-dependency checks ran against; it is cleared first, so a failed build leaves none.
+    local r=$1 ver th key
     build_log=$RUN/$r.build.log
+    th=$(tree_hash "$r")
+    as_user rm -f "$STAGE_DIR/.staged-$r"
     if [[ $EUID -eq 0 ]]; then
         OMARCHY_ASUS_SANDBOX_HIDE=$sandbox_hide "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 |
             as_user tee "$build_log" >/dev/null || return 1
@@ -350,7 +399,9 @@ build_recipe() {  # build_recipe <recipe>: chroot build of $CLONE/recipes/<recip
         as_user "$LIB/build-pkg" "$CLONE/recipes/$r" 2>&1 | as_user tee "$build_log" >/dev/null || return 1
     fi
     ver=$(recipe_version "$CLONE/recipes/$r") || return 1
-    revdep_checks "$r" "$ver"
+    key=$(revdep_key "$r" "$ver")
+    revdep_checks "$r" "$ver" || return 1
+    as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.staged-$r" "$th $key"
 }
 
 # ---------------------------------------------------------------- reverse-dependency CI
@@ -796,11 +847,28 @@ EOF
     built_tree=$(tree_hash "$r")
 
     if ((${#reasons[@]} == 0)); then
-        if as_user gh pr merge "$pr" -R "$GH_REPO" --squash --delete-branch --admin --match-head-commit "$head" >/dev/null &&
-           publish_files "$CLONE/recipes/$r" "$new_ver"; then
+        local prc=1
+        if as_user gh pr merge "$pr" -R "$GH_REPO" --squash --delete-branch --admin --match-head-commit "$head" >/dev/null; then
+            prc=0; publish_files "$CLONE/recipes/$r" "$new_ver" || prc=$?
+        fi
+        if ((prc == 0)); then
             as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.built-$r" "$(tree_hash "$r") $key"
             as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"
             record "$r" ok rebase version="$new_ver" pr="$pr" message="merged and published"
+        elif ((prc == 3)); then
+            # Merged and built, but its release-cohort partner is not built at $new_ver yet:
+            # nothing was published. No .built-<r>, so the next run's build step retries the
+            # publish (from the .staged-<r> build); the stale pair must not shadow stock meanwhile.
+            as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"
+            if unpublish_now "$in_repo" "merged $new_ver; held back until its release-cohort partner is built at $new_ver"; then
+                record "$r" attention rebase version="$new_ver" pr="$pr" \
+                    message="merged; publishes together with its release-cohort partner once that is built at $new_ver"
+                attention=1
+            else
+                record "$r" failed rebase class=unpublish version="$new_ver" pr="$pr" \
+                    message="merged, held back for its release-cohort partner; stale ${in_repo//,/ } could not be unpublished (retried next run)"
+                failed=1
+            fi
         elif [[ $merge_mismatch == yes ]]; then
             # Merged, but not what was built: publish nothing. Without a built-tree marker the
             # next run sees the base branch's recipe unbuilt, and builds and publishes it.
@@ -840,13 +908,14 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
         record "$r" ok build-dry-run version="$ver" message="$3"
         return 0
     fi
-    local th key built_tree_mark built_key
+    local th key staged_tree staged_key prc=0 how="built and published"
     th=$(tree_hash "$r")
     key=$(revdep_key "$r" "$ver")
-    # Marker "<tree> <key>": the build of this tree, checked against these counterparts.
-    read -r built_tree_mark built_key _ < <(as_user cat "$STAGE_DIR/.built-$r" 2>/dev/null || true) || true
-    if [[ ${built_tree_mark:-} == "$th" ]]; then
-        if [[ ${built_key:-} != "$key" ]]; then
+    # .staged-<r> "<tree> <key>": the staged build of this tree, checked against these counterparts.
+    read -r staged_tree staged_key _ < <(as_user cat "$STAGE_DIR/.staged-$r" 2>/dev/null || true) || true
+    if [[ ${staged_tree:-} == "$th" ]]; then
+        how="published the build made for its PR"
+        if [[ ${staged_key:-} != "$key" ]]; then
             note "$r" "the reverse-dependency counterpart changed since $ver was built: re-running the checks"
             build_log=$RUN/$r.build.log
             if ! revdep_checks "$r" "$ver"; then
@@ -856,20 +925,33 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
                 failed=1
                 return 0
             fi
-            as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.built-$r" "$th $key"
+            as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.staged-$r" "$th $key"
+        else
+            note "$r" "already built from this tree; publishing"
         fi
-        if publish_files "$CLONE/recipes/$r" "$ver"; then
-            record "$r" ok build version="$ver" message="published the build made for its PR"
+    else
+        note "$r" "building $ver"
+        if ! build_recipe "$r"; then
+            unpublish_now "$in_repo" "build of $ver failed" || true
+            record "$r" failed build class=build version="$ver" message="chroot build failed: see run $run_id: ${build_log##*/}"
+            failed=1
             return 0
         fi
     fi
-    note "$r" "building $ver"
-    if build_recipe "$r" && publish_files "$CLONE/recipes/$r" "$ver"; then
+    publish_files "$CLONE/recipes/$r" "$ver" || prc=$?
+    if ((prc == 0)); then
         as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.built-$r" "$th $key"
-        record "$r" ok build version="$ver" message="built and published"
+        record "$r" ok build version="$ver" message="$how"
+    elif ((prc == 3)); then
+        # Built, but its release-cohort partner is not built at $ver yet: nothing published.
+        unpublish_now "$in_repo" "built $ver; held back until its release-cohort partner is built at $ver" || true
+        record "$r" attention build version="$ver" message="built; publishes together with its release-cohort partner once that is built at $ver"
+        attention=1
     else
-        unpublish_now "$in_repo" "build of $ver failed" || true
-        record "$r" failed build class=build version="$ver" message="chroot build failed: see run $run_id: ${build_log##*/}"
+        # Rebuild next run rather than retrying a staged build that may be gone or bad.
+        as_user rm -f "$STAGE_DIR/.staged-$r"
+        unpublish_now "$in_repo" "publish of $ver failed" || true
+        record "$r" failed build class=publish version="$ver" message="publish of $ver failed; see logs/${LOG##*/}"
         failed=1
     fi
 }

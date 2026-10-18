@@ -46,7 +46,7 @@ The signed `[omarchy-asus]` repo, served from the
 | `hyprland`, `hyprpm` | 0.56.2-4.1 | Windows no longer render off-screen after an HDMI replug | Fixed on main by [hyprwm/Hyprland#16140](https://github.com/hyprwm/Hyprland/pull/16140), unreleased; dropped when 0.57 ships |
 | `omarchy-asus-g16` | 1.0.0-1 | GA605KM: the touchpad no longer wakes the laptop; hibernate powers off cleanly (`HibernateMode=shutdown`); Dynamic Boost keeps working after many charger plug-ins (nvidia-powerd start limit) | Not yet proposed upstream; files are byte-identical to the [omarchy fork](https://github.com/omarchy-asus/omarchy)'s, under `/usr/lib` ([notes](recipes/omarchy-asus-g16/README.md)) |
 | `asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` | 0.1.0-1 | A toast when Fn+Super locks or unlocks the Windows key (needs the kernel's Win-lock patch); the G16 Control widget holds the switch | Userspace for the kernel patch; the widget needs Omarchy to load system-wide plugins ([notes](recipes/asus-rog-nkey-winlock/README.md)) |
-| `omarchy`, `omarchy-settings` | 4.0.5-1.1 | **Experimental.** Stock Omarchy 4.0.5 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
+| `omarchy`, `omarchy-settings` | 4.0.5-1.2 | **Experimental.** Stock Omarchy 4.0.5 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
 
 The three NVIDIA fixes are open pull requests by other people. We carry them because they fix
 real bugs on this hardware.
@@ -147,8 +147,18 @@ Where our fixes are headed:
   `[omarchy]`).
 - `bin/mkchroot`: creates or updates the clean devtools chroot.
 - `bin/build-pkg recipes/X`: `makechrootpkg -c -u` at idle CPU and IO priority.
-- `bin/publish FILES`: signs the packages and runs `repo-add --sign --verify --remove`.
-- `bin/unpublish PKG`: drops a package so the stock build flows through.
+- `bin/publish FILES`: signs the packages and runs `repo-add --sign --verify --remove`. It
+  refuses to publish a release cohort member from `build/cohorts.conf` (e.g. omarchy and
+  omarchy-settings) without its partner at the same version, in the same call or already in
+  the db.
+- `bin/unpublish PKG`: drops a package so the stock build flows through; it withdraws the
+  whole release cohort (the partners the db holds) with it.
+- `bin/release-cohort members|check-publish|check-recipes`: the release cohorts in
+  `build/cohorts.conf`. `members` lists a package's partners, `check-publish` is the gate
+  `bin/publish` runs, `check-recipes` checks that a member's `package()` pins its partner
+  as `=${pkgver}-${pkgrel}` (never the build-time `depends=()`: the chroot only has the stock
+  partner), and warns when the members' `_tag`, `_commit`, `pkgver`, `pkgrel`, sources or
+  checksums differ (`--strict`: refuses; offline test: `tests/ci/release-cohort.sh`).
 - `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release.
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:

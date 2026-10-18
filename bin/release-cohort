@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""Release cohorts: recipes whose packages are built, published and withdrawn together.
+
+Usage: bin/release-cohort [--cohorts FILE] [--workspace DIR] <command> [args]
+
+  members [--db DB [--present]] NAME...
+      Print each NAME, then every cohort partner of every NAME, one per line,
+      de-duplicated in first-seen order. With --db (a pacman repo db .tar.gz),
+      a partner is printed only if the db holds it; the NAMEs always print,
+      unless --present: then only the names the db holds print (none: no output).
+  check-publish [--db DB] FILE...
+      Refuse (exit 1) a set of package files that would publish a cohort member
+      without every partner at the same pkgver-pkgrel, either in the same set
+      or already in DB. Files outside every cohort always pass.
+  check-recipes [--strict]
+      Refuse (exit 1) a member whose dependency on a partner is not pinned to
+      the release: a package function must add exactly
+      "<partner>=${pkgver}-${pkgrel}", and the global (build-time) arrays may
+      name the partner only as "<partner>=${pkgver}" (the clean chroot and CI
+      have only the stock partner, so the exact pin there could not be
+      satisfied). Members that differ in _tag, _commit, pkgver, pkgrel,
+      source=() or sha256sums=() are a warning: auto-update rebases each
+      recipe in its own PR, so one may lag its partner on the base branch
+      (bin/publish and bin/auto-update hold it back until both match).
+      --strict makes those differences fatal too. PKGBUILDs are read as text,
+      never executed.
+
+Cohorts come from build/cohorts.conf: one cohort per line, whitespace-separated
+recipe directory names; each recipe builds one package with its own name. A
+missing file means no cohorts.
+
+--cohorts FILE    cohorts file (default <workspace>/build/cohorts.conf)
+--workspace DIR   repo checkout (default $OMARCHY_ASUS_WORKSPACE, else this
+                  script's checkout)
+
+Exit: 0 ok, 1 a check failed, 64 usage error.
+"""
+import argparse
+import os
+import re
+import sys
+import tarfile
+
+WORKSPACE = os.environ.get("OMARCHY_ASUS_WORKSPACE") or os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+EX_USAGE = 64
+PKG_RE = re.compile(r"\.pkg\.tar(\.[A-Za-z0-9]+)?$")
+ASSIGNMENTS = ("_tag", "_commit", "pkgver", "pkgrel")
+ARRAYS = ("source", "sha256sums")
+
+
+class UsageError(Exception):
+    pass
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        sys.stderr.write(f"release-cohort: {message}\n(see bin/release-cohort -h)\n")
+        sys.exit(EX_USAGE)
+
+
+class DocHelp(argparse.Action):
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, help="show the usage")
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(__doc__)
+        sys.exit(0)
+
+
+def load_cohorts(path):
+    """The cohorts in PATH: a list of member lists. A missing file is no cohorts."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return []
+    cohorts = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].split()
+        if line:
+            cohorts.append(line)
+    return cohorts
+
+
+def db_versions(path):
+    """{name: pkgver-pkgrel} of the packages in a pacman repo db. No db is an empty db."""
+    if not path or not os.path.exists(path):
+        return {}
+    versions = {}
+    try:
+        with tarfile.open(path, "r:*") as tar:
+            for member in tar.getmembers():
+                name = member.name
+                while name.startswith("./"):
+                    name = name[2:]
+                top = name.split("/", 1)[0]
+                parts = top.rsplit("-", 2)
+                if len(parts) == 3 and all(parts):
+                    versions[parts[0]] = f"{parts[1]}-{parts[2]}"
+    except (tarfile.TarError, OSError) as e:
+        raise UsageError(f"cannot read the repo db {path}: {e}") from e
+    return versions
+
+
+def partners_of(name, cohorts):
+    """The other members of every cohort NAME is in, in cohort order."""
+    out = []
+    for cohort in cohorts:
+        if name in cohort:
+            out.extend(m for m in cohort if m != name and m not in out)
+    return out
+
+
+def cmd_members(args, cohorts):
+    if args.present and not args.db:
+        raise UsageError("members: --present needs --db")
+    in_db = db_versions(args.db) if args.db else None
+    seen = []
+    for name in args.names:
+        if name not in seen:
+            seen.append(name)
+    for name in args.names:
+        for partner in partners_of(name, cohorts):
+            if partner in seen:
+                continue
+            if in_db is not None and partner not in in_db:
+                continue
+            seen.append(partner)
+    for name in seen:
+        if args.present and name not in in_db:
+            continue
+        print(name)
+    return 0
+
+
+def parse_pkgfile(path):
+    """(name, pkgver-pkgrel) of a package file, or None for a signature."""
+    base = os.path.basename(path)
+    if base.endswith(".sig"):
+        return None
+    m = PKG_RE.search(base)
+    if not m:
+        raise UsageError(f"not a package file: {path}")
+    parts = base[:m.start()].rsplit("-", 3)
+    if len(parts) != 4 or not all(parts):
+        raise UsageError(f"cannot parse <name>-<pkgver>-<pkgrel>-<arch> from {path}")
+    return parts[0], f"{parts[1]}-{parts[2]}"
+
+
+def cmd_check_publish(args, cohorts):
+    pkgs = [p for p in (parse_pkgfile(f) for f in args.files) if p]
+    in_db = db_versions(args.db) if args.db else {}
+    ok = True
+    for cohort in cohorts:
+        touched = [(n, v) for n, v in pkgs if n in cohort]
+        if not touched:
+            continue
+        members = " ".join(cohort)
+        versions = sorted({v for _, v in touched})
+        if len(versions) > 1:
+            listed = ", ".join(f"{n} {v}" for n, v in touched)
+            print(f"release-cohort: {listed} are at different versions (cohort: {members}); not publishing",
+                  file=sys.stderr)
+            ok = False
+            continue
+        name, ver = touched[0]
+        names = {n for n, _ in touched}
+        for partner in cohort:
+            if partner in names or in_db.get(partner) == ver:
+                continue
+            print(f"release-cohort: {name} {ver} needs {partner} {ver} published with it "
+                  f"(cohort: {members}); not publishing", file=sys.stderr)
+            ok = False
+    return 0 if ok else 1
+
+
+def assignment(text, var):
+    m = re.search(rf"^{re.escape(var)}=(.*)$", text, re.M)
+    if not m:
+        return None
+    return m.group(1).strip().strip("'\"")
+
+
+def arrays(text, var):
+    """The text of every VAR=( ... ) array, from its first line to the line ending in ")"."""
+    lines = text.splitlines()
+    start = re.compile(rf"^\s*{re.escape(var)}=\(")
+    found = []
+    i = 0
+    while i < len(lines):
+        if start.match(lines[i]):
+            block = []
+            while i < len(lines):
+                block.append(lines[i].strip())
+                if lines[i].rstrip().endswith(")"):
+                    break
+                i += 1
+            found.append("\n".join(block))
+        i += 1
+    return found
+
+
+PACKAGE_FN_RE = re.compile(r"^\s*package(_[A-Za-z0-9@._+-]+)?\s*\(\)")
+
+
+def cmd_check_recipes(args, cohorts):
+    problems, lags = [], []
+    for cohort in cohorts:
+        members = " ".join(cohort)
+        texts = {}
+        for member in cohort:
+            path = os.path.join(args.workspace, "recipes", member, "PKGBUILD")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    texts[member] = f.read()
+            except OSError as e:
+                problems.append(f"{member}: cannot read recipes/{member}/PKGBUILD: {e.strerror} (cohort: {members})")
+        if len(texts) != len(cohort):
+            continue
+        first = cohort[0]
+        for var in ASSIGNMENTS:
+            want = assignment(texts[first], var)
+            for member in cohort[1:]:
+                got = assignment(texts[member], var)
+                if got != want:
+                    lags.append(f"{member}: {var}={got} but {first} has {var}={want} (cohort: {members})")
+        for var in ARRAYS:
+            want = arrays(texts[first], var)
+            for member in cohort[1:]:
+                if arrays(texts[member], var) != want:
+                    lags.append(f"{member}: {var}=() differs from {first}'s (cohort: {members})")
+        for member in cohort:
+            lines = [line for line in texts[member].splitlines() if not line.lstrip().startswith("#")]
+            split = next((i for i, line in enumerate(lines) if PACKAGE_FN_RE.match(line)), len(lines))
+            parts = (("global", "\n".join(lines[:split])), ("package", "\n".join(lines[split:])))
+            for partner in cohort:
+                if partner == member:
+                    continue
+                pin = f'"{partner}=${{pkgver}}-${{pkgrel}}"'
+                build_pin = f'"{partner}=${{pkgver}}"'
+                refs = {part: [m.group(0) for m in re.finditer(rf"""["']{re.escape(partner)}(=[^"']*)?["']""", code)]
+                        for part, code in parts}
+                if not refs["global"] and not refs["package"]:
+                    continue
+                for ref in refs["global"]:
+                    if ref == pin:
+                        problems.append(f"{member}: {pin} is a build dependency (global depends=()): the clean chroot "
+                                        f"and CI only have the stock {partner}; add it in package() instead (cohort: {members})")
+                    elif ref != build_pin:
+                        problems.append(f"{member}: depends on {ref} at build time, must be {build_pin} (cohort: {members})")
+                for ref in refs["package"]:
+                    if ref != pin:
+                        problems.append(f"{member}: package() depends on {ref}, must be exactly {pin} (cohort: {members})")
+                if pin not in refs["package"]:
+                    problems.append(f"{member}: no package function adds depends+=({pin}), so a {partner} of another "
+                                    f"release satisfies it (cohort: {members})")
+    for p in problems:
+        print(f"release-cohort: {p}", file=sys.stderr)
+    for p in lags:
+        print(f"release-cohort: {'' if args.strict else 'warning: '}{p}", file=sys.stderr)
+    return 1 if problems or (args.strict and lags) else 0
+
+
+def main(argv):
+    parser = Parser(prog="bin/release-cohort", add_help=False)
+    parser.add_argument("-h", "--help", action=DocHelp)
+    parser.add_argument("--cohorts")
+    parser.add_argument("--workspace", default=WORKSPACE)
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
+    members = sub.add_parser("members", add_help=False)
+    members.add_argument("-h", "--help", action=DocHelp)
+    members.add_argument("--db")
+    members.add_argument("--present", action="store_true")
+    members.add_argument("names", nargs="+")
+    publish = sub.add_parser("check-publish", add_help=False)
+    publish.add_argument("-h", "--help", action=DocHelp)
+    publish.add_argument("--db")
+    publish.add_argument("files", nargs="+")
+    recipes = sub.add_parser("check-recipes", add_help=False)
+    recipes.add_argument("-h", "--help", action=DocHelp)
+    recipes.add_argument("--strict", action="store_true")
+    args = parser.parse_args(argv)
+    cohorts = load_cohorts(args.cohorts or os.path.join(args.workspace, "build", "cohorts.conf"))
+    command = {"members": cmd_members, "check-publish": cmd_check_publish, "check-recipes": cmd_check_recipes}
+    try:
+        return command[args.command](args, cohorts)
+    except UsageError as e:
+        print(f"release-cohort: {e}", file=sys.stderr)
+        return EX_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

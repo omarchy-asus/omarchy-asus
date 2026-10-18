@@ -13,7 +13,7 @@ pkgname='omarchy'
 _tag='v4.0.5'
 _commit='94a8fbc2d67eec5673c7f16b8c5e8a9c8452ffdc'
 pkgver=4.0.5
-pkgrel=1.1
+pkgrel=1.2
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH'
 # The payload is architecture-independent, but the dependency set is not: the
 # boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
@@ -178,6 +178,12 @@ prepare() {
 
 package() {
   cd "$srcdir/omarchy"
+
+  # omarchy-asus: only the patched omarchy-settings of this same release satisfies
+  # this, never stock's same-pkgver build (#83). Set here, not in depends=() above,
+  # so it is in the package but not a build dependency: the clean chroot and CI only
+  # have stock omarchy-settings, which satisfies the ${pkgver} pin above.
+  depends+=("omarchy-settings=${pkgver}-${pkgrel}")
 
   # Runtime binaries — ship everything in bin/ except the debug helpers
   # that ship from omarchy-settings (needed before omarchy is installed,
