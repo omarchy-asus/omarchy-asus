@@ -41,7 +41,7 @@ one-shot commands work with any kernel.
 | path | package |
 |---|---|
 | `/usr/bin/g16-winlock` | asus-rog-nkey-winlock (Python 3, standard library only) |
-| `/usr/lib/udev/rules.d/99-g16-winlock-hidraw.rules` | asus-rog-nkey-winlock: the keyboard's hidraw nodes get mode 0660, group `input` |
+| `/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules` | asus-rog-nkey-winlock: the keyboard's hidraw nodes get mode 0660, group `input`, and a `uaccess` ACL for the logged-in user |
 | `/usr/lib/systemd/user/g16-winlock.service` | asus-rog-nkey-winlock: runs `g16-winlock watch` |
 | `/usr/share/omarchy/plugins/omarchy-asus.g16/` | asus-zephyrus-g16-control: `manifest.json`, `Panel.qml`, `g16ctl` |
 
@@ -81,8 +81,9 @@ Neither package enables anything for you.
 Local copies win over the packaged files, so installing the packages changes
 nothing until you remove those copies:
 
-- `/etc/udev/rules.d/99-g16-winlock-hidraw.rules` masks the packaged rule of
-  the same name, and both sort at the same position.
+- An older `/etc/udev/rules.d/99-g16-winlock-hidraw.rules` keeps applying
+  next to the packaged `70-` rule. The content is identical, so that's
+  harmless, but remove it once the package is in.
 - `~/.config/systemd/user/g16-winlock.service` shadows the packaged unit in
   `/usr/lib/systemd/user/`. Drop-ins in `g16-winlock.service.d/` (such as
   `mode.conf`) apply to either one.
@@ -95,12 +96,13 @@ To switch over:
 1. Install the packages. Nothing changes yet.
 2. Compare the files:
    ```bash
-   diff /etc/udev/rules.d/99-g16-winlock-hidraw.rules /usr/lib/udev/rules.d/99-g16-winlock-hidraw.rules
+   diff /etc/udev/rules.d/99-g16-winlock-hidraw.rules /usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules
    diff ~/.config/systemd/user/g16-winlock.service /usr/lib/systemd/user/g16-winlock.service
    diff /path/to/old/g16-winlock /usr/bin/g16-winlock
    diff -r ~/.config/omarchy/plugins/<old-id> /usr/share/omarchy/plugins/omarchy-asus.g16
    ```
-   The rule and the script should be identical. The unit should differ only in
+   The rule and the script should be identical (only the rule's file name
+   changed). The unit should differ only in
    `ExecStart=` (`/usr/bin/g16-winlock watch`). The widget should differ only in
    its id, its author, the way `Panel.qml` finds `g16ctl` (next to itself
    instead of a fixed path under the old id), and `g16ctl`'s fallback path for
@@ -156,3 +158,12 @@ ones above it.
    19b6 hidraw node other than the one that carries report `0x5d` (step 2
    lists them all).
 5. The OSD on its own: `omarchy-osd -m test`.
+
+## Why the rule is `70-`, not `99-`
+
+`TAG+="uaccess"` only grants the logged-in user access if it's set before
+systemd's `73-seat-late.rules` runs. A `99-` rule sets it too late, so access
+fell back to the `input` group. Omarchy 4.0.5 removes users from `input` on
+purpose, so on a stock install `g16-winlock` couldn't open the keyboard and the
+lock toast never appeared. The packaged rule is `70-` so `uaccess` takes effect.
+The rule's content is unchanged.

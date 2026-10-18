@@ -63,7 +63,7 @@ def open_hidraw(*, writable: bool = True) -> tuple[int, Path]:
     except PermissionError as e:
         raise SystemExit(
             f"Cannot open {path} ({e}). Install the udev rule "
-            f"(system/udev/99-g16-winlock-hidraw.rules) and replug/reload, "
+            f"(70-g16-winlock-hidraw.rules) and replug/reload, "
             f"or run via pkexec."
         ) from e
     return fd, path

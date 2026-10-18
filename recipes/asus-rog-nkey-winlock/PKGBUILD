@@ -28,20 +28,20 @@ license=('MIT')
 options=('!debug')
 source=(
   'g16-winlock'
-  '99-g16-winlock-hidraw.rules'
+  '70-g16-winlock-hidraw.rules'
   'g16-winlock.service'
   'manifest.json'
   'Panel.qml'
   'g16ctl'
   'README.md'
 )
-sha256sums=('713591e5b3a69c67b59e8b0ee9e9be8fa78fc8e28fc31ec32e33bc23bb86ca68'
+sha256sums=('01141d007fd09462c541069bc84e7f38e75d3b0b4a1a0b6a9d98488425d99195'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
             'ae11adf8d3fa9a1f2a08cbd810dd524f2d6ac208762b2d1b6ef6efd9b027d9d6'
             '5cf036a8b150d79f0d8013e82f56396d9d58f0b1e5cf07677de45c613565f575'
             'e4e223beb516b778533b0972f0a417f9959a40e15f255c19de2c0d80ee7fcfd1'
             '4cfbb5e75ec11b6e8e8af8b04333890adb0ad8669e3810633066545ac1768532'
-            '5f0af971b25459e6679506c77dc1efde15951efe6707f970fde3e8d723d96360')
+            'ef07abb24a278e54bc28ad3036b91e6bdd20350efc1006c2cc3a494befa76fbd')
 
 _plugin_id=omarchy-asus.g16
 
@@ -56,7 +56,7 @@ package_asus-rog-nkey-winlock() {
   )
 
   install -Dm755 g16-winlock "$pkgdir/usr/bin/g16-winlock"
-  install -Dm644 99-g16-winlock-hidraw.rules "$pkgdir/usr/lib/udev/rules.d/99-g16-winlock-hidraw.rules"
+  install -Dm644 70-g16-winlock-hidraw.rules "$pkgdir/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules"
   # Not enabled by the package: `systemctl --user enable --now g16-winlock.service`.
   install -Dm644 g16-winlock.service "$pkgdir/usr/lib/systemd/user/g16-winlock.service"
   install -Dm644 README.md "$pkgdir/usr/share/doc/asus-rog-nkey-winlock/README.md"
