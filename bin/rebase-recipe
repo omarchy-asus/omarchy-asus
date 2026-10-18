@@ -536,7 +536,8 @@ def main():
                         continue
                     os.makedirs(os.path.dirname(os.path.join(out, rel)), exist_ok=True)
                     shutil.copy2(os.path.join(updir, rel), os.path.join(out, rel))
-            for f in patch_files + delta["keep"] + ["DELTA"]:
+            held = ["HOLD"] if os.path.isfile(os.path.join(rdir, "HOLD")) else []  # a hold survives rebases
+            for f in patch_files + delta["keep"] + ["DELTA"] + held:
                 os.makedirs(os.path.dirname(os.path.join(out, f)) or out, exist_ok=True)
                 if os.path.exists(os.path.join(updir, f)) and f in patch_files:
                     raise Fail(4, "delta", f"upstream now ships a file named {f}; rename our patch")

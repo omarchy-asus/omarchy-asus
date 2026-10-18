@@ -140,7 +140,8 @@ Where our fixes are headed:
 
 - `recipes/<pkg>/`: PKGBUILDs, patches and a `NOTES.md` for each package (base, changes,
   upstream status, how to rebase). `DELTA` declares how the recipe differs from upstream;
-  `LOCAL_ONLY` marks a package with no upstream build.
+  `LOCAL_ONLY` marks a package with no upstream build; `HOLD` (its first line is the reason)
+  keeps `bin/auto-update` from building or publishing a recipe.
 - `recipes/omarchy-asus-keyring/`: keyring package (`pacman-key --populate omarchy-asus`),
   packaged like omarchy-keyring. Its `omarchy-asus.gpg` is a copy of `keys/omarchy-asus.asc`.
 - `bin/omarchy-asus-setup`: the one-step setup a user runs on a G16. See LAPTOP-SETUP.md.

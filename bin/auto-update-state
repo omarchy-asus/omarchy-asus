@@ -22,6 +22,8 @@ Plan actions:
   attention  needs a human (upstream merged/closed one of our PRs, upstream older than
              our base, bad pkgrel, not in any upstream repo); no automatic change
 Config via env: SKIP_RECIPES (space separated), BUILD_NOT_BUILT (yes/no).
+A recipe with a HOLD file (first non-comment line: the reason) is never built or published;
+a stale published copy of it is unpublished.
 """
 import json
 import os
@@ -72,8 +74,16 @@ def plan(check_path, status_path):
             for m in r.get("dep_mismatch") or []:
                 notes.append(f"{r['name']} needs {m['dep']}={m['want']}, upstream has {m['upstream'] or 'none'}")
         target = max((r["upstream"] for r in rows if r["upstream"]), default="", key=VerKey)
+        hold = next((r.get("hold") for r in rows if r.get("hold")), None)
         if recipe in skip:
             action, notes = "attention", notes + [f"skipped by SKIP_RECIPES ({', '.join(sorted(statuses))})"]
+        elif hold and in_repo and statuses & {"rebuild-needed", "dep-mismatch"}:
+            # Held recipes never get (re)published; a stale copy still goes, so stock flows.
+            action = "unpublish"
+            notes.append(f"held ({hold}); stale copy unpublished instead of rebased")
+        elif hold:
+            action = "attention"
+            notes.append(f"held, not built or published: {hold} ({', '.join(sorted(statuses))})")
         elif not rows[0]["recipe"]:
             if statuses & {"rebuild-needed", "dep-mismatch", "upstream-older"}:
                 action = "unpublish"

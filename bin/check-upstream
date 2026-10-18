@@ -262,6 +262,10 @@ def main():
         repo_ver = ours_repo.get(name)
         base = base_of(ver)
         local_only = recipe is not None and os.path.isfile(os.path.join(WORKSPACE, "recipes", recipe, "LOCAL_ONLY"))
+        hold = None
+        if recipe is not None and os.path.isfile(os.path.join(WORKSPACE, "recipes", recipe, "HOLD")):
+            with open(os.path.join(WORKSPACE, "recipes", recipe, "HOLD")) as f:
+                hold = next((l.strip() for l in f if l.strip() and not l.startswith("#")), "held")
         if local_only:
             if repo_ver is None:
                 status = "not-built"
@@ -288,7 +292,7 @@ def main():
         else:
             status = "current"
         rows.append({"name": name, "ours": ver, "base": None if local_only else base, "repo": repo_ver,
-                     "local_only": local_only,
+                     "local_only": local_only, "hold": hold,
                      "upstream": up_ver, "upstream_repo": up_repo, "recipe": recipe, "status": status,
                      "dep_mismatch": mismatches})
 
