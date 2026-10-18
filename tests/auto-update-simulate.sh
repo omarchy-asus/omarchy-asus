@@ -70,7 +70,7 @@ fi
 
 # ---------------------------------------------------------------- 4. stubbed full runs
 # A copy of bin/ in which every step that builds, signs, publishes or calls a network is a
-# stub that logs its call to $T/calls. bin/sync-release --pii-scan stays the real one.
+# stub that logs its call to $T/calls. bin/sync-release --pii-scan(-text) stays the real one.
 stub_case() {  # stub_case <name> <base changes the recipe: 0|1> <agent: approve|pii|fail>
     local name=$1 race=$2 agent=$3
     T=$S/stub-$name
@@ -86,7 +86,7 @@ stub_case() {  # stub_case <name> <base changes the recipe: 0|1> <agent: approve
 set -eu
 me=$(basename "$0")
 case $me in
-    sync-release) [[ ${1:-} == --pii-scan ]] && exec "$(dirname "$0")/sync-release.real" "$@" ;;
+    sync-release) [[ ${1:-} == --pii-scan* ]] && exec "$(dirname "$0")/sync-release.real" "$@" ;;
 esac
 echo "$me $*" >>"$T/calls"
 case $me in
@@ -117,7 +117,7 @@ EOF
 cat >/dev/null
 case $agent in
     fail) exit 1 ;;
-    pii) echo '{"result": "{\"verdict\": \"approve\", \"notes\": \"built fine on zorblaxhost\", \"replies\": [{\"id\": 101, \"reply\": \"checked on zorblaxhost\"}]}"}' ;;
+    pii) echo '{"result": "{\"verdict\": \"approve\", \"notes\": \"built fine on zorblaxhost\", \"replies\": [{\"id\": 101, \"reply\": \"#mtree checked on zorblaxhost\"}]}"}' ;;
     *) echo '{"result": "{\"verdict\": \"approve\", \"notes\": \"mechanical bump\", \"replies\": [{\"id\": 101, \"reply\": \"no change needed\"}]}"}' ;;
 esac
 EOF
@@ -216,11 +216,14 @@ grep -qF "$T" "$T/data/status.json"; expect $? 1 "no absolute path in status.jso
 
 echo "== 4e. the PII scan fails closed"
 printf 'hello\n' >"$T/text.md"
-PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan "$T/text.md" >/dev/null 2>&1; expect $? 0 "clean text passes"
+PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan-text "$T/text.md" >/dev/null 2>&1; expect $? 0 "clean text passes"
 printf 'Zorblaxhost was here\n' >"$T/text.md"
-PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan "$T/text.md" >/dev/null 2>&1; expect $? 1 "a denylisted word in text is a hit"
+PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan-text "$T/text.md" >/dev/null 2>&1; expect $? 1 "a denylisted word in text is a hit"
 printf 'hello\n' >"$T/text.md"
-PII_DENYLIST=$T/no-such-list "$W/bin/sync-release" --pii-scan "$T/text.md" >/dev/null 2>&1; expect $? 1 "a missing denylist is a hit"
+PII_DENYLIST=$T/no-such-list "$W/bin/sync-release" --pii-scan-text "$T/text.md" >/dev/null 2>&1; expect $? 1 "a missing denylist is a hit"
 printf 'a(b\n' >"$T/bad-denylist"
-PII_DENYLIST=$T/bad-denylist "$W/bin/sync-release" --pii-scan "$T/text.md" >/dev/null 2>&1; expect $? 1 "a scan error (grep exit 2) is a hit"
+PII_DENYLIST=$T/bad-denylist "$W/bin/sync-release" --pii-scan-text "$T/text.md" >/dev/null 2>&1; expect $? 1 "a scan error (grep exit 2) is a hit"
+PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan-text "$T/no-such-file.md" >/dev/null 2>&1; expect $? 1 "an unreadable body is a hit"
+printf '#mtree\n# built on zorblaxhost\n' >"$T/text.md"   # bsdtar would read this as an archive
+PII_DENYLIST=$T/denylist "$W/bin/sync-release" --pii-scan-text "$T/text.md" >/dev/null 2>&1; expect $? 1 "text that looks like an mtree archive is still scanned as text"
 exit $fail

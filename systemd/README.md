@@ -104,9 +104,9 @@ during the build and review, the squash merge holds a recipe that was never buil
 is published, the stale package is unpublished, and the next run builds the base branch's recipe.
 
 Every PR comment and thread reply goes through the same denylist scan as the release
-(`bin/sync-release --pii-scan`). If the body has a hit, the denylist is missing or the scan
-fails, a placeholder naming the run is posted instead. The original stays in the run dir as
-`<name>.withheld`. Messages name run files by run id and file name, never by absolute path.
+(`bin/sync-release --pii-scan-text`). If the body has a hit, the denylist is missing or the scan
+fails, a placeholder naming the run is posted instead. The original stays in the run dir.
+Messages name run files by run id and file name, never by absolute path.
 
 ### Recipe deltas
 
