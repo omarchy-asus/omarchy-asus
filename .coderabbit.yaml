@@ -1,6 +1,10 @@
-# Review draft PRs too: the coordinator and the auto-update pipeline open
-# PRs as drafts until the clean-chroot build and checks pass.
+# CodeRabbit on omarchy-asus/omarchy-asus. Review draft PRs too: the coordinator
+# opens PRs as drafts until the clean-chroot build and checks pass. bin/auto-update
+# merges its PRs only after CodeRabbit has reviewed the head with no unresolved threads.
 reviews:
+  # bin/auto-update reads the "CodeRabbit" commit status (and CodeRabbit check runs, if
+  # any) to know when a review of the head is in progress or done; keep the status on.
+  commit_status: true
   auto_review:
     enabled: true
     drafts: true

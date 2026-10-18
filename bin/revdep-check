@@ -1,0 +1,109 @@
+#!/bin/bash
+# Reverse-dependency CI: compile a DKMS package against kernel headers inside a
+# throwaway copy of the clean build chroot. Nothing is installed on the host.
+#
+# Usage: bin/revdep-check --headers <headers .pkg.tar.zst | stock:PKGNAME> --dkms <dkms .pkg.tar.zst> [--log FILE]
+#
+#   --headers FILE         a freshly built headers package (e.g. linux-omarchy-headers)
+#   --headers stock:NAME   the headers package from the chroot's repos ([omarchy]), for
+#                          when our repo does not carry the kernel
+#   --dkms FILE            the DKMS module package (e.g. our nvidia-open-dkms)
+#
+# In the copy: install dkms, then the DKMS package with -dd (its runtime dependencies,
+# such as nvidia-utils=<ver>, are irrelevant for compiling and may not be in the
+# mirror yet), then the headers. Installing the headers runs the dkms pacman hook,
+# which builds the module for that kernel; `dkms status` must then say "installed".
+# Otherwise `dkms build` is re-run for a definite exit code and make.log is shown.
+#
+# Root, as for bin/build-pkg: run as a normal user it uses sudo for the chroot steps;
+# run as root (bin/auto-update under systemd) it needs BUILD_USER and reads the
+# package files as that user. Exit: 0 built, 1 module failed to build, 2 setup error.
+set -euo pipefail
+source "$(dirname "$0")/env.sh"
+
+headers= dkms= log=/dev/null
+while (($#)); do
+    case $1 in
+        --headers) headers=$2; shift ;;
+        --dkms) dkms=$2; shift ;;
+        --log) log=$2; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+[[ -n $headers && -n $dkms ]] || { sed -n '5,10p' "$0" >&2; exit 2; }
+
+if [[ $EUID -eq 0 ]]; then
+    : "${BUILD_USER:?running as root needs BUILD_USER}"
+    user_home=$(getent passwd "$BUILD_USER" | cut -d: -f6)
+    as_user() { runuser -u "$BUILD_USER" -- env HOME="$user_home" PATH="$PATH" "$@"; }
+    as_root() { "$@"; }
+else
+    as_user() { "$@"; }
+    as_root() { ${SUDO:-sudo} "$@"; }
+fi
+[[ -d $CHROOT/root ]] || { echo "no build chroot at $CHROOT/root (run bin/mkchroot)" >&2; exit 2; }
+
+# What to build: the dkms.conf inside the package names the module and version.
+conf=$(as_user bsdtar -xOf "$dkms" 'usr/src/*/dkms.conf') || { echo "no usr/src/*/dkms.conf in $dkms" >&2; exit 2; }
+mod_name=$(sed -n 's/^PACKAGE_NAME=["'\'']\{0,1\}\([^"'\'']*\).*/\1/p' <<<"$conf" | head -1)
+mod_ver=$(sed -n 's/^PACKAGE_VERSION=["'\'']\{0,1\}\([^"'\'']*\).*/\1/p' <<<"$conf" | head -1)
+[[ -n $mod_name && -n $mod_ver ]] || { echo "cannot read PACKAGE_NAME/PACKAGE_VERSION from $dkms" >&2; exit 2; }
+
+tmp=$(as_root mktemp -d /var/tmp/omarchy-asus-revdep.XXXXXX)
+copy=$CHROOT/revdep-$$
+cleanup() {
+    if as_root btrfs subvolume show "$copy" >/dev/null 2>&1; then
+        as_root btrfs subvolume delete "$copy" >/dev/null || true
+    fi
+    as_root rm -rf "$copy" "$tmp"
+}
+trap cleanup EXIT
+
+# Package files are read as the user and written into the root-owned temp dir.
+as_root mkdir "$tmp/pkgs"
+for f in "$dkms" ${headers%%stock:*}; do
+    as_user cat "$f" | as_root tee "$tmp/pkgs/$(basename "$f")" >/dev/null
+done
+hspec=$headers
+[[ $headers == stock:* ]] || hspec=file:$(basename "$headers")
+as_root tee "$tmp/run.sh" >/dev/null <<'EOF'
+set -euo pipefail
+mod_name=$1 mod_ver=$2 hspec=$3 dkms_file=$4
+pacman -Syu --noconfirm --needed dkms
+pacman -U --noconfirm -dd "/revdep/pkgs/$dkms_file"
+if [[ $hspec == stock:* ]]; then
+    hname=${hspec#stock:}
+    pacman -S --noconfirm "$hname"
+else
+    pacman -U --noconfirm "/revdep/pkgs/${hspec#file:}"
+    hname=$(pacman -Qqp "/revdep/pkgs/${hspec#file:}")
+fi
+rel=$(pacman -Qlq "$hname" | sed -n 's#^/usr/lib/modules/\([^/]*\)/build/$#\1#p' | head -1)
+[[ -n $rel ]] || { echo "revdep: $hname has no /usr/lib/modules/<release>/build"; exit 2; }
+echo "revdep: $mod_name/$mod_ver against $hname ($rel)"
+status=$(dkms status -m "$mod_name" -v "$mod_ver" -k "$rel" 2>&1 || true)
+echo "revdep: dkms status after the install hook: ${status:-none}"
+if [[ $status == *installed* ]]; then
+    echo "revdep: OK, $mod_name/$mod_ver builds against $rel"
+    exit 0
+fi
+if dkms build -m "$mod_name" -v "$mod_ver" -k "$rel"; then
+    echo "revdep: OK, $mod_name/$mod_ver builds against $rel"
+    exit 0
+fi
+tail -n 150 "/var/lib/dkms/$mod_name/$mod_ver/build/make.log" 2>/dev/null || true
+echo "revdep: FAILED, $mod_name/$mod_ver does not build against $rel"
+exit 1
+EOF
+
+echo "revdep-check: $mod_name/$mod_ver against ${headers##*/} in a copy of $CHROOT/root"
+if as_root btrfs subvolume show "$CHROOT/root" >/dev/null 2>&1; then
+    as_root btrfs subvolume snapshot "$CHROOT/root" "$copy" >/dev/null
+else
+    as_root cp -a --reflink=auto "$CHROOT/root" "$copy"
+fi
+rc=0
+as_root nice -n 19 ionice -c 3 arch-nspawn "$copy" --bind-ro="$tmp:/revdep" \
+    bash /revdep/run.sh "$mod_name" "$mod_ver" "$hspec" "$(basename "$dkms")" 2>&1 | as_user tee -a "$log" || rc=$?
+case $rc in 0) exit 0 ;; 1) exit 1 ;; *) exit 2 ;; esac

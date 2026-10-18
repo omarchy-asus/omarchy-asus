@@ -1,0 +1,9 @@
+# How recipes/hyprland differs from upstream; bin/rebase-recipe re-applies it to each
+# new upstream release (see its --help for the format, NOTES.md for the why).
+upstream arch hyprland
+mode overlay
+take PKGBUILD LICENSE
+keep NOTES.md
+patch reconnect-render-offset.patch prepare
+# main has the same fix (e9e2f64c, #16140); flag the first release that contains it
+fixed-upstream hyprwm/Hyprland e9e2f64c v{pkgver}

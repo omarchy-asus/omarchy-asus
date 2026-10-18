@@ -1,0 +1,9 @@
+# How recipes/linux-omarchy differs from upstream; bin/rebase-recipe re-applies it to each
+# new upstream release (see its --help for the format, NOTES.md for the why).
+# prepare() applies every *.patch in source=() order at fuzz 0, so placing the patch
+# in source=() is the whole edit.
+upstream omarchy-pkgs pkgbuilds/linux-omarchy
+mode overlay
+keep NOTES.md
+patch 0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch after 0567-*
+patch 9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch end -- EXPERIMENTAL, default-off scheduler series for GA605KM battery testing; see NOTES.md

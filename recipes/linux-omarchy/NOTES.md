@@ -41,6 +41,11 @@ successful `makepkg --nobuild` proves all patches apply cleanly. On 7.2.8 all
 
 ## Rebasing on a new upstream version
 
+`bin/auto-update` does this automatically from `DELTA`. By hand, run
+`bin/rebase-recipe linux-omarchy --version <omarchy ver> --out <dir> --verify`. It
+reproduces steps 1-5 below, taking the checksums of upstream's files from upstream's
+PKGBUILD and hashing only our two patches. The manual steps:
+
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
    NOTES.md and the 0568 patch).
 2. Add `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch` back to
