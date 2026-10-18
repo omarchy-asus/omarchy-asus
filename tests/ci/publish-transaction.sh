@@ -14,7 +14,10 @@
 # Usage: tests/ci/publish-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 for t in gpg bsdtar flock; do
-    command -v "$t" >/dev/null || { echo "skip: $t missing"; exit 0; }
+    command -v "$t" >/dev/null && continue
+    # CI installs every one of them (.github/workflows/lint.yml): a skip there is a failure
+    [[ -n ${CI:-} ]] && { echo "FAIL: $t missing on CI"; exit 1; }
+    echo "skip: $t missing"; exit 0
 done
 W=$(cd "$(dirname "$0")/../.." && pwd)
 S=$(mktemp -d)
@@ -138,25 +141,25 @@ publish "$S/pkgs/foo-1-1-x86_64.pkg.tar.zst"; expect $? 0 "publish foo-1-1"
 db_names foo-1-1-x86_64.pkg.tar.zst; expect $? 0 "the db names foo-1-1"
 gpg --batch --verify "$REPO/foo-1-1-x86_64.pkg.tar.zst.sig" "$REPO/foo-1-1-x86_64.pkg.tar.zst" 2>/dev/null
 expect $? 0 "the package signature verifies"
-[[ -f $S/data/sync-pending ]]; expect $? 0 "the change is journaled in sync-pending"
-[[ -e $REPO.new || -e $REPO.prev ]]; expect $? 1 "no staging or .prev dir left"
+if [[ -f $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 0 "the change is journaled in sync-pending"
+if [[ -e $REPO.new || -e $REPO.prev ]]; then r=0; else r=1; fi; expect "$r" 1 "no staging or .prev dir left"
 
 echo "== b. repo-add leaves the old db signature"
 before=$(listing)
 STUB_SIGN=stale publish "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst"; nonzero $? "publish with a stale db signature is refused"
 unchanged "$before" "live repo unchanged"
-[[ -e $REPO.new ]]; expect $? 1 "no staging dir left"
+if [[ -e $REPO.new ]]; then r=0; else r=1; fi; expect "$r" 1 "no staging dir left"
 
 echo "== c. db signed by another key"
 STUB_SIGN=wrongkey publish "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst"; nonzero $? "publish with a wrong-key db signature is refused"
 unchanged "$before" "live repo unchanged"
-[[ -e $REPO.new ]]; expect $? 1 "no staging dir left"
+if [[ -e $REPO.new ]]; then r=0; else r=1; fi; expect "$r" 1 "no staging dir left"
 
 echo "== d. lock held elsewhere"
 ( exec 9>"$S/data/publish.lock"; flock 9; : >"$S/locked"; exec sleep 30 ) &
 holder=$!
 for _ in $(seq 100); do [[ -e $S/locked ]] && break; sleep 0.1; done
-[[ -e $S/locked ]]; expect $? 0 "the test holds the lock"
+if [[ -e $S/locked ]]; then r=0; else r=1; fi; expect "$r" 0 "the test holds the lock"
 PUBLISH_LOCK_WAIT=1 publish "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst"; expect $? 75 "publish waits, then exits 75"
 grep -q 'holds .*publish.lock' "$S/out"; expect $? 0 "says who blocks it"
 unchanged "$before" "live repo unchanged"
@@ -165,7 +168,7 @@ kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; holder=
 echo "== e. unpublish with a stale db signature"
 STUB_SIGN=stale unpublish foo; nonzero $? "unpublish with a stale db signature is refused"
 unchanged "$before" "live repo unchanged"
-[[ -f $REPO/foo-1-1-x86_64.pkg.tar.zst ]]; expect $? 0 "foo-1-1 still present"
+if [[ -f $REPO/foo-1-1-x86_64.pkg.tar.zst ]]; then r=0; else r=1; fi; expect "$r" 0 "foo-1-1 still present"
 
 echo "== f. good unpublish"
 unpublish foo; expect $? 0 "unpublish foo"
@@ -176,7 +179,7 @@ echo "== g. recovery from an interrupted swap"
 mv "$REPO" "$REPO.prev"
 publish "$S/pkgs/foo-1-1-x86_64.pkg.tar.zst"; expect $? 0 "publish after an interrupted swap"
 grep -q 'recovered' "$S/out"; expect $? 0 "says it recovered"
-[[ -e $REPO.prev || -e $REPO.new ]]; expect $? 1 "no .prev or staging dir left"
+if [[ -e $REPO.prev || -e $REPO.new ]]; then r=0; else r=1; fi; expect "$r" 1 "no .prev or staging dir left"
 db_names foo-1-1-x86_64.pkg.tar.zst; expect $? 0 "the db names foo-1-1"
 ((fail)) && { echo "--- last output:"; cat "$S/out"; }
 exit $fail

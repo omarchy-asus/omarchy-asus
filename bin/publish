@@ -7,6 +7,7 @@
 # Usage: bin/publish $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+# shellcheck source=bin/publish-lib.sh
 source "$(dirname "$0")/publish-lib.sh"
 : "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
 names=()
@@ -31,4 +32,5 @@ repo-add --sign --key "$SIGN_KEY" --verify --remove "$PUB_STAGE/$REPO_NAME.db.ta
 # db: its exit status is not trusted, the staged repo is checked instead.
 pub_verify_repo "$PUB_STAGE"
 pub_commit
+# shellcheck disable=SC2034  # read by the EXIT trap above
 committed=1

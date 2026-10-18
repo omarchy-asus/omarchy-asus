@@ -5,6 +5,7 @@
 # $DATA/publish.lock stays busy): any failure leaves the live repo as it was.
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
+# shellcheck source=bin/publish-lib.sh
 source "$(dirname "$0")/publish-lib.sh"
 : "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
 pub_lock
@@ -21,4 +22,5 @@ done
 # repo-remove's exit status does not cover a failed signature: check the result
 pub_verify_repo "$PUB_STAGE"
 pub_commit
+# shellcheck disable=SC2034  # read by the EXIT trap above
 committed=1

@@ -15,7 +15,10 @@
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 for t in gpg bsdtar flock strings; do
-    command -v "$t" >/dev/null || { echo "skip: $t missing"; exit 0; }
+    command -v "$t" >/dev/null && continue
+    # CI installs every one of them (.github/workflows/lint.yml): a skip there is a failure
+    [[ -n ${CI:-} ]] && { echo "FAIL: $t missing on CI"; exit 1; }
+    echo "skip: $t missing"; exit 0
 done
 S=$(mktemp -d)
 cleanup() { GNUPGHOME=$S/data/gnupg gpgconf --kill gpg-agent >/dev/null 2>&1; rm -rf "$S"; }
@@ -29,13 +32,19 @@ export OMARCHY_ASUS_WORKSPACE=$S/ws OMARCHY_ASUS_DATA=$S/data GNUPGHOME=$S/data/
     PII_DENYLIST=$S/denylist FAKE_REL=$S/release FAKE_LOG=$S/gh.log FAKE_CALLS=$S/calls \
     PATH=$S/bin:$PATH
 unset PII_SCAN SYNC_ADOPT_REMOTE PRUNE_GRACE_HOURS PUBLISH_LOCK_WAIT OMARCHY_ASUS_PUBLISH_LOCKED
+# bin/sync-release talks to the live release (env.sh fixes GH_REPO/GH_TAG), so the fake gh
+# must win: a BASH_ENV that puts another dir first on PATH (a wrapper's gh shim) would hand
+# the uploads to the real gh. Drop it, and give any real gh that still runs no credentials.
+unset BASH_ENV ENV GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+mkdir -p "$S/no-gh"
+export GH_CONFIG_DIR=$S/no-gh GH_HOST=fake-gh.invalid
 fail=0 out=''
 expect() {
     if [[ $1 == "$2" ]]; then echo "ok: $3"
     else echo "FAIL: $3 (exit $1, want $2)"; sed 's/^/    | /' <<<"$out"; fail=1; fi
 }
 run_sync() { "$W/bin/sync-release" "$@" 2>&1; }
-uploaded() { grep -q '^upload' "$S/calls" 2>/dev/null; }
+uploaded() { [[ -f $S/calls ]] && grep -q "^upload" "$S/calls"; }
 reset_release() { rm -f "$S/release"/* "$S/calls" "$S/gh.log"; }
 
 # --- a fake gh: the release is $FAKE_REL; uploads and deletes are logged to $FAKE_CALLS ---
@@ -78,6 +87,9 @@ case $sub in
 esac
 EOF
 chmod +x "$S/bin/gh"
+# refuse to run at all unless a child bash script (as bin/sync-release is) resolves the fake
+[[ $(bash -c 'command -v gh') == "$S/bin/gh" ]] ||
+    { echo "FAIL: a child bash does not resolve the fake gh; refusing to run against the real one"; exit 1; }
 
 # --- a signing key (its fingerprint in $DATA/fingerprint) and a second, foreign one ---
 gen() { gpg --batch --pinentry-mode loopback --passphrase '' --quick-gen-key "$1" ed25519 sign never >/dev/null 2>&1; }
@@ -143,7 +155,7 @@ flock -n 9 || echo "FAIL: the test cannot take the lock itself"
 out=$(PUBLISH_LOCK_WAIT=1 run_sync 9>&-); rc=$?
 exec 9>&-
 expect $rc 75 "a busy lock exits 75"
-[[ -s $S/gh.log ]]; expect $? 1 "no gh call while the lock is busy"
+if [[ -s $S/gh.log ]]; then r=0; else r=1; fi; expect "$r" 1 "no gh call while the lock is busy"
 
 echo "== e. a good repo syncs, is verified, and the journal is cleared"
 reset_release
@@ -151,27 +163,27 @@ touch "$S/data/sync-pending"
 out=$(run_sync); expect $? 0 "a good repo syncs"
 for n in foo-1-1-x86_64.pkg.tar.zst foo-1-1-x86_64.pkg.tar.zst.sig \
          omarchy-asus.db omarchy-asus.db.sig omarchy-asus.files omarchy-asus.files.sig; do
-    [[ -f $S/release/$n ]]; expect $? 0 "$n is on the release"
+    if [[ -f $S/release/$n ]]; then r=0; else r=1; fi; expect "$r" 0 "$n is on the release"
 done
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the release's db is the local db"
-[[ -e $S/data/sync-pending ]]; expect $? 1 "sync-pending is cleared"
-[[ $(cat "$S/data/release-db.sha256" 2>/dev/null) == "$db_sum" ]]; expect $? 0 "release-db.sha256 records the db"
+if [[ -e $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 1 "sync-pending is cleared"
+if [[ $(cat "$S/data/release-db.sha256" 2>/dev/null) == "$db_sum" ]]; then r=0; else r=1; fi; expect "$r" 0 "release-db.sha256 records the db"
 
 echo "== f. superseded assets wait out the grace period"
 printf 'stale\n' >"$S/release/old-1-1-x86_64.pkg.tar.zst"
 : >"$S/calls"
 out=$(run_sync); expect $? 0 "a sync with a superseded asset succeeds"
-[[ -f $S/release/old-1-1-x86_64.pkg.tar.zst ]]; expect $? 0 "the superseded asset is kept for now"
+if [[ -f $S/release/old-1-1-x86_64.pkg.tar.zst ]]; then r=0; else r=1; fi; expect "$r" 0 "the superseded asset is kept for now"
 grep -q $'^old-1-1-x86_64.pkg.tar.zst\t[0-9]' "$S/data/prune-candidates" 2>/dev/null
 expect $? 0 "it is listed in prune-candidates"
 grep -q '^delete' "$S/calls"; expect $? 1 "nothing deleted"
 printf 'old-1-1-x86_64.pkg.tar.zst\t%s\n' $(($(date +%s) - 7200)) >"$S/data/prune-candidates"
 out=$(PRUNE_GRACE_HOURS=1 run_sync); expect $? 0 "a sync after the grace period succeeds"
-[[ -e $S/release/old-1-1-x86_64.pkg.tar.zst ]]; expect $? 1 "the superseded asset is deleted"
+if [[ -e $S/release/old-1-1-x86_64.pkg.tar.zst ]]; then r=0; else r=1; fi; expect "$r" 1 "the superseded asset is deleted"
 grep -q '^delete old-1-1-x86_64.pkg.tar.zst$' "$S/calls"; expect $? 0 "through gh release delete-asset"
 grep -q '^old-' "$S/data/prune-candidates"; expect $? 1 "and dropped from prune-candidates"
-[[ -f $S/release/omarchy-asus.db && -f $S/release/foo-1-1-x86_64.pkg.tar.zst ]]
-expect $? 0 "the db and the package it names stay"
+if [[ -f $S/release/omarchy-asus.db && -f $S/release/foo-1-1-x86_64.pkg.tar.zst ]]; then r=0; else r=1; fi
+expect "$r" 0 "the db and the package it names stay"
 
 echo "== g. one publisher"
 printf 'a db from somewhere else\n' >"$S/release/omarchy-asus.db"
@@ -183,7 +195,7 @@ out=$(SYNC_ADOPT_REMOTE=1 run_sync); expect $? 0 "SYNC_ADOPT_REMOTE=1 takes the 
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the release's db is ours again"
 : >"$S/calls"
 out=$(run_sync --dry-run); expect $? 0 "a dry run of a synced repo passes"
-[[ -s $S/calls ]]; expect $? 1 "a dry run uploads and deletes nothing"
+if [[ -s $S/calls ]]; then r=0; else r=1; fi; expect "$r" 1 "a dry run uploads and deletes nothing"
 
 echo "== h. a sync that dies after its db upload is still this host's"
 newdb() {  # newdb <tag>: a new signed local db (same package, another desc field)
@@ -196,14 +208,14 @@ newdb second
 sum_b=$(sha256sum "$R/omarchy-asus.db.tar.gz" | cut -d' ' -f1)
 touch "$S/data/sync-pending"
 out=$(FAKE_DB_UPLOAD_DIES=1 run_sync); rc=$?
-((rc != 0)); expect $? 0 "a sync that dies in its db upload fails (exit $rc)"
+if ((rc != 0)); then r=0; else r=1; fi; expect "$r" 0 "a sync that dies in its db upload fails (exit $rc)"
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the new db did reach the release"
-[[ $(tail -n 1 "$S/data/release-db.sha256") == "$sum_b" ]]; expect $? 0 "its sum was recorded before the upload"
-[[ -e $S/data/sync-pending ]]; expect $? 0 "sync-pending is kept"
+tail -n 1 "$S/data/release-db.sha256" | grep -qxF -- "$sum_b"; expect $? 0 "its sum was recorded before the upload"
+if [[ -e $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 0 "sync-pending is kept"
 newdb third   # another publish before the retry
 out=$(run_sync); expect $? 0 "the next sync is not refused as another publisher"
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the release's db is the newest local one"
-[[ $(cat "$S/data/release-db.sha256") == "$(sha256sum "$R/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]
-expect $? 0 "a verified sync leaves only its own db in the record"
-[[ -e $S/data/sync-pending ]]; expect $? 1 "sync-pending is cleared"
+if [[ $(cat "$S/data/release-db.sha256") == "$(sha256sum "$R/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi
+expect "$r" 0 "a verified sync leaves only its own db in the record"
+if [[ -e $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 1 "sync-pending is cleared"
 exit $fail
