@@ -1,0 +1,184 @@
+From 7ce59936ea833a5c28bee729c487ed12d376c302 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 04:55:57 -0400
+Subject: [PATCH 23/23] Leave mpv alone when the user sets hwdec or
+ vaapi-device anywhere
+
+The hybrid video decode pin skipped only mpv options set at the top level
+of ~/.config/mpv/mpv.conf. A machine where decode was set up by hand in a
+[profile], or in a file pulled in with include=, got hwdec=vaapi and a
+vaapi-device pin written ahead of it: the new top-level options apply to
+every file played, overriding the user's own setup outside that profile.
+
+Now the pin writes nothing to mpv.conf when hwdec or vaapi-device is set
+in any section of mpv.conf or in any file it includes, nested includes
+too (mpv has no conf.d directory; include= is its only way to split a
+config). An include that cannot be read counts as a setting. Omarchy's own
+lines, the block under its comment and a pin under its marker, do not
+count, so a stale pin is still repinned. Options in comments do not count.
+
+The Chromium rule is unchanged: each flags file that already has a
+--render-node-override line is left alone, the others are pinned.
+---
+ install/helpers/hybrid-video-decode.sh   | 68 +++++++++++++++++++++++-
+ test/shell.d/hybrid-video-decode-test.sh | 49 +++++++++++++++--
+ 2 files changed, 110 insertions(+), 7 deletions(-)
+
+diff --git a/install/helpers/hybrid-video-decode.sh b/install/helpers/hybrid-video-decode.sh
+index e2f44940..37d67e42 100644
+--- a/install/helpers/hybrid-video-decode.sh
++++ b/install/helpers/hybrid-video-decode.sh
+@@ -52,16 +52,80 @@ hybrid_video_mpv_sets() {
+     ' "$HYBRID_VIDEO_MPV_CONF"
+ }
+ 
++# Whether the user sets any of the options given anywhere mpv reads them: any
++# section of mpv.conf, and any file pulled in with include= (mpv has no conf.d
++# directory; include= is how a config is split up). Omarchy's own lines do not
++# count: the block under HYBRID_VIDEO_MPV_COMMENT and a line under the marker.
++# An include that cannot be read counts as a setting, since what it holds is
++# unknown.
++hybrid_video_mpv_user_sets() {
++  local options conf include dir found
++  local -a queue=("$HYBRID_VIDEO_MPV_CONF") seen=()
++  local -i i=0
++  options=$(IFS='|'; echo "$*")
++  dir=$(dirname "$HYBRID_VIDEO_MPV_CONF")
++
++  while (( i < ${#queue[@]} && i < 32 )); do
++    conf=${queue[i]}
++    i+=1
++    [[ " ${seen[*]} " == *" $conf "* ]] && continue
++    seen+=("$conf")
++    if [[ ! -r $conf ]]; then
++      (( i == 1 )) && continue
++      return 0
++    fi
++    found=0
++    while IFS= read -r include; do
++      if [[ $include == set ]]; then
++        found=1
++        break
++      fi
++      case $include in
++      \~\~/* | \~\~home/*) include="$dir/${include#*/}" ;;
++      \~/*) include="$HOME/${include#\~/}" ;;
++      /*) ;;
++      *) include="$dir/$include" ;;
++      esac
++      queue+=("$include")
++    done < <(awk -v options="$options" -v main=$(( i == 1 )) \
++      -v comment="$HYBRID_VIDEO_MPV_COMMENT" -v marker="$HYBRID_VIDEO_PIN_MARKER" '
++      main && $0 == comment { omarchy = 1; next }
++      omarchy && (/^[[:space:]]*$/ || /^[[:space:]]*\[/) { omarchy = 0 }
++      main && $0 == marker { held = 1; next }
++      held { held = 0; next }
++      omarchy { next }
++      {
++        line = $0
++        sub(/^[[:space:]]*/, "", line)
++        if (line ~ /^(--)?include[[:space:]]*=/) {
++          sub(/^(--)?include[[:space:]]*=[[:space:]]*/, "", line)
++          # A quoted path ends at its closing quote; any other ends at a #.
++          if (line ~ /^"[^"]*"/) line = substr(line, 2, index(substr(line, 2), "\"") - 1)
++          else if (line ~ /^\047[^\047]*\047/) line = substr(line, 2, index(substr(line, 2), "\047") - 1)
++          else { sub(/#.*/, "", line); sub(/[[:space:]]*$/, "", line) }
++          if (line != "") print line
++          next
++        }
++        sub(/#.*/, "", line)
++        if (line ~ "^(--)?(" options ")[[:space:]]*(=|$)") { print "set"; exit }
++      }' "$conf")
++    (( found )) && return 0
++  done
++  return 1
++}
++
+ # Decodes through VA-API on the iGPU. hwdec=auto-safe from /etc/mpv/mpv.conf
+ # can settle on NVDEC, which loads CUDA and wakes the dGPU. The options go at
+-# the top of ~/.config/mpv/mpv.conf, ahead of any [profile] section, and only
+-# those the user has not set. When the comment Omarchy writes above them is
++# the top of ~/.config/mpv/mpv.conf, ahead of any [profile] section. A user who
++# sets either one anywhere (see hybrid_video_mpv_user_sets) has set decode up
++# their own way, and mpv is left alone. When the comment Omarchy writes above them is
+ # still there (a stale pin was dropped), they go back under it.
+ hybrid_video_pin_mpv() {
+   local node existing="" out
+   local -a options=()
+ 
+   node=$(omarchy-hw-igpu-render-node) || return 0
++  hybrid_video_mpv_user_sets hwdec vaapi-device && return 0
+ 
+   hybrid_video_mpv_sets hwdec || options+=("hwdec=vaapi")
+   hybrid_video_mpv_sets vaapi-device || options+=("$HYBRID_VIDEO_PIN_MARKER" "vaapi-device=$node")
+diff --git a/test/shell.d/hybrid-video-decode-test.sh b/test/shell.d/hybrid-video-decode-test.sh
+index 156d2ad0..2b0021ef 100755
+--- a/test/shell.d/hybrid-video-decode-test.sh
++++ b/test/shell.d/hybrid-video-decode-test.sh
+@@ -84,19 +84,58 @@ pass "the migration pins existing Chromium-family flags files to the iGPU, once"
+   fail "the migration creates an mpv config that decodes through VA-API on the iGPU" "$(cat "$home/.config/mpv/mpv.conf")"
+ pass "the migration creates an mpv config that decodes through VA-API on the iGPU, once"
+ 
+-# A user's own choices win, and a [profile] section keeps its options.
++# A user's own choices win. A machine where decode was already set up by hand
++# keeps mpv exactly as it is when hwdec or vaapi-device is set anywhere mpv
++# reads: any [profile] of mpv.conf, or a file it pulls in with include=.
++# Chromium keeps a flags file that already names a render node.
+ reset_home
+ mkdir -p "$home/.config/mpv"
+ printf '%s\n' '--render-node-override=/dev/dri/renderD128' >>"$home/.config/chromium-flags.conf"
+-printf '%s\n' 'hwdec = auto-copy' 'volume=80' '' '[big]' 'vaapi-device=/dev/dri/renderD128' >"$home/.config/mpv/mpv.conf"
++cp "$ROOT/config/chromium-flags.conf" "$home/.config/brave-flags.conf"
++printf '%s\n' '--render-node-override=/dev/dri/renderD129' >>"$home/.config/brave-flags.conf"
++cp "$home/.config/brave-flags.conf" "$test_tmp/brave-flags.user"
++printf '%s' '--enable-features=VaapiVideoDecoder' >"$home/.config/chrome-flags.conf"
+ run_migration
+ 
+ grep -c -- '--render-node-override=' "$home/.config/chromium-flags.conf" | grep -qx 1 ||
+   fail "a render node the user chose is kept" "$(cat "$home/.config/chromium-flags.conf")"
+-expected=$(printf '%s\n' "$mpv_comment" "$marker" "vaapi-device=$node" '' 'hwdec = auto-copy' 'volume=80' '' '[big]' 'vaapi-device=/dev/dri/renderD128')
++cmp -s "$test_tmp/brave-flags.user" "$home/.config/brave-flags.conf" ||
++  fail "every flags file with a render node keeps it" "$(cat "$home/.config/brave-flags.conf")"
++grep -qFx -- "--render-node-override=$node" "$home/.config/chrome-flags.conf" ||
++  fail "a flags file without a render node is still pinned" "$(cat "$home/.config/chrome-flags.conf")"
++pass "Chromium flags files that name a render node are kept, the others pinned"
++
++mpv_kept() { # description, then the lines of mpv.conf
++  local description=$1
++  shift
++  mkdir -p "$home/.config/mpv"
++  printf '%s\n' "$@" >"$home/.config/mpv/mpv.conf"
++  cp "$home/.config/mpv/mpv.conf" "$test_tmp/mpv.user"
++  run_migration
++  cmp -s "$test_tmp/mpv.user" "$home/.config/mpv/mpv.conf" ||
++    fail "$description: mpv.conf is untouched" "$(cat "$home/.config/mpv/mpv.conf")"
++  pass "$description: mpv.conf is untouched"
++}
++mpv_kept "hwdec at the top, vaapi-device in a profile" 'hwdec = auto-copy' 'volume=80' '' '[big]' 'vaapi-device=/dev/dri/renderD128'
++mpv_kept "vaapi-device only in a profile" 'volume=80' '' '[igpu]' 'vaapi-device=/dev/dri/renderD129'
++mpv_kept "hwdec only in a profile, with no value" 'volume=80' '[hw]' '--hwdec'
++printf '%s\n' '[default]' 'hwdec=vaapi' >"$home/.config/mpv/decode.conf"
++mpv_kept "hwdec in a file included from the config directory" 'volume=80' 'include="~~/decode.conf"'
++printf '%s\n' 'vaapi-device=/dev/dri/renderD129' >"$test_tmp/igpu.conf"
++printf '%s\n' "include=$test_tmp/igpu.conf" >"$test_tmp/decode.conf"
++mpv_kept "vaapi-device in a nested include" 'volume=80' "--include=$test_tmp/decode.conf"
++mpv_kept "an include that cannot be read" 'volume=80' "include=$test_tmp/missing.conf"
++
++# An include without either option, and the options in comments, do not count.
++rm -rf "$home/.config/mpv"
++mkdir -p "$home/.config/mpv"
++printf '%s\n' 'volume=80' >"$home/.config/mpv/extra.conf"
++printf '%s\n' '# hwdec=nvdec' 'include=~~/extra.conf # volume' "include='$home/.config/mpv/extra.conf' # again" '[big]' 'fullscreen # vaapi-device=x' >"$home/.config/mpv/mpv.conf"
++run_migration
++expected=$(printf '%s\n' "$mpv_comment" "hwdec=vaapi" "$marker" "vaapi-device=$node" '' '# hwdec=nvdec' 'include=~~/extra.conf # volume' "include='$home/.config/mpv/extra.conf' # again" '[big]' 'fullscreen # vaapi-device=x')
+ [[ $(cat "$home/.config/mpv/mpv.conf") == "$expected" ]] ||
+-  fail "the mpv pin keeps the user's hwdec and lands ahead of their profiles" "$(cat "$home/.config/mpv/mpv.conf")"
+-pass "settings the user already has are kept"
++  fail "an mpv.conf without decode settings is pinned ahead of its profiles" "$(cat "$home/.config/mpv/mpv.conf")"
++pass "an mpv.conf without decode settings is pinned ahead of its profiles"
+ 
+ # Machines where the pin does not apply are left exactly as they were.
+ for description in "AMD only" "NVIDIA drives the display" "No device claims boot_vga"; do
+-- 
+2.55.0
+

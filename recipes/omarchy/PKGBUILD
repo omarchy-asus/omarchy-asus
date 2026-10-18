@@ -115,7 +115,10 @@ else
         0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch
         0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch
         0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch
-        0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch)
+        0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch
+        0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch
+        0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch
+        0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch)
   sha256sums=('ce413d3fb5b90fab5b2e5cec66552a0562bc1fa3503e3b02e6c067c9a7a7a687'
               '13bad35cf1cc779ade5304debb026327026a3e165848aba62c6b3f3995562503'
               '29c1d4fdf427d9c389d25228c07ca564271c140653b622cf1e760c93677454b0'
@@ -136,7 +139,10 @@ else
               '1ebd57eaec1d9ffdad97b24f50ae9be86ce79dd259ae2c29a0fd7580d6a2aeec'
               '6468816ed154cf9eb6ae74f0e1af0a861346719b848f927336187fd8fa2db465'
               '64c86dd99a4b5a71df44f287ccdd1e4469d9eb69811fb89dcbce690e5896dd93'
-              'c79b725a3df1bc6b7003e5e48ce4256ece94909ec504a4eff50e7206dec0edb1')
+              'c79b725a3df1bc6b7003e5e48ce4256ece94909ec504a4eff50e7206dec0edb1'
+              '0801323e5cf288f80d7177b66892c9a79aeebf3bdbd871e406ad93c982174d9b'
+              '4f94f5e6c2cf30d2be3d7eee91c928f053a5f1caa233e5d213873cea578644d7'
+              'e273ac9a2c4b80cd9031064ce881fd0dfabab135d643dce356240ab49d897932')
 fi
 
 prepare() {
@@ -165,6 +171,9 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch"
 }
 
 package() {

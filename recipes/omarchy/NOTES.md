@@ -28,10 +28,10 @@ commit (`Backport-of:`) and any adaptation.
 | 0003 | another power manager can own the profile on plug and unplug | #23 | omacom/omarchy#15669 |
 | 0004 | GA605KM fans stop at idle on battery (sudoers grant for the helper) | #24 | not submitted |
 | 0005, 0019 | software cursor while an NVIDIA-driven monitor is plugged in (hybrid; 0019 picks the connected card when both GPUs have the connector name) | #25 | not submitted |
-| 0006-0008, 0020 | video decode on the iGPU of hybrid laptops (LIBVA, mpv, Chromium; 0020 repins only the pins Omarchy wrote, under its marker comment, so a render node the user chose is never replaced) | #26 | not submitted |
+| 0006-0008, 0020, 0023 | video decode on the iGPU of hybrid laptops (LIBVA, mpv, Chromium; 0020 repins only the pins Omarchy wrote, under its marker comment, so a render node the user chose is never replaced; 0023 leaves mpv alone when the user sets hwdec/vaapi-device anywhere) | #26 | not submitted |
 | 0009 | ALC285 Master at full scale under the soft mixer | #27 | not submitted |
-| 0010-0011 | rtkit on x86_64; restart the portal, then PipeWire | #28 | omacom/omarchy#12428 (another contributor's PR, taken as is) |
-| 0012-0013 | no NVIDIA early load in the initramfs on hybrid machines | #29 | omacom/omarchy#8263 (another contributor's PR) |
+| 0010-0011, 0022 | rtkit on x86_64; restart the portal, then PipeWire (0022: only for a session that started without rtkit) | #28 | omacom/omarchy#12428 (another contributor's PR, taken as is; 0022 is ours, not on that PR) |
+| 0012-0013, 0021 | no NVIDIA early load in the initramfs on hybrid machines (0021: only an unedited drop-in is removed) | #29 | omacom/omarchy#8263 (another contributor's PR; 0021 is ours, not on that PR) |
 | 0014-0015 | webcam menu guard answered from udev | #30 | omacom/omarchy#15670 |
 | 0016 | Tailscale panel polls status only while closed | #31 | omacom/omarchy#15671 |
 | 0017 | clamshell state from logind events instead of a 2 s poll | #32 | not submitted |
@@ -47,18 +47,25 @@ nvidia-powerd start limit (shipped by `omarchy-asus-g16` under `/usr/lib`, no `/
 path in common), and the Win-lock helper (`asus-rog-nkey-winlock`).
 
 **Migrations run on `omarchy update`.** Each one runs once per user. On a machine where the
-same fix was made by hand:
+same fix was made by hand they leave it alone (patches 0021-0023):
 - `1787683023` (initramfs): on a hybrid machine it deletes `/etc/mkinitcpio.conf.d/nvidia.conf`
-  and rebuilds the initramfs, whatever that file contains now (a hand-edited copy is lost;
-  it restores the file if the rebuild fails).
-- `1789747667` (rtkit): if rtkit is already installed, it still restarts the portal and
-  PipeWire once (a short audio drop).
-- `1792123636` (video pins): it only skips mpv options set at the top level of
-  `~/.config/mpv/mpv.conf`; a `hwdec`/`vaapi-device` inside a `[profile]` or a `conf.d`
-  file gets a second pin. Chromium is skipped when `--render-node-override` is present.
+  and rebuilds the initramfs only when the file is byte for byte what Omarchy's installer
+  wrote (`MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)`). Any other content is kept,
+  with a one-line note, and nothing is rebuilt. No file: nothing to do. A failed rebuild
+  still puts the file back.
+- `1789747667` (rtkit): restarts the portal and PipeWire (one short audio drop) only when
+  this run installed rtkit (`pacman -Q rtkit` before installing), or rtkit was installed
+  after this user's running portal or PipeWire started (another user's run). rtkit there
+  before the session: nothing restarts.
+- `1792123636` (video pins): mpv.conf is left untouched when `hwdec` or `vaapi-device` is
+  set anywhere mpv reads it: any `[profile]` of `~/.config/mpv/mpv.conf` or any file pulled
+  in with `include=`, nested too (mpv has no `conf.d`; an unreadable include counts as set).
+  Omarchy's own lines don't count. Each Chromium-family flags file that already has
+  `--render-node-override` is skipped. Pins Omarchy writes sit under a marker comment
+  (0020), so only those are ever repinned.
 - The others check before acting or only print a message.
 
-So **don't publish these until the test laptop's hand-made equivalents are switched off.**
+`HOLD` stays in both recipes; a human decides when to publish.
 
 **Tests:** on the backport branch, every test file for a changed script passes. The full
 `test/shell` suite has no failure that plain v4.0.5 doesn't also have (those come from
