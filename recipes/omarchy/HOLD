@@ -1,2 +1,0 @@
-# bin/auto-update never builds or publishes a recipe with this file (see bin/auto-update-state).
-Not published until the test laptop confirms its hand-made equivalents of these fixes are off: the migrations run on omarchy update (see recipes/omarchy/NOTES.md). Delete this file to release it.

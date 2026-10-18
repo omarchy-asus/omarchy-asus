@@ -46,6 +46,7 @@ The signed `[omarchy-asus]` repo, served from the
 | `hyprland`, `hyprpm` | 0.56.2-4.1 | Windows no longer render off-screen after an HDMI replug | Fixed on main by [hyprwm/Hyprland#16140](https://github.com/hyprwm/Hyprland/pull/16140), unreleased; dropped when 0.57 ships |
 | `omarchy-asus-g16` | 1.0.0-1 | GA605KM: the touchpad no longer wakes the laptop; hibernate powers off cleanly (`HibernateMode=shutdown`); Dynamic Boost keeps working after many charger plug-ins (nvidia-powerd start limit) | Not yet proposed upstream; files are byte-identical to the [omarchy fork](https://github.com/omarchy-asus/omarchy)'s, under `/usr/lib` ([notes](recipes/omarchy-asus-g16/README.md)) |
 | `asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` | 0.1.0-1 | A toast when Fn+Super locks or unlocks the Windows key (needs the kernel's Win-lock patch); the G16 Control widget holds the switch | Userspace for the kernel patch; the widget needs Omarchy to load system-wide plugins ([notes](recipes/asus-rog-nkey-winlock/README.md)) |
+| `omarchy`, `omarchy-settings` | 4.0.5-1.1 | **Experimental.** Stock Omarchy 4.0.5 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
 
 The three NVIDIA fixes are open pull requests by other people. We carry them because they fix
 real bugs on this hardware.
@@ -59,11 +60,6 @@ real bugs on this hardware.
   your own config or `/etc` (iGPU video decode, HDMI cursor, speaker level, rtkit, asusd,
   Win-lock). Settings you already have are left alone. See
   [its README](recipes/omarchy-asus-g16-apply/README.md).
-- **Patched `omarchy` + `omarchy-settings` 4.0.5-1.1 (experimental):** stock 4.0.5 plus the
-  fork's fixes that live in Omarchy's own scripts, config and migrations. These cover ROG
-  power-profile ownership, USB-C power policy, quiet fans on battery, the HDMI cursor, iGPU
-  video decode, ALC285 volume, rtkit, NVIDIA initramfs and four perf fixes. They arrive with
-  `omarchy update`. Staged only, not published yet ([notes](recipes/omarchy/NOTES.md)).
 - **Daily auto-update pipeline:** the code is in this repo (`bin/auto-update`, `systemd/`);
   it will be installed on the build host soon.
 
