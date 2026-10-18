@@ -68,6 +68,15 @@ if [[ -n $distcc_dir && -f $distcc_dir/id_ed25519 ]]; then
     distcc_bind=(-D "$distcc_dir:/distcc")
     echo "==> distcc: key dir mounted read-only at /distcc"
 fi
+# Persistent compiler cache (optional): if the cache dir exists, mount it
+# read-write at /ccache; the chroot's /etc/makepkg.conf.d/ccache.conf (local)
+# sets CCACHE_DIR=/ccache and BUILDENV enables ccache. Small-patch kernel
+# rebuilds then reuse almost every object. CCACHE_HOST_DIR= (empty) turns it off.
+ccache_dir=${CCACHE_HOST_DIR-$DATA/ccache}
+if [[ -n $ccache_dir && -d $ccache_dir ]]; then
+    distcc_bind+=(-d "$(realpath "$ccache_dir"):/ccache")
+    echo "==> ccache: $ccache_dir mounted at /ccache"
+fi
 
 # -c: fresh copy of the root chroot; -u: update it first.
 cd "$work"

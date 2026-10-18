@@ -100,3 +100,29 @@ word, so options there are fragile. Put them in the wrapper.
 `/distcc` when `id_ed25519` is there (see `DISTCC_KEY_DIR` above). If the
 helper is off or busy, distcc compiles locally, so builds never fail because
 of it. Linking, Rust and packaging always run on the build host.
+
+## Persistent ccache (optional)
+
+A compiler cache that survives the clean chroot makes small-patch kernel
+rebuilds reuse almost every object. Set it up on the build host:
+
+```bash
+mkdir -p ~/.local/share/omarchy-asus/ccache
+sudo arch-nspawn -C build/pacman.conf <chroot>/root pacman -S --needed ccache
+```
+
+Enable `ccache` in the chroot's `BUILDENV` (with distcc enabled too, makepkg
+chains them as `CCACHE_PREFIX=distcc`), and create
+`<chroot>/root/etc/makepkg.conf.d/ccache.conf`:
+
+```bash
+export CCACHE_DIR=/ccache
+export CCACHE_MAXSIZE=40G
+export CCACHE_BASEDIR=/build
+export CCACHE_NOHASHDIR=1
+export CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,locale
+```
+
+`bin/build-pkg` mounts the cache dir read-write at `/ccache` when it exists.
+Create the directory before enabling ccache in the chroot: with ccache on and
+nothing mounted at `/ccache`, compiles fail.
