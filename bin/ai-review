@@ -368,11 +368,17 @@ def pii_check(text):
                            + "); nothing posted")
 
 
-def final_status(repo, head):
+def merge_base(repo, base, head):
+    """The diff's real base: changes on retarget, not when the base branch only moves on."""
+    return gh_json("api", f"repos/{repo}/compare/{base}...{head}?per_page=1")["merge_base_commit"]["sha"]
+
+
+def final_status(repo, head, mb):
+    """The newest ai-review state on head, if it was a review of the diff from merge-base mb."""
     st = gh_json("api", f"repos/{repo}/commits/{head}/status")
     for s in (st or {}).get("statuses") or []:
-        if s.get("context") == CONTEXT:
-            return s.get("state")  # newest first
+        if s.get("context") == CONTEXT:  # newest first
+            return s.get("state") if f"mb {mb[:12]}" in (s.get("description") or "") else None
     return None
 
 
@@ -439,7 +445,8 @@ def post(repo, num, res, roots):
     res["review_url"] = rv.get("html_url")
     state = "failure" if res["blocking"] else "success"
     set_status(repo, res["head"], state,
-               f"{res['blocking']} blocking, {len(shown)} posted, {len(refuted)} refuted", rv.get("html_url"))
+               f"{res['blocking']} blocking, {len(shown)} posted, {len(refuted)} refuted | mb {res['merge_base'][:12]}",
+               rv.get("html_url"))
 
 
 # ---------------------------------------------------------------- one PR
@@ -460,18 +467,19 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
                                "the review must see exactly the PR head")
     head, base = pr["headRefOid"], pr["baseRefOid"]
     os.makedirs(DATA, exist_ok=True)
-    cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}.json")
+    mb = merge_base(repo, base, head)  # a retargeted PR (same head, new diff) is reviewed again
+    cache = os.path.join(DATA, f"{repo.replace('/', '__')}-{num}-{head}-{mb[:12]}.json")
     lock = open(cache + ".lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     if os.path.exists(cache) and not force:
         res = json.load(open(cache))
         if not do_post or res.get("posted"):
             return res
-    elif do_post and not force and (state := final_status(repo, head)) in ("success", "failure"):
+    elif do_post and not force and (state := final_status(repo, head, mb)) in ("success", "failure"):
         # Reviewed elsewhere (another agent, another HOME): trust the posted status, and
         # keep a failure blocking, since its findings are not in this cache.
         log(f"{repo}#{num} {head[:12]}: already reviewed (status {CONTEXT} is {state})")
-        res = {"head": head, "reviewed": True, "skipped": "already reviewed", "posted": True,
+        res = {"head": head, "merge_base": mb, "reviewed": True, "skipped": "already reviewed", "posted": True,
                "blocking": int(state == "failure"), "findings": []}
         if state == "failure":
             res["findings"] = [{"priority": 1, "verdict": "confirmed", "path": "(see the PR)", "start": 0, "end": 0,
@@ -502,7 +510,7 @@ def review_pr(repo, num, checkout=None, do_post=False, force=False):
         try:
             diff = run(["git", "-C", root, "diff", "-U3", "--src-prefix=a/", "--dst-prefix=b/", f"{base}...{head}"]).stdout
             raw, findings = find(root, base, pr["title"], diff)
-            res = {"repo": repo, "pr": num, "head": head, "base": base, "codex_raw": raw,
+            res = {"repo": repo, "pr": num, "head": head, "base": base, "merge_base": mb, "codex_raw": raw,
                    "reviewer": f"{reviewer()} {model()}".strip(),
                    "findings": findings, "verifier": None}
             if findings:
@@ -568,10 +576,10 @@ def sweep(owners, limit, include_forks, do_post, dry=False):
     rc = 0
     for repo, num in todo[:limit]:
         try:
-            pr = gh_json("pr", "view", str(num), "-R", repo, "--json", "headRefOid,isCrossRepository")
+            pr = gh_json("pr", "view", str(num), "-R", repo, "--json", "headRefOid,baseRefOid,isCrossRepository")
             if pr["isCrossRepository"] and not include_forks:
                 continue
-            if final_status(repo, pr["headRefOid"]) in ("success", "failure"):
+            if final_status(repo, pr["headRefOid"], merge_base(repo, pr["baseRefOid"], pr["headRefOid"])) in ("success", "failure"):
                 continue
             if dry:
                 log(f"would review {repo}#{num} {pr['headRefOid'][:12]}")
