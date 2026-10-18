@@ -17,6 +17,14 @@
 #    rewrite KBD_AC/KBD_BATTERY in power-tune.conf, then restart the unit --
 #    whose own startup apply() then sets the hardware. Colour and power-state
 #    flags are untouched by power-tune, so those go straight over D-Bus.
+#
+# omarchy-power-tune is NOT part of this package (it is a personal script). When
+# it is absent, `get` reports HasPowerTune=false and RefreshHz=0, the panel hides
+# the per-power-source brightness and refresh-rate sections, keyboard on/off goes
+# straight to `asusctl leds set`, and `refresh` exits 1 with a message.
+#
+# Commands that need no asusd Aura object (get, battery-limit, winlock-*) still
+# work without one; only kbd-* and slash-* require it.
 set -u
 
 SVC=xyz.ljones.Asusd
@@ -24,10 +32,18 @@ AURA=xyz.ljones.Aura
 SLASH=xyz.ljones.Slash
 CONF="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/power-tune.conf"
 POWERTUNE="$(command -v omarchy-power-tune 2>/dev/null || echo "$HOME/.local/bin/omarchy-power-tune")"
+HAS_POWERTUNE=false
+[ -x "$POWERTUNE" ] && HAS_POWERTUNE=true
 
 P="$(busctl --system tree "$SVC" 2>/dev/null \
       | grep -o '/xyz/ljones/aura/[A-Za-z0-9_]*' | head -1)"
-[ -n "$P" ] || { echo "HasAura=false"; echo "HasSlash=false"; exit 0; }
+
+# Aura/Slash operations only: the asusd object both interfaces live on.
+need_aura() {
+  [ -n "$P" ] && return 0
+  echo "g16ctl: no asusd Aura object (is asusd running?)" >&2
+  exit 1
+}
 
 getp() { busctl --system get-property "$SVC" "$P" "$1" "$2" 2>/dev/null; }
 # busctl wants every struct field as its OWN argv entry -- passing them as one
@@ -91,7 +107,7 @@ winlock_state() {
 }
 
 
-state() {
+aura_state() {
   local lmd power supported
 
   echo "HasAura=true"
@@ -107,6 +123,7 @@ state() {
   # Static-only hardware still reports the list; the panel hides the section
   # when there is nothing to choose between.
   supported="$(getp $AURA SupportedBasicModes | arrayvals)"
+  # shellcheck disable=SC2086 # word splitting counts the modes
   echo "SupportedModeCount=$(echo $supported | wc -w)"
 
   # (a(ubbbb)) count zone boot awake sleep shutdown
@@ -118,15 +135,19 @@ state() {
   echo "KbdShutdown=$(echo "$power" | awk '{print $7}')"
 
   # The levels power-tune will re-apply, which are the values that actually stick.
-  echo "KbdAC=$(conf_val KBD_AC)"
-  echo "KbdBattery=$(conf_val KBD_BATTERY)"
+  if [ "$HAS_POWERTUNE" = true ]; then
+    echo "KbdAC=$(conf_val KBD_AC)"
+    echo "KbdBattery=$(conf_val KBD_BATTERY)"
+  fi
   if [ "$(busctl --system get-property org.freedesktop.UPower /org/freedesktop/UPower \
             org.freedesktop.UPower OnBattery 2>/dev/null)" = "b true" ]; then
     echo "OnBattery=true"
   else
     echo "OnBattery=false"
   fi
-  echo "PowerTune=$(systemctl --user is-active power-tune 2>/dev/null)"
+  if [ "$HAS_POWERTUNE" = true ]; then
+    echo "PowerTune=$(systemctl --user is-active power-tune 2>/dev/null)"
+  fi
 
   if busctl --system introspect "$SVC" "$P" "$SLASH" >/dev/null 2>&1; then
     echo "HasSlash=true"
@@ -138,12 +159,25 @@ state() {
   else
     echo "HasSlash=false"
   fi
+}
+
+state() {
+  echo "HasPowerTune=$HAS_POWERTUNE"
+  if [ -n "$P" ]; then
+    aura_state
+  else
+    echo "HasAura=false"
+    echo "HasSlash=false"
+  fi
 
   # ---- display refresh ----
   # power-tune owns the modeset: monitors.lua is re-applied on hotplug and on
   # `hyprctl reload`, so a raw mode set here would be silently reverted.
   # Last line only: power-tune may print a resolve log before "HZ override".
-  hz_line="$("$POWERTUNE" hz get 2>/dev/null | awk 'NF{line=$0} END{print line}')"
+  hz_line=""
+  if [ "$HAS_POWERTUNE" = true ]; then
+    hz_line="$("$POWERTUNE" hz get 2>/dev/null | awk 'NF{line=$0} END{print line}')"
+  fi
   echo "RefreshHz=$(echo "$hz_line" | awk '{print $1+0}')"
   echo "RefreshOverride=$(echo "$hz_line" | awk '{v=$2; print (v=="" ? "auto" : v)}')"
 
@@ -161,16 +195,25 @@ state() {
 }
 
 case "${1:-get}" in
+  kbd-*|slash-*) need_aura ;;
+esac
+
+case "${1:-get}" in
   get) state ;;
   list-modes) modes ;;
 
   # kbd-level <ac|battery|both> <off|low|med|high>
   kbd-level)
+    case "$2" in ac|battery|both) ;; *) echo "bad scope: $2" >&2; exit 2 ;; esac
+    if [ "$HAS_POWERTUNE" != true ]; then
+      # No power-tune to revert it: a direct write is durable.
+      asusctl leds set "$3" >/dev/null 2>&1
+      exit $?
+    fi
     case "$2" in
       ac)      conf_set KBD_AC "$3" ;;
       battery) conf_set KBD_BATTERY "$3" ;;
       both)    conf_set KBD_AC "$3"; conf_set KBD_BATTERY "$3" ;;
-      *) echo "bad scope: $2" >&2; exit 2 ;;
     esac
     # Restarting re-sources the conf and runs apply(), which sets the hardware.
     # Without this the unit keeps enforcing the levels it started with.
@@ -211,7 +254,9 @@ case "${1:-get}" in
     ;;
 
   # refresh <60|240|auto>
-  refresh)          "$POWERTUNE" hz "$2" >/dev/null 2>&1 ;;
+  refresh)
+    [ "$HAS_POWERTUNE" = true ] || { echo "g16ctl: refresh needs omarchy-power-tune" >&2; exit 1; }
+    "$POWERTUNE" hz "$2" >/dev/null 2>&1 ;;
 
   # battery-limit <percent> -- asusctl writes charge_control_end_threshold
   battery-limit)    asusctl battery limit "$2" >/dev/null 2>&1 ;;

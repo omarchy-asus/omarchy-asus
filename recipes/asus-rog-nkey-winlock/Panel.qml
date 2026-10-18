@@ -42,6 +42,9 @@ Panel {
   property string kbdColor: "FF00FF"
   property string kbdAC: "off"
   property string kbdBattery: "off"
+  // omarchy-power-tune (not packaged) owns the per-source levels and refresh
+  // rate; without it those sections hide and on/off writes asusctl directly.
+  property bool hasPowerTune: false
   property bool onBattery: false
   property bool kbdBoot: true
   property bool kbdAwake: true
@@ -82,7 +85,9 @@ Panel {
     "00FF88", "00E5FF", "0066FF", "8A2BE2", "FF00FF"
   ]
 
-  readonly property string effectiveLevel: onBattery ? kbdBattery : kbdAC
+  readonly property string effectiveLevel: hasPowerTune
+    ? (onBattery ? kbdBattery : kbdAC)
+    : levelOptions[Math.max(0, Math.min(3, kbdBrightness))].value
   readonly property bool kbdOn: kbdBrightness > 0
   readonly property bool anyOn: kbdOn || slashOn
   readonly property int slashPercent: Math.round(slashBrightness / 255 * 100)
@@ -141,6 +146,7 @@ Panel {
     if (m["HasAura"] === undefined) return
 
     root.hasAura = bool(m["HasAura"])
+    root.hasPowerTune = bool(m["HasPowerTune"])
     root.kbdBrightness = parseInt(m["KbdBrightness"]) || 0
     if (m["KbdColor"]) root.kbdColor = m["KbdColor"]
     if (m["KbdAC"]) root.kbdAC = m["KbdAC"]
@@ -336,7 +342,8 @@ Panel {
     anchorItem: button
     owner: root
     bar: root.bar
-    open: root.opened && (root.hasAura || root.hasSlash)
+    open: root.opened && (root.hasAura || root.hasSlash || root.refreshAvailable
+                          || root.chargeAvailable || root.winlockAvailable)
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
@@ -416,10 +423,11 @@ Panel {
 
             PanelSeparator { foreground: root.bar.foreground }
 
-            // ---------- Level, per power source ----------
+            // ---------- Level, per power source (power-tune only) ----------
             Column {
               width: parent.width
               spacing: Style.space(8)
+              visible: root.hasPowerTune
 
               PanelSectionHeader {
                 text: "BRIGHTNESS"
@@ -452,7 +460,7 @@ Panel {
               }
             }
 
-            PanelSeparator { foreground: root.bar.foreground }
+            PanelSeparator { visible: root.hasPowerTune; foreground: root.bar.foreground }
 
             // ---------- Colour ----------
             Column {
