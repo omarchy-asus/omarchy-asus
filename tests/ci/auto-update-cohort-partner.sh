@@ -24,6 +24,7 @@ expect() {
 }
 
 # The function under test, verbatim from bin/auto-update.
+# shellcheck disable=SC2043  # one function today; the loop matches the other extraction tests
 for f in publish_files; do
     body=$(awk -v f="$f" 'index($0, f "() {") == 1, /^\}/' "$W/bin/auto-update")
     if [[ -z $body ]]; then echo "not ok - cannot extract $f() from bin/auto-update"; fails=1; continue; fi

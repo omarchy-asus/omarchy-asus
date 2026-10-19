@@ -1005,12 +1005,12 @@ pipeline_drift() {  # pipeline_drift <stamp> <installed bin dir> <clone>: 0 and 
     # The clone is read as BUILD_USER (root never reads the user's clone directly).
     local stamp=$1 dir=$2 clone=$3 re='^([0-9a-f]{64})  ([^/]+)$' line n
     local names=() changed=() differ=() new=() listed=() why=()
-    local -A want=() inst=() cl=()
+    local -A stamped=() inst=() cl=()
     if [[ -f $stamp && -r $stamp ]]; then
         while IFS= read -r line; do
             # "-" would make sha256sum read stdin: never a script name
             [[ $line =~ $re && ${BASH_REMATCH[2]} != - ]] || continue
-            want[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
+            stamped[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
             names+=("${BASH_REMATCH[2]}")
         done <"$stamp"
     fi
@@ -1022,15 +1022,15 @@ pipeline_drift() {  # pipeline_drift <stamp> <installed bin dir> <clone>: 0 and 
         [[ $line =~ $re ]] && cl[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
     done < <(as_user bash -c 'cd "$1/bin" 2>/dev/null && sha256sum -- "${@:2}" 2>/dev/null' _ "$clone" "${names[@]}")
     for n in "${names[@]}"; do
-        [[ ${inst[$n]:-} == "${want[$n]}" ]] || changed+=("$n")
-        [[ ${cl[$n]:-} == "${want[$n]}" ]] || differ+=("$n")
+        [[ ${inst[$n]:-} == "${stamped[$n]}" ]] || changed+=("$n")
+        [[ ${cl[$n]:-} == "${stamped[$n]}" ]] || differ+=("$n")
     done
     # A script the base branch's installer would add (not installed yet) is drift too.
     line=$(as_user grep -m1 '^scripts=(' "$clone/bin/install-auto-update" 2>/dev/null) || line=
     line=${line#"scripts=("}
     line=${line%%")"*}
     read -r -a listed <<<"$line" || true
-    for n in "${listed[@]}"; do [[ -n ${want[$n]+set} ]] || new+=("$n"); done
+    for n in "${listed[@]}"; do [[ -n ${stamped[$n]+set} ]] || new+=("$n"); done
     if ((${#changed[@]})); then why+=("installed ${changed[*]} changed since install"); fi
     if ((${#differ[@]})); then why+=("differ from bin/ on the base branch: ${differ[*]}"); fi
     if ((${#new[@]})); then why+=("new script(s) on the base branch: ${new[*]}"); fi
