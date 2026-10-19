@@ -26,7 +26,8 @@
 #              a repo-db package that no recipe ships any more (recipe removed;
 #              KEEP_PUBLISHED exempts names)
 #   cohorts:   release cohorts (build/cohorts.conf) are published in one bin/publish call once
-#              every member is built at the same version, and are withdrawn together.
+#              every member is built at the same version or already published at it, and are
+#              withdrawn together.
 #   On a failed rebase/build the affected packages are unpublished and the release
 #   synced at once (stock flows through: a stale pin blocks or breaks updates, because
 #   pacman takes the first repo that has the name), and the reason goes to
@@ -42,6 +43,9 @@
 #   Withdrawing a kernel first compiles our retained DKMS package against the stock headers
 #   and withdraws it too if that fails; cached builds are re-checked when that counterpart moved.
 #   An unreadable build/revdeps.conf withdraws nothing (attention); retried removals get the check too.
+#   The service compares its installed copy with bin/ of the refreshed bot clone (install stamp
+#   from bin/install-auto-update): any difference records "(pipeline)" attention and stops the
+#   run before any unpublish, publish or sync.
 #
 # Root vs user: run as root (systemd), only the chroot build runs as root; every other
 # step runs as BUILD_USER via runuser. Run as a normal user, the build uses sudo.
@@ -60,7 +64,7 @@ while (($#)); do
         --recipe) recipes+=("$2"); shift ;;
         --workspace) workspace_arg=$(realpath "$2"); shift ;;
         --config) config=$2; shift ;;
-        -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
     shift
@@ -169,11 +173,6 @@ echo "auto-update $run_id: mode=$mode user=$BUILD_USER merge=$MERGE_MODE log=$LO
 
 if [[ -n $GH_TOKEN_FILE ]]; then
     GH_TOKEN=$(as_user cat "$GH_TOKEN_FILE") || { echo "cannot read GH_TOKEN_FILE $GH_TOKEN_FILE" >&2; exit 1; }
-fi
-installed=(); for f in "$LIB"/*; do installed+=("$(basename "$f")"); done
-if [[ $EUID -eq 0 ]] && ! cmp -s <(cd "$LIB" && cat "${installed[@]}") \
-        <(as_user bash -c 'cd "$1/bin" && cat "${@:2}" 2>/dev/null' _ "$CLONE" "${installed[@]}"); then
-    echo "note: the installed scripts differ from bin/ on $BASE_BRANCH; re-run bin/install-auto-update after review"
 fi
 
 failed=0 attention=0
@@ -287,6 +286,9 @@ publish_files() {  # publish_files <recipe dir> <version>: publish the staged pa
     # Release cohorts (build/cohorts.conf, bin/release-cohort): every partner of this recipe's
     # packages must be staged from its recipe on $BASE_BRANCH (the first field of the
     # .staged-<p> marker holds that tree) at the same version; then all of them go out in one bin/publish call.
+    # A partner already in the repo db at exactly that version also counts, as in bin/publish
+    # (bin/release-cohort check-publish): the member then goes out next to it. A partner in the
+    # db at another version holds the member back; check-publish stays the final gate.
     # Returns 3 (nothing published) while a partner is not ready, 1 on failure.
     local dir=$1 ver=$2 files=() own=() n info
     if [[ -n ${merged_pr:-} && $(merged_tree "$merged_pr" "${dir##*/}") != "${built_tree:-}" ]]; then
@@ -323,7 +325,13 @@ publish_files() {  # publish_files <recipe dir> <version>: publish the staged pa
             mapfile -t pfiles < <(as_user bash -c 'ls "$1"/"$2"-"$3"-*.pkg.tar.zst 2>/dev/null' _ "$STAGE_DIR" "$p" "$ver")
         fi
         if ((${#pfiles[@]} == 0)); then
-            note publish "$p is not built from $BASE_BRANCH at $ver yet: holding ${dir##*/} back (release cohort, build/cohorts.conf)"
+            # Same db entry form ("<name>-<ver>/") as the already-published check below.
+            if as_user bash -c 'bsdtar -tf "$1" 2>/dev/null | grep -qxF -- "$2-$3/"' \
+                    _ "$REPO_DIR/$REPO_NAME.db.tar.gz" "$p" "$ver"; then
+                note publish "$p $ver is already published: publishing ${dir##*/} next to it (release cohort)"
+                continue
+            fi
+            note publish "$p is not built from $BASE_BRANCH or published at $ver yet: holding ${dir##*/} back (release cohort, build/cohorts.conf)"
             return 3
         fi
         files+=("${pfiles[@]}")
@@ -869,13 +877,13 @@ EOF
             as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"
             record "$r" ok rebase version="$new_ver" pr="$pr" message="merged and published"
         elif ((prc == 3)); then
-            # Merged and built, but its release-cohort partner is not built at $new_ver yet:
-            # nothing was published. No .built-<r>, so the next run's build step retries the
-            # publish (from the .staged-<r> build); the stale pair must not shadow stock meanwhile.
+            # Merged and built, but its release-cohort partner is not built or published at
+            # $new_ver yet: nothing was published. No .built-<r>, so the next run's build step retries
+            # the publish (from the .staged-<r> build); the stale pair must not shadow stock meanwhile.
             as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"
-            if unpublish_now "$in_repo" "merged $new_ver; held back until its release-cohort partner is built at $new_ver"; then
+            if unpublish_now "$in_repo" "merged $new_ver; held back until its release-cohort partner is built or published at $new_ver"; then
                 record "$r" attention rebase version="$new_ver" pr="$pr" \
-                    message="merged; publishes together with its release-cohort partner once that is built at $new_ver"
+                    message="merged; publishes together with its release-cohort partner once that is built or published at $new_ver"
                 attention=1
             else
                 record "$r" failed rebase class=unpublish version="$new_ver" pr="$pr" \
@@ -956,9 +964,9 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
         as_user bash -c 'echo "$2" > "$1"' _ "$STAGE_DIR/.built-$r" "$th $key"
         record "$r" ok build version="$ver" message="$how"
     elif ((prc == 3)); then
-        # Built, but its release-cohort partner is not built at $ver yet: nothing published.
-        unpublish_now "$in_repo" "built $ver; held back until its release-cohort partner is built at $ver" || true
-        record "$r" attention build version="$ver" message="built; publishes together with its release-cohort partner once that is built at $ver"
+        # Built, but its release-cohort partner is not built or published at $ver yet: nothing published.
+        unpublish_now "$in_repo" "built $ver; held back until its release-cohort partner is built or published at $ver" || true
+        record "$r" attention build version="$ver" message="built; publishes together with its release-cohort partner once that is built or published at $ver"
         attention=1
     else
         # Rebuild next run rather than retrying a staged build that may be gone or bad.
@@ -991,6 +999,63 @@ upstream_dbs_check() { # upstream_dbs_check <check.json>
     fi
 }
 
+pipeline_drift() {  # pipeline_drift <stamp> <installed bin dir> <clone>: 0 and a one-line reason on stdout when the installed pipeline differs from <clone>/bin, 1 when it matches
+    # Cheap and offline: sha256sum only, no git, no network. The stamp bin/install-auto-update
+    # writes holds "source <commit>" and one "<sha256>  <name>" line per installed script.
+    # The clone is read as BUILD_USER (root never reads the user's clone directly).
+    local stamp=$1 dir=$2 clone=$3 re='^([0-9a-f]{64})  ([^/]+)$' line n
+    local names=() changed=() differ=() new=() listed=() why=()
+    local -A stamped=() inst=() cl=()
+    if [[ -f $stamp && -r $stamp ]]; then
+        while IFS= read -r line; do
+            # "-" would make sha256sum read stdin: never a script name
+            [[ $line =~ $re && ${BASH_REMATCH[2]} != - ]] || continue
+            stamped[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
+            names+=("${BASH_REMATCH[2]}")
+        done <"$stamp"
+    fi
+    if ((${#names[@]} == 0)); then echo "no install stamp (or it lists no scripts)"; return 0; fi
+    while IFS= read -r line; do
+        [[ $line =~ $re ]] && inst[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
+    done < <(cd "$dir" 2>/dev/null && sha256sum -- "${names[@]}" 2>/dev/null)
+    while IFS= read -r line; do
+        [[ $line =~ $re ]] && cl[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
+    done < <(as_user bash -c 'cd "$1/bin" 2>/dev/null && sha256sum -- "${@:2}" 2>/dev/null' _ "$clone" "${names[@]}")
+    for n in "${names[@]}"; do
+        [[ ${inst[$n]:-} == "${stamped[$n]}" ]] || changed+=("$n")
+        [[ ${cl[$n]:-} == "${stamped[$n]}" ]] || differ+=("$n")
+    done
+    # A script the base branch's installer would add (not installed yet) is drift too.
+    line=$(as_user grep -m1 '^scripts=(' "$clone/bin/install-auto-update" 2>/dev/null) || line=
+    line=${line#"scripts=("}
+    line=${line%%")"*}
+    read -r -a listed <<<"$line" || true
+    for n in "${listed[@]}"; do [[ -n ${stamped[$n]+set} ]] || new+=("$n"); done
+    if ((${#changed[@]})); then why+=("installed ${changed[*]} changed since install"); fi
+    if ((${#differ[@]})); then why+=("differ from bin/ on the base branch: ${differ[*]}"); fi
+    if ((${#new[@]})); then why+=("new script(s) on the base branch: ${new[*]}"); fi
+    ((${#why[@]})) || return 1
+    line=$(printf '%s; ' "${why[@]}")
+    echo "${line%; }"
+}
+pipeline_guard() {  # pipeline_guard: 0 when the installed pipeline matches bin/ of the refreshed bot clone;
+    # otherwise records "(pipeline)" attention and returns 1: the caller stops the run before any
+    # unpublish, publish or sync (a stale copy would act on a plan the base branch no longer makes)
+    local drift src head msg
+    if ! drift=$(pipeline_drift "$LIB/../installed" "$LIB" "$CLONE"); then
+        [[ $mode == plan ]] || as_user "$LIB/auto-update-state" forget "$STATUS" "(pipeline)" || true
+        return 0
+    fi
+    src=$(awk '$1 == "source" {print $2; exit}' "$LIB/../installed" 2>/dev/null) || src=
+    src=${src:0:12}
+    head=$(ugit rev-parse --short HEAD 2>/dev/null) || head=
+    msg="installed pipeline (source ${src:-unknown}) is stale against $BASE_BRANCH (${head:-unknown}): $drift; nothing published or unpublished this run. Fix: review $BASE_BRANCH, then re-run sudo bin/install-auto-update --apply from that checkout"
+    note ATTENTION "$msg"
+    attention=1
+    [[ $mode == plan ]] || record "(pipeline)" attention none message="$msg" || true
+    return 1
+}
+
 # ---------------------------------------------------------------- main
 if [[ $mode == crstate ]]; then
     as_user env GH_REPO="$GH_REPO" "$LIB/ai-review" pr "$cr_pr" --repo "$GH_REPO"
@@ -1003,6 +1068,13 @@ if [[ -z $workspace_arg ]]; then
         git fetch --quiet --prune origin "+refs/heads/$3:refs/remotes/origin/$3"
         git checkout --quiet -B "$3" "origin/$3"; git reset --quiet --hard "origin/$3"; git clean -qfdx' \
         _ "$CLONE" "$GIT_URL" "$BASE_BRANCH"
+fi
+# The installed service checks its own copy against the clone just refreshed: a stale copy
+# stops here, before any retried unpublish, sync, plan, publish or unpublish.
+if [[ $EUID -eq 0 && -z $workspace_arg ]] && ! pipeline_guard; then
+    as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" || true
+    echo "auto-update: installed pipeline is stale (see $SUMMARY)"
+    exit 1
 fi
 [[ $mode == full ]] && retry_unpublish
 # Sync a release left behind (a crash or failure after publish/unpublish) before the plan

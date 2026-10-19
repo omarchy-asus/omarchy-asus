@@ -118,6 +118,11 @@ A member is published only once every partner is staged from its recipe on the b
 member is held back: nothing is published, the stale pair is unpublished so the stock
 packages flow through, and the recipe is recorded as attention, not failed. The next run
 publishes it from the staged build, without rebuilding, once the partner is built.
+A partner already in the repo db at exactly the same version also counts: the built member
+publishes next to it, the same rule `bin/publish` and `bin/release-cohort check-publish`
+apply. Without it the member waited forever, because a partner published earlier is never
+rebuilt (#127). A partner in the db at a different version still holds the member back, and
+a lone member never publishes next to a partner at another version.
 `bin/unpublish` withdraws every member of a cohort, never one alone.
 
 ### Merge gates (all of them)
@@ -156,7 +161,7 @@ Rebasing each recipe onto its current base reproduces the committed recipe. The 
 
 `makechrootpkg` needs root. Nothing else does. The design keeps the two apart:
 
-- **The code that runs as root is a root-owned copy.** `bin/install-auto-update --apply` copies the scripts to `/usr/local/lib/omarchy-asus/bin`, owned by root and not writable by group or others. `auto-update` refuses to run as root from anywhere else, so it never runs the user-writable workspace or the bot clone. Changes to `bin/` reach the service only when the user re-runs the installer after review. The run logs a note when the installed copy differs from the branch.
+- **The code that runs as root is a root-owned copy.** `bin/install-auto-update --apply` copies the scripts to `/usr/local/lib/omarchy-asus/bin`, owned by root and not writable by group or others. `auto-update` refuses to run as root from anywhere else, so it never runs the user-writable workspace or the bot clone. Changes to `bin/` reach the service only when the user re-runs the installer after review. `bin/install-auto-update --apply` records the source commit and the sha256 of every installed script in `/usr/local/lib/omarchy-asus/installed`. Each run, right after refreshing the bot clone and before any retry, unpublish, publish or sync, compares the installed scripts (and the stamp) with `bin/` of the clone at `BASE_BRANCH`. On any difference (a changed or new script, an installed file changed since install, or no stamp) it records a `(pipeline)` attention entry that names the fix (review the branch, then `sudo bin/install-auto-update --apply`), does nothing else and exits 1. A stale copy once unpublished omarchy because its check-upstream predated release cohorts (#127). The entry clears on the first run after the reinstall.
 - **The config is root-owned too.** `/etc/omarchy-asus/auto-update.conf` must be `root:root` and not group/world-writable, or the run refuses to start. It names `BUILD_USER` and holds no secrets.
 - **Every step except the chroot build runs as `BUILD_USER`** through `runuser -u BUILD_USER -- env -i ...`, with a fixed environment. That covers git, fetching upstream, rebase (its recipe code runs in the sandbox below), gpg signing, `repo-add`, `gh`, `bin/ai-review` (codex and the verifier, on the user's own logins) and the agent. The signing key, the local repo, the bot clone, logs and status stay in `~BUILD_USER/.local/share/omarchy-asus`, and root never writes there:
   - the log is written by a user-side `tee`
@@ -208,6 +213,9 @@ sudo systemctl start omarchy-asus-auto-update.service   # first run, watched:
 journalctl -fu omarchy-asus-auto-update
 sudo systemctl enable --now omarchy-asus-auto-update.timer
 ```
+
+Re-run `sudo bin/install-auto-update --apply` after every merge that touches `bin/`. Until
+then the service stops with `(pipeline)` attention and publishes or unpublishes nothing.
 
 Try it without root first:
 
