@@ -13,7 +13,7 @@ pkgname='omarchy-settings'
 _tag='v4.0.5'
 _commit='94a8fbc2d67eec5673c7f16b8c5e8a9c8452ffdc'
 pkgver=4.0.5
-pkgrel=1.2
+pkgrel=1.3
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -156,7 +156,8 @@ else
         0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch
         0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch
         0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch
-        0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch)
+        0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch
+        0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch)
   sha256sums=('ce413d3fb5b90fab5b2e5cec66552a0562bc1fa3503e3b02e6c067c9a7a7a687'
               '13bad35cf1cc779ade5304debb026327026a3e165848aba62c6b3f3995562503'
               '29c1d4fdf427d9c389d25228c07ca564271c140653b622cf1e760c93677454b0'
@@ -180,7 +181,8 @@ else
               'c79b725a3df1bc6b7003e5e48ce4256ece94909ec504a4eff50e7206dec0edb1'
               '0801323e5cf288f80d7177b66892c9a79aeebf3bdbd871e406ad93c982174d9b'
               '4f94f5e6c2cf30d2be3d7eee91c928f053a5f1caa233e5d213873cea578644d7'
-              'e273ac9a2c4b80cd9031064ce881fd0dfabab135d643dce356240ab49d897932')
+              'e273ac9a2c4b80cd9031064ce881fd0dfabab135d643dce356240ab49d897932'
+              '2a5d638fa589c1734a759f48a3595ebf037f88b52e4e329f0fed232e5f5c7740')
 fi
 
 prepare() {
@@ -212,6 +214,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch"
 }
 
 # Print the HOOKS that result from sourcing mkinitcpio drop-ins onto a line.
