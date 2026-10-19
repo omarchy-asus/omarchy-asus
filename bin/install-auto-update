@@ -10,6 +10,9 @@
 # /etc/systemd/system, and /etc/omarchy-asus/auto-update.conf (only if missing, with
 # BUILD_USER set to the sudo user). --enable also starts the timer; without it the
 # timer is installed but off. Re-run after merging changes to bin/ to update the copy.
+# The source commit and sha256 of each installed script go to
+# /usr/local/lib/omarchy-asus/installed; auto-update compares them with the bot clone
+# and does nothing that publishes or unpublishes while they differ.
 set -euo pipefail
 src=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
 LIB=/usr/local/lib/omarchy-asus
@@ -24,7 +27,7 @@ for a in "$@"; do
         --apply) apply=1 ;;
         --enable) enable=1 ;;
         --uninstall) uninstall=1 ;;
-        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
         *) echo "unknown argument: $a" >&2; exit 64 ;;
     esac
 done
@@ -52,6 +55,27 @@ for s in "${scripts[@]}"; do
     mode=0755; [[ $s == env.sh || $s == publish-lib.sh ]] && mode=0644
     do_ install -o root -g root -m "$mode" "$src/bin/$s" "$LIB/bin/$s"
 done
+# Install stamp, read by auto-update as $LIB/bin/../installed (outside $LIB/bin, which it
+# globs): the source commit and the sha256 of the bytes just installed, in scripts order.
+if ((apply)); then
+    commit=$(runuser -u "$user" -- git -C "$src" rev-parse HEAD 2>/dev/null \
+        || git -C "$src" rev-parse HEAD 2>/dev/null || echo unknown)
+    [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=unknown
+    stamp=$(mktemp)
+    trap 'rm -f "$stamp"' EXIT
+    {
+        echo "# omarchy-asus auto-update install stamp (bin/install-auto-update)"
+        echo "source $commit"
+        (cd "$src/bin" && sha256sum -- "${scripts[@]}")
+    } > "$stamp"
+    short=${commit:0:7}; [[ $commit != unknown ]] || short=unknown
+    echo "+ write $LIB/installed (source $short)"
+    install -o root -g root -m 0644 "$stamp" "$LIB/installed"
+    rm -f "$stamp"
+    trap - EXIT
+else
+    echo "would write $LIB/installed (source commit and sha256 of the installed scripts)"
+fi
 do_ install -o root -g root -m 0644 "$src/systemd/README.md" "$src/systemd/auto-update.conf.example" "$LIB/systemd/"
 for u in "${units[@]}"; do do_ install -o root -g root -m 0644 "$src/systemd/$u" "$UNITS/$u"; done
 if [[ -e $CONF ]]; then
