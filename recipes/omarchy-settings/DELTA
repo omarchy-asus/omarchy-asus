@@ -35,3 +35,4 @@ patch 0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch prepare omarchy
 patch 0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch prepare omarchy
 patch 0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch prepare omarchy
 patch 0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch prepare omarchy
+patch 0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch prepare omarchy

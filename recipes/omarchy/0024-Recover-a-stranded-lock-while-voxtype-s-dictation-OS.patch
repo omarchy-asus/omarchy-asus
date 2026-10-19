@@ -1,0 +1,76 @@
+From 763f418214693962cd6ff9037d654cadba86802b Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sun, 18 Oct 2026 21:47:36 -0400
+Subject: [PATCH 24/24] Recover a stranded lock while voxtype's dictation OSD
+ is running
+
+Backport-of: omacom/omarchy#15890 (ae5ca034), applies to v4.0.5 unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bin/omarchy-hyprland-session-lock-stranded    |  8 +++++++-
+ .../hyprland-session-lock-stranded-test.sh    | 20 +++++++++++++++----
+ 2 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/bin/omarchy-hyprland-session-lock-stranded b/bin/omarchy-hyprland-session-lock-stranded
+index 05b8a56cc..267417fa7 100755
+--- a/bin/omarchy-hyprland-session-lock-stranded
++++ b/bin/omarchy-hyprland-session-lock-stranded
+@@ -12,8 +12,14 @@
+ #
+ # Exits 0 stranded, 1 unlocked, 2 undetermined. The caller passes its own pid,
+ # as a crash re-execs the shell in place.
++#
++# Voxtype's dictation OSD is a Quickshell that runs for the whole session and
++# never locks, so it doesn't count; otherwise no orphan would ever be recovered
++# while dictation is installed. Its config is /usr/share/voxtype/quickshell, or
++# a per-user copy under $XDG_DATA_HOME/voxtype/quickshell.
+ omarchy-hyprland-session-locked || exit
+ 
+-if pgrep -u "$UID" -x 'quickshell|qs|hyprlock' | grep -qvxF "$1"; then
++if pgrep -u "$UID" -a -x 'quickshell|qs|hyprlock' \
++  | awk -v self="$1" '$1 != self && !/\/voxtype\/quickshell\/?( |$)/ { found = 1 } END { exit !found }'; then
+   exit 2
+ fi
+diff --git a/test/shell.d/hyprland-session-lock-stranded-test.sh b/test/shell.d/hyprland-session-lock-stranded-test.sh
+index ba1db1f18..52cafa2be 100755
+--- a/test/shell.d/hyprland-session-lock-stranded-test.sh
++++ b/test/shell.d/hyprland-session-lock-stranded-test.sh
+@@ -17,9 +17,9 @@ SH
+ cat >"$fake_bin/pgrep" <<'SH'
+ #!/bin/bash
+ 
+-[[ $* == "-u $UID -x quickshell|qs|hyprlock" ]] || exit 3
++[[ $* == "-u $UID -a -x quickshell|qs|hyprlock" ]] || exit 3
+ [[ -n $OMARCHY_TEST_LOCKERS ]] || exit 1
+-printf '%s\n' $OMARCHY_TEST_LOCKERS
++printf '%s\n' "$OMARCHY_TEST_LOCKERS"
+ SH
+ chmod +x "$fake_bin"/*
+ 
+@@ -33,8 +33,20 @@ assert_status() {
+   pass "$description"
+ }
+ 
++shell="100 quickshell -n -p /usr/share/omarchy/shell"
++other_shell="200 quickshell -n -p /tmp/tmp.abc/omarchy/shell"
++voxtype="300 qs -d -p /usr/share/voxtype/quickshell"
++voxtype_user="301 qs -d -p /data/.local/share/voxtype/quickshell/"
++not_voxtype="302 quickshell -p /usr/share/voxtype/quickshell-lock"
++hyprlock="400 hyprlock"
++
+ assert_status 0 0 "" "a lock with no locker alive is stranded"
+-assert_status 0 0 "100" "the asking shell does not count as another locker"
++assert_status 0 0 "$shell" "the asking shell does not count as another locker"
+ assert_status 1 1 "" "an unlocked session is not stranded"
+ assert_status 2 2 "" "a compositor that cannot say leaves it undetermined"
+-assert_status 2 0 "100 200" "a lock another locker may hold is left undetermined, so it is never taken"
++assert_status 2 0 "$shell"$'\n'"$other_shell" "a lock another shell may hold is left undetermined, so it is never taken"
++assert_status 2 0 "$shell"$'\n'"$hyprlock" "a lock hyprlock may hold is left undetermined"
++assert_status 0 0 "$shell"$'\n'"$voxtype" "voxtype's dictation OSD does not count as a locker"
++assert_status 2 0 "$voxtype"$'\n'"$other_shell" "voxtype's OSD does not hide another shell"
++assert_status 0 0 "$shell"$'\n'"$voxtype_user" "voxtype's per-user OSD copy does not count as a locker"
++assert_status 2 0 "$shell"$'\n'"$not_voxtype" "only voxtype's own config is skipped, not a path that starts like it"
+-- 
+2.56.0
+
