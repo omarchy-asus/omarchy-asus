@@ -46,23 +46,28 @@ The signed `[omarchy-asus]` repo, served from the
 | `hyprland`, `hyprpm` | 0.56.2-4.1 | Windows no longer render off-screen after an HDMI replug | Fixed on main by [hyprwm/Hyprland#16140](https://github.com/hyprwm/Hyprland/pull/16140), unreleased; dropped when 0.57 ships |
 | `omarchy-asus-g16` | 1.0.0-1 | GA605KM: the touchpad no longer wakes the laptop; hibernate powers off cleanly (`HibernateMode=shutdown`); Dynamic Boost keeps working after many charger plug-ins (nvidia-powerd start limit) | Not yet proposed upstream; files are byte-identical to the [omarchy fork](https://github.com/omarchy-asus/omarchy)'s, under `/usr/lib` ([notes](recipes/omarchy-asus-g16/README.md)) |
 | `asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` | 0.1.0-1 | A toast when Fn+Super locks or unlocks the Windows key (needs the kernel's Win-lock patch); the G16 Control widget holds the switch | Userspace for the kernel patch; the widget needs Omarchy to load system-wide plugins ([notes](recipes/asus-rog-nkey-winlock/README.md)) |
-| `omarchy`, `omarchy-settings` | 4.0.5-1.2 | **Experimental.** Stock Omarchy 4.0.5 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
+| `omarchy`, `omarchy-settings` | 4.0.5-1.1 (main: 4.0.5-1.2) | **Experimental.** Stock Omarchy 4.0.5 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
+| `omarchy-asus-g16-apply` | 0.1.0-2 (main: 0.1.0-5) | A command you run yourself. It reports every known G16 fix with `--check` and applies the ones that live in your own config or `/etc` | Local tool ([notes](recipes/omarchy-asus-g16-apply/README.md)) |
+
+Versions are what the release serves now. Where main is ahead (`omarchy` and
+`omarchy-settings` 4.0.5-1.2, `omarchy-asus-g16-apply` 0.1.0-5), the daily auto-update
+publishes the new build.
+
+On a fresh G16, the patched `omarchy` and `omarchy-settings` (#58) apply the G16 fixes that
+live in your own config or `/etc` (iGPU video decode, HDMI cursor, rtkit, asusd) through their
+migrations on `omarchy update`. `omarchy-asus-g16-apply` reports every known G16 fix with
+`--check`, and is the manual path on a stock install and for the speaker level, which no
+migration raises. Settings you already have are left alone. See
+[its README](recipes/omarchy-asus-g16-apply/README.md).
 
 The three NVIDIA fixes are open pull requests by other people. We carry them because they fix
 real bugs on this hardware.
 
 ### In progress
 
-- **Kernel 7.2.8-9.2:** an `i2c-designware` RX threshold backport (the touchpad fires about
-  52 interrupts per report today) and GA605KM power limits for `asus-armoury`.
-- **Fresh G16 coverage:** with the patched `omarchy` and `omarchy-settings` from this repo
-  (#58), their migrations apply the G16 fixes that live in your own config or `/etc` (iGPU
-  video decode, HDMI cursor, rtkit, asusd) on `omarchy update`. `omarchy-asus-g16-apply` (not
-  published yet) reports every known G16 fix with `--check`, and is the manual path on a stock
-  install and for the speaker level, which no migration raises. Settings you already have are
-  left alone. See [its README](recipes/omarchy-asus-g16-apply/README.md).
-- **Daily auto-update pipeline:** the code is in this repo (`bin/auto-update`, `systemd/`);
-  it will be installed on the build host soon.
+- **Kernel 7.2.8-9.3:** an `i2c-designware` RX threshold backport (the touchpad fires about
+  52 interrupts per report today) and GA605KM power limits for `asus-armoury`. It is held in
+  PR #8 until it boots on a G16.
 
 ## Install (G16, experimental)
 
@@ -101,7 +106,7 @@ rebuilds it when upstream moves. If a patch stops applying or the build fails, o
 withdrawn from the repo and the stock build flows through again. You never get stuck on a
 stale pin. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
 pull request, builds it in a clean chroot as CI, and merges and publishes only after
-a verified AI review (`bin/ai-review`) and an agent review pass. Until the timer is installed, it is run by hand.
+a verified AI review (`bin/ai-review`) and an agent review pass. The timer runs daily on the build host.
 
 ## Supported hardware
 
