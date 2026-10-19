@@ -2,7 +2,9 @@
 # omarchy-asus-g16-apply against the patched omarchy/omarchy-settings (#45), offline: the
 # command runs with OMARCHY_ASUS_G16_ROOT, HOME, OMARCHY_ASUS_G16_APPLY_SHARE and
 # OMARCHY_ASUS_G16_APPLY_LIB pointing at temp dirs, a hybrid GA605KM in the fake sysfs, and
-# pacman, aplay, amixer, busctl, systemctl and sudo stubbed. The patched omarchy is stood in
+# pacman, aplay, amixer, busctl, systemctl and sudo stubbed. The XDG base-dir variables are
+# unset for the command, so they default under the case's HOME; a decoy host XDG_CONFIG_HOME
+# holding a rog-power.service checks this (#120). The patched omarchy is stood in
 # for by its migrations (/usr/share/omarchy/migrations/<id>.sh) and its hybrid-cursor.lua.
 #   a. stock Omarchy: hdmi-cursor is missing
 #   b. patched, migration 1792123636 run and its pins in place: hdmi-cursor and hybrid-video
@@ -66,6 +68,11 @@ for stub in aplay amixer busctl systemctl sudo; do
 done
 chmod +x "$S/lib/bin/"* "$S/bin/"*
 export PATH=$S/bin:$PATH
+# A decoy for a host that exports the XDG base dirs, with a rog-power.service in its user
+# unit dir: run() must not let it through to the command (#120).
+mkdir -p "$S/host-xdg/config/systemd/user" "$S/host-xdg/data" "$S/host-xdg/state" "$S/host-xdg/cache"
+printf '[Service]\nExecStart=/bin/true\n' >"$S/host-xdg/config/systemd/user/rog-power.service"
+export XDG_CONFIG_HOME=$S/host-xdg/config XDG_DATA_HOME=$S/host-xdg/data XDG_STATE_HOME=$S/host-xdg/state XDG_CACHE_HOME=$S/host-xdg/cache
 
 check() {
     local desc=$1
@@ -118,6 +125,8 @@ NODE=/dev/dri/by-path/pci-0000:65:00.0-render
 run() {
     (
         export HOME=$H OMARCHY_ASUS_G16_ROOT=$ROOT
+        # The command follows the XDG base dirs: default them under the case's HOME, whatever the host exports (#120).
+        unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
         bash "$TOOL" "$@"
     ) >"$OUT" 2>&1
     return 0

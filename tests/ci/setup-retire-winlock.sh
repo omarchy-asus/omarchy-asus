@@ -62,8 +62,9 @@ exec "$@"
 STUB
 chmod +x "$S/bin/pacman" "$S/bin/systemctl" "$S/bin/udevadm" "$S/bin/sudo"
 export PATH=$S/bin:$PATH
-# The user unit dir follows XDG_CONFIG_HOME: only case 14 sets it (through X).
-unset XDG_CONFIG_HOME
+# The user unit dir follows XDG_CONFIG_HOME: only case 14 sets it (through X). The other
+# XDG base dirs are unset too, so nothing the host exports reaches the script (#120).
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
 
 # Never run the installer itself: without the guard, load only the functions.
 LIB=$W/bin/omarchy-asus-setup

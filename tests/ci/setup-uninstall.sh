@@ -1,6 +1,7 @@
 #!/bin/bash
 # bin/omarchy-asus-setup --dry-run --uninstall, offline (#84): pacman and the other
-# commands it checks for are stubs, HOME and the pacman config are temp files.
+# commands it checks for are stubs, HOME and the pacman config are temp files, and the
+# XDG base-dir variables are unset so they default under the temp HOME.
 # The stub pacman has the repo builds and the optional G16 packages installed;
 # linux-omarchy, nvidia-open-dkms and hyprpm (a split package of hyprland) also have a
 # stock build in core/extra.
@@ -47,6 +48,9 @@ printf '[options]\nHoldPkg = pacman glibc\n\n[omarchy]\nInclude = /etc/pacman.d/
 # shellcheck disable=SC2016 # $arch is pacman's, written out verbatim
 printf '[omarchy-asus]\nSigLevel = Required\nServer = https://example.invalid/$arch\n' >"$S/custom-repos.conf"
 export PATH=$S/bin:$PATH HOME=$S/home
+# The setup follows the XDG base dirs: unset them so they default under the temp HOME,
+# whatever the host exports (#120).
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
 export OMARCHY_ASUS_PACMAN_CONF=$S/pacman.conf OMARCHY_ASUS_CUSTOM_REPOS=$S/custom-repos.conf
 fail=0
 expect() { if [[ $1 == "$2" ]]; then echo "ok: $3"; else printf 'FAIL: %s\n  got:  %s\n  want: %s\n' "$3" "$1" "$2"; fail=1; fi; }

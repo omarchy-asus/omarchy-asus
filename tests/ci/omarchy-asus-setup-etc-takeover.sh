@@ -221,8 +221,9 @@ run_g16() {
         set --
         export OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 OMARCHY_ASUS_SETUP_ROOT=$S/root OMARCHY_ASUS_SETUP_TTY=/dev/null
         export HOME=$S/home PATH=$NO_APPLY
-        # retire_local_winlock reads the user unit dir from XDG_CONFIG_HOME: keep it under HOME.
-        unset XDG_CONFIG_HOME
+        # retire_local_winlock reads the user unit dir from XDG_CONFIG_HOME: keep it and the
+        # other XDG base dirs under HOME, whatever the host exports (#120).
+        unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
         # shellcheck source=/dev/null
         . "$W/bin/omarchy-asus-setup"
         touch "$TMP/key.gpg"
