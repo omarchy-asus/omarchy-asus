@@ -26,8 +26,9 @@ if ((EUID == 0)); then
     exit 0
 fi
 
-# The user unit dir follows XDG_CONFIG_HOME: only the cases that set X export it.
-unset XDG_CONFIG_HOME
+# The user unit dir follows XDG_CONFIG_HOME: only the cases that set X export it. The other
+# XDG base dirs are unset too, so nothing the host exports reaches the scripts (#120).
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
 
 RECIPE=$W/recipes/omarchy-asus-g16-apply
 TOOL=$RECIPE/omarchy-asus-g16-apply
