@@ -53,7 +53,7 @@ SHAs are the commits of omacom/omarchy#12428, reachable there.
 | 0016 | Tailscale panel polls status only while closed | #31 | omacom/omarchy#15671 |
 | 0017 | clamshell state from logind events instead of a 2 s poll | #32 | not submitted |
 | 0018 | launcher icon index rescanned at most once a minute | #33 | not submitted |
-| 0024 | a crashed shell retakes its stranded lock while voxtype's dictation OSD runs (stock Omarchy bug; fork commit `ca1cbdca` on `asus/v4-0-5`) | #102 | omacom/omarchy#15890 |
+| 0024 | a crashed shell retakes its stranded lock while voxtype's dictation OSD runs (stock Omarchy bug) | #102 | omacom/omarchy#15890 |
 
 **PKGBUILD change (omarchy-settings only):** `pkgbuild-source-monitor-unit.diff` installs the
 charger-swap monitor user unit (from 0002) in `/usr/lib/systemd/user`. omarchy-settings installs
