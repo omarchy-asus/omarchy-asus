@@ -25,7 +25,7 @@
 pkgbase=asus-rog-nkey-winlock
 pkgname=(asus-rog-nkey-winlock asus-zephyrus-g16-control)
 pkgver=0.1.0
-pkgrel=4
+pkgrel=5
 pkgdesc='Win-key lock helper and Omarchy bar widget for the ASUS ROG Zephyrus G16 (GA605)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -45,10 +45,10 @@ sha256sums=('548676e73486095be2621f7e0f0d096b98c5643e898785a809634837804c64fe'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
             '85955d0a7eb12911ead8c0cb68cd89d356aae02d67d4668f187136be3e767bfd'
             'ab7dec56a6b8b2e88cfc7654c16d367e28d360149e6d79b972f3cb3ba278872c'
-            '280084a81b45c0df105536cabf980bbf3130763bdc2575188aefe538e0776f7b'
-            'dcd85b43e93146a229f2c0adf7efcfdd6587f5597a60fd4587c1df091fedab99'
-            'e8b672deee214a3af1b771ae7c53d0f08e1d647fc5fb53d4f7deffbeba8003c9'
-            '32434709424ffc2c3ecea1f97bddbb41ed2aa79e6cd23fa8ce6839e5a091ccff')
+            '09b4c48e0ff56cd3fa27dd76b69493f255dd2ea00c936a19340997f729676609'
+            'a32aa8822d98ce464f8c7cec5650402ac955a5eb0205c47a9dbec1aa387e9ce0'
+            'f438c4a990142e37b62bc88983293e6e1d45c2f7b66c17d882681820c2d8f7a8'
+            '8e6cf639ed024d95c4cb493cfb2567ef5a1923f6537dc67c738b4270fe86c9ab')
 
 _plugin_id=omarchy-asus.g16
 

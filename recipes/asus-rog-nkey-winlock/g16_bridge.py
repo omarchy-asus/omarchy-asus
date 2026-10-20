@@ -32,8 +32,22 @@ Per power source (what omarchy-power-tune used to do, folded in here), from
                                         barrel (once, not a cap); empty = off
   BRIGHT_DEVICE                         backlight to use (default: the first
                                         one that isn't nvidia_*)
+  PPT_AC / PPT_USBC / PPT_WEAK_BARREL     "SPL SPPT FPPT" in W for that source
+  BOOST_AC / BOOST_USBC / BOOST_WEAK_BARREL
+                                        NVIDIA Dynamic Boost (W) for that source
 A USB-C charger counts as battery: barrel = full power, USB-C and battery
-save. UPower reports both chargers as AC; asus-armoury's charge_mode tells
+save. A barrel that drops out 3 or more times in 30 s is a weak barrel (a
+third-party adapter that can't carry the load): it keeps the AC settings and
+gets the PPT_WEAK_BARREL limits until it's unplugged for good. Power-source
+changes apply once the source has been stable for 1.5 s.
+
+The PPT limits only take effect while the CPU custom fan curve is on (BIOS
+307 measured: a limit written in auto fan mode is stored but ignored, and
+applies the moment the curve is enabled). So a source with limits enables
+asusd's stored CPU curve for the current profile and writes the limits,
+clamped to the live firmware range; leaving it disables the curve and writes
+each attribute's default back. The profiles it enabled are kept in
+~/.local/state/omarchy/g16-ppt-curves, so a crash can't leave a curve on. UPower reports both chargers as AC; asus-armoury's charge_mode tells
 them apart (bit 0 barrel, bit 1 USB-C).
 A key that is absent is left alone: with no file nothing is enforced. The
 refresh pin (~/.local/state/omarchy/power-tune-hz, an integer) wins over
@@ -88,10 +102,17 @@ OVERDRIVE_NAME = "panel_overdrive"
 WINLOCK_BIN = "/usr/bin/g16-winlock"
 WINLOCK_UNIT = "g16-winlock.service"
 MAX_LINE = 4096
-CONF_KEYS = {"KBD_AC", "KBD_BATTERY", "HZ_AC", "HZ_BATTERY", "HZ_GAMING",
+CONF_KEYS = {"PPT_AC", "PPT_USBC", "PPT_WEAK_BARREL", "BOOST_AC", "BOOST_USBC",
+             "BOOST_WEAK_BARREL", "KBD_AC", "KBD_BATTERY", "HZ_AC", "HZ_BATTERY", "HZ_GAMING",
              "PANEL_OVERDRIVE_AC", "PANEL_OVERDRIVE_BATTERY", "INTERNAL_OUTPUT",
              "BITDEPTH", "BRIGHT_BATTERY", "BRIGHT_DEVICE"}
 LOGIND = "org.freedesktop.login1"
+PLATFORM = "xyz.ljones.Platform"
+FANCURVES = "xyz.ljones.FanCurves"
+PPT_ATTRS = ["ppt_pl1_spl", "ppt_pl2_sppt", "ppt_pl3_fppt"]
+BOOST_ATTR = "nv_dynamic_boost"
+DEBOUNCE_MS = 1500
+WEAK_EDGES, WEAK_WINDOW, WEAK_CLEAR_S = 3, 30.0, 10
 
 
 def env(name, default=""):
@@ -112,6 +133,7 @@ WINLOCK_MODE_CONF = os.path.join(WINLOCK_DROPIN, "mode.conf")
 # barrel backlight level saved when leaving it.
 SEEN_SOURCE = os.path.join(STATE_DIR, "power-tune.source")
 SAVED_BRIGHT = os.path.join(STATE_DIR, "power-tune.bright-ac")
+CURVES_STATE = os.path.join(STATE_DIR, "g16-ppt-curves")
 # Tests point these at a temp tree; on a real system they are the defaults.
 SYSROOT = env("G16_BRIDGE_SYSROOT", "/sys")
 WINLOCK_PATH = env("G16_BRIDGE_WINLOCK", WINLOCK_BIN)
@@ -358,6 +380,14 @@ class Bridge:
         self.kind = "ac"          # ac (barrel) | usbc | battery
         self.kind_tries = 0
         self.kind_timer = 0
+        self.edges = []           # monotonic times of charger online/offline edges
+        self.weak = False
+        self.debounce_timer = 0
+        self.weak_clear_timer = 0
+        self.armoury = {}         # attribute name -> (path, iface)
+        self.platform = None      # path of xyz.ljones.Platform
+        self.fancurves = None     # path of xyz.ljones.FanCurves
+        self.limits_on = False
         self.conf = read_conf()
         self.aura = None      # object path
         self.slash = None
@@ -487,6 +517,8 @@ class Bridge:
         self.aura = self.slash = self.charge = self.overdrive = None
         self.cache = {}
         self.prop_names = {}
+        self.armoury = {}
+        self.platform = self.fancurves = None
         seen = 0
         stack = ["/"]
         while stack and seen < 256:
@@ -509,6 +541,13 @@ class Bridge:
                     self.slash = path
                 elif CHARGE_PROP in names and not self.charge:
                     self.charge = (path, iface.name)
+                if iface.name == PLATFORM and not self.platform:
+                    self.platform = path
+                if iface.name == FANCURVES and not self.fancurves:
+                    self.fancurves = path
+                last = path.rstrip("/").rsplit("/", 1)[-1]
+                if "CurrentValue" in names and last in PPT_ATTRS + [BOOST_ATTR]:
+                    self.armoury[last] = (path, iface.name)
                 if iface.name.startswith("xyz.ljones.") and not self.overdrive:
                     self.match_overdrive(path, iface.name, names)
         for key in [(self.aura, AURA), (self.slash, SLASH), self.charge,
@@ -548,9 +587,13 @@ class Bridge:
         if path == "/org/freedesktop/UPower" and iface == UPOWER:
             if "OnBattery" in changed and bool(changed["OnBattery"]) != self.on_battery:
                 self.on_battery = bool(changed["OnBattery"])
-                self.update_kind("power source")
+                self.power_edge()
             self.emit()
             return
+        if iface == PLATFORM and "PlatformProfile" in changed and self.limits_on:
+            # Omarchy switches the profile on a charger change: the curve
+            # gate belongs to the new profile now.
+            self.apply_limits("profile change")
         if key in self.cache:
             self.cache[key].update(changed)
             if invalidated:
@@ -568,8 +611,9 @@ class Bridge:
 
     # ---- the per-source policy (power-tune) ----
     def source(self):
-        """Which settings apply: AC on the barrel, BATTERY on USB-C and battery."""
-        return "AC" if self.kind == "ac" else "BATTERY"
+        """Which settings apply: AC on the barrel (weak or not), BATTERY on
+        USB-C and battery."""
+        return "AC" if self.kind in ("ac", "weak") else "BATTERY"
 
     def read_kind(self):
         if self.on_battery:
@@ -579,7 +623,40 @@ class Bridge:
             return "ac", True          # no asus-armoury: every charger is AC
         if v == 0:
             return "ac", False         # the firmware hasn't classified it yet
-        return ("usbc" if not v & 1 and v & 2 else "ac"), True
+        if not v & 1 and v & 2:
+            return "usbc", True
+        return ("weak" if self.weak else "ac"), True
+
+    def power_edge(self):
+        """A charger went online or offline. Count it toward weak-barrel
+        detection, and apply once the source has been stable for 1.5 s, so a
+        flapping adapter doesn't re-apply (and modeset) on every edge."""
+        now = GLib.get_monotonic_time() / 1e6
+        self.edges = [t for t in self.edges if now - t <= WEAK_WINDOW] + [now]
+        if not self.on_battery and len(self.edges) >= WEAK_EDGES and not self.weak:
+            self.weak = True
+            log(f"weak barrel: {len(self.edges)} charger edges in {WEAK_WINDOW:.0f} s")
+        if self.weak_clear_timer:
+            GLib.source_remove(self.weak_clear_timer)
+            self.weak_clear_timer = 0
+        if self.on_battery and self.weak:
+            # Unplugged for good (10 s on battery) ends the weak-barrel state.
+            def clear():
+                self.weak_clear_timer = 0
+                if self.on_battery:
+                    self.weak = False
+                    self.edges = []
+                    log("weak barrel cleared")
+                return False
+            self.weak_clear_timer = GLib.timeout_add_seconds(WEAK_CLEAR_S, clear)
+        if self.debounce_timer:
+            GLib.source_remove(self.debounce_timer)
+
+        def settled():
+            self.debounce_timer = 0
+            self.update_kind("power source")
+            return False
+        self.debounce_timer = GLib.timeout_add(DEBOUNCE_MS, settled)
 
     def update_kind(self, why):
         """Work out the source and apply. The firmware sets charge_mode a
@@ -632,6 +709,99 @@ class Bridge:
         od = self.conf.get("PANEL_OVERDRIVE_" + src, "")
         if od in ("0", "1") and self.overdrive:
             self.set_overdrive(int(od))
+        self.apply_limits(why)
+
+    # ---- per-source power limits (#34) ----
+    def wanted_limits(self):
+        """(ppt values or None, boost or None) for the current source."""
+        key = {"ac": "AC", "weak": "WEAK_BARREL", "usbc": "USBC"}.get(self.kind)
+        if not key:
+            return None, None
+        ppt = self.conf.get("PPT_" + key, "").split()
+        ppt = [int(x) for x in ppt] if len(ppt) == 3 and all(x.isdigit() for x in ppt) else None
+        b = self.conf.get("BOOST_" + key, "")
+        return ppt, (int(b) if b.isdigit() else None)
+
+    def read_curves(self):
+        try:
+            return [int(x) for x in read_text(CURVES_STATE).split() if x.isdigit()]
+        except ValueError:
+            return []
+
+    def set_curve(self, profile, on):
+        # Only the CPU fan's curve gates the PPT; asusd persists the flag per
+        # profile, so every one we turn on is recorded until it's off again.
+        mgr = (self.fancurves, FANCURVES)
+        try:
+            self.call(self.system, ASUSD, mgr[0], mgr[1], "SetProfileFanCurveEnabled",
+                      GLib.Variant("(usb)", (profile, "CPU", on)))
+        except GLib.Error as e:
+            log(f"CPU fan curve for profile {profile} -> {on}: {e.message}; trying all fans")
+            self.call(self.system, ASUSD, mgr[0], mgr[1], "SetFanCurvesEnabled",
+                      GLib.Variant("(ub)", (profile, on)))
+        had = self.read_curves()
+        now = sorted(set(had) | {profile}) if on else [p for p in had if p != profile]
+        write_text(CURVES_STATE, " ".join(str(p) for p in now))
+
+    def write_attr(self, name, value, default=False):
+        """Write an asus-armoury attribute through asusd, clamped to its live
+        range (asusd reports the AC or DC range for the current source)."""
+        if name not in self.armoury:
+            return
+        path, iface = self.armoury[name]
+        props = {}
+        for p in ("CurrentValue", "MinValue", "MaxValue", "DefaultValue"):
+            try:
+                props[p] = self.raw_prop(path, iface, p)
+            except GLib.Error:
+                pass
+        if "CurrentValue" not in props:
+            return
+        lo, hi = (int(props[p].unpack()) if p in props else -1 for p in ("MinValue", "MaxValue"))
+        if default:
+            value = int(props["DefaultValue"].unpack()) if "DefaultValue" in props else -1
+            if value < 0:
+                return
+        if 0 <= lo <= hi and hi > 0:
+            value = max(lo, min(hi, value))
+        elif hi == 0 and value != 0:
+            return                      # not adjustable on this source (e.g. boost on battery)
+        if int(props["CurrentValue"].unpack()) != value:
+            self.set_prop(path, iface, "CurrentValue",
+                          GLib.Variant(props["CurrentValue"].get_type_string(), value))
+            log(f"{name} -> {value}")
+
+    def apply_limits(self, why):
+        if not self.platform or not self.fancurves or not self.armoury:
+            return
+        ppt, boost = self.wanted_limits()
+        try:
+            stale = self.read_curves()
+            if ppt is None and boost is None:
+                if self.limits_on or stale:
+                    for p in stale:
+                        self.set_curve(p, False)
+                    for name in PPT_ATTRS + [BOOST_ATTR]:
+                        self.write_attr(name, 0, default=True)
+                    self.limits_on = False
+                    log(f"power limits off ({why})")
+                return
+            profile = int(self.raw_prop(self.platform, PLATFORM, "PlatformProfile").unpack())
+            # Curve first, limits after: enabling a curve makes asusd re-apply
+            # its own tuning group when that's on, and ours must land last.
+            for p in stale:
+                if p != profile:
+                    self.set_curve(p, False)
+            if profile not in stale:
+                self.set_curve(profile, True)
+            for name, v in zip(PPT_ATTRS, ppt or []):
+                self.write_attr(name, v)
+            if boost is not None:
+                self.write_attr(BOOST_ATTR, boost)
+            self.limits_on = True
+            log(f"power limits for {self.kind} ({why}): ppt={ppt} boost={boost} profile={profile}")
+        except (GLib.Error, OSError) as e:
+            log(f"power limits ({why}): {getattr(e, 'message', e)}")
 
     def adjust_brightness(self):
         """power-tune's backlight step, edge-triggered on the source class

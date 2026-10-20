@@ -47,10 +47,20 @@ ASUSD_XML = """
   </interface>
   <interface name="xyz.ljones.Platform">
     <property name="ChargeControlEndThreshold" type="y" access="readwrite"/>
+    <property name="PlatformProfile" type="u" access="readwrite"/>
+  </interface>
+  <interface name="xyz.ljones.FanCurves">
+    <method name="SetProfileFanCurveEnabled">
+      <arg type="u" direction="in"/><arg type="s" direction="in"/><arg type="b" direction="in"/>
+    </method>
+    <method name="SetFanCurvesEnabled"><arg type="u" direction="in"/><arg type="b" direction="in"/></method>
   </interface>
   <interface name="xyz.ljones.AsusArmoury">
     <property name="Name" type="s" access="read"/>
     <property name="CurrentValue" type="i" access="readwrite"/>
+    <property name="DefaultValue" type="i" access="read"/>
+    <property name="MinValue" type="i" access="read"/>
+    <property name="MaxValue" type="i" access="read"/>
   </interface>
 </node>"""
 
@@ -98,13 +108,36 @@ values = {
         "ShowOnBattery": GLib.Variant("b", False), "ShowBatteryWarning": GLib.Variant("b", True),
         "ShowOnLidClosed": GLib.Variant("b", False),
     },
-    ("/xyz/ljones", "xyz.ljones.Platform"): {"ChargeControlEndThreshold": GLib.Variant("y", 80)},
+    ("/xyz/ljones", "xyz.ljones.Platform"): {"ChargeControlEndThreshold": GLib.Variant("y", 80),
+                                             "PlatformProfile": GLib.Variant("u", 0)},
     ("/xyz/ljones/asus_armoury/panel_overdrive", "xyz.ljones.AsusArmoury"): {
-        "Name": GLib.Variant("s", "PanelOverdrive"), "CurrentValue": GLib.Variant("i", 0)},
+        "Name": GLib.Variant("s", "PanelOverdrive"), "CurrentValue": GLib.Variant("i", 0),
+        "DefaultValue": GLib.Variant("i", -1), "MinValue": GLib.Variant("i", -1), "MaxValue": GLib.Variant("i", -1)},
     ("/org/freedesktop/UPower", "org.freedesktop.UPower"): {"OnBattery": GLib.Variant("b", False)},
     ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice", "org.freedesktop.systemd1.Unit"): {
         "ActiveState": GLib.Variant("s", "active")},
 }
+
+
+# asus-armoury PPT attributes as asusd 6.5.0 reports them on the G16: the
+# range and default follow the power source (AC 15-80 each; DC SPL 25-35,
+# SPPT 31-44, FPPT 45-65; Dynamic Boost 5-15 on AC, 0 on battery).
+RANGES = {"ppt_pl1_spl": ((15, 80, 80), (25, 35, 35)), "ppt_pl2_sppt": ((15, 80, 80), (31, 44, 44)),
+          "ppt_pl3_fppt": ((15, 80, 80), (45, 65, 65)), "nv_dynamic_boost": ((5, 15, 15), (0, 0, 0))}
+NAMES = {"ppt_pl1_spl": "PptPl1Spl", "ppt_pl2_sppt": "PptPl2Sppt", "ppt_pl3_fppt": "PptPl3Fppt",
+         "nv_dynamic_boost": "NvDynamicBoost"}
+for attr, (ac, dc) in RANGES.items():
+    values[(f"/xyz/ljones/asus_armoury/{attr}", "xyz.ljones.AsusArmoury")] = {
+        "Name": GLib.Variant("s", NAMES[attr]), "CurrentValue": GLib.Variant("i", ac[2]),
+        "MinValue": GLib.Variant("i", ac[0]), "MaxValue": GLib.Variant("i", ac[1]),
+        "DefaultValue": GLib.Variant("i", ac[2])}
+
+
+def set_ranges(on_battery):
+    for attr, (ac, dc) in RANGES.items():
+        lo, hi, default = dc if on_battery else ac
+        v = values[(f"/xyz/ljones/asus_armoury/{attr}", "xyz.ljones.AsusArmoury")]
+        v["MinValue"], v["MaxValue"], v["DefaultValue"] = (GLib.Variant("i", x) for x in (lo, hi, default))
 
 
 def log(entry):
@@ -164,8 +197,9 @@ upower = Gio.DBusConnection.new_for_address_sync(
     os.environ["DBUS_SYSTEM_BUS_ADDRESS"],
     Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
 asusd_objects = [(AURA_PATH, ["xyz.ljones.Aura", "xyz.ljones.Slash"]),
-                 ("/xyz/ljones", ["xyz.ljones.Platform"]),
-                 ("/xyz/ljones/asus_armoury/panel_overdrive", ["xyz.ljones.AsusArmoury"])]
+                 ("/xyz/ljones", ["xyz.ljones.Platform", "xyz.ljones.FanCurves"]),
+                 ("/xyz/ljones/asus_armoury/panel_overdrive", ["xyz.ljones.AsusArmoury"])] + [
+                 (f"/xyz/ljones/asus_armoury/{a}", ["xyz.ljones.AsusArmoury"]) for a in RANGES]
 asusd_ids = register(system, ASUSD_XML, asusd_objects)
 register(upower, UPOWER_XML, [("/org/freedesktop/UPower", ["org.freedesktop.UPower"])])
 register(upower, LOGIND_XML, [("/org/freedesktop/login1/session/auto", ["org.freedesktop.login1.Session"])])
@@ -223,6 +257,8 @@ def stdin_cb(fd, cond):
             if sig.startswith("("):
                 val = tuple(val)
             values[(path, iface)][prop] = GLib.Variant(sig, val)
+            if prop == "OnBattery":
+                set_ranges(bool(val))
             changed(upower if path.startswith("/org/freedesktop/UPower") else system, path, iface, prop)
         elif "noise" in msg:
             nm = Gio.DBusConnection.new_for_address_sync(

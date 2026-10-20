@@ -103,9 +103,25 @@ script):
 | `BRIGHT_BATTERY` | % | on leaving the barrel, dim the screen to this if it's brighter (once, not a cap); back on the barrel the old level returns unless you've gone brighter |
 | `BRIGHT_DEVICE` | e.g. `amdgpu_bl1` | the backlight for that (default: the first one that isn't `nvidia_*`), set through logind |
 
+| `PPT_AC`, `PPT_USBC`, `PPT_WEAK_BARREL` | `"SPL SPPT FPPT"` in W, e.g. `"25 30 40"` | CPU power limits on that source (asus-armoury, through asusd), clamped to the firmware's range |
+| `BOOST_AC`, `BOOST_USBC`, `BOOST_WEAK_BARREL` | W | NVIDIA Dynamic Boost on that source |
+
 "AC" means the barrel charger. A USB-C charger gets the battery settings:
 UPower calls both chargers AC, so the widget tells them apart by asus-armoury's
-`charge_mode` (bit 0 barrel, bit 1 USB-C).
+`charge_mode` (bit 0 barrel, bit 1 USB-C). A barrel that drops out three or
+more times in 30 s (a third-party adapter that can't carry the load) is a
+**weak barrel**: it keeps the AC settings and gets `PPT_WEAK_BARREL` until it's
+unplugged for good. Power-source changes apply once the source has been stable
+for 1.5 s, so a flapping adapter doesn't flip the refresh rate back and forth.
+
+**Power limits and the fan curve.** On the GA605KM (BIOS 307) the firmware only
+applies PPT limits while the CPU custom fan curve is on; in auto fan mode a
+written limit is stored but ignored. So on a source with limits the widget
+enables asusd's stored CPU curve for the current profile, then writes the
+limits; leaving it turns the curve off and writes the defaults back. The fans
+follow that curve while limits apply. The values the G16 used with rog-power:
+`PPT_USBC="25 30 40"`, `PPT_WEAK_BARREL="45 55 65"`, `BOOST_WEAK_BARREL=5`
+(the OEM barrel left at stock).
 
 A key that isn't set is left alone, so with no file nothing is enforced. The
 refresh pin (the panel's 60/240/Auto switch, stored in
