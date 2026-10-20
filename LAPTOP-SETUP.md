@@ -35,8 +35,16 @@ The script:
 2. Prints the EXPERIMENTAL warning and asks you to confirm. If no fallback kernel is installed, it
    offers to install Arch's `linux` and `linux-headers` first (from the databases you already have,
    so no partial upgrade), and DKMS builds the NVIDIA module for both kernels. It also warns if
-   `IgnorePkg` holds back a package this repo ships, and about an out-of-tree hid-asus DKMS source
-   in `/usr/src` (see step 4 of [Switching an existing install](#switching-an-existing-install)).
+   `IgnorePkg` holds back a package this repo ships.
+
+   It also looks for an out-of-tree hid-asus DKMS source in `/usr/src` (see step 4 of
+   [Switching an existing install](#switching-an-existing-install)). When no package owns the
+   source and the running kernel is the omarchy-asus `linux-omarchy` (a `.N` pkgrel such as
+   `7.2.8-9.1`, which carries patch 0568), it offers to retire it. It runs
+   `dkms remove <module>/<version> --all` when the module is registered, then moves the source to
+   `/usr/local/src/dkms-disabled/`. It never deletes it: an existing backup gets a
+   `.before-omarchy-asus` name instead. It prints the command that undoes the move. On any other
+   kernel, or when a package owns the source, it only warns, as before.
 
    For each fallback kernel you have installed (`linux`, `linux-lts`, `linux-zen`,
    `linux-hardened`), it warns when:
@@ -212,6 +220,9 @@ before you run the script. The script only warns about them.
    sudo mkdir -p /usr/local/src/dkms-disabled
    sudo mv /usr/src/<module>-<version> /usr/local/src/dkms-disabled/
    ```
+
+   Once the patched kernel is running, `omarchy-asus-setup` offers to do this move for you (see
+   step 2 of the script, above).
 
    Move it rather than delete it: it may be your only copy of the patch. Move it out of
    `/usr/src`, because a renamed dir inside `/usr/src` still matches the hook.
