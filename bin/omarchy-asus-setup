@@ -833,7 +833,7 @@ run_upgrade() {
 # on every plug and unplug. The patched omarchy-powerprofiles-set stands back when Omarchy's
 # powerprofiles-autoswitch-off toggle is set; set it before the upgrade runs the migrations.
 POWER_TOGGLE=$HOME/.local/state/omarchy/toggles/powerprofiles-autoswitch-off
-# The user unit dir follows XDG_CONFIG_HOME (~/.config by default), like systemd and g16ctl.
+# The user unit dir follows XDG_CONFIG_HOME (~/.config by default), like systemd and the G16 Control widget.
 USER_UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 # The /etc unit dirs, the source monitor Omarchy's charger switching needs and the sudoers
 # dir: variables so the offline tests (tests/ci/setup-power-handover.sh) can point them at
@@ -1084,8 +1084,8 @@ aside_path() {
   echo "$base.$n"
 }
 
-# True when FILE is a mode.conf exactly as `g16ctl winlock-mode` (G16 Control) writes it
-# for the packaged unit.
+# True when FILE is a mode.conf exactly as the G16 Control widget writes it for the packaged
+# unit (its bridge now, `g16ctl winlock-mode` before).
 written_by_g16ctl() {
   local f=$1
   [[ -f $f && ! -L $f ]] || return 1
