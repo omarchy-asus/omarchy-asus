@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.3**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.4**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,8 +14,9 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.3` (kernel release string becomes `7.2.8-9.3-omarchy`).
-   History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481.
+1. `pkgrel=9` -> `pkgrel=9.4` (kernel release string becomes `7.2.8-9.4-omarchy`).
+   History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
+   9.4 added 0773.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -29,7 +30,9 @@ Compared with upstream, only:
    after `0806-...` (GA605KM power-limits entry; see "0807" below).
 5. New patch `0481-drm-amd-display-power-backports.patch` after `0480-...`
    (three amdgpu display backports, CACP default off; see "0481" below).
-6. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
+6. New patch `0773-gpiolib-acpi-ignore-wake-on-gpio16-asus-ga605km.patch` after
+   `0772-...` (GA605KM: ignore GPIO 16 wakeups; see "0773" below).
+7. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -88,6 +91,39 @@ kernel log must stay clean. To roll back, boot the previous kernel.
 **Remove when** the commit is in mainline and upstream linux-omarchy is
 based on a kernel that contains it, or upstream linux-omarchy carries it
 (the patch then fails to apply at fuzz 0, which shows it).
+
+## 0773: gpiolib-acpi ignores GPIO 16 wakeups on the GA605KM (#151)
+
+**What.** A DMI entry in `drivers/gpio/gpiolib-acpi-quirks.c` (vendor
+`ASUSTeK COMPUTER INC.`, board `GA605KM`) with `.ignore_wake =
+"AMDI0030:00@16"`, the same pattern as the existing `ignore_wake` entries. It
+applies after 0771, which touches the same table.
+
+**Why.** With an HDMI monitor connected (driven by the RTX), the G16 woke
+about 95 ms after entering s2idle, on battery and on AC. The wake came from the
+firmware `_AEI` event on GPIO 16 (`ACPI: PM: Wakeup unrelated to ACPI SCI`,
+`GPIO 16 is active`), so lid-close and idle suspend left it awake with the
+screens off (#132). Booting with `gpiolib_acpi.ignore_wake=AMDI0030:00@16`
+fixed it on the G16: 10.5 s and 33 s of hardware sleep with HDMI connected,
+44 s for a lid close, and the lid (GPIO 0) and keyboard still wake it. What
+GPIO 16's `_AEI` handler is for has not been decoded (it needs an acpidump).
+
+**Default behaviour and risk.** It changes behaviour only on a GA605KM: GPIO 16
+can no longer wake the machine. Nothing else matches.
+
+**Test** (on the G16, booted on this kernel, with the local
+`/etc/limine-entry-tool.d/98-g16-test-gpio16.conf` drop-in removed first):
+```bash
+grep -o 'gpiolib_acpi[^ ]*' /proc/cmdline                     # expect nothing
+journalctl -k -b | grep 'Ignoring wakeup on pin 16'             # expect one line
+# HDMI connected: suspend, wait 60 s, wake with the power button
+cat /sys/power/suspend_stats/last_hw_sleep                     # seconds, not ~95000 us
+```
+The kit's `0773` check covers the first two; its `suspend` check fails a
+cycle that wakes at once.
+
+**Upstream.** Not submitted (target: linux-gpio). Drop it once an equivalent
+entry is merged.
 
 ## 0807: asus-armoury power limits for GA605KM
 

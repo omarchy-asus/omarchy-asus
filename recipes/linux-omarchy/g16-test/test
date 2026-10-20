@@ -12,6 +12,7 @@
 #   0807       asus-armoury GA605KM limits present and correct; PPT writes refused
 #              without a custom fan curve (writes the current value back, no change)
 #   0481       panel_power_savings exists, reads 0, nothing enables CACP
+#   0773       gpiolib-acpi ignores GPIO 16 wakeups (the quirk, not a command-line option)
 #   suspend    one s2idle cycle (RTC wakes it after 30 s): at least 10 s of s0i3
 #   hibernate  only with --hibernate: hibernate, power-off, resume (needs a button press)
 #   9900       Zen 5c soft park knobs all at their defaults (off)
@@ -314,6 +315,20 @@ check_panel() {
   result "$st" 0481 "panel_power_savings exists and reads $v; nothing in the config enables CACP" "${det[@]}"
 }
 
+# 0773: the DMI quirk logs this at boot. The G16 carried the same as a kernel
+# command-line option before (#151); with that still set the check proves nothing.
+check_gpio16() {
+  local st=PASS det=() msg
+  if grep -q 'gpiolib_acpi.ignore_wake' /proc/cmdline; then
+    st=WARN
+    det+=("the kernel command line still sets gpiolib_acpi.ignore_wake: remove that drop-in and reboot, so the quirk is what is tested")
+  fi
+  msg=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -m1 'Ignoring wakeup on pin 16')
+  [[ -n $msg ]] || { result FAIL 0773 "no 'Ignoring wakeup on pin 16' in this boot's kernel log" "${det[@]}"; return; }
+  det+=("$msg")
+  result "$st" 0773 "GPIO 16 wakeups ignored (AMDI0030:00@16); suspend with HDMI connected should now sleep" "${det[@]}"
+}
+
 check_hfi() {
   local d st=PASS det=() hits
   grep -q 'amd_hfi.ranking' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amd_hfi.ranking"); }
@@ -440,6 +455,7 @@ run_checks() {
     check_touchpad
     check_armoury
     check_panel
+    check_gpio16
     check_hfi
     check_nvidia
     check_suspend
