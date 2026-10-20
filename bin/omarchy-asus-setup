@@ -835,35 +835,204 @@ run_upgrade() {
 POWER_TOGGLE=$HOME/.local/state/omarchy/toggles/powerprofiles-autoswitch-off
 # The user unit dir follows XDG_CONFIG_HOME (~/.config by default), like systemd and g16ctl.
 USER_UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+# The /etc unit dirs, the source monitor Omarchy's charger switching needs and the sudoers
+# dir: variables so the offline tests (tests/ci/setup-power-handover.sh) can point them at
+# temp dirs instead of the host's.
+POWER_ETC_USER_DIR=/etc/systemd/user
+POWER_ETC_SYSTEM_DIR=/etc/systemd/system
+POWER_MONITOR_UNIT=/usr/lib/systemd/user/omarchy-powerprofiles-source-monitor.service
+POWER_SUDOERS_DIR=/etc/sudoers.d
 own_power_manager() {
   local unit
-  for unit in "$USER_UNIT_DIR/rog-power.service" /etc/systemd/user/rog-power.service \
-    /etc/systemd/system/rog-power.service; do
+  for unit in "$USER_UNIT_DIR/rog-power.service" "$POWER_ETC_USER_DIR/rog-power.service" \
+    "$POWER_ETC_SYSTEM_DIR/rog-power.service"; do
     [[ -f $unit ]] && { echo "$unit"; return 0; }
   done
   return 1
 }
 
-prepare_power_owner() {
-  local unit
-  unit=$(own_power_manager) || return 0
-  step "Your own power manager"
-  if [[ -e $POWER_TOGGLE ]]; then
-    ok "${unit/#$HOME/\~} found and Omarchy's powerprofiles-autoswitch-off toggle is already set"
+# Ask which owner of the power profile to keep (works under `curl | bash` too). Prints one
+# word on stdout: keep, omarchy, or nothing for neither. The prompt goes to stderr.
+power_owner_choice() {
+  local answer question="Which one should own the power profile? [1/2/Enter]"
+  {
+    info "1) keep yours in charge (sets Omarchy's powerprofiles-autoswitch-off toggle)"
+    info "2) hand over to Omarchy (disables and moves aside your unit)"
+    info "Enter: neither"
+  } >&2
+  if ((DRY_RUN)); then
+    printf '    %s [dry-run: assuming keep]\n' "$question" >&2
+    echo keep
     return 0
   fi
-  info "${unit/#$HOME/\~} manages your power profile. The patched Omarchy also switches it on"
-  info "every charger change; with both, they would fight. Setting Omarchy's"
-  info "powerprofiles-autoswitch-off toggle keeps yours in charge (delete the file to hand over)."
-  if confirm "Keep your power manager in charge (set the toggle)?"; then
+  [[ -r $TTY ]] || die "no terminal to ask for confirmation on"
+  read -r -p "    $question " answer <"$TTY" || answer=''
+  case $answer in
+    1) echo keep ;;
+    2) echo omarchy ;;
+  esac
+  return 0
+}
+
+# Hand the power profile from the local rog-power UNIT over to Omarchy: disable it, move the
+# unit (and the toggle, if set) aside, check the source monitor, and list the root helpers
+# and sudoers rules that came with it. Nothing is deleted; the undo commands are printed.
+handover_power_owner() {
+  local unit=$1 scope=user sudo='' a t src line cmd f enable_cmd unreadable=0
+  local undo=() helpers=() sudoers=()
+  if [[ $unit == "$POWER_ETC_SYSTEM_DIR"/* ]]; then scope=system; fi
+  if [[ $unit != "$USER_UNIT_DIR"/* ]]; then sudo='sudo '; fi
+
+  # Before the move, so systemd removes the links it made for the unit.
+  if [[ $scope == system ]]; then
+    as_root systemctl disable --now rog-power.service ||
+      warn "could not disable rog-power.service; stop it yourself"
+  elif ((DRY_RUN)); then
+    info "[dry-run] would run: systemctl --user disable --now rog-power.service"
+  else
+    systemctl --user disable --now rog-power.service 2>/dev/null || true
+  fi
+
+  a=$(aside_path "$unit")
+  if [[ -n $sudo ]]; then
+    if ! as_root mv "$unit" "$a"; then
+      warn "could not move $unit; it stays in place, disabled, and the toggle is untouched"
+      return 0
+    fi
+  elif ((DRY_RUN)); then
+    info "[dry-run] would run: mv ${unit/#$HOME/\~} ${a/#$HOME/\~}"
+  elif ! mv "$unit" "$a"; then
+    warn "could not move ${unit/#$HOME/\~}; it stays in place, disabled, and the toggle is untouched"
+    return 0
+  fi
+  # A unit in the /etc user dir moves back with sudo but is a user unit again.
+  if [[ $scope == system ]]; then
+    enable_cmd='sudo systemctl enable --now rog-power.service'
+  else
+    enable_cmd='systemctl --user enable --now rog-power.service'
+  fi
+  undo+=("${unit/#$HOME/\~} -> ${a##*/}; undo: ${sudo}mv ${a/#$HOME/\~} ${unit/#$HOME/\~} && $enable_cmd")
+
+  if [[ $scope == system ]]; then
+    as_root systemctl daemon-reload || true
+  elif ((DRY_RUN)); then
+    info "[dry-run] would run: systemctl --user daemon-reload"
+  else
+    systemctl --user daemon-reload 2>/dev/null || true
+  fi
+
+  # Only a toggle that is set moves aside; this path never creates or deletes it.
+  if [[ -e $POWER_TOGGLE ]]; then
+    t=$(aside_path "$POWER_TOGGLE")
     if ((DRY_RUN)); then
-      info "[dry-run] would run: mkdir -p ${POWER_TOGGLE%/*} && touch $POWER_TOGGLE"
+      info "[dry-run] would run: mv ${POWER_TOGGLE/#$HOME/\~} ${t/#$HOME/\~}"
+      undo+=("${POWER_TOGGLE/#$HOME/\~} -> ${t##*/}; undo: mv ${t/#$HOME/\~} ${POWER_TOGGLE/#$HOME/\~}")
+    elif mv "$POWER_TOGGLE" "$t"; then
+      undo+=("${POWER_TOGGLE/#$HOME/\~} -> ${t##*/}; undo: mv ${t/#$HOME/\~} ${POWER_TOGGLE/#$HOME/\~}")
     else
-      mkdir -p "${POWER_TOGGLE%/*}" && touch "$POWER_TOGGLE" && ok "set ${POWER_TOGGLE/#$HOME/\~}"
+      warn "could not move ${POWER_TOGGLE/#$HOME/\~}; while it is set, Omarchy leaves the profile alone"
+    fi
+  fi
+
+  # Verify only: the source monitor is Omarchy's to enable (read-only, so under --dry-run too).
+  if [[ -e $POWER_MONITOR_UNIT ]]; then
+    if systemctl --user is-enabled omarchy-powerprofiles-source-monitor.service >/dev/null 2>&1; then
+      ok "omarchy-powerprofiles-source-monitor is enabled"
+    else
+      warn "omarchy-powerprofiles-source-monitor is not enabled, so Omarchy won't follow the charger; run:"
+      warn "  systemctl --user enable --now omarchy-powerprofiles-source-monitor.service"
     fi
   else
-    warn "not set: stop ${unit##*/} yourself, or both will switch profiles on plug and unplug."
+    info "omarchy-powerprofiles-source-monitor isn't installed yet: the upgrade below installs it"
+    info "with omarchy-settings, and Omarchy's migration enables it."
   fi
+
+  # Root helpers the unit runs, and sudoers rules that mention it: listed, never touched.
+  src=$a
+  if ((DRY_RUN)) || [[ ! -r $src ]]; then src=$unit; fi
+  if [[ -r $src ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ $line =~ ^[[:space:]]*(ExecStart[A-Za-z]*|ExecStop[A-Za-z]*|ExecReload)[[:space:]]*=[[:space:]]*(.*)$ ]] ||
+        continue
+      cmd=${BASH_REMATCH[2]}
+      while [[ $cmd == [-@:+!]* ]]; do cmd=${cmd:1}; done
+      cmd=${cmd%%[[:space:]]*}
+      [[ $cmd == /* ]] || continue
+      case $cmd in /usr/bin/* | /usr/lib/*) continue ;; esac
+      [[ " ${helpers[*]} " == *" $cmd "* ]] && continue
+      helpers+=("$cmd")
+    done <"$src"
+  fi
+  # /etc/sudoers.d and its files are root-only on Arch: then read it with sudo -n (read-only and
+  # never a password prompt; install_keyring has just used sudo), or say to look by hand.
+  if [[ -d $POWER_SUDOERS_DIR ]]; then
+    if [[ -r $POWER_SUDOERS_DIR && -x $POWER_SUDOERS_DIR ]]; then
+      for f in "$POWER_SUDOERS_DIR"/*; do
+        [[ -f $f ]] || continue
+        if [[ ! -r $f ]]; then
+          unreadable=1
+        elif grep -qF rog-power -- "$f" 2>/dev/null; then
+          sudoers+=("$f")
+        fi
+      done
+    else
+      unreadable=1
+    fi
+    if ((unreadable)); then
+      sudoers=()
+      if sudo -n true 2>/dev/null; then
+        mapfile -t sudoers < <(sudo -n grep -rlF rog-power -- "$POWER_SUDOERS_DIR" 2>/dev/null)
+      else
+        info "could not read $POWER_SUDOERS_DIR without a password; look there for rules that mention rog-power."
+      fi
+    fi
+  fi
+  for f in "${helpers[@]}" "${sudoers[@]}"; do
+    info "  ${f/#$HOME/\~}: left in place"
+  done
+  info "Helpers and sudoers rules stay; remove them yourself once you no longer need them."
+  info "Nothing is deleted."
+
+  if ((DRY_RUN)); then info "[dry-run] would hand over:"; else ok "handed over to Omarchy:"; fi
+  for line in "${undo[@]}"; do info "  $line"; done
+  return 0
+}
+
+prepare_power_owner() {
+  local unit choice toggle_set=0
+  unit=$(own_power_manager) || return 0
+  step "Your own power manager"
+  info "${unit/#$HOME/\~} manages your power profile. The patched Omarchy also switches it on"
+  info "every charger change; with both, they would fight. Setting Omarchy's"
+  info "powerprofiles-autoswitch-off toggle keeps yours in charge."
+  if [[ -e $POWER_TOGGLE ]]; then
+    toggle_set=1
+    ok "Omarchy's powerprofiles-autoswitch-off toggle is already set"
+  fi
+  # A failed question (no terminal) stops the script, as confirm's die does.
+  choice=$(power_owner_choice) || exit 1
+  case $choice in
+    keep)
+      if ((toggle_set)); then
+        ok "nothing changes: yours stays in charge"
+      elif ((DRY_RUN)); then
+        info "[dry-run] would run: mkdir -p ${POWER_TOGGLE%/*} && touch $POWER_TOGGLE"
+      else
+        mkdir -p "${POWER_TOGGLE%/*}" && touch "$POWER_TOGGLE" && ok "set ${POWER_TOGGLE/#$HOME/\~}"
+      fi
+      ;;
+    omarchy)
+      handover_power_owner "$unit"
+      ;;
+    *)
+      if ((toggle_set)); then
+        ok "nothing changes: the toggle stays set, so yours stays in charge"
+      else
+        warn "not set: hand over, or stop ${unit##*/} yourself, or both will switch profiles on plug and unplug."
+      fi
+      ;;
+  esac
+  return 0
 }
 
 # A hand-made Win-lock setup has up to four local pieces next to what asus-rog-nkey-winlock

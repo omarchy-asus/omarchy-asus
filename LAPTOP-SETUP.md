@@ -68,10 +68,14 @@ The script:
    `pacman-key --populate omarchy-asus` works, like `archlinux-keyring` and `omarchy-keyring`.
    This step runs `pacman -Sy`.
 7. If you run your own power manager (a `rog-power.service` in `~/.config/systemd/user`,
-   `/etc/systemd/user` or `/etc/systemd/system`), offers to set Omarchy's
-   `powerprofiles-autoswitch-off` toggle before the upgrade. The patched Omarchy then leaves the
-   power profile to yours, instead of both switching it on every charger change. Delete
-   `~/.local/state/omarchy/toggles/powerprofiles-autoswitch-off` to hand over later.
+   `/etc/systemd/user` or `/etc/systemd/system`), asks before the upgrade which owner of the
+   power profile to keep, so they don't both switch it on every charger change. Keeping yours sets
+   Omarchy's `powerprofiles-autoswitch-off` toggle, and the patched Omarchy leaves the profile to
+   it. Handing over to Omarchy disables `rog-power.service` and moves it aside (and the toggle, if
+   set) under a `.before-omarchy-asus` backup name, checks that
+   `omarchy-powerprofiles-source-monitor` is enabled, lists the root helpers and sudoers rules
+   that came with your tool without touching them, and prints the undo commands. After a hand-over,
+   running setup again skips this step.
 8. Lists what the system upgrade would change, marking the packages from `[omarchy-asus]`, and
    upgrades only if you say yes. The upgrade runs through `omarchy update`, which asks once more,
    takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
