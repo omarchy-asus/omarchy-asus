@@ -233,6 +233,9 @@ Item {
     clearEnvironment: true
     stdinEnabled: true
     stdout: SplitParser { onRead: function(line) { svc.handleLine(line) } }
+    // Its log lines ("g16-bridge: ...") go to the shell's log, so they reach
+    // the journal with the rest of the shell's output.
+    stderr: SplitParser { onRead: function(line) { console.log(line.slice(0, 500)) } }
     onRunningChanged: if (running) svc._startedAt = Date.now()
     onExited: function(code) {
       svc.ready = false
