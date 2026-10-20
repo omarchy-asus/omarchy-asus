@@ -99,7 +99,7 @@ set_toggle() { mkdir -p "${T%/*}" && touch "$T"; }
 
 # run <choice> <dry run 0|1>
 run() {
-    local choice=$1 dry=$2 st=0
+    local answer=$1 dry=$2 st=0
     (
         set --
         export HOME=$H
@@ -109,7 +109,7 @@ run() {
         DRY_RUN=$dry POWER_ETC_USER_DIR=$E/systemd/user POWER_ETC_SYSTEM_DIR=$E/systemd/system POWER_MONITOR_UNIT=$M
         # shellcheck disable=SC2034 # read by the sourced functions
         POWER_SUDOERS_DIR=$E/sudoers.d
-        power_owner_choice() { echo "$choice"; }
+        power_owner_choice() { echo "$answer"; } # not $choice: prepare_power_owner declares its own local choice
         prepare_power_owner
     ) >"$OUT" 2>&1 || st=$?
     check "prepare_power_owner exits 0" [ "$st" -eq 0 ]
