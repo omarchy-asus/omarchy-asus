@@ -19,6 +19,9 @@
 #   9. the source monitor is not enabled: a warning and the enable command, never run
 #  10. the source monitor unit is missing: not checked, the upgrade installs it
 #  11. a system unit in /etc/systemd/system: disabled and moved aside with sudo
+#  12. a user unit in /etc/systemd/user enabled with --global: disabled for all users with
+#      sudo, its wants link removed, the running instance stopped, moved aside (#142);
+#      --dry-run leaves the link
 # All cases run with the XDG base-dir variables unset, whatever the host exports.
 # Usage: tests/ci/setup-power-handover.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -256,6 +259,27 @@ check "sudo mv to the backup" grep -qE \
 check "unit moved away" [ ! -e "$E/systemd/system/rog-power.service" ]
 check "unit backup" [ -f "$E/systemd/system/rog-power.service.before-omarchy-asus" ]
 check "no user disable" not grep -qF 'systemctl --user disable' "$LOG"
+
+echo "== 12. a user unit in /etc/systemd/user, enabled with --global (#142)"
+for dry in 1 0; do
+    setup_case "c12-$dry"
+    fixture "$E/systemd/user"
+    mkdir -p "$E/systemd/user/default.target.wants"
+    ln -s ../rog-power.service "$E/systemd/user/default.target.wants/rog-power.service"
+    run omarchy "$dry"
+    if ((dry)); then
+        check "[dry-run] global disable" grep -qF '[dry-run] sudo systemctl --global disable rog-power.service' "$OUT"
+        check "[dry-run] link stays" [ -L "$E/systemd/user/default.target.wants/rog-power.service" ]
+        check "[dry-run] no sudo ran" not grep -q '^sudo ' "$LOG"
+        continue
+    fi
+    check "sudo global disable ran" grep -qxF 'sudo systemctl --global disable rog-power.service' "$LOG"
+    check "wants link removed" [ ! -L "$E/systemd/user/default.target.wants/rog-power.service" ]
+    check "user instance stopped" grep -qxF 'systemctl --user stop rog-power.service' "$LOG"
+    check "unit moved away" [ ! -e "$E/systemd/user/rog-power.service" ]
+    check "unit backup" [ -f "$E/systemd/user/rog-power.service.before-omarchy-asus" ]
+    check "undo enables it for all users" grep -qF 'sudo systemctl --global enable rog-power.service' "$OUT"
+done
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"
