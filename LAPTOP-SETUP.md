@@ -35,8 +35,16 @@ The script:
 2. Prints the EXPERIMENTAL warning and asks you to confirm. If no fallback kernel is installed, it
    offers to install Arch's `linux` and `linux-headers` first (from the databases you already have,
    so no partial upgrade), and DKMS builds the NVIDIA module for both kernels. It also warns if
-   `IgnorePkg` holds back a package this repo ships, and about an out-of-tree hid-asus DKMS source
-   in `/usr/src` (see step 4 of [Switching an existing install](#switching-an-existing-install)).
+   `IgnorePkg` holds back a package this repo ships.
+
+   It also looks for an out-of-tree hid-asus DKMS source in `/usr/src` (see step 4 of
+   [Switching an existing install](#switching-an-existing-install)). When no package owns the
+   source and the running kernel is the omarchy-asus `linux-omarchy` (a `.N` pkgrel such as
+   `7.2.8-9.1`, which carries patch 0568), it offers to retire it. It runs
+   `dkms remove <module>/<version> --all` when the module is registered, then moves the source to
+   `/usr/local/src/dkms-disabled/`. It never deletes it: an existing backup gets a
+   `.before-omarchy-asus` name instead. It prints the command that undoes the move. On any other
+   kernel, or when a package owns the source, it only warns, as before.
 
    For each fallback kernel you have installed (`linux`, `linux-lts`, `linux-zen`,
    `linux-hardened`), it warns when:
@@ -60,10 +68,14 @@ The script:
    `pacman-key --populate omarchy-asus` works, like `archlinux-keyring` and `omarchy-keyring`.
    This step runs `pacman -Sy`.
 7. If you run your own power manager (a `rog-power.service` in `~/.config/systemd/user`,
-   `/etc/systemd/user` or `/etc/systemd/system`), offers to set Omarchy's
-   `powerprofiles-autoswitch-off` toggle before the upgrade. The patched Omarchy then leaves the
-   power profile to yours, instead of both switching it on every charger change. Delete
-   `~/.local/state/omarchy/toggles/powerprofiles-autoswitch-off` to hand over later.
+   `/etc/systemd/user` or `/etc/systemd/system`), asks before the upgrade which owner of the
+   power profile to keep, so they don't both switch it on every charger change. Keeping yours sets
+   Omarchy's `powerprofiles-autoswitch-off` toggle, and the patched Omarchy leaves the profile to
+   it. Handing over to Omarchy disables `rog-power.service` and moves it aside (and the toggle, if
+   set) under a `.before-omarchy-asus` backup name, checks that
+   `omarchy-powerprofiles-source-monitor` is enabled, lists the root helpers and sudoers rules
+   that came with your tool without touching them, and prints the undo commands. After a hand-over,
+   running setup again skips this step.
 8. Lists what the system upgrade would change, marking the packages from `[omarchy-asus]`, and
    upgrades only if you say yes. The upgrade runs through `omarchy update`, which asks once more,
    takes a snapshot and runs Omarchy's migrations. Since Omarchy 4.0.5 a pacman hook stops a bare
@@ -122,6 +134,21 @@ The script:
    are left alone. With the patched omarchy installed, most rows show `present` because its
    migrations already applied them; only the speaker level (`audio-master`) and the opt-ins
    remain manual. See [`recipes/omarchy-asus-g16-apply/README.md`](recipes/omarchy-asus-g16-apply/README.md).
+
+   It also looks for local copies of fixes `omarchy-asus-g16` ships:
+   - A rule of your own in `/etc/udev/rules.d` that disarms the ASUF1209 touchpad wake
+     (`power/wakeup`), which no package owns. With sudo, it offers to move it aside with the same
+     `.before-omarchy-asus` suffix, and an existing backup is never overwritten. It reloads udev,
+     re-triggers the touchpad and lists the command that undoes it. `omarchy-asus-g16` ships the
+     same rule as `/usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules`.
+   - A `HibernateMode=` line in `/etc/systemd/sleep.conf` or `/etc/systemd/sleep.conf.d/*.conf`.
+     It only reports it, with its file and line number, because the file may hold other settings
+     you want to keep. `omarchy-asus-g16` sets `HibernateMode=shutdown` in
+     `/usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf`. Delete the line yourself
+     once you don't need it. A value other than `shutdown` gets a warning, because it can override
+     the packaged one.
+
+   `--dry-run` prints the move without making it.
 
 > [!IMPORTANT]
 > The fingerprint check is trust on first use. The script, the key and this page all come from
@@ -212,6 +239,9 @@ before you run the script. The script only warns about them.
    sudo mkdir -p /usr/local/src/dkms-disabled
    sudo mv /usr/src/<module>-<version> /usr/local/src/dkms-disabled/
    ```
+
+   Once the patched kernel is running, `omarchy-asus-setup` offers to do this move for you (see
+   step 2 of the script, above).
 
    Move it rather than delete it: it may be your only copy of the patch. Move it out of
    `/usr/src`, because a renamed dir inside `/usr/src` still matches the hook.

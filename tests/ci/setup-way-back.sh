@@ -88,7 +88,7 @@ STUB
 chmod +x "$S"/bin/*
 export PATH=$S/bin:$PATH
 export OMARCHY_ASUS_LIMINE_CONF=$S/limine.conf OMARCHY_ASUS_SNAPPER_CONFIG=$S/snapper-root \
-    OMARCHY_ASUS_PACMAN_CONF=$S/pacman.conf OMARCHY_ASUS_SETUP_TTY=$S/tty
+    OMARCHY_ASUS_PACMAN_CONF=$S/pacman.conf OMARCHY_ASUS_SETUP_TTY=$S/tty OMARCHY_ASUS_DKMS_SRC_ROOT=$S/src
 OUT=$S/out
 
 check() {
