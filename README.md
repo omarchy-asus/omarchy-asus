@@ -38,7 +38,10 @@ The signed `[omarchy-asus]` repo, served from the
 
 | Package | Version | What it fixes | Upstream |
 |---|---|---|---|
-| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.1 | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
+| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.3 | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
+| | | The touchpad's I2C controller interrupts once per batch, not once per byte (backport) | linux-next `e7d5d642c089`, not in mainline yet |
+| | | `asus-armoury` knows the GA605KM's power-limit ranges (nothing is written at boot) | Not submitted yet |
+| | | Three amdgpu display backports: no self-refresh on tearing flips, s0i3 pipe teardown, OLED CACP control (off by default) | Mainline v7.3-rc1 / stable |
 | | | *Plus an **experimental, default-off** scheduler series (Zen 5c-first soft park) for GA605KM battery testing. Compile-tested only. Nothing enables it. Not meant for upstream.* | Local carry ([notes](recipes/linux-omarchy/NOTES.md)) |
 | `nvidia-open-dkms` | 615.78.08-1.2 | No hang at power-off after hibernate | [NVIDIA/open-gpu-kernel-modules#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412), open |
 | | | The dGPU no longer wakes from D3cold on every battery change | [NVIDIA/open-gpu-kernel-modules#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299), open |
@@ -46,11 +49,10 @@ The signed `[omarchy-asus]` repo, served from the
 | `hyprland`, `hyprpm` | 0.56.2-4.1 | Windows no longer render off-screen after an HDMI replug | Fixed on main by [hyprwm/Hyprland#16140](https://github.com/hyprwm/Hyprland/pull/16140), unreleased; dropped when 0.57 ships |
 | `omarchy-asus-g16` | 1.0.0-1 | GA605KM: the touchpad no longer wakes the laptop; hibernate powers off cleanly (`HibernateMode=shutdown`); Dynamic Boost keeps working after many charger plug-ins (nvidia-powerd start limit) | Not yet proposed upstream; files are byte-identical to the [omarchy fork](https://github.com/omarchy-asus/omarchy)'s, under `/usr/lib` ([notes](recipes/omarchy-asus-g16/README.md)) |
 | `asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` | 0.1.0-1 | A toast when Fn+Super locks or unlocks the Windows key (needs the kernel's Win-lock patch); the G16 Control widget holds the switch | Userspace for the kernel patch; the widget needs Omarchy to load system-wide plugins ([notes](recipes/asus-rog-nkey-winlock/README.md)) |
-| `omarchy`, `omarchy-settings` | 4.0.5-1.1 (main: 4.0.5-1.3) | **Experimental.** Stock Omarchy 4.0.5 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes; a crashed shell gets its lock screen back while dictation is installed. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
-| `omarchy-asus-g16-apply` | 0.1.0-2 (main: 0.1.0-5) | A command you run yourself. It reports every known G16 fix with `--check` and applies the ones that live in your own config or `/etc` | Local tool ([notes](recipes/omarchy-asus-g16-apply/README.md)) |
+| `omarchy`, `omarchy-settings` | 4.0.6-1.1 | **Experimental.** Stock Omarchy 4.0.6 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes; a crashed shell gets its lock screen back while dictation is installed. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
+| `omarchy-asus-g16-apply` | 0.1.0-6 | A command you run yourself. It reports every known G16 fix with `--check` and applies the ones that live in your own config or `/etc` | Local tool ([notes](recipes/omarchy-asus-g16-apply/README.md)) |
 
-Versions are what the release serves now. Where main is ahead (`omarchy` and
-`omarchy-settings` 4.0.5-1.3, `omarchy-asus-g16-apply` 0.1.0-5), the daily auto-update
+Versions are what the release serves now. When main gets ahead, the daily auto-update
 publishes the new build.
 
 On a fresh G16, the patched `omarchy` and `omarchy-settings` (#58) apply the G16 fixes that
@@ -62,12 +64,6 @@ migration raises. Settings you already have are left alone. See
 
 The three NVIDIA fixes are open pull requests by other people. We carry them because they fix
 real bugs on this hardware.
-
-### In progress
-
-- **Kernel 7.2.8-9.3:** an `i2c-designware` RX threshold backport (the touchpad fires about
-  52 interrupts per report today) and GA605KM power limits for `asus-armoury`. It is held in
-  PR #8 until it boots on a G16.
 
 ## Install (G16, experimental)
 

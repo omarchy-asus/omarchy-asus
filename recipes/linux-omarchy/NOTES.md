@@ -176,8 +176,9 @@ upstream settles the offset-or-absolute question.
 
 `g16-test/` holds the hardware test for this kernel. It travels with the kernel
 PR and is not part of the package (it is not in `source=()`); `DELTA` keeps it
-across rebases. Remove it, or refresh it for the next kernel, once the G16 boot
-test has passed and the HOLD is lifted.
+across rebases. 7.2.8-9.3 passed it on 2026-10-20 (PR #8). It reads the
+expected version from the PKGBUILD, so it serves the next kernel's boot test
+as is.
 
 On the G16, from a clone of this repo:
 
@@ -196,9 +197,10 @@ recipes/linux-omarchy/g16-test/test --temps                 # #42, on battery
   new kernel and the fallback entry is still there. `--dry-run` changes nothing.
 - `test` runs every check from the sections above (kernel log against the
   baseline, Win-lock key press, touchpad IRQs per report, asus-armoury ranges
-  and the fan-curve gate, `panel_power_savings`, one s2idle cycle with s0i3
-  residency, 9900 knobs at their defaults, nvidia and runtime PM; hibernate
-  with `--hibernate`), writes a report without host or user names to
+  and the fan-curve gate, `panel_power_savings`, one s2idle cycle that must
+  reach at least 10 s of s0i3 (a suspend that wakes at once fails, #133),
+  9900 knobs at their defaults, nvidia and runtime PM; hibernate with
+  `--hibernate`), writes a report without host or user names to
   `~/omarchy-asus-g16-test-<kernel>-<date>.md` and offers to post it on the PR.
   `--temps [MIN]` is the #42 measurement (quiet fan table on battery,
   sustained load, `--ab` adds the balanced table); its report goes to #42.
@@ -282,11 +284,12 @@ fuzz 0 with every later patch, including 9900.
 3. CACP for OLED eDP, hand-ported from 7b0cc3085216. It adds
    `/sys/class/drm/card*-eDP-1/amdgpu/panel_power_savings` (0-4), which boots
    at 0 (off). Nothing in this repo changes that level: no kernel command line,
-   no udev rule, no power-profiles action. Level testing is done by hand on the
-   laptop.
+   no udev rule, and none of our Omarchy patches. power-profiles-daemon lists an
+   `amdgpu_panel_power` action, but on the G16 it left the level at 0 on battery
+   and in power-saver (#46). Level testing is done by hand on the laptop.
 
-Status: compile-tested only, not booted. Not for upstream submission. A
-staging-only fix (ISM flush before releasing the stream) was offered as an
+Status: booted on the G16 (7.2.8-9.3, PR #8 test, 2026-10-20). Not for
+upstream submission. A staging-only fix (ISM flush before releasing the stream) was offered as an
 optional fourth patch and is not carried.
 
 Test (on the G16, after booting this kernel):

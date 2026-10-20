@@ -12,7 +12,7 @@
 #   0807       asus-armoury GA605KM limits present and correct; PPT writes refused
 #              without a custom fan curve (writes the current value back, no change)
 #   0481       panel_power_savings exists, reads 0, nothing enables CACP
-#   suspend    one s2idle cycle (RTC wakes it after 30 s): s0i3 residency grows
+#   suspend    one s2idle cycle (RTC wakes it after 30 s): at least 10 s of s0i3
 #   hibernate  only with --hibernate: hibernate, power-off, resume (needs a button press)
 #   9900       Zen 5c soft park knobs all at their defaults (off)
 #   nvidia     module, dkms, nvidia-smi, runtime PM back to suspended
@@ -309,8 +309,7 @@ check_panel() {
   hits=$(grep -rls 'panel_power_savings' /etc/udev/rules.d /usr/lib/udev/rules.d /etc/tmpfiles.d /usr/lib/tmpfiles.d /etc/systemd/system 2>/dev/null)
   [[ -z $hits ]] || { st=FAIL; det+=("files that write it: $hits"); }
   if have powerprofilesctl && powerprofilesctl list-actions 2>/dev/null | grep -q amdgpu_panel_power; then
-    [[ $st == PASS ]] && st=WARN
-    det+=("power-profiles-daemon has its amdgpu_panel_power action: it writes this level on battery or in power-saver, which would turn CACP on")
+    det+=("power-profiles-daemon lists its amdgpu_panel_power action; on the G16 it left the value at 0 on battery and in power-saver (#46). Rerun this on battery to see the value there")
   fi
   result "$st" 0481 "panel_power_savings exists and reads $v; nothing in the config enables CACP" "${det[@]}"
 }
@@ -363,7 +362,7 @@ check_nvidia() {
 
 check_suspend() {
   ((SUSPEND)) || { result SKIP suspend "--no-suspend"; return; }
-  local ms s0 f0 t0 s1 f1 l1 t1 pmc0 pmc1 since
+  local ms s0 f0 t0 s1 f1 l1 t1 pmc0 pmc1 since irq
   ms=$(cat /sys/power/mem_sleep 2>/dev/null)
   [[ $ms == *"[s2idle]"* ]] || { result FAIL suspend "mem_sleep is '$ms', expected [s2idle]"; return; }
   ask "Suspend now for about 30 s? The RTC wakes it; if it is still asleep after a minute, press the power button (then unlock the screen)." ||
@@ -382,13 +381,17 @@ check_suspend() {
   sleep 5
   l1=$(cat /sys/power/suspend_stats/last_hw_sleep 2>/dev/null || echo 0) t1=$(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo 0)
   pmc1=$(root_read cat /sys/kernel/debug/amd_pmc/s0ix_stats || true)
-  local det=("suspend_stats success $s0 -> $s1, fail $f0 -> $f1" "last_hw_sleep ${l1} us, total_hw_sleep $t0 -> $t1 us"
+  irq=$(cat /sys/power/pm_wakeup_irq 2>/dev/null || echo none)
+  local det=("suspend_stats success $s0 -> $s1, fail $f0 -> $f1" "last_hw_sleep ${l1} us, total_hw_sleep $t0 -> $t1 us, wake irq $irq"
     "amd_pmc s0ix_stats before:" "${pmc0:-unreadable}" "after:" "${pmc1:-unreadable}"
     "kernel errors since the suspend:" "$(journalctl -k -p err --since "$since" -o cat --no-pager 2>/dev/null | head -n 20)")
   if ((f1 > f0)); then
     result FAIL suspend "the suspend failed (suspend_stats fail $f0 -> $f1)" "${det[@]}"
   elif ((s1 == s0)); then
     result FAIL suspend "no completed suspend within 3 minutes" "${det[@]}"
+  elif ((l1 > 0 && t1 > t0 && l1 < 10000000)); then
+    # success counts a suspend that resumes at once too (#133): the RTC alarm is 30 s out
+    result FAIL suspend "woke after $((l1 / 1000)) ms of hardware sleep (wake irq $irq), not the 30 s RTC alarm: see #132" "${det[@]}"
   elif ((l1 > 0 && t1 > t0)); then
     result PASS suspend "s2idle cycle reached s0i3: $((l1 / 1000)) ms of hardware sleep" "${det[@]}"
   else
@@ -454,11 +457,15 @@ run_checks() {
 
 # ==================================================================== temps
 temps_preflight() {
-  local cap qa qm helper=/usr/bin/omarchy-powerprofiles-asus-quiet-fans
+  local cap need qa qm helper=/usr/bin/omarchy-powerprofiles-asus-quiet-fans
   on_ac && die "the charger is connected: #42 is about battery. Unplug it and run --temps again."
   cap=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1)
-  ((${cap:-0} >= 35 + 3 * TEMPS_MIN * (AB + 1))) ||
-    die "battery at ${cap:-?}%: charge to at least $((35 + 3 * TEMPS_MIN * (AB + 1)))% for this run (or shorten it: --temps 5)"
+  # About 1 %/min under load (33-41 W measured on the G16), idle and recovery included, plus
+  # the 15 % the run stops at.
+  need=$((20 + (TEMPS_MIN + 1 + RECOVERY) * (AB + 1)))
+  ((need <= 100)) || die "--temps $TEMPS_MIN$( ((AB)) && echo ' --ab') needs more than a full battery; shorten it"
+  ((${cap:-0} >= need)) ||
+    die "battery at ${cap:-?}%: charge to at least $need% for this run (or shorten it: --temps 5)"
   qa=$(profile_of asus-wmi) qm=$(profile_of amd-pmf)
   if [[ $qa != quiet || $qm != balanced ]]; then
     note "the quiet fan table is not active (asus-wmi $qa, amd-pmf $qm; want quiet + balanced)"
