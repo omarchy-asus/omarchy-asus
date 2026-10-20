@@ -2,13 +2,15 @@
   "schemaVersion": 1,
   "id": "omarchy-asus.g16",
   "name": "G16 Control",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "omarchy-asus",
   "description": "Zephyrus G16 hardware in one panel: keyboard and lid Slash LEDs, panel refresh rate, and battery charge ceiling",
   "kinds": [
+    "service",
     "bar-widget"
   ],
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "Panel.qml"
   },
   "barWidget": {

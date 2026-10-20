@@ -43,7 +43,7 @@ one-shot commands work with any kernel.
 | `/usr/bin/g16-winlock` | asus-rog-nkey-winlock (Python 3, standard library only) |
 | `/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules` | asus-rog-nkey-winlock: the keyboard's hidraw nodes get mode 0660, group `input`, and a `uaccess` ACL for the logged-in user |
 | `/usr/lib/systemd/user/g16-winlock.service` | asus-rog-nkey-winlock: runs `g16-winlock watch` |
-| `/usr/share/omarchy/plugins/omarchy-asus.g16/` | asus-zephyrus-g16-control: `manifest.json`, `Panel.qml`, `g16ctl` |
+| `/usr/share/omarchy/plugins/omarchy-asus.g16/` | asus-zephyrus-g16-control: `manifest.json`, `Service.qml`, `Panel.qml`, `g16ctl` |
 
 ## Setup
 
@@ -97,6 +97,16 @@ and the keyboard on/off switch calls `asusctl leds set` directly. Everything els
 works the same. The widget also works without asusd's Aura object: the keyboard
 and Slash tabs hide, and the charge limit and Fn+Super switch stay.
 
+### Nothing polls while the panel is closed
+
+`Service.qml` (manifest kind `service`) holds the widget's state once, however
+many bars show it. It follows asusd's `PropertiesChanged` signals through one
+`gdbus monitor`, the keyboard LED's `brightness_hw_changed` (Fn+F2/F3), the
+power-tune files, UPower and Hyprland's monitor list. `g16ctl get` runs at
+start, when a panel opens, every 5 s while one is open, after a control is
+used, and when asusd restarts. Under a shell that does not hand out services,
+each widget starts its own copy after 10 s.
+
 ## Moving from a manual install
 
 Local copies win over the packaged files, so installing the packages changes
@@ -126,9 +136,10 @@ To switch over:
    changed). The unit should differ only in
    `ExecStart=` (`/usr/bin/g16-winlock watch`) and in the default mode, which
    is now `toast` (keep a `mode.conf` drop-in if you want `unlock`). The widget should differ only in
-   its id, its author, the way `Panel.qml` finds `g16ctl` (next to itself
-   instead of a fixed path under the old id), and `g16ctl`'s fallback path for
-   `g16-winlock`.
+   its id, its author, the way `Service.qml` finds `g16ctl` (next to itself
+   instead of a fixed path under the old id), `g16ctl`'s fallback path for
+   `g16-winlock`, and the additions for machines without `omarchy-power-tune`
+   or asusd's Aura object (above).
 3. Remove the local copies:
    ```bash
    sudo rm /etc/udev/rules.d/99-g16-winlock-hidraw.rules
