@@ -64,9 +64,13 @@ MODE=install
 ROOT=${OMARCHY_ASUS_SETUP_ROOT:-}
 TTY=${OMARCHY_ASUS_SETUP_TTY:-/dev/tty}
 # Also test hooks, for tests/ci/setup-way-back.sh: the boot menu the fallback kernel check
-# reads, and the snapper config take_snapshot needs.
+# reads, and the snapper config take_snapshot needs. And for
+# tests/ci/setup-retire-dkms-source.sh: where DKMS sources live, and where an unowned
+# hid-asus source is moved aside to.
 LIMINE_CONF=${OMARCHY_ASUS_LIMINE_CONF:-$ROOT/boot/limine.conf}
 SNAPPER_CONFIG=${OMARCHY_ASUS_SNAPPER_CONFIG:-$ROOT/etc/snapper/configs/root}
+DKMS_SRC_ROOT=${OMARCHY_ASUS_DKMS_SRC_ROOT:-$ROOT/usr/src}
+DKMS_DISABLED_DIR=${OMARCHY_ASUS_DKMS_DISABLED_DIR:-$ROOT/usr/local/src/dkms-disabled}
 
 # Under `curl ... | bash`, $0 is "bash", not this file: fall back to the URL.
 if [[ -f $0 ]]; then
@@ -344,6 +348,80 @@ check_fallback_kernel() {
   return 0
 }
 
+# True when the running kernel carries patch 0568 (hid-asus Win-lock pass-through): an
+# omarchy-asus build, whose release ends in -<pkgrel with .N>-omarchy (e.g. 7.2.8-9.1-omarchy),
+# the same rule as bin/g16-check. Every linux-omarchy build from this repo carries 0568
+# (recipes/linux-omarchy/DELTA); a stock ...-9-omarchy or ...-arch1-1 does not.
+kernel_carries_0568() {
+  local krel
+  krel=$(uname -r 2>/dev/null) || return 1
+  [[ $krel =~ -[0-9]+\.[0-9]+-omarchy$ ]]
+}
+
+# The manual steps for retiring an unowned hid-asus DKMS source at DIR (module NAME/VER).
+dkms_source_manual_steps() {
+  local d=$1 name=$2 ver=$3
+  warn "Run 'sudo dkms remove $name/$ver --all', then move it out of /usr/src:"
+  warn "'sudo mkdir -p /usr/local/src/dkms-disabled && sudo mv $d /usr/local/src/dkms-disabled/'."
+}
+
+# Offer to retire the unowned out-of-tree hid-asus DKMS source DIR on a kernel that already
+# has the fix: 'dkms remove' its module (only when DKMS has it registered), then move the
+# source out of the DKMS source root so the DKMS hook stops adding it back (#134, #87).
+# Nothing is deleted. Always returns 0: preflight_warnings must never stop setup.
+retire_dkms_source() {
+  local d=$1 base name='' ver='' line key val dest status='' krel sq="'" dq='"'
+  base=${d##*/}
+  krel=$(uname -r 2>/dev/null) || krel=unknown
+  # PACKAGE_NAME and PACKAGE_VERSION, read as text: dkms.conf is never sourced.
+  if [[ -r $d/dkms.conf ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ $line =~ ^[[:space:]]*(PACKAGE_NAME|PACKAGE_VERSION)=(.*)$ ]] || continue
+      key=${BASH_REMATCH[1]}
+      val=${BASH_REMATCH[2]}
+      val=${val%"${val##*[![:space:]]}"}
+      if ((${#val} >= 2)) && [[ ($val == "$dq"*"$dq") || ($val == "$sq"*"$sq") ]]; then
+        val=${val:1:${#val}-2}
+      fi
+      if [[ $key == PACKAGE_NAME ]]; then name=$val; else ver=$val; fi
+    done <"$d/dkms.conf"
+  fi
+  [[ -n $name ]] || name=${base%-*}
+  [[ -n $ver ]] || ver=${base##*-}
+
+  warn "$d is an out-of-tree hid-asus DKMS source that no package owns. The running kernel $krel"
+  warn "already has the fix (0568), and DKMS adds the source back on every kernel update, even after dkms remove."
+  dest=$DKMS_DISABLED_DIR/$base
+  if [[ -e $dest || -L $dest ]]; then dest=$(aside_path "$dest"); fi
+  if ! confirm "Retire it: dkms remove $name/$ver --all and move it to $dest (needs sudo)?"; then
+    warn "kept: $d stays, and DKMS keeps adding it back."
+    dkms_source_manual_steps "$d" "$name" "$ver"
+    return 0
+  fi
+
+  # Never move the source while its module is still registered: a built module left in
+  # /usr/lib/modules would override the in-tree hid_asus.
+  if command -v dkms >/dev/null; then
+    status=$(dkms status "$name/$ver" 2>/dev/null) || status=''
+    if [[ -n ${status//[[:space:]]/} ]] && ! as_root dkms remove "$name/$ver" --all; then
+      warn "could not remove $name/$ver from DKMS; $d stays in place."
+      dkms_source_manual_steps "$d" "$name" "$ver"
+      return 0
+    fi
+  fi
+  if ! as_root mkdir -p "$DKMS_DISABLED_DIR" || ! as_root mv "$d" "$dest"; then
+    warn "could not move $d; it stays in place"
+    return 0
+  fi
+  if ((DRY_RUN)); then
+    info "[dry-run] would move aside: $d -> $dest"
+  else
+    ok "moved $d -> $dest"
+  fi
+  info "undo: sudo mv $dest $d (DKMS adds it again at the next kernel update; 'sudo dkms install $name/$ver' builds it now)"
+  return 0
+}
+
 preflight_warnings() {
   local k fallback=''
   for k in linux linux-lts linux-zen linux-hardened; do
@@ -380,8 +458,9 @@ preflight_warnings() {
   fi
   # An out-of-tree hid-asus DKMS source: Arch's DKMS hook adds every /usr/src/<name>-<version>
   # with a dkms.conf again on each kernel transaction, so 'dkms remove' alone doesn't stick (#87).
+  # An unowned one on a kernel that carries 0568 is offered for retirement (#134).
   local d base owner
-  for d in /usr/src/*; do
+  for d in "$DKMS_SRC_ROOT"/*; do
     [[ -f $d/dkms.conf ]] || continue
     base=${d##*/}
     [[ ${base,,} == *hid[-_]asus* ]] || grep -qiE 'hid[-_]asus' "$d/dkms.conf" || continue
@@ -389,6 +468,8 @@ preflight_warnings() {
       owner=${owner%%$'\n'*}
       warn "$d (package $owner) is an out-of-tree hid-asus DKMS source; the patched kernel has the fix"
       warn "built in: remove the package (sudo pacman -Rns $owner)."
+    elif kernel_carries_0568; then
+      retire_dkms_source "$d"
     else
       warn "$d is an out-of-tree hid-asus DKMS source that no package owns. DKMS adds it again on every"
       warn "kernel update, even after dkms remove. Run 'sudo dkms remove ${base%-*}/${base##*-} --all', then move it"
