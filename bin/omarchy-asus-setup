@@ -1046,6 +1046,10 @@ WINLOCK_LOCAL=$WINLOCK_USER_DIR/g16-winlock.service
 WINLOCK_DROPIN=$WINLOCK_LOCAL.d
 WINLOCK_UDEV_DIR=/etc/udev/rules.d
 WINLOCK_LOCAL_BIN=$HOME/.local/bin/g16-winlock
+# Local copies of the fixes omarchy-asus-g16 ships (#136). ROOT is the test hook.
+G16_UDEV_DIR=$ROOT/etc/udev/rules.d
+G16_SLEEP_CONF=$ROOT/etc/systemd/sleep.conf
+G16_SLEEP_DROPIN_DIR=$ROOT/etc/systemd/sleep.conf.d
 
 # The backup name for a path: <path>.before-omarchy-asus, or the first free
 # <path>.before-omarchy-asus.N after it, so an earlier backup is never overwritten.
@@ -1244,6 +1248,80 @@ retire_local_winlock() {
   return 0
 }
 
+# Hand-made copies in /etc of the two fixes omarchy-asus-g16 ships (#136), once the package
+# is installed: a udev rule in /etc/udev/rules.d that disarms the ASUF1209 touchpad wake
+# (the package has 99-omarchy-asus-g16-touchpad-wake.rules), offered to move aside with
+# sudo; and HibernateMode= lines in /etc/systemd/sleep.conf or sleep.conf.d/*.conf (the
+# package has omarchy-asus-g16-hibernate-mode.conf), only reported, because those files
+# may hold other settings. A rule some package owns is not yours and stays.
+retire_local_g16_fixes() {
+  pacman -Q omarchy-asus-g16 >/dev/null 2>&1 || ((DRY_RUN)) || return 0
+  local rules=() sleeps=() others=() undo=() f a n body hit line moved=0
+  local comment='^[[:space:]]*#'
+  local mode='^[[:space:]]*HibernateMode[[:space:]]*='
+  local shutdown='^[[:space:]]*HibernateMode[[:space:]]*=[[:space:]]*shutdown[[:space:]]*$'
+  for f in "$G16_UDEV_DIR"/*.rules; do
+    [[ -f $f && ! -L $f ]] || continue
+    body=$(grep -vE "$comment" "$f" || true)
+    [[ $body == *ASUF1209* && $body == *power/wakeup* ]] || continue
+    # pacman gets the real path (ROOT is only the test hook), as in unowned_etc_of.
+    pacman -Qqo "${f#"$ROOT"}" >/dev/null 2>&1 && continue
+    rules+=("$f")
+  done
+  for f in "$G16_SLEEP_CONF" "$G16_SLEEP_DROPIN_DIR"/*.conf; do
+    [[ -f $f && -r $f ]] || continue
+    while IFS= read -r hit; do
+      n=${hit%%:*}
+      line=${hit#*:}
+      sleeps+=("$f:$n: $line")
+      [[ $line =~ $shutdown ]] || others+=("$f:$n")
+    done < <(grep -nE "$mode" "$f" || true)
+  done
+  ((${#rules[@]} + ${#sleeps[@]})) || return 0
+
+  step "Local copies of the omarchy-asus-g16 fixes"
+  # udev reads only *.rules, so the .before-omarchy-asus suffix is enough to stop it, and
+  # a re-run does not find the moved rule again.
+  if ((${#rules[@]})); then
+    for f in "${rules[@]}"; do
+      info "  $f: your udev rule that disarms the ASUF1209 touchpad wake"
+    done
+    if confirm "Move ${rules[*]} aside (needs sudo)? omarchy-asus-g16 ships the same fix in /usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules."; then
+      for f in "${rules[@]}"; do
+        a=$(aside_path "$f")
+        if as_root mv "$f" "$a"; then
+          moved=1
+          undo+=("$f -> ${a##*/}; undo: sudo mv $a $f && sudo udevadm control --reload")
+        else
+          warn "could not move $f; it stays in place"
+        fi
+      done
+      if ((moved)); then
+        as_root udevadm control --reload || warn "udevadm control --reload failed; the old rule applies until a reboot"
+        as_root udevadm trigger --action=add --subsystem-match=i2c '--sysname-match=i2c-ASUF1209:*' || warn "udevadm trigger failed"
+      fi
+    else
+      warn "kept: ${rules[*]} still applies next to the packaged rule."
+    fi
+  fi
+
+  # Report only: these files may hold other sleep settings, so they are never written.
+  if ((${#sleeps[@]})); then
+    info "These set HibernateMode next to omarchy-asus-g16's /usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf (HibernateMode=shutdown):"
+    for line in "${sleeps[@]}"; do info "  $line"; done
+    info "The files may hold other settings, so they are left alone: delete the HibernateMode= line once you no longer need it."
+    for line in "${others[@]}"; do
+      warn "$line sets a HibernateMode other than shutdown and can override the packaged one"
+    done
+  fi
+
+  if ((${#undo[@]})); then
+    if ((DRY_RUN)); then info "[dry-run] would move aside:"; else ok "moved aside:"; fi
+    for line in "${undo[@]}"; do info "  $line"; done
+  fi
+  return 0
+}
+
 # The way back from a bad driver or migration: a snapper snapshot taken (and seen in the
 # list) right before the upgrade. 'omarchy update' tries one too, but carries on without it
 # (#85). Returns 0 only when the snapshot it just took exists.
@@ -1356,6 +1434,7 @@ offer_g16_fixes() {
     for p in "${INSTALL_OVERWRITE[@]}"; do overwrite+=(--overwrite "$p"); done
     as_root pacman -S --needed "${overwrite[@]}" "${G16_PKGS[@]}"
     retire_local_winlock
+    retire_local_g16_fixes
     info "[dry-run] would run: omarchy-asus-g16-apply ${apply_opts[*]} --check, ask, then omarchy-asus-g16-apply ${apply_opts[*]} --yes"
     return 0
   fi
@@ -1385,6 +1464,7 @@ offer_g16_fixes() {
   for p in "${INSTALL_OVERWRITE[@]}"; do overwrite+=(--overwrite "$p"); done
   as_root pacman -S --needed "${overwrite[@]}" "${available[@]}" || { warn "install failed; skipping the fixes"; return 0; }
   retire_local_winlock
+  retire_local_g16_fixes
   command -v omarchy-asus-g16-apply >/dev/null || return 0
   omarchy-asus-g16-apply "${apply_opts[@]}" --check || rc=$?
   if ((rc == 10)); then

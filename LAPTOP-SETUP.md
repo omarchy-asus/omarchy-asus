@@ -135,6 +135,21 @@ The script:
    migrations already applied them; only the speaker level (`audio-master`) and the opt-ins
    remain manual. See [`recipes/omarchy-asus-g16-apply/README.md`](recipes/omarchy-asus-g16-apply/README.md).
 
+   It also looks for local copies of fixes `omarchy-asus-g16` ships:
+   - A rule of your own in `/etc/udev/rules.d` that disarms the ASUF1209 touchpad wake
+     (`power/wakeup`), which no package owns. With sudo, it offers to move it aside with the same
+     `.before-omarchy-asus` suffix, and an existing backup is never overwritten. It reloads udev,
+     re-triggers the touchpad and lists the command that undoes it. `omarchy-asus-g16` ships the
+     same rule as `/usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules`.
+   - A `HibernateMode=` line in `/etc/systemd/sleep.conf` or `/etc/systemd/sleep.conf.d/*.conf`.
+     It only reports it, with its file and line number, because the file may hold other settings
+     you want to keep. `omarchy-asus-g16` sets `HibernateMode=shutdown` in
+     `/usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf`. Delete the line yourself
+     once you don't need it. A value other than `shutdown` gets a warning, because it can override
+     the packaged one.
+
+   `--dry-run` prints the move without making it.
+
 > [!IMPORTANT]
 > The fingerprint check is trust on first use. The script, the key and this page all come from
 > the same GitHub account, so the check proves only that the downloaded key matches the script.
