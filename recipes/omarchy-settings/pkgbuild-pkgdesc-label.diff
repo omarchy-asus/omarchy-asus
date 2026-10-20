@@ -1,0 +1,5 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -17 +17 @@
+-pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers'
++pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'

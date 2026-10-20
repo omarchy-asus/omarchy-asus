@@ -1,15 +1,11 @@
 --- a/PKGBUILD
 +++ b/PKGBUILD
-@@ -110,6 +110,12 @@
- package() {
+@@ -111,2 +111,8 @@
    cd "$srcdir/omarchy"
- 
++
 +  # omarchy-asus: only the patched omarchy-settings of this same release satisfies
 +  # this, never stock's same-pkgver build (#83). Set here, not in depends=() above,
 +  # so it is in the package but not a build dependency: the clean chroot and CI only
 +  # have stock omarchy-settings, which satisfies the ${pkgver} pin above.
 +  depends+=("omarchy-settings=${pkgver}-${pkgrel}")
-+
-   # Runtime binaries — ship everything in bin/ except the debug helpers
-   # that ship from omarchy-settings (needed before omarchy is installed,
-   # e.g. on the ISO live env).
+ 

@@ -13,8 +13,8 @@ pkgname='omarchy-settings'
 _tag='v4.0.6'
 _commit='237f1b4071a0bff2296c6d740ba2b9fd695ebfa0'
 pkgver=4.0.6
-pkgrel=1.1
-pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers'
+pkgrel=1.2
+pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
 # x86_64 memory stack and are left out of the aarch64 package (see package()).
@@ -25,7 +25,7 @@ pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and su
 # files as x86_64. makepkg only honours the arch-suffixed arrays below on
 # arch-specific packages.
 arch=('x86_64' 'aarch64')
-url='https://github.com/basecamp/omarchy'
+url='https://github.com/omacom/omarchy'
 license=('MIT')
 conflicts=('omarchy-settings-dev')
 
@@ -44,6 +44,7 @@ depends=(
   'bash'
   'curl'
   'gum'
+  'sudo'
   'hicolor-icon-theme'
   'plymouth'
 )
@@ -133,7 +134,7 @@ if [[ -n "${OMARCHY_SRC:-}" ]]; then
   source=()
   sha256sums=()
 else
-  source=("omarchy::git+https://github.com/basecamp/omarchy.git#commit=${_commit}"
+  source=("omarchy::git+https://github.com/omacom/omarchy.git#commit=${_commit}"
         0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch
         0002-Save-power-on-USB-C-chargers-on-ASUS-ROG-Zephyrus-la.patch
         0003-Let-another-power-manager-own-the-profile-on-plug-an.patch
@@ -438,7 +439,7 @@ ANSI_COLOR="38;2;158;206;106"
 HOME_URL="https://omarchy.org/"
 DOCUMENTATION_URL="https://learn.omacom.io/2/the-omarchy-manual"
 SUPPORT_URL="https://discord.gg/tXFUdasqhY"
-BUG_REPORT_URL="https://github.com/basecamp/omarchy/issues"
+BUG_REPORT_URL="https://github.com/omacom/omarchy/issues"
 LOGO=omarchy
 EOF
   for path in "${_etc_override_paths[@]}"; do
@@ -551,6 +552,22 @@ EOF
       "$pkgdir/usr/share/libalpm/scripts/omarchy-platform-guard"
     install -Dm755 bin/omarchy-hw-platform \
       "$pkgdir/usr/share/libalpm/scripts/omarchy-hw-platform"
+  fi
+
+  # Temporary passwordless sudo: the grant command, its library, the boot
+  # cleanup rule from etc/ and the hook that revokes grants before this
+  # package changes all live here, so the hook never outlives its Exec target
+  # and removing the runtime alone keeps expiry working. Conditional until no
+  # pinned source predates the hook; omarchy keeps the command until then.
+  if [[ -f default/libalpm/hooks/05-omarchy-passwordless-revoke.hook ]]; then
+    provides+=('omarchy-security-functions')
+    for helper in omarchy-sudo-passwordless omarchy-security-functions; do
+      install -Dm755 "bin/$helper" "$pkgdir/usr/bin/$helper"
+      install -d "$pkgdir/usr/share/omarchy/bin"
+      ln -s "/usr/bin/$helper" "$pkgdir/usr/share/omarchy/bin/$helper"
+    done
+    install -Dm644 default/libalpm/hooks/05-omarchy-passwordless-revoke.hook \
+      "$pkgdir/usr/share/libalpm/hooks/05-omarchy-passwordless-revoke.hook"
   fi
 
   # Branding assets (logos, icons).
