@@ -879,14 +879,33 @@ power_owner_choice() {
 # and sudoers rules that came with it. Nothing is deleted; the undo commands are printed.
 handover_power_owner() {
   local unit=$1 scope=user sudo='' a t src line cmd f enable_cmd unreadable=0
-  local undo=() helpers=() sudoers=()
-  if [[ $unit == "$POWER_ETC_SYSTEM_DIR"/* ]]; then scope=system; fi
+  local undo=() helpers=() sudoers=() link
+  # A unit in the /etc user dir is a user unit, enabled there for every user (--global).
+  if [[ $unit == "$POWER_ETC_SYSTEM_DIR"/* ]]; then
+    scope=system
+  elif [[ $unit == "$POWER_ETC_USER_DIR"/* ]]; then
+    scope=global
+  fi
   if [[ $unit != "$USER_UNIT_DIR"/* ]]; then sudo='sudo '; fi
 
   # Before the move, so systemd removes the links it made for the unit.
   if [[ $scope == system ]]; then
     as_root systemctl disable --now rog-power.service ||
       warn "could not disable rog-power.service; stop it yourself"
+  elif [[ $scope == global ]]; then
+    # Only root removes the links `systemctl --global enable` made in the /etc user dir
+    # (#142); the running instance is this user's.
+    as_root systemctl --global disable rog-power.service ||
+      warn "could not disable rog-power.service for all users"
+    for link in "$POWER_ETC_USER_DIR"/*.wants/rog-power.service; do
+      [[ -L $link ]] || continue
+      as_root rm -f "$link" || warn "could not remove $link; remove it yourself"
+    done
+    if ((DRY_RUN)); then
+      info "[dry-run] would run: systemctl --user stop rog-power.service"
+    else
+      systemctl --user stop rog-power.service 2>/dev/null || true
+    fi
   elif ((DRY_RUN)); then
     info "[dry-run] would run: systemctl --user disable --now rog-power.service"
   else
@@ -905,9 +924,11 @@ handover_power_owner() {
     warn "could not move ${unit/#$HOME/\~}; it stays in place, disabled, and the toggle is untouched"
     return 0
   fi
-  # A unit in the /etc user dir moves back with sudo but is a user unit again.
+  # A unit in the /etc user dir moves back with sudo and is enabled for every user again.
   if [[ $scope == system ]]; then
     enable_cmd='sudo systemctl enable --now rog-power.service'
+  elif [[ $scope == global ]]; then
+    enable_cmd='sudo systemctl --global enable rog-power.service && systemctl --user start rog-power.service'
   else
     enable_cmd='systemctl --user enable --now rog-power.service'
   fi
