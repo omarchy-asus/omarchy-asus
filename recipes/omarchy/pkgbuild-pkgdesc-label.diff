@@ -1,0 +1,5 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -17 +17 @@
+-pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH'
++pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH (omarchy-asus build)'

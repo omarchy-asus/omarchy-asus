@@ -12,6 +12,7 @@ keep NOTES.md
 # Pin omarchy-settings to pkgver-pkgrel, so stock's omarchy-settings of the same pkgver can't
 # satisfy the patched omarchy (#83).
 pkgbuild-patch pkgbuild-pin-settings-release.diff
+pkgbuild-patch pkgbuild-pkgdesc-label.diff
 patch 0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch prepare omarchy
 patch 0002-Save-power-on-USB-C-chargers-on-ASUS-ROG-Zephyrus-la.patch prepare omarchy
 patch 0003-Let-another-power-manager-own-the-profile-on-plug-an.patch prepare omarchy
