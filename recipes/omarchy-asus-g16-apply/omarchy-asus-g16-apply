@@ -160,6 +160,9 @@ power_owner() {
 # default files to /usr/share/omarchy/default/.
 PATCHED_OMARCHY_MIGRATIONS=/usr/share/omarchy/migrations
 PATCHED_HYBRID_CURSOR=/usr/share/omarchy/default/hypr/hybrid-cursor.lua
+# Patches 0002 (USB-C as its own power source) and 0003 (the external-owner
+# toggle) change omarchy-powerprofiles-set itself.
+PATCHED_POWERPROFILES_SET=/usr/bin/omarchy-powerprofiles-set
 omarchy_has_migration() { [[ -f $(r "$PATCHED_OMARCHY_MIGRATIONS/$1.sh") ]]; }
 patched_omarchy() { omarchy_has_migration 1792123636 || [[ -f $(r "$PATCHED_HYBRID_CURSOR") ]]; }
 # A shipped migration hasn't necessarily run: pacman installs it, and the next
@@ -1050,8 +1053,18 @@ info_rows() {
     row usbc-power local "power profiles are owned by $owner"
     row external-owner local "power profiles are owned by $owner"
   else
-    row usbc-power upstream "changes Omarchy's omarchy-powerprofiles-set: omacom/omarchy#15668"
-    row external-owner upstream "changes Omarchy's omarchy-powerprofiles-set: omacom/omarchy#15669"
+    local set
+    set=$(r "$PATCHED_POWERPROFILES_SET")
+    if grep -qF omarchy-hw-asus-rog-usbc-power "$set" 2>/dev/null; then
+      row usbc-power present "the patched omarchy's omarchy-powerprofiles-set (patch 0002)"
+    else
+      row usbc-power upstream "changes Omarchy's omarchy-powerprofiles-set: omacom/omarchy#15668"
+    fi
+    if grep -qF powerprofiles-autoswitch-off "$set" 2>/dev/null; then
+      row external-owner present "the patched omarchy's omarchy-powerprofiles-set (patch 0003)"
+    else
+      row external-owner upstream "changes Omarchy's omarchy-powerprofiles-set: omacom/omarchy#15669"
+    fi
   fi
 }
 

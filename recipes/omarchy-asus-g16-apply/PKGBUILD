@@ -22,7 +22,7 @@
 
 pkgname=omarchy-asus-g16-apply
 pkgver=0.1.0
-pkgrel=5
+pkgrel=6
 pkgdesc='Apply the ASUS ROG Zephyrus G16 GA605KM fixes that live in user config or /etc, on request (EXPERIMENTAL)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -47,7 +47,7 @@ source=('omarchy-asus-g16-apply'
         'omarchy-powerprofiles-asus-quiet-fans'
         'README.md'
         'LICENSE')
-sha256sums=('5c0db8830e9a5c1e4c6fa3987fe28f60ce736cdac298dbd92d865b611560a6e2'
+sha256sums=('24cb1736e70fe20784f8269df780f86dfb5d294ff5df8a606019de558fe90677'
             '1c02bdc6b3055649bd8bee1394c68cd26af05a0fefefcd6190f164cd8fc0ab13'
             'eadf7a74b73aec5c63fb2164908dc0f0f28a40411f9c696761265a96c76e6fc9'
             '54997bee5a950335bb8ce471c72c79923133dc777a1ea61f7a311540582e0be5'
@@ -57,7 +57,7 @@ sha256sums=('5c0db8830e9a5c1e4c6fa3987fe28f60ce736cdac298dbd92d865b611560a6e2'
             '1f5f1b0f51d2a12db84e2125ca56b704a41ce78d8a4787d862bdbaae4aa0404b'
             'e781d8e218dcb06ab49627ab567fafbad652a45f706ad65e7a8f728429c8915a'
             '336a30e3ca249944448ac35ffe45154f1bd83f81c4bfa34fa7b489ff152d3e00'
-            '43deba9c93282dd4a79a9e7e337fa4a3d4c12987bb64f51615cc1b685ee85353'
+            '23b1754fc2e40ee74a214a5eeab9a1a25cc6d06c418844a77cc4f556d19b6d22'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 package() {
