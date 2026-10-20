@@ -43,7 +43,7 @@ one-shot commands work with any kernel.
 | `/usr/bin/g16-winlock` | asus-rog-nkey-winlock (Python 3, standard library only) |
 | `/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules` | asus-rog-nkey-winlock: the keyboard's hidraw nodes get mode 0660, group `input`, and a `uaccess` ACL for the logged-in user |
 | `/usr/lib/systemd/user/g16-winlock.service` | asus-rog-nkey-winlock: runs `g16-winlock watch` |
-| `/usr/share/omarchy/plugins/omarchy-asus.g16/` | asus-zephyrus-g16-control: `manifest.json`, `Service.qml`, `Panel.qml`, `g16ctl` |
+| `/usr/share/omarchy/plugins/omarchy-asus.g16/` | asus-zephyrus-g16-control: `manifest.json`, `Service.qml`, `Panel.qml`, `bridge/g16_bridge.py` |
 
 ## Setup
 
@@ -86,26 +86,63 @@ The bar widget (`asus-zephyrus-g16-control`) is separate and optional:
    The link follows package upgrades. Remove it before you uninstall the
    package.
 
-### omarchy-power-tune is optional
+### Per power source: keyboard, refresh rate, panel overdrive
 
-Two parts of the widget defer to `omarchy-power-tune`, a personal power script
-that this repo does not ship: the per-power-source keyboard levels ("On AC" /
-"On battery", stored as `KBD_AC`/`KBD_BATTERY` in
-`~/.config/omarchy/power-tune.conf`) and the refresh-rate switch. Without
-`omarchy-power-tune` on `PATH` (or in `~/.local/bin`), both sections are hidden,
-and the keyboard on/off switch calls `asusctl leds set` directly. Everything else
-works the same. The widget also works without asusd's Aura object: the keyboard
-and Slash tabs hide, and the charge limit and Fn+Super switch stay.
+The widget applies these itself on every plug and unplug (it replaces
+`omarchy-power-tune`, which was written for this widget). They live in
+`~/.config/omarchy/power-tune.conf`, as plain `KEY=VALUE` lines (never run as a
+script):
 
-### Nothing polls while the panel is closed
+| key | values | what |
+|---|---|---|
+| `KBD_AC`, `KBD_BATTERY` | `off` `low` `med` `high` | keyboard backlight; the panel's "On AC" / "On battery" rows write these |
+| `HZ_AC`, `HZ_BATTERY`, `HZ_GAMING` | Hz | the internal panel's refresh rate |
+| `PANEL_OVERDRIVE_AC`, `PANEL_OVERDRIVE_BATTERY` | `0` `1` | asus-armoury panel overdrive, through asusd |
+| `INTERNAL_OUTPUT` | `eDP-1`, or `desc:<EDID description>` | which output is the panel (default: the first `eDP`) |
+| `BITDEPTH` | `8` `10` | carried on every modeset (default: the panel's current format) |
+| `BRIGHT_BATTERY` | % | on leaving the barrel, dim the screen to this if it's brighter (once, not a cap); back on the barrel the old level returns unless you've gone brighter |
+| `BRIGHT_DEVICE` | e.g. `amdgpu_bl1` | the backlight for that (default: the first one that isn't `nvidia_*`), set through logind |
+
+"AC" means the barrel charger. A USB-C charger gets the battery settings:
+UPower calls both chargers AC, so the widget tells them apart by asus-armoury's
+`charge_mode` (bit 0 barrel, bit 1 USB-C).
+
+A key that isn't set is left alone, so with no file nothing is enforced. The
+refresh pin (the panel's 60/240/Auto switch, stored in
+`~/.local/state/omarchy/power-tune-hz`) wins over gaming mode
+(`power-tune-gaming`), which wins over the power source. For a key binding:
+
+```bash
+python3 /usr/share/omarchy/plugins/omarchy-asus.g16/bridge/g16_bridge.py gaming toggle
+python3 /usr/share/omarchy/plugins/omarchy-asus.g16/bridge/g16_bridge.py hz 60   # or: hz auto
+```
+
+A monitor hotplug or `hyprctl reload` re-applies `monitors.lua`, which puts the
+panel back on its native rate; the widget sets the rate again after both.
+
+**Coming from `omarchy-power-tune`:** the settings file and state files are the
+same, so nothing needs converting. Stop the old service so two programs don't
+set the same things: `systemctl --user disable --now power-tune.service`. Its
+overdrive and refresh jobs are covered here; anything else you added to it is
+not.
+
+The widget also works without asusd: the keyboard and Slash tabs hide, and the
+refresh rate, charge limit and Fn+Super switch stay.
+
+### How it works: one Python bridge, nothing polls
 
 `Service.qml` (manifest kind `service`) holds the widget's state once, however
-many bars show it. It follows asusd's `PropertiesChanged` signals through one
-`gdbus monitor`, the keyboard LED's `brightness_hw_changed` (Fn+F2/F3), the
-power-tune files, UPower and Hyprland's monitor list. `g16ctl get` runs at
-start, when a panel opens, every 5 s while one is open, after a control is
-used, and when asusd restarts. Under a shell that does not hand out services,
-each widget starts its own copy after 10 s.
+many bars show it. Everything that touches the machine is one process,
+`bridge/g16_bridge.py`. It uses only the Python standard library and
+PyGObject's Gio, both on stock Omarchy, and it spawns nothing. It talks to:
+- asusd and UPower over D-Bus, and follows their `PropertiesChanged` signals;
+- Hyprland over its IPC sockets, including the event socket;
+- the keyboard LED's `brightness_hw_changed` (Fn+F2/F3) and the settings
+  files, through inotify.
+
+It sends a JSON state line whenever something changes and takes commands on
+stdin. Under a shell that doesn't hand out services, each widget starts its own
+copy after 10 s.
 
 ## Moving from a manual install
 
@@ -136,10 +173,8 @@ To switch over:
    changed). The unit should differ only in
    `ExecStart=` (`/usr/bin/g16-winlock watch`) and in the default mode, which
    is now `toast` (keep a `mode.conf` drop-in if you want `unlock`). The widget should differ only in
-   its id, its author, the way `Service.qml` finds `g16ctl` (next to itself
-   instead of a fixed path under the old id), `g16ctl`'s fallback path for
-   `g16-winlock`, and the additions for machines without `omarchy-power-tune`
-   or asusd's Aura object (above).
+   its id and author, and in that `g16ctl`, the `gdbus monitor` and
+   `omarchy-power-tune` are replaced by the bridge (above).
 3. Remove the local copies:
    ```bash
    sudo rm /etc/udev/rules.d/99-g16-winlock-hidraw.rules
@@ -148,7 +183,9 @@ To switch over:
    systemctl --user disable g16-winlock.service    # drops your own link; the packaged unit stays enabled
    systemctl --user restart g16-winlock.service
    ```
-4. Swap the widget: disable the old id, move its directory out of
+4. If you ran `omarchy-power-tune`, stop it:
+   `systemctl --user disable --now power-tune.service` (see "Per power source").
+5. Swap the widget: disable the old id, move its directory out of
    `~/.config/omarchy/plugins/`, then link and enable `omarchy-asus.g16`
    (Setup step 3). The old id's widget settings in `shell.json` are not carried
    over. The G16 Control widget keeps no per-widget settings, so nothing is lost

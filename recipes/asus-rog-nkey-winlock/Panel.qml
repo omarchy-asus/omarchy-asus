@@ -11,13 +11,11 @@ import qs.Ui
 // very differently:
 //
 //   Keyboard backlight -- a real kernel LED (/sys/class/leds/asus::kbd_backlight)
-//     owned by asusd's xyz.ljones.Aura interface. This panel does NOT write its
-//     brightness directly: omarchy-power-tune re-applies KBD_AC/KBD_BATTERY on
-//     every UPower event and a 30s poll, so a direct write is reverted within
-//     half a minute. Brightness therefore edits power-tune.conf and restarts
-//     that unit, which is why it is presented as two per-power-source levels
-//     rather than one slider. Colour and power-state flags are untouched by
-//     power-tune and go straight over D-Bus.
+//     owned by asusd's xyz.ljones.Aura interface. Brightness is set per power
+//     source (KBD_AC/KBD_BATTERY in power-tune.conf): the bridge re-applies
+//     the level for the current source on every plug and unplug, which is why
+//     it is presented as two levels rather than one slider. Colour and
+//     power-state flags go straight to asusd.
 //
 //   Slash bar (lid) -- not a kernel LED at all; nothing for it appears under
 //     /sys/class/leds. It is asusd's xyz.ljones.Slash interface on the same
@@ -87,12 +85,13 @@ Panel {
   readonly property bool hasAura: g ? g.hasAura : false
   readonly property int kbdBrightness: g ? g.kbdBrightness : 0
   readonly property string kbdColor: g ? g.kbdColor : "FF00FF"
-  readonly property string kbdAC: g ? g.kbdAC : "off"
-  readonly property string kbdBattery: g ? g.kbdBattery : "off"
-  // omarchy-power-tune (not packaged) owns the per-source levels and refresh
-  // rate; without it those sections hide and on/off writes asusctl directly.
-  readonly property bool hasPowerTune: g ? g.hasPowerTune : false
+  // "" when not set: the bridge then leaves the level alone on that source.
+  readonly property string kbdAC: g ? g.kbdAC : ""
+  readonly property string kbdBattery: g ? g.kbdBattery : ""
   readonly property bool onBattery: g ? g.onBattery : false
+  // USB-C chargers use the battery settings; the rows say which one is live.
+  readonly property bool batterySettings: g ? g.batterySettings : false
+  readonly property string powerSource: g ? g.source : "ac"
   readonly property bool kbdBoot: g ? g.kbdBoot : true
   readonly property bool kbdAwake: g ? g.kbdAwake : true
   readonly property bool kbdSleep: g ? g.kbdSleep : true
@@ -131,9 +130,8 @@ Panel {
     "00FF88", "00E5FF", "0066FF", "8A2BE2", "FF00FF"
   ]
 
-  readonly property string effectiveLevel: hasPowerTune
-    ? (onBattery ? kbdBattery : kbdAC)
-    : levelOptions[Math.max(0, Math.min(3, kbdBrightness))].value
+  // The live brightness: Fn+F2/F3 can move it away from the saved level.
+  readonly property string effectiveLevel: levelOptions[Math.max(0, Math.min(3, kbdBrightness))].value
   readonly property bool kbdOn: kbdBrightness > 0
   readonly property bool anyOn: kbdOn || slashOn
   readonly property int slashPercent: Math.round(slashBrightness / 255 * 100)
@@ -141,10 +139,11 @@ Panel {
   // 0 = System (front page), 1 = Keyboard, 2 = Lid slash.
   property int tab: 0
 
-  // ---- display (refresh goes through power-tune, never a raw modeset:
-  // a hotplug or `hyprctl reload` re-applies monitors.lua and would revert it) ----
+  // ---- display: the internal panel's refresh rate. The bridge sets it per
+  // power source (or pinned here), and sets it again after a hotplug or
+  // `hyprctl reload`, which re-apply monitors.lua and its native rate. ----
   readonly property int refreshHz: g ? g.refreshHz : 0
-  // Shows the click at once; the service's file watch then confirms it.
+  // Shows the click at once; the bridge's next state confirms it.
   property string refreshPicked: ""
   readonly property string refreshOverride: refreshPicked !== "" ? refreshPicked
     : (g ? g.refreshOverride : "auto")
@@ -309,7 +308,7 @@ Panel {
               fontFamily: root.bar.fontFamily
               title: "Keyboard"
               meta: (root.kbdOn ? root.effectiveLevel : "off").toUpperCase()
-              detail: root.onBattery ? "on battery" : "on AC"
+              detail: root.powerSource === "usbc" ? "on USB-C" : (root.onBattery ? "on battery" : "on the barrel charger")
               iconComponent: Component {
                 KeyboardMark {
                   lit: root.kbdOn
@@ -329,11 +328,10 @@ Panel {
 
             PanelSeparator { foreground: root.bar.foreground }
 
-            // ---------- Level, per power source (power-tune only) ----------
+            // ---------- Level, per power source ----------
             Column {
               width: parent.width
               spacing: Style.space(8)
-              visible: root.hasPowerTune
 
               PanelSectionHeader {
                 text: "BRIGHTNESS"
@@ -342,23 +340,23 @@ Panel {
               }
 
               LevelRow {
-                label: "On AC"
+                label: "On the barrel charger"
                 value: root.kbdAC
-                live: !root.onBattery
+                live: !root.batterySettings
                 onPicked: function(v) { root.setLevel("ac", v) }
               }
 
               LevelRow {
-                label: "On battery"
+                label: root.powerSource === "usbc" ? "On battery / USB-C (now: USB-C)" : "On battery / USB-C"
                 value: root.kbdBattery
-                live: root.onBattery
+                live: root.batterySettings
                 onPicked: function(v) { root.setLevel("battery", v) }
               }
 
               Text {
                 width: parent.width
-                text: "power-tune re-applies these on every power change, so they are "
-                    + "set here rather than as one live slider."
+                text: "Applied again on every plug and unplug, so they are set here "
+                    + "rather than as one live slider."
                 color: Qt.darker(root.bar.foreground, 1.5)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
@@ -366,7 +364,7 @@ Panel {
               }
             }
 
-            PanelSeparator { visible: root.hasPowerTune; foreground: root.bar.foreground }
+            PanelSeparator { foreground: root.bar.foreground }
 
             // ---------- Colour ----------
             Column {
