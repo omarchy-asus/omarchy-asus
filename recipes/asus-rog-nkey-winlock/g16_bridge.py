@@ -28,6 +28,13 @@ Per power source (what omarchy-power-tune used to do, folded in here), from
   INTERNAL_OUTPUT                       connector name, or desc:<EDID description>
   BITDEPTH                              carried on every modeset (default: the
                                         panel's current format, 10 or 8)
+  BRIGHT_BATTERY                        % to dim the screen to on leaving the
+                                        barrel (once, not a cap); empty = off
+  BRIGHT_DEVICE                         backlight to use (default: the first
+                                        one that isn't nvidia_*)
+A USB-C charger counts as battery: barrel = full power, USB-C and battery
+save. UPower reports both chargers as AC; asus-armoury's charge_mode tells
+them apart (bit 0 barrel, bit 1 USB-C).
 A key that is absent is left alone: with no file nothing is enforced. The
 refresh pin (~/.local/state/omarchy/power-tune-hz, an integer) wins over
 gaming mode (power-tune-gaming exists), which wins over the power source.
@@ -79,7 +86,8 @@ WINLOCK_UNIT = "g16-winlock.service"
 MAX_LINE = 4096
 CONF_KEYS = {"KBD_AC", "KBD_BATTERY", "HZ_AC", "HZ_BATTERY", "HZ_GAMING",
              "PANEL_OVERDRIVE_AC", "PANEL_OVERDRIVE_BATTERY", "INTERNAL_OUTPUT",
-             "BITDEPTH"}
+             "BITDEPTH", "BRIGHT_BATTERY", "BRIGHT_DEVICE"}
+LOGIND = "org.freedesktop.login1"
 
 
 def env(name, default=""):
@@ -96,6 +104,10 @@ HZ_PIN = os.path.join(STATE_DIR, "power-tune-hz")
 GAMING_FLAG = os.path.join(STATE_DIR, "power-tune-gaming")
 WINLOCK_DROPIN = os.path.join(CONFIG_HOME, "systemd", "user", WINLOCK_UNIT + ".d")
 WINLOCK_MODE_CONF = os.path.join(WINLOCK_DROPIN, "mode.conf")
+# power-tune's edge-trigger state: the source class last applied, and the
+# barrel backlight level saved when leaving it.
+SEEN_SOURCE = os.path.join(STATE_DIR, "power-tune.source")
+SAVED_BRIGHT = os.path.join(STATE_DIR, "power-tune.bright-ac")
 # Tests point these at a temp tree; on a real system they are the defaults.
 SYSROOT = env("G16_BRIDGE_SYSROOT", "/sys")
 WINLOCK_PATH = env("G16_BRIDGE_WINLOCK", WINLOCK_BIN)
@@ -202,6 +214,41 @@ def charge_limit_sysfs():
     return 0
 
 
+def charge_mode():
+    """asus-armoury charge_mode: bit 0 barrel, bit 1 USB-C; 0 until the
+    firmware has looked at a new adapter."""
+    return read_int_file(os.path.join(SYSROOT, "class", "firmware-attributes", "asus-armoury",
+                                      "attributes", "charge_mode", "current_value"))
+
+
+def backlight_device(conf):
+    want = conf.get("BRIGHT_DEVICE", "")
+    base = os.path.join(SYSROOT, "class", "backlight")
+    if want and re.fullmatch(r"[A-Za-z0-9_.:-]+", want):
+        return want
+    try:
+        for n in sorted(os.listdir(base)):
+            if not n.startswith("nvidia"):
+                return n
+    except OSError:
+        pass
+    return ""
+
+
+def read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def write_text(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text + "\n")
+
+
 def winlock_mode():
     m = "toast"
     try:
@@ -304,6 +351,9 @@ class Bridge:
         self.last_sent = None
         self.emit_pending = False
         self.on_battery = False
+        self.kind = "ac"          # ac (barrel) | usbc | battery
+        self.kind_tries = 0
+        self.kind_timer = 0
         self.conf = read_conf()
         self.aura = None      # object path
         self.slash = None
@@ -346,6 +396,7 @@ class Bridge:
         s = {
             "type": "state", "ack": self.ack,
             "onBattery": self.on_battery,
+            "source": self.kind,
             "hasAura": bool(self.aura),
             "kbdBrightness": max(0, min(3, int(bright))) if isinstance(bright, int) else 0,
             "kbdColor": color,
@@ -470,7 +521,7 @@ class Bridge:
         if path == "/org/freedesktop/UPower" and iface == UPOWER:
             if "OnBattery" in changed and bool(changed["OnBattery"]) != self.on_battery:
                 self.on_battery = bool(changed["OnBattery"])
-                self.apply("power source")
+                self.update_kind("power source")
             self.emit()
             return
         if key in self.cache:
@@ -490,7 +541,45 @@ class Bridge:
 
     # ---- the per-source policy (power-tune) ----
     def source(self):
-        return "BATTERY" if self.on_battery else "AC"
+        """Which settings apply: AC on the barrel, BATTERY on USB-C and battery."""
+        return "AC" if self.kind == "ac" else "BATTERY"
+
+    def read_kind(self):
+        if self.on_battery:
+            return "battery", True
+        v = charge_mode()
+        if v is None:
+            return "ac", True          # no asus-armoury: every charger is AC
+        if v == 0:
+            return "ac", False         # the firmware hasn't classified it yet
+        return ("usbc" if not v & 1 and v & 2 else "ac"), True
+
+    def update_kind(self, why):
+        """Work out the source and apply. The firmware sets charge_mode a
+        moment after an adapter comes online, so a 0 is read again every
+        250 ms, at most 8 times, after a power event (never while idle)."""
+        if self.kind_timer:
+            GLib.source_remove(self.kind_timer)
+            self.kind_timer = 0
+        kind, sure = self.read_kind()
+        self.kind = kind
+        self.apply(why)
+        self.emit()
+        if not sure:
+            self.kind_tries = 0
+
+            def again():
+                self.kind_tries += 1
+                k, ok = self.read_kind()
+                if ok or self.kind_tries >= 8:
+                    self.kind_timer = 0
+                    if k != self.kind:
+                        self.kind = k
+                        self.apply(why + " (charger type)")
+                        self.emit()
+                    return False
+                return True
+            self.kind_timer = GLib.timeout_add(250, again)
 
     def target_hz(self):
         pin = pinned_hz()
@@ -505,16 +594,63 @@ class Bridge:
         """Apply the settings for the current power source. Keys that are not
         set are left alone. Gaming mode uses the AC keyboard and overdrive."""
         src = "AC" if gaming_on() and not pinned_hz() else self.source()
-        log(f"apply ({why}): {self.source().lower()}")
+        log(f"apply ({why}): {self.kind}")
         self.apply_refresh()
         if refresh_only:
             return
+        self.adjust_brightness()
         level = self.conf.get("KBD_" + src, "").lower()
         if level in LEVELS and self.aura:
             self.set_level_now(level)
         od = self.conf.get("PANEL_OVERDRIVE_" + src, "")
         if od in ("0", "1") and self.overdrive:
             self.set_overdrive(int(od))
+
+    def adjust_brightness(self):
+        """power-tune's backlight step, edge-triggered on the source class
+        (ac / not ac) against the last apply: leaving the barrel dims to
+        BRIGHT_BATTERY % if brighter (once, not a cap); back on the barrel
+        the saved level returns unless it has since gone brighter. The first
+        apply after a start only records the class."""
+        cls = "ac" if self.kind == "ac" else "battery"
+        prev = read_text(SEEN_SOURCE)
+        if prev == cls:
+            return
+        try:
+            write_text(SEEN_SOURCE, cls)
+        except OSError as e:
+            log(f"cannot record the power source: {e}")
+        pct = self.conf.get("BRIGHT_BATTERY", "")
+        dev = backlight_device(self.conf)
+        if not prev or not pct.isdigit() or not dev:
+            return
+        base = os.path.join(SYSROOT, "class", "backlight", dev)
+        cur, top = read_int_file(os.path.join(base, "brightness")), read_int_file(os.path.join(base, "max_brightness"))
+        if cur is None or not top:
+            log(f"no backlight {dev}")
+            return
+        if prev == "ac" and cls != "ac":
+            if cur * 100 // top > int(pct):
+                write_text(SAVED_BRIGHT, str(cur))
+                self.set_backlight(dev, top * int(pct) // 100)
+        elif prev != "ac" and cls == "ac":
+            want = read_int_file(SAVED_BRIGHT)
+            try:
+                os.unlink(SAVED_BRIGHT)
+            except FileNotFoundError:
+                pass
+            if want is not None and cur < want:
+                self.set_backlight(dev, want)
+
+    def set_backlight(self, dev, value):
+        # logind lets the session's user set it; no root, no brightnessctl.
+        try:
+            self.call(self.system, LOGIND, "/org/freedesktop/login1/session/auto",
+                      LOGIND + ".Session", "SetBrightness",
+                      GLib.Variant("(ssu)", ("backlight", dev, int(value))))
+            log(f"backlight {dev} -> {value}")
+        except GLib.Error as e:
+            log(f"backlight {dev}: {e.message}")
 
     def set_level_now(self, level):
         cur = self.cache.get((self.aura, AURA), {}).get("Brightness")
@@ -815,7 +951,7 @@ class Bridge:
         self.hypr.listen()
         self.read_monitors()
         self.winlock_state = self.unit_state()
-        self.apply("start")
+        self.update_kind("start")
         GLib.io_add_watch(sys.stdin.fileno(), GLib.PRIORITY_DEFAULT,
                           GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
                           self.stdin_readable)

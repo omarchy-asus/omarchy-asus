@@ -104,7 +104,7 @@ class FakeHyprland:
 
 
 class Harness:
-    def __init__(self, conf=CONF, asusd=True, on_battery=False):
+    def __init__(self, conf=CONF, asusd=True, on_battery=False, charge_mode=None, bright=None):
         self.tmp = tempfile.mkdtemp(prefix="g16b-")
         t = self.tmp
         self.home = os.path.join(t, "home")
@@ -115,6 +115,19 @@ class Harness:
             os.makedirs(d)
         with open(os.path.join(self.sys, "class", "power_supply", "BAT0", "charge_control_end_threshold"), "w") as f:
             f.write("80\n")
+        self.charge_mode = os.path.join(self.sys, "class", "firmware-attributes", "asus-armoury",
+                                        "attributes", "charge_mode", "current_value")
+        if charge_mode is not None:
+            self.set_charge_mode(charge_mode)
+        self.backlight = os.path.join(self.sys, "class", "backlight", "amdgpu_bl1")
+        if bright is not None:
+            # An nvidia_* backlight sorts first and must be skipped.
+            for d, v in ((os.path.join(self.sys, "class", "backlight", "nvidia_0"), 50), (self.backlight, bright)):
+                os.makedirs(d)
+                with open(os.path.join(d, "max_brightness"), "w") as f:
+                    f.write("100\n")
+                with open(os.path.join(d, "brightness"), "w") as f:
+                    f.write(f"{v}\n")
         self.led = os.path.join(self.sys, "class", "leds", "asus::kbd_backlight", "brightness_hw_changed")
         with open(self.led, "w") as f:
             f.write("1\n")
@@ -136,7 +149,7 @@ class Harness:
         self.hypr = FakeHyprland(os.path.join(self.run_dir, "hypr", "SIG"))
         base = {"PATH": "/usr/bin:/bin", "HOME": self.home, "LANG": "C.UTF-8",
                 "DBUS_SYSTEM_BUS_ADDRESS": self.sysbus, "DBUS_SESSION_BUS_ADDRESS": self.sesbus}
-        fenv = dict(base, FAKE_LOG=self.log, FAKE_NO_ASUSD="0" if asusd else "1")
+        fenv = dict(base, FAKE_LOG=self.log, FAKE_NO_ASUSD="0" if asusd else "1", FAKE_SYSFS=self.sys)
         self.fakes = subprocess.Popen([sys.executable, "-I", FAKES], env=fenv, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, text=True)
         assert self.fakes.stdout.readline().strip() == "ready"
@@ -203,6 +216,18 @@ class Harness:
         self.wait(lambda: cid in self.replies, what=f"reply to {cmd}")
         self.wait(lambda: self.state.get("ack", 0) >= cid, what=f"state with ack {cid}")
         return self.replies[cid]
+
+    def set_charge_mode(self, v):
+        os.makedirs(os.path.dirname(self.charge_mode), exist_ok=True)
+        with open(self.charge_mode, "w") as f:
+            f.write(f"{v}\n")
+
+    def brightness(self):
+        with open(os.path.join(self.backlight, "brightness")) as f:
+            return int(f.read())
+
+    def power(self, on_battery):
+        self.fake({"set": ["/org/freedesktop/UPower", "org.freedesktop.UPower", "OnBattery", "b", on_battery]})
 
     def fake(self, msg):
         self.fakes.stdin.write(json.dumps(msg) + "\n")
@@ -380,6 +405,60 @@ class BridgeTest(unittest.TestCase):
         before = switches()
         time.sleep(6)
         self.assertEqual(switches() - before, 0, "the idle bridge woke up")
+
+    def test_usb_c_uses_the_battery_settings(self):
+        h = self.harness(charge_mode=2)   # bit 1: USB-C, bit 0 (barrel) clear
+        h.wait(lambda: h.state.get("source") == "usbc" and h.state.get("refreshHz") == 60, what="USB-C applied")
+        self.assertFalse(h.state["onBattery"])
+        h.wait(lambda: [s[4] for s in h.sets("Brightness") if s[1] == "xyz.ljones.Aura"] == [0], what="battery kbd")
+        h.set_charge_mode(1)
+        h.power(True)
+        h.power(False)                    # back on the barrel
+        h.wait(lambda: h.state.get("source") == "ac" and h.state.get("refreshHz") == 240, what="barrel applied")
+
+    def test_charger_classified_late_is_read_again(self):
+        h = self.harness(charge_mode=1, on_battery=True)
+        h.wait(lambda: h.state.get("source") == "battery" and h.state.get("refreshHz") == 60, what="battery")
+        h.set_charge_mode(0)              # the firmware hasn't looked at the new adapter yet
+        h.power(False)
+        h.wait(lambda: h.state.get("source") == "ac", what="first guess")
+        h.set_charge_mode(2)              # it turns out to be USB-C
+        h.wait(lambda: h.state.get("source") == "usbc" and h.hypr.hz == 60, timeout=4, what="USB-C after the re-read")
+
+    def test_backlight_dims_leaving_the_barrel_and_comes_back(self):
+        h = self.harness(conf=CONF + "BRIGHT_BATTERY=30\n", charge_mode=1, bright=80)
+        h.wait(lambda: h.state.get("refreshHz") == 240, what="started on the barrel")
+        self.assertEqual(h.brightness(), 80, "the first apply only records the source")
+        h.power(True)
+        h.wait(lambda: h.brightness() == 30, what="dimmed to 30 %")
+        with open(os.path.join(h.backlight, "..", "nvidia_0", "brightness")) as f:
+            self.assertEqual(f.read().strip(), "50")
+        h.power(False)
+        h.wait(lambda: h.brightness() == 80, what="barrel level back")
+        h.power(True)
+        h.wait(lambda: h.brightness() == 30, what="dimmed again")
+        with open(os.path.join(h.backlight, "brightness"), "w") as f:
+            f.write("90\n")              # turned up by hand on battery
+        h.power(False)
+        h.wait(lambda: h.state.get("source") == "ac" and h.state.get("refreshHz") == 240, what="barrel")
+        h.send("get")
+        self.assertEqual(h.brightness(), 90, "a brighter manual level is kept")
+        calls = [c["call"][3] for c in h.calls() if "call" in c and c["call"][2] == "SetBrightness"]
+        self.assertEqual(calls, [["backlight", "amdgpu_bl1", 30], ["backlight", "amdgpu_bl1", 80],
+                                 ["backlight", "amdgpu_bl1", 30]])
+
+    def test_the_g16s_power_tune_conf_works_as_is(self):
+        # The live file from the G16 (tests/power-tune.g16.conf): a desc: panel
+        # match, keys only power-tune knew (UPOWER_EVENTS, POLL_SECS, HYPR_EVENTS),
+        # quoted values and BRIGHT_BATTERY.
+        with open(os.path.join(HERE, "power-tune.g16.conf")) as f:
+            conf = f.read()
+        h = self.harness(conf=conf, charge_mode=1, bright=70)
+        h.wait(lambda: h.state.get("hasAura") and h.state.get("refreshHz") == 240, what="barrel applied")
+        self.assertIn("bitdepth = 10", h.hypr.evals[-1] if h.hypr.evals else "bitdepth = 10")
+        h.power(True)
+        h.wait(lambda: h.hypr.hz == 60 and h.brightness() == 30, what="battery: 60 Hz, dimmed to 30 %")
+        self.assertEqual((h.state["kbdAC"], h.state["kbdBattery"]), ("med", "med"))
 
     def test_closing_stdin_stops_the_bridge(self):
         h = self.harness()

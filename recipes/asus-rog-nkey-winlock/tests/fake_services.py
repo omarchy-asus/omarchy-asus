@@ -49,6 +49,13 @@ ASUSD_XML = """
   </interface>
 </node>"""
 
+LOGIND_XML = """
+<node><interface name="org.freedesktop.login1.Session">
+  <method name="SetBrightness">
+    <arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="u" direction="in"/>
+  </method>
+</interface></node>"""
+
 UPOWER_XML = """
 <node><interface name="org.freedesktop.UPower">
   <property name="OnBattery" type="b" access="read"/>
@@ -88,7 +95,7 @@ values = {
     },
     ("/xyz/ljones", "xyz.ljones.Platform"): {"ChargeControlEndThreshold": GLib.Variant("y", 80)},
     ("/xyz/ljones/asus_armoury/panel_overdrive", "xyz.ljones.AsusArmoury"): {
-        "Name": GLib.Variant("s", "panel_overdrive"), "CurrentValue": GLib.Variant("i", 0)},
+        "Name": GLib.Variant("s", "PanelOverdrive"), "CurrentValue": GLib.Variant("i", 0)},
     ("/org/freedesktop/UPower", "org.freedesktop.UPower"): {"OnBattery": GLib.Variant("b", False)},
     ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice", "org.freedesktop.systemd1.Unit"): {
         "ActiveState": GLib.Variant("s", "active")},
@@ -122,6 +129,12 @@ def method_call(conn, sender, path, iface, method, params, invocation):
         invocation.return_value(GLib.Variant("(o)", ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice",)))
     elif method == "EnableUnitFiles":
         invocation.return_value(GLib.Variant("(ba(sss))", (False, [])))
+    elif method == "SetBrightness":
+        # Like logind: write the backlight's brightness file.
+        _sub, dev, value = params.unpack()
+        with open(os.path.join(os.environ["FAKE_SYSFS"], "class", "backlight", dev, "brightness"), "w") as f:
+            f.write(f"{value}\n")
+        invocation.return_value(None)
     elif method == "RestartUnit":
         invocation.return_value(GLib.Variant("(o)", ("/org/freedesktop/systemd1/job/1",)))
     else:
@@ -145,6 +158,7 @@ asusd_objects = [(AURA_PATH, ["xyz.ljones.Aura", "xyz.ljones.Slash"]),
                  ("/xyz/ljones/asus_armoury/panel_overdrive", ["xyz.ljones.AsusArmoury"])]
 asusd_ids = register(system, ASUSD_XML, asusd_objects)
 register(system, UPOWER_XML, [("/org/freedesktop/UPower", ["org.freedesktop.UPower"])])
+register(system, LOGIND_XML, [("/org/freedesktop/login1/session/auto", ["org.freedesktop.login1.Session"])])
 register(session, SYSTEMD_XML, [("/org/freedesktop/systemd1", ["org.freedesktop.systemd1.Manager"]),
                                 ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice",
                                  ["org.freedesktop.systemd1.Unit"])])
@@ -162,6 +176,7 @@ def release(conn, name):
 
 
 own(system, "org.freedesktop.UPower")
+own(system, "org.freedesktop.login1")
 own(session, "org.freedesktop.systemd1")
 if os.environ.get("FAKE_NO_ASUSD") != "1":
     own(system, "xyz.ljones.Asusd")

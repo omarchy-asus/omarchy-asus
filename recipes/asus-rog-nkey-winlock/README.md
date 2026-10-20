@@ -100,6 +100,12 @@ script):
 | `PANEL_OVERDRIVE_AC`, `PANEL_OVERDRIVE_BATTERY` | `0` `1` | asus-armoury panel overdrive, through asusd |
 | `INTERNAL_OUTPUT` | `eDP-1`, or `desc:<EDID description>` | which output is the panel (default: the first `eDP`) |
 | `BITDEPTH` | `8` `10` | carried on every modeset (default: the panel's current format) |
+| `BRIGHT_BATTERY` | % | on leaving the barrel, dim the screen to this if it's brighter (once, not a cap); back on the barrel the old level returns unless you've gone brighter |
+| `BRIGHT_DEVICE` | e.g. `amdgpu_bl1` | the backlight for that (default: the first one that isn't `nvidia_*`), set through logind |
+
+"AC" means the barrel charger. A USB-C charger gets the battery settings:
+UPower calls both chargers AC, so the widget tells them apart by asus-armoury's
+`charge_mode` (bit 0 barrel, bit 1 USB-C).
 
 A key that isn't set is left alone, so with no file nothing is enforced. The
 refresh pin (the panel's 60/240/Auto switch, stored in

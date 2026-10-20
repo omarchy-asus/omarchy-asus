@@ -89,6 +89,9 @@ Panel {
   readonly property string kbdAC: g ? g.kbdAC : ""
   readonly property string kbdBattery: g ? g.kbdBattery : ""
   readonly property bool onBattery: g ? g.onBattery : false
+  // USB-C chargers use the battery settings; the rows say which one is live.
+  readonly property bool batterySettings: g ? g.batterySettings : false
+  readonly property string powerSource: g ? g.source : "ac"
   readonly property bool kbdBoot: g ? g.kbdBoot : true
   readonly property bool kbdAwake: g ? g.kbdAwake : true
   readonly property bool kbdSleep: g ? g.kbdSleep : true
@@ -305,7 +308,7 @@ Panel {
               fontFamily: root.bar.fontFamily
               title: "Keyboard"
               meta: (root.kbdOn ? root.effectiveLevel : "off").toUpperCase()
-              detail: root.onBattery ? "on battery" : "on AC"
+              detail: root.powerSource === "usbc" ? "on USB-C" : (root.onBattery ? "on battery" : "on the barrel charger")
               iconComponent: Component {
                 KeyboardMark {
                   lit: root.kbdOn
@@ -337,16 +340,16 @@ Panel {
               }
 
               LevelRow {
-                label: "On AC"
+                label: "On the barrel charger"
                 value: root.kbdAC
-                live: !root.onBattery
+                live: !root.batterySettings
                 onPicked: function(v) { root.setLevel("ac", v) }
               }
 
               LevelRow {
-                label: "On battery"
+                label: root.powerSource === "usbc" ? "On battery / USB-C (now: USB-C)" : "On battery / USB-C"
                 value: root.kbdBattery
-                live: root.onBattery
+                live: root.batterySettings
                 onPicked: function(v) { root.setLevel("battery", v) }
               }
 
