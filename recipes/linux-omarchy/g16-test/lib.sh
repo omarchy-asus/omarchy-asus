@@ -3,7 +3,10 @@
 # shellcheck disable=SC2034  # variables here are used by the sourcing scripts
 
 GH_REPO=omarchy-asus/omarchy-asus
-PR=8
+# The kernel PR this checkout is on (gh pr checkout N), so reports and CI
+# artifacts follow the PR under test. G16_TEST_PR=N overrides; 8 is the first.
+PR=${G16_TEST_PR:-$(gh pr view --json number -q .number 2>/dev/null || true)}
+[[ $PR =~ ^[0-9]+$ ]] || PR=8
 TEMPS_ISSUE=42
 WORKFLOW=build-pr.yml
 KIT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
