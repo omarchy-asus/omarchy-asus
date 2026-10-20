@@ -5,7 +5,12 @@
 # <pkg>-<arch>-<git tree hash> and skips a package whose label already exists.
 #
 # The label here hashes everything the build depends on:
-#   - the recipe directory's git tree (PKGBUILD, patches, keys, config...)
+#   - the recipe directory's files (PKGBUILD, patches, keys, config...),
+#     except the ones makepkg never reads: NOTES.md, README.md, DELTA, HOLD,
+#     LOCAL_ONLY and the g16-test/ and tests/ directories, unless the PKGBUILD
+#     names them (a package can install its README). Editing those docs, the
+#     hold or the G16 test kit then reuses the earlier build instead of
+#     building linux-omarchy again for 2.5 hours.
 #   - build/pacman.conf (the pinned Omarchy snapshot the deps come from)
 #   - ci/build-recipe, ci/setup-arch and ci/omarchy-signing-key.asc (how the
 #     container builds it)
@@ -27,13 +32,31 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 recipe=${1:?usage: ci/find-build <recipe> [rev]} rev=${2:-HEAD}
-SCHEME=1
+SCHEME=2
+
+# Recipe files that never reach the build, unless the PKGBUILD names them.
+SKIP_FILES=(NOTES.md README.md DELTA HOLD LOCAL_ONLY)
+SKIP_DIRS=(g16-test tests)
+
+# One "<mode> <type> <object> <path>" line per file the build can read.
+recipe_inputs() {
+    local pkgbuild entry path rel top f d skip
+    pkgbuild=$(git show "$rev:recipes/$recipe/PKGBUILD" 2>/dev/null || true)
+    git ls-tree -r --full-tree "$rev" -- "recipes/$recipe/" | while IFS= read -r entry; do
+        path=${entry#*$'\t'} rel=${path#"recipes/$recipe/"} top=${rel%%/*} skip=0
+        for f in "${SKIP_FILES[@]}"; do [[ $rel == "$f" ]] && skip=1; done
+        for d in "${SKIP_DIRS[@]}"; do [[ $rel != "$top" && $top == "$d" ]] && skip=1; done
+        # Named in the PKGBUILD (source=(), install=, a path in package()): it counts.
+        ((skip)) && grep -qF -- "$rel" <<<"$pkgbuild" && skip=0
+        ((skip)) || printf '%s\n' "$entry"
+    done
+}
 
 inputs=$(
     echo "scheme $SCHEME"
     echo "image ${BUILDER_IMAGE:?}"
-    for p in "recipes/$recipe" build/pacman.conf ci/build-recipe ci/setup-arch \
-        ci/omarchy-signing-key.asc; do
+    echo "recipes/$recipe $(recipe_inputs | sha256sum | cut -c1-40)"
+    for p in build/pacman.conf ci/build-recipe ci/setup-arch ci/omarchy-signing-key.asc; do
         echo "$p $(git rev-parse --verify --quiet "$rev:$p" || echo missing)"
     done
 )
