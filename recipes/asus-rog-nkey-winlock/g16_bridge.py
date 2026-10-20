@@ -77,6 +77,10 @@ LEVELS = ["off", "low", "med", "high"]
 SLASH_MODES = ["Static", "Bounce", "Slash", "Loading", "BitStream", "Transmission",
                "Flow", "Flux", "Phantom", "Spectrum", "Hazard", "Interfacing",
                "Ramp", "GameOver", "Start", "Buzzer"]
+# asusd's Mode property takes rog-slash's SlashMode codes (asusctl
+# rog-slash/src/data.rs), in the order `asusctl slash list` prints them.
+SLASH_CODES = [0x06, 0x10, 0x12, 0x13, 0x1D, 0x1A, 0x19, 0x25, 0x24, 0x26,
+               0x32, 0x33, 0x34, 0x42, 0x43, 0x44]
 SLASH_FLAGS = ["ShowOnBoot", "ShowOnShutdown", "ShowOnSleep", "ShowOnBattery",
                "ShowBatteryWarning", "ShowOnLidClosed"]
 CHARGE_PROP = "ChargeControlEndThreshold"
@@ -360,6 +364,7 @@ class Bridge:
         self.charge = None    # (path, interface)
         self.overdrive = None  # (path, interface, property)
         self.cache = {}       # (path, iface) -> {prop: python value}
+        self.prop_names = {}  # (path, iface) -> property names, from introspection
         self.hypr = Hyprland(self.hypr_event)
         self.refresh_hz = 0
         self.output = ""
@@ -405,7 +410,7 @@ class Bridge:
             "hasSlash": bool(self.slash),
             "slashOn": bool(slash.get("Enabled", False)),
             "slashBrightness": int(slash.get("Brightness", 0) or 0),
-            "slashPattern": int(slash.get("Interval", 0) or 0),
+            "slashPattern": self.slash_pattern(slash),
             "slashModes": SLASH_MODES,
             "chargeLimit": charge,
             "hasPanel": bool(self.output),
@@ -440,13 +445,33 @@ class Bridge:
         return bus.call_sync(name, path, iface, method, args, reply and GLib.VariantType(reply),
                              Gio.DBusCallFlags.NONE, timeout, None)
 
+    @staticmethod
+    def slash_pattern(slash):
+        """The saved pattern (Mode, a SlashMode code) when asusd reports one we
+        know; otherwise Interval, which is what drives the live pattern."""
+        mode = slash.get("Mode")
+        if isinstance(mode, int) and mode in SLASH_CODES:
+            return SLASH_CODES.index(mode)
+        v = slash.get("Interval", 0)
+        return int(v) if isinstance(v, int) and 0 <= v < len(SLASH_MODES) else 0
+
     def get_all(self, path, iface):
+        """GetAll, or, if asusd fails it (zbus fails the whole call when one
+        getter errors), each property on its own, keeping the ones that read."""
         try:
             v = self.call(self.system, ASUSD, path, PROPS, "GetAll",
                           GLib.Variant("(s)", (iface,)), "(a{sv})")
             self.cache[(path, iface)] = dict(v.unpack()[0])
+            return
         except GLib.Error as e:
-            log(f"GetAll {path} {iface}: {e.message}")
+            log(f"GetAll {path} {iface}: {e.message}; reading properties one by one")
+        got = {}
+        for name in sorted(self.prop_names.get((path, iface), ())):
+            try:
+                got[name] = self.raw_prop(path, iface, name).unpack()
+            except GLib.Error as e:
+                log(f"Get {path} {iface}.{name}: {e.message}")
+        self.cache[(path, iface)] = got
 
     def set_prop(self, path, iface, prop, variant):
         self.call(self.system, ASUSD, path, PROPS, "Set",
@@ -461,6 +486,7 @@ class Bridge:
     def discover(self):
         self.aura = self.slash = self.charge = self.overdrive = None
         self.cache = {}
+        self.prop_names = {}
         seen = 0
         stack = ["/"]
         while stack and seen < 256:
@@ -476,6 +502,7 @@ class Bridge:
                 stack.append((path.rstrip("/") + "/" + child.path) if child.path else path)
             for iface in node.interfaces:
                 names = {p.name for p in iface.properties}
+                self.prop_names[(path, iface.name)] = names
                 if iface.name == AURA and not self.aura:
                     self.aura = path
                 elif iface.name == SLASH and not self.slash:
@@ -875,6 +902,13 @@ class Bridge:
                     raise ValueError(f"bad slash pattern: {a[0]}")
             v = self.raw_prop(self.slash, SLASH, prop)
             self.set_prop(self.slash, SLASH, prop, GLib.Variant(v.get_type_string(), raw))
+            if cmd == "slash-pattern" and "Mode" in self.prop_names.get((self.slash, SLASH), ()):
+                # Interval changes the live pattern on this firmware; Mode is
+                # what asusd saves (to the device and its config), as
+                # `asusctl slash --mode` did for g16ctl.
+                m = self.raw_prop(self.slash, SLASH, "Mode")
+                self.set_prop(self.slash, SLASH, "Mode", GLib.Variant(m.get_type_string(), SLASH_CODES[raw]))
+                self.cache.setdefault((self.slash, SLASH), {})["Mode"] = SLASH_CODES[raw]
         elif cmd == "refresh":
             set_pin(a[0])
             self.apply("refresh pin", refresh_only=True)
@@ -942,8 +976,13 @@ class Bridge:
     def run(self):
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, s, lambda *_: (self.loop.quit(), False)[1])
-        self.system.signal_subscribe(None, PROPS, "PropertiesChanged", None, None,
+        # Only asusd's signals, and UPower's daemon object (not its battery
+        # devices, which change every few seconds): with no sender filter every
+        # PropertiesChanged on the system bus would wake the bridge.
+        self.system.signal_subscribe(ASUSD, PROPS, "PropertiesChanged", None, None,
                                      Gio.DBusSignalFlags.NONE, self.props_changed)
+        self.system.signal_subscribe(UPOWER, PROPS, "PropertiesChanged", "/org/freedesktop/UPower",
+                                     None, Gio.DBusSignalFlags.NONE, self.props_changed)
         self.read_on_battery()
         Gio.bus_watch_name_on_connection(self.system, ASUSD, Gio.BusNameWatcherFlags.NONE,
                                          self.asusd_appeared, self.asusd_vanished)

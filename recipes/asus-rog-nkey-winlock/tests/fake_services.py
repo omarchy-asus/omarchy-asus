@@ -8,6 +8,10 @@ asus-armoury attributes one object each. Every Set and method call is
 appended to $FAKE_LOG as a JSON line. Commands arrive on stdin as JSON lines:
   {"set": [path, iface, prop, signature, value]}  change a value, emit PropertiesChanged
   {"asusd": false}                                 drop the asusd name (true: own it again)
+  {"noise": true}                                  start unrelated PropertiesChanged traffic (NetworkManager,
+                                                   UPower's battery device), as on a real system bus
+FAKE_SLASH_GETALL_FAILS=1 makes GetAll on the Slash interface fail, the way asusd's
+zbus fails the whole call when one getter errors.
 Prints "ready" once every name is owned.
 """
 import json
@@ -33,6 +37,7 @@ ASUSD_XML = """
     <property name="Enabled" type="b" access="readwrite"/>
     <property name="Brightness" type="y" access="readwrite"/>
     <property name="Interval" type="y" access="readwrite"/>
+    <property name="Mode" type="y" access="readwrite"/>
     <property name="ShowOnBoot" type="b" access="readwrite"/>
     <property name="ShowOnShutdown" type="b" access="readwrite"/>
     <property name="ShowOnSleep" type="b" access="readwrite"/>
@@ -88,7 +93,7 @@ values = {
     },
     (AURA_PATH, "xyz.ljones.Slash"): {
         "Enabled": GLib.Variant("b", True), "Brightness": GLib.Variant("y", 100),
-        "Interval": GLib.Variant("y", 2), "ShowOnBoot": GLib.Variant("b", True),
+        "Interval": GLib.Variant("y", 2), "Mode": GLib.Variant("y", 0x12), "ShowOnBoot": GLib.Variant("b", True),
         "ShowOnShutdown": GLib.Variant("b", False), "ShowOnSleep": GLib.Variant("b", False),
         "ShowOnBattery": GLib.Variant("b", False), "ShowBatteryWarning": GLib.Variant("b", True),
         "ShowOnLidClosed": GLib.Variant("b", False),
@@ -153,12 +158,17 @@ def register(conn, xml, objects):
 
 system = Gio.bus_get_sync(Gio.BusType.SYSTEM)
 session = Gio.bus_get_sync(Gio.BusType.SESSION)
+# UPower and logind are other processes than asusd on a real system: own them
+# on a connection of their own, so a sender filter can tell them apart.
+upower = Gio.DBusConnection.new_for_address_sync(
+    os.environ["DBUS_SYSTEM_BUS_ADDRESS"],
+    Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
 asusd_objects = [(AURA_PATH, ["xyz.ljones.Aura", "xyz.ljones.Slash"]),
                  ("/xyz/ljones", ["xyz.ljones.Platform"]),
                  ("/xyz/ljones/asus_armoury/panel_overdrive", ["xyz.ljones.AsusArmoury"])]
 asusd_ids = register(system, ASUSD_XML, asusd_objects)
-register(system, UPOWER_XML, [("/org/freedesktop/UPower", ["org.freedesktop.UPower"])])
-register(system, LOGIND_XML, [("/org/freedesktop/login1/session/auto", ["org.freedesktop.login1.Session"])])
+register(upower, UPOWER_XML, [("/org/freedesktop/UPower", ["org.freedesktop.UPower"])])
+register(upower, LOGIND_XML, [("/org/freedesktop/login1/session/auto", ["org.freedesktop.login1.Session"])])
 register(session, SYSTEMD_XML, [("/org/freedesktop/systemd1", ["org.freedesktop.systemd1.Manager"]),
                                 ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice",
                                  ["org.freedesktop.systemd1.Unit"])])
@@ -175,14 +185,27 @@ def release(conn, name):
                    "ReleaseName", GLib.Variant("(s)", (name,)), None, 0, -1, None)
 
 
-own(system, "org.freedesktop.UPower")
-own(system, "org.freedesktop.login1")
+if os.environ.get("FAKE_SLASH_GETALL_FAILS") == "1":
+    def getall_filter(conn, msg, incoming):
+        if (incoming and msg.get_message_type() == Gio.DBusMessageType.METHOD_CALL
+                and msg.get_interface() == "org.freedesktop.DBus.Properties"
+                and msg.get_member() == "GetAll" and msg.get_body()
+                and msg.get_body().unpack()[0] == "xyz.ljones.Slash"):
+            conn.send_message(Gio.DBusMessage.new_method_error_literal(
+                msg, "org.freedesktop.zbus.Error", "a getter failed"), Gio.DBusSendMessageFlags.NONE)
+            return None
+        return msg
+    system.add_filter(getall_filter)
+
+own(upower, "org.freedesktop.UPower")
+own(upower, "org.freedesktop.login1")
 own(session, "org.freedesktop.systemd1")
 if os.environ.get("FAKE_NO_ASUSD") != "1":
     own(system, "xyz.ljones.Asusd")
 print("ready", flush=True)
 
 buf = b""
+noisy = []
 
 
 def stdin_cb(fd, cond):
@@ -200,7 +223,24 @@ def stdin_cb(fd, cond):
             if sig.startswith("("):
                 val = tuple(val)
             values[(path, iface)][prop] = GLib.Variant(sig, val)
-            changed(system, path, iface, prop)
+            changed(upower if path.startswith("/org/freedesktop/UPower") else system, path, iface, prop)
+        elif "noise" in msg:
+            nm = Gio.DBusConnection.new_for_address_sync(
+                os.environ["DBUS_SYSTEM_BUS_ADDRESS"],
+                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+            own(nm, "org.freedesktop.NetworkManager")
+            noisy.append(nm)
+
+            def tick():
+                nm.emit_signal(None, "/org/freedesktop/NetworkManager", "org.freedesktop.DBus.Properties",
+                               "PropertiesChanged", GLib.Variant("(sa{sv}as)", (
+                                   "org.freedesktop.NetworkManager", {"Connectivity": GLib.Variant("u", 4)}, [])))
+                upower.emit_signal(None, "/org/freedesktop/UPower/devices/battery_BAT1",
+                                   "org.freedesktop.DBus.Properties", "PropertiesChanged", GLib.Variant(
+                                       "(sa{sv}as)", ("org.freedesktop.UPower.Device",
+                                                      {"Percentage": GLib.Variant("d", 50.0)}, [])))
+                return True
+            GLib.timeout_add(100, tick)
         elif "asusd" in msg:
             (own if msg["asusd"] else release)(system, "xyz.ljones.Asusd")
         print("done", flush=True)

@@ -104,7 +104,8 @@ class FakeHyprland:
 
 
 class Harness:
-    def __init__(self, conf=CONF, asusd=True, on_battery=False, charge_mode=None, bright=None):
+    def __init__(self, conf=CONF, asusd=True, on_battery=False, charge_mode=None, bright=None,
+                 slash_getall_fails=False):
         self.tmp = tempfile.mkdtemp(prefix="g16b-")
         t = self.tmp
         self.home = os.path.join(t, "home")
@@ -149,7 +150,8 @@ class Harness:
         self.hypr = FakeHyprland(os.path.join(self.run_dir, "hypr", "SIG"))
         base = {"PATH": "/usr/bin:/bin", "HOME": self.home, "LANG": "C.UTF-8",
                 "DBUS_SYSTEM_BUS_ADDRESS": self.sysbus, "DBUS_SESSION_BUS_ADDRESS": self.sesbus}
-        fenv = dict(base, FAKE_LOG=self.log, FAKE_NO_ASUSD="0" if asusd else "1", FAKE_SYSFS=self.sys)
+        fenv = dict(base, FAKE_LOG=self.log, FAKE_NO_ASUSD="0" if asusd else "1", FAKE_SYSFS=self.sys,
+                    FAKE_SLASH_GETALL_FAILS="1" if slash_getall_fails else "0")
         self.fakes = subprocess.Popen([sys.executable, "-I", FAKES], env=fenv, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, text=True)
         assert self.fakes.stdout.readline().strip() == "ready"
@@ -394,6 +396,9 @@ class BridgeTest(unittest.TestCase):
         # No timers: with nothing happening, no thread of the bridge runs.
         h = self.harness()
         h.wait(lambda: h.state.get("hasAura") and h.state.get("refreshHz") == 240, what="settled")
+        # A real system bus: other services and UPower's battery device keep
+        # emitting PropertiesChanged (the G16 saw ~10 wakeups a minute).
+        h.fake({"noise": True})
         time.sleep(1.5)
 
         def switches():
@@ -459,6 +464,23 @@ class BridgeTest(unittest.TestCase):
         h.power(True)
         h.wait(lambda: h.hypr.hz == 60 and h.brightness() == 30, what="battery: 60 Hz, dimmed to 30 %")
         self.assertEqual((h.state["kbdAC"], h.state["kbdBattery"]), ("med", "med"))
+
+    def test_slash_state_when_getall_fails(self):
+        # asusd 6.5.0 (zbus) fails a whole GetAll when one getter errors; on the
+        # G16 the Slash section then showed nothing until it was toggled.
+        h = self.harness(slash_getall_fails=True)
+        h.wait(lambda: h.state.get("hasSlash"), what="slash found")
+        s = h.state
+        self.assertEqual((s["slashOn"], s["slashBrightness"], s["slashPattern"], s["showOnBoot"]),
+                         (True, 100, 2, True))
+
+    def test_slash_pattern_sets_interval_then_saves_mode(self):
+        h = self.harness()
+        h.wait(lambda: h.state.get("hasSlash"), what="slash found")
+        self.assertTrue(h.send("slash-pattern", "5")["ok"])      # Transmission
+        sets = [c["set"][2:5] for c in h.calls() if "set" in c and c["set"][1] == "xyz.ljones.Slash"]
+        self.assertEqual(sets, [["Interval", "y", 5], ["Mode", "y", 0x1A]])
+        h.wait(lambda: h.state.get("slashPattern") == 5, what="pattern from Mode")
 
     def test_closing_stdin_stops_the_bridge(self):
         h = self.harness()
