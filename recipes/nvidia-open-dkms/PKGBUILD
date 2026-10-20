@@ -21,8 +21,8 @@
 
 pkgname=nvidia-open-dkms
 pkgver=615.78.08
-pkgrel=1.2
-pkgdesc="NVIDIA open kernel modules - module sources (PR #1412 hibernate power-off hang, PR #1299 NVPCF wake defer, PR #1368 nvkms semaphore leak)"
+pkgrel=1.3
+pkgdesc="NVIDIA open kernel modules - module sources (PR #1412 hibernate power-off hang, PR #1299 NVPCF wake defer, PR #1368 nvkms semaphore leak) (omarchy-asus build)"
 arch=('x86_64')
 url="https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412"
 license=('MIT AND GPL-2.0-only')
