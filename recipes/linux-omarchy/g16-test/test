@@ -1,0 +1,668 @@
+#!/bin/bash
+# Test the PR #8 kernel on the G16 after `deploy` and a reboot, then report.
+#
+#   recipes/linux-omarchy/g16-test/test [--hibernate] [--no-suspend] [--yes]
+#   recipes/linux-omarchy/g16-test/test --temps [MIN] [--interval S] [--recovery MIN] [--ab]
+#
+# Default mode: one PASS/FAIL/WARN/SKIP line per check, with evidence:
+#   kernel     uname and package versions
+#   klog       oops/warnings, amdgpu, i2c, nvidia errors against deploy's baseline
+#   0568       hid-asus Win-lock pass-through (asks you to press Fn+Super once)
+#   0569       i2c-designware: touchpad IRQs per report (asks you to swipe for 10 s)
+#   0807       asus-armoury GA605KM limits present and correct; PPT writes refused
+#              without a custom fan curve (writes the current value back, no change)
+#   0481       panel_power_savings exists, reads 0, nothing enables CACP
+#   suspend    one s2idle cycle (RTC wakes it after 30 s): at least 10 s of s0i3
+#   hibernate  only with --hibernate: hibernate, power-off, resume (needs a button press)
+#   9900       Zen 5c soft park knobs all at their defaults (off)
+#   nvidia     module, dkms, nvidia-smi, runtime PM back to suspended
+# --no-suspend skips the suspend cycle; --yes answers the yes/no prompts with yes
+# (the Fn+Super and touchpad steps still wait for you).
+#
+# --temps (#42): on battery with the quiet fan table (asus-wmi quiet, amd-pmf
+# balanced), 1 min idle, MIN minutes (default 10) of all-core load (stress-ng, or
+# busy loops), then --recovery minutes (default 3) of idle, sampling temperatures,
+# fans, power, clocks and the platform profile every --interval seconds (default
+# 5). --ab repeats the run with the balanced fan table for comparison.
+#
+# Both modes write a report without host or user names to
+# ~/omarchy-asus-g16-test-<kernel>-<date>[-temps].md, show it, and offer to post
+# it on PR #8 (default mode) or issue #42 (--temps).
+set -uo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+MODE=checks HIBERNATE=0 SUSPEND=1 YES=0 TEMPS_MIN=10 INTERVAL=5 RECOVERY=3 AB=0
+while (($#)); do
+  case $1 in
+    --temps) MODE=temps; if [[ ${2:-} =~ ^[0-9]+$ ]]; then TEMPS_MIN=$2; shift; fi ;;
+    --temps=*) MODE=temps TEMPS_MIN=${1#--temps=} ;;
+    --interval) INTERVAL=${2:?}; shift ;;
+    --recovery) RECOVERY=${2:?}; shift ;;
+    --ab) AB=1 ;;
+    --hibernate) HIBERNATE=1 ;;
+    --no-suspend) SUSPEND=0 ;;
+    --yes | -y) YES=1 ;;
+    -h | --help) sed -n '2,31s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) die "unknown option $1 (see --help)" ;;
+  esac
+  shift
+done
+for v in TEMPS_MIN INTERVAL RECOVERY; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || die "$v must be a positive number"; done
+((EUID != 0)) || die "run it as your normal user; it uses sudo where it must"
+is_g16 || die "this is not a GA605; the kit is for the ROG Zephyrus G16 GA605 only"
+have python3 || die "python3 is missing"
+
+KREL=$(uname -r)
+STAMP=$(date +%Y%m%d-%H%M)
+BASE=$STATE_DIR/baseline.env
+mkdir -p "$STATE_DIR"
+KIT_REV=$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
+INTERACTIVE=0; [[ -t 0 ]] && INTERACTIVE=1
+
+ask() { # question -> 0 for yes
+  local a
+  ((YES)) && return 0
+  ((INTERACTIVE)) || return 1
+  read -r -p "$1 [Y/n] " a || return 1
+  [[ -z $a || $a == [yY]* ]]
+}
+
+# ------------------------------------------------------------------ results
+ROWS=() DETAILS=() NP=0 NF=0 NW=0 NS=0
+result() { # status check summary [details...]
+  local st=$1 name=$2 sum=$3 col
+  shift 3
+  case $st in
+    PASS) col=$G NP=$((NP + 1)) ;;
+    FAIL) col=$R NF=$((NF + 1)) ;;
+    WARN) col=$Y NW=$((NW + 1)) ;;
+    *) col=$D NS=$((NS + 1)) ;;
+  esac
+  printf '  %s%-4s%s  %-10s %s\n' "$col" "$st" "$N" "$name" "$sum"
+  ROWS+=("| $name | **$st** | ${sum//|/\\|} |")
+  if (($#)); then
+    local body
+    body=$(printf '%s\n' "$@")
+    printf '%s\n' "$body" | sed 's/^/              /' | head -n 12
+    DETAILS+=("#### $name ($st)"$'\n\n```\n'"$body"$'\n```\n')
+  fi
+}
+
+sudo_up_front() {
+  say "Some checks need root: $*."
+  note "Asking for the sudo password once; nothing is changed except where a check says so."
+  sudo -v || note "no sudo: the checks that need root will report SKIP or FAIL with the reason"
+}
+
+write_report() { # file title intro
+  local f=$1 title=$2 intro=$3 raw
+  raw=$(mktemp)
+  {
+    printf '## %s\n\n' "$title"
+    printf '%s\n\n' "$intro"
+    if ((${#ROWS[@]})); then
+      printf '**%d pass, %d fail, %d warn, %d skip**\n\n' "$NP" "$NF" "$NW" "$NS"
+      printf '| Check | Result | Evidence |\n|---|---|---|\n'
+      printf '%s\n' "${ROWS[@]}"
+      printf '\n'
+    fi
+    if ((${#DETAILS[@]})); then
+      printf '<details><summary>Details</summary>\n\n'
+      printf '%s\n' "${DETAILS[@]}"
+      printf '</details>\n\n'
+    fi
+    printf -- '---\nGenerated on the G16 by `recipes/linux-omarchy/g16-test/test` (kit %s). Host and user names are stripped.\n' "$KIT_REV"
+  } >"$raw"
+  redact <"$raw" >"$f"
+  rm -f "$raw"
+}
+
+header_info() {
+  printf -- '- Kernel: `%s` (expected `%s`)\n' "$KREL" "$EXPECT_KREL"
+  printf -- '- Machine: %s / %s, BIOS %s\n' "$(dmi product_name)" "$(dmi board_name)" "$(dmi bios_version)"
+  printf -- '- Date (UTC): %s\n' "$(date -u +%Y-%m-%dT%H:%MZ)"
+  printf -- '- Power: %s, battery %s%%\n' "$(on_ac && echo AC || echo battery)" "$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1)"
+  printf -- '- Profiles: asus-wmi %s, amd-pmf %s\n' "$(profile_of asus-wmi)" "$(profile_of amd-pmf)"
+  if [[ -f $BASE ]]; then
+    printf -- '- Baseline: `%s` (recorded by deploy %s)\n' "$(state_get "$BASE" krel)" "$(state_get "$BASE" date)"
+  else
+    printf -- '- Baseline: none (deploy did not record one)\n'
+  fi
+}
+
+# =================================================================== checks
+check_kernel() {
+  local pk ph
+  pk=$(pacman -Q linux-omarchy 2>/dev/null | cut -d' ' -f2)
+  ph=$(pacman -Q linux-omarchy-headers 2>/dev/null | cut -d' ' -f2)
+  if [[ $KREL == "$EXPECT_KREL" && $pk == "$EXPECT_VER" && $ph == "$EXPECT_VER" ]]; then
+    result PASS kernel "running $KREL; linux-omarchy and headers $pk"
+    return 0
+  fi
+  local prev
+  prev=$(journalctl -k -b -1 -o cat --no-pager 2>/dev/null | head -n1)
+  result FAIL kernel "running $KREL, not $EXPECT_KREL (installed: linux-omarchy ${pk:-none}, headers ${ph:-none})" \
+    "previous boot: ${prev:-no journal}" \
+    "$(journalctl -k -b -1 -p err -o short-monotonic --no-pager 2>/dev/null | tail -n 40)"
+  return 1
+}
+
+check_klog() {
+  local k now base new lines st=PASS sum=() det=()
+  for k in oops amdgpu i2c nvidia hidasus armoury; do
+    now=$(klog_lines "$k" | wc -l)
+    base=$(state_get "$BASE" "klog_$k")
+    sum+=("$k $now${base:+ (was $base)}")
+    ((now == 0)) && continue
+    lines=$(klog_lines "$k" | sed -E 's/^\[ *[0-9.]+\] //; s/^[^ ]+ +[^ ]+ kernel: //')
+    if [[ -f $STATE_DIR/baseline-klog-$k.txt ]]; then
+      new=$(grep -vxFf <(sed -E 's/^\[ *[0-9.]+\] //; s/^[^ ]+ +[^ ]+ kernel: //' "$STATE_DIR/baseline-klog-$k.txt") <<<"$lines" | sort | uniq -c | sort -rn | head -n 15)
+    else
+      new=$(sort <<<"$lines" | uniq -c | sort -rn | head -n 15)
+    fi
+    [[ -n $new ]] || continue
+    det+=("[$k] lines not in the baseline:" "$new")
+    if [[ $k == oops ]]; then st=FAIL; elif [[ $st == PASS ]]; then st=WARN; fi
+  done
+  result "$st" klog "$(IFS=,; echo "${sum[*]}"); err-level total $(state_get <(klog_counts) klog_err)" "${det[@]}"
+}
+
+check_winlock() {
+  local mp node out before
+  mp=$(modinfo -n hid_asus 2>/dev/null)
+  if [[ $mp != /usr/lib/modules/$KREL/kernel/* && $mp != /lib/modules/$KREL/kernel/* ]]; then
+    result FAIL 0568 "hid_asus is not the in-tree module of $KREL: ${mp:-not found}"
+    return
+  fi
+  node=$(winlock_hidraw)
+  [[ -n $node ]] || { result FAIL 0568 "no hidraw node of the N-Key keyboard (0b05:19b6) declares report 0x5D"; return; }
+  ((INTERACTIVE)) || { result SKIP 0568 "in-tree hid_asus, $node present; key press needs a terminal"; return; }
+  before=$(state_get "$BASE" winlock_state)
+  local reader=(python3 -I -c '
+import os, select, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
+end, seen = time.time() + 15, []
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], max(0, end - time.time()))
+    if not r: break
+    try: d = os.read(fd, 64)
+    except BlockingIOError: continue
+    if len(d) >= 4 and d[:3] == bytes([0x5D, 0xBF, 0x01]):
+        seen.append(d[3]); print("report 5d bf 01 %02x -> Win-lock %s" % (d[3], "on" if d[3] else "off"), flush=True)
+        if len(seen) >= 1: end = min(end, time.time() + 1.5)
+print("seen=%d last=%s" % (len(seen), seen[-1] if seen else "-"))
+' "$node")
+  local try
+  for try in 1 2; do
+    printf '\n%s>>> Press Fn+Super ONCE now (15 s).%s\n' "$B" "$N"
+    if [[ -r $node ]]; then out=$("${reader[@]}" 2>&1); else out=$(sudo -n "${reader[@]}" 2>&1); fi
+    [[ $out == *"seen=0"* && $try == 1 ]] && { ask "No Win-lock report seen. Try once more?" && continue; }
+    break
+  done
+  if [[ $out == *"seen=0"* ]]; then
+    result FAIL 0568 "no 5D BF 01 report reached $node within 15 s of the prompt" "$out"
+    return
+  fi
+  local last=${out##*last=}
+  result PASS 0568 "Fn+Super report reached hidraw ($node): Win-lock $([[ $last == 0 ]] && echo off || echo on)" "$out" "baseline state: ${before:-unknown}"
+  if [[ $last != 0 ]]; then
+    if have g16-winlock && g16-winlock unlock >/dev/null 2>&1; then
+      note "Win-lock was left on by the test: cleared it (g16-winlock unlock)"
+    else
+      printf '%sWin-lock is now ON (Super does nothing): press Fn+Super once more to clear it.%s\n' "$Y" "$N"
+    fi
+  fi
+}
+
+check_touchpad() {
+  local ev a b rate irqs reports ratio base out
+  ev=$(touchpad_event)
+  [[ -n $ev ]] || { result FAIL 0569 "no touchpad input device in /proc/bus/input/devices"; return; }
+  ((INTERACTIVE)) || { result SKIP 0569 "touchpad $ev present; the swipe needs a terminal"; return; }
+  read -r -p $'\n'"${B}>>> Press Enter, then keep moving one finger on the touchpad for 10 s.${N} " _ || true
+  a=$(dw_irq_counts)
+  out=$(sudo -n python3 -I -c '
+import os, select, struct, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
+end, n, buf = time.time() + 10, 0, b""
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], max(0, end - time.time()))
+    if not r: continue
+    try: buf += os.read(fd, 24 * 64)
+    except BlockingIOError: continue
+    while len(buf) >= 24:
+        _, _, t, c, _ = struct.unpack("qqHHi", buf[:24]); buf = buf[24:]
+        if t == 0 and c == 0: n += 1
+print(n)
+' "$ev" 2>&1)
+  b=$(dw_irq_counts)
+  rate=$(join <(sort <<<"$a") <(sort <<<"$b") | awk '{d=($3-$2); if (d>m) {m=d; irq=$1}} END {printf "%d %s", m, irq}')
+  irqs=${rate% *}
+  reports=${out//[!0-9]/}
+  base=$(state_get "$BASE" touch_irq_rate)
+  if [[ -z $reports ]]; then
+    result SKIP 0569 "could not read $ev ($out)"
+    return
+  fi
+  if ((reports == 0)); then
+    result FAIL 0569 "touchpad sent no reports in 10 s (dead touchpad, or no finger on it); DesignWare IRQs $((irqs / 10))/s"
+    return
+  fi
+  ratio=$(awk -v i="$irqs" -v r="$reports" 'BEGIN {printf "%.1f", i / r}')
+  local tsum="$((reports / 10)) reports/s, $((irqs / 10)) IRQ/s on IRQ ${rate#* }, $ratio IRQs per report (stock about 52)${base:+; baseline $base IRQ/s}"
+  if awk -v x="$ratio" 'BEGIN {exit !(x < 26)}'; then result PASS 0569 "$tsum"; else result WARN 0569 "$tsum: not clearly fewer IRQs than stock"; fi
+}
+
+check_armoury() {
+  local exp a v mn mx cur st=PASS det=() ac
+  if on_ac; then
+    ac=AC exp=(ppt_pl1_spl=15-80 ppt_pl2_sppt=35-80 ppt_pl3_fppt=35-80 nv_dynamic_boost=5-15 nv_temp_target=75-87)
+  else
+    ac=DC exp=(ppt_pl1_spl=25-35 ppt_pl2_sppt=31-44 ppt_pl3_fppt=45-65 nv_temp_target=75-87)
+  fi
+  [[ -d $ARMOURY ]] || { result FAIL 0807 "$ARMOURY is missing (asus-armoury not loaded?)"; return; }
+  local nomatch
+  nomatch=$(klog | grep -c 'No matching power limits' || true)
+  ((nomatch == 0)) || { st=FAIL; det+=("kernel log: No matching power limits found ($nomatch)"); }
+  for e in "${exp[@]}"; do
+    a=${e%%=*}
+    v=$(armoury_read "$a")
+    det+=("$a: $v (expected ${e#*=} on $ac)")
+    mn=${v%%-*} mx=${v#*-} mx=${mx%% *}
+    [[ "$mn-$mx" == "${e#*=}" ]] || st=FAIL
+  done
+  [[ $ac == DC ]] && det+=("nv_dynamic_boost: $(armoury_read nv_dynamic_boost) (no DC range in the entry)")
+  if [[ -d $ARMOURY/nv_tgp ]]; then st=FAIL; det+=("nv_tgp is present (should be hidden)"); else det+=("nv_tgp: absent, as intended"); fi
+  # The fan-curve gate: write the current value back (no change if accepted).
+  local fc pe out
+  fc=$(hwmon_by_name asus_custom_fan_curve || true)
+  pe=$(cat "$fc/pwm1_enable" 2>/dev/null || echo '?')
+  cur=$(cat "$ARMOURY/ppt_pl1_spl/current_value" 2>/dev/null || true)
+  if [[ $pe == 1 ]]; then
+    det+=("PPT gate: skipped, the CPU custom fan curve is on (pwm1_enable=1)")
+  elif [[ $cur =~ ^[0-9]+$ ]]; then
+    printf '%s[sudo]%s write the current SPL (%s W) back to ppt_pl1_spl: expect EBUSY, no change either way\n' "$Y" "$N" "$cur"
+    out=$(printf '%s\n' "$cur" | sudo -n tee "$ARMOURY/ppt_pl1_spl/current_value" 2>&1 >/dev/null)
+    if [[ $out == *"busy"* ]]; then
+      det+=("PPT gate: writing the current SPL ($cur) back with pwm1_enable=$pe -> EBUSY, as intended")
+    else
+      st=FAIL; det+=("PPT gate: write of the current SPL ($cur) with pwm1_enable=$pe was not refused: ${out:-accepted}")
+    fi
+  else
+    det+=("PPT gate: skipped, ppt_pl1_spl current_value unreadable: ${cur:-empty}")
+  fi
+  local base
+  base=$(state_get "$BASE" armoury_ppt_pl1_spl)
+  [[ -n $base ]] && det+=("baseline ppt_pl1_spl: $base")
+  result "$st" 0807 "GA605KM limits on $ac $([[ $st == PASS ]] && echo 'present and correct' || echo 'wrong or missing'); nv_tgp hidden; PPT writes gated by the fan curve" "${det[@]}"
+}
+
+check_panel() {
+  local p v st=PASS det=() hits
+  p=$(panel_power_path)
+  [[ -n $p ]] || { result FAIL 0481 "no card*-eDP-*/amdgpu/panel_power_savings (CACP backport not active on the OLED)"; return; }
+  v=$(cat "$p" 2>&1)
+  det+=("$p = $v (baseline: $(state_get "$BASE" panel_power_savings || true))")
+  [[ $v == 0 ]] || { st=FAIL; det+=("expected 0 at boot"); }
+  grep -q 'amdgpu.abmlevel' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amdgpu.abmlevel"); }
+  hits=$(grep -rls 'panel_power_savings' /etc/udev/rules.d /usr/lib/udev/rules.d /etc/tmpfiles.d /usr/lib/tmpfiles.d /etc/systemd/system 2>/dev/null)
+  [[ -z $hits ]] || { st=FAIL; det+=("files that write it: $hits"); }
+  if have powerprofilesctl && powerprofilesctl list-actions 2>/dev/null | grep -q amdgpu_panel_power; then
+    det+=("power-profiles-daemon lists its amdgpu_panel_power action; on the G16 it left the value at 0 on battery and in power-saver (#46). Rerun this on battery to see the value there")
+  fi
+  result "$st" 0481 "panel_power_savings exists and reads $v; nothing in the config enables CACP" "${det[@]}"
+}
+
+check_hfi() {
+  local d st=PASS det=() hits
+  grep -q 'amd_hfi.ranking' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amd_hfi.ranking"); }
+  hits=$(grep -rlsE 'wake_preferred|wlc_track|wake_pack|amd_hfi' /etc/udev/rules.d /usr/lib/udev/rules.d /etc/tmpfiles.d /usr/lib/tmpfiles.d /etc/sysctl.d /etc/modprobe.d 2>/dev/null)
+  [[ -z $hits ]] || { st=FAIL; det+=("files that set the knobs: $hits"); }
+  d=$(hfi_dir)
+  if [[ -z $d ]]; then
+    det+=("amd_hfi has no bound device, so the knobs are not reachable; the static keys default off")
+    result "$([[ $st == PASS ]] && echo SKIP || echo FAIL)" 9900 "amd_hfi not bound; nothing configures the knobs" "${det[@]}"
+    return
+  fi
+  local r w t k
+  r=$(cat "$d/ranking") w=$(cat "$d/wake_preferred") t=$(cat "$d/wlc_track") k=$(cat "$d/wake_pack")
+  det+=("ranking: $r" "wake_preferred: $w" "wlc_track: $t" "wake_pack: $k")
+  [[ $r == *"[performance]"* && $w == off && $t == 0 && $k == 0 ]] || st=FAIL
+  result "$st" 9900 "soft park knobs: ranking $r, wake_preferred $w, wlc_track $t, wake_pack $k" "${det[@]}"
+}
+
+check_nvidia() {
+  local d rs0 drv nv smi rs st=PASS det=()
+  d=$(dgpu_dir) || { result FAIL nvidia "no NVIDIA GPU on the PCI bus"; return; }
+  rs0=$(cat "$d/power/runtime_status" 2>/dev/null)
+  drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
+  det+=("dGPU ${d##*/}: driver ${drv:-none}, runtime_status at start: $rs0, control: $(cat "$d/power/control" 2>/dev/null)")
+  [[ $drv == nvidia ]] || st=FAIL
+  nv=$(dkms status -k "$KREL" 2>/dev/null | grep -i nvidia)
+  det+=("dkms: ${nv:-nothing for $KREL}" "module: $(cat /sys/module/nvidia/version 2>/dev/null || echo not loaded)")
+  [[ $nv == *installed* ]] || st=FAIL
+  if have nvidia-smi && smi=$(timeout 30 nvidia-smi --query-gpu=name,driver_version,pstate,temperature.gpu,power.draw --format=csv,noheader 2>&1); then
+    det+=("nvidia-smi: $smi")
+  else
+    st=FAIL; det+=("nvidia-smi failed: ${smi:-not installed}")
+  fi
+  local i
+  for ((i = 0; i < 30; i++)); do
+    rs=$(cat "$d/power/runtime_status" 2>/dev/null)
+    [[ $rs == suspended ]] && break
+    sleep 1
+  done
+  det+=("runtime_status ${i}s after nvidia-smi: $rs")
+  if [[ $rs != suspended && $st == PASS ]]; then
+    st=WARN; det+=("the dGPU did not runtime-suspend within 30 s (something holds it, e.g. an external monitor or a GPU app)")
+  fi
+  result "$st" nvidia "driver $drv, dkms ${nv:+installed}, nvidia-smi $([[ -n ${smi:-} && $st != FAIL ]] && echo works || echo failed), runtime PM: $rs0 -> $rs" "${det[@]}"
+}
+
+check_suspend() {
+  ((SUSPEND)) || { result SKIP suspend "--no-suspend"; return; }
+  local ms s0 f0 t0 s1 f1 l1 t1 pmc0 pmc1 since irq
+  ms=$(cat /sys/power/mem_sleep 2>/dev/null)
+  [[ $ms == *"[s2idle]"* ]] || { result FAIL suspend "mem_sleep is '$ms', expected [s2idle]"; return; }
+  ask "Suspend now for about 30 s? The RTC wakes it; if it is still asleep after a minute, press the power button (then unlock the screen)." ||
+    { result SKIP suspend "declined"; return; }
+  s0=$(cat /sys/power/suspend_stats/success) f0=$(cat /sys/power/suspend_stats/fail) t0=$(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo 0)
+  pmc0=$(root_read cat /sys/kernel/debug/amd_pmc/s0ix_stats || true)
+  since=$(date '+%Y-%m-%d %H:%M:%S')
+  as_root "set an RTC alarm 30 s ahead so the laptop wakes by itself" rtcwake -m no -s 30 >/dev/null || true
+  systemctl suspend || { result FAIL suspend "systemctl suspend refused"; return; }
+  local i
+  for ((i = 0; i < 180; i++)); do
+    s1=$(cat /sys/power/suspend_stats/success) f1=$(cat /sys/power/suspend_stats/fail)
+    ((s1 > s0 || f1 > f0)) && break
+    sleep 1
+  done
+  sleep 5
+  l1=$(cat /sys/power/suspend_stats/last_hw_sleep 2>/dev/null || echo 0) t1=$(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo 0)
+  pmc1=$(root_read cat /sys/kernel/debug/amd_pmc/s0ix_stats || true)
+  irq=$(cat /sys/power/pm_wakeup_irq 2>/dev/null || echo none)
+  local det=("suspend_stats success $s0 -> $s1, fail $f0 -> $f1" "last_hw_sleep ${l1} us, total_hw_sleep $t0 -> $t1 us, wake irq $irq"
+    "amd_pmc s0ix_stats before:" "${pmc0:-unreadable}" "after:" "${pmc1:-unreadable}"
+    "kernel errors since the suspend:" "$(journalctl -k -p err --since "$since" -o cat --no-pager 2>/dev/null | head -n 20)")
+  if ((f1 > f0)); then
+    result FAIL suspend "the suspend failed (suspend_stats fail $f0 -> $f1)" "${det[@]}"
+  elif ((s1 == s0)); then
+    result FAIL suspend "no completed suspend within 3 minutes" "${det[@]}"
+  elif ((l1 > 0 && t1 > t0 && l1 < 10000000)); then
+    # success counts a suspend that resumes at once too (#133): the RTC alarm is 30 s out
+    result FAIL suspend "woke after $((l1 / 1000)) ms of hardware sleep (wake irq $irq), not the 30 s RTC alarm: see #132" "${det[@]}"
+  elif ((l1 > 0 && t1 > t0)); then
+    result PASS suspend "s2idle cycle reached s0i3: $((l1 / 1000)) ms of hardware sleep" "${det[@]}"
+  else
+    result FAIL suspend "resumed, but no hardware sleep (s0i3 not reached: last_hw_sleep $l1)" "${det[@]}"
+  fi
+}
+
+check_hibernate() {
+  ((HIBERNATE)) || { result SKIP hibernate "opt-in: run with --hibernate (needs a power-button press)"; return; }
+  local can since t0 ok=''
+  can=$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanHibernate 2>/dev/null | awk '{print $2}' | tr -d '"')
+  [[ $can == yes ]] || { result SKIP hibernate "logind CanHibernate: ${can:-unknown} (no swap/resume set up?)"; return; }
+  printf '\n%sHibernate: the laptop saves memory to disk and powers off. Wait until it is fully\n' "$B"
+  printf 'off (all lights out), press the power button, keep the default Limine entry, unlock.%s\n' "$N"
+  ask "Hibernate now?" || { result SKIP hibernate "declined"; return; }
+  since=$(date '+%Y-%m-%d %H:%M:%S') t0=$(date +%s)
+  systemctl hibernate || { result FAIL hibernate "systemctl hibernate refused"; return; }
+  local i
+  for ((i = 0; i < 900; i++)); do
+    journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'PM: hibernation: hibernation exit' && break
+    sleep 1
+  done
+  sleep 3
+  local lines
+  lines=$(journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -E 'PM: (hibernation|Image|resume)|NVRM|Freezing|Restarting' | head -n 30)
+  if ((INTERACTIVE)); then read -r -p "Did it power off completely within about 30 s (no hang with lights on)? [y/n] " ok || ok=''; fi
+  if [[ $lines != *"hibernation exit"* ]]; then
+    result FAIL hibernate "no resume from hibernation seen in the kernel log" "$lines"
+  elif [[ $ok == [nN]* ]]; then
+    result FAIL hibernate "resumed after $(($(date +%s) - t0)) s, but it did not power off cleanly" "$lines"
+  else
+    result PASS hibernate "hibernated, powered off$([[ -z $ok ]] && echo ' (not confirmed)'), resumed after $(($(date +%s) - t0)) s" "$lines"
+  fi
+}
+
+run_checks() {
+  say "G16 test: $EXPECT_KREL (PR #$PR), running $KREL"
+  [[ -f $BASE ]] || note "no baseline from deploy: comparisons are skipped"
+  sudo_up_front "dmesg fallback, amd_pmc counters, reading the touchpad device, the asus-armoury write check, the RTC alarm"
+  echo
+  local booted=1
+  check_kernel || booted=0
+  if ((booted)); then
+    check_klog
+    check_winlock
+    check_touchpad
+    check_armoury
+    check_panel
+    check_hfi
+    check_nvidia
+    check_suspend
+    check_hibernate
+  fi
+  local f=$HOME/omarchy-asus-g16-test-$KREL-$STAMP.md verdict
+  if ((!booted)); then verdict="**Did not boot $EXPECT_KREL** (running $KREL)."
+  elif ((NF)); then verdict="**$NF check(s) failed.** HOLD stays."
+  else verdict="**No failures.** The boot test passed; the HOLD can be lifted by the maintainer."; fi
+  write_report "$f" "G16 test: linux-omarchy $EXPECT_VER" "$(header_info)"$'\n\n'"$verdict"
+  echo
+  say "$NP pass, $NF fail, $NW warn, $NS skip. Report: ${f/#$HOME/\~}"
+  offer_post "$f" pr "$PR"
+}
+
+# ==================================================================== temps
+temps_preflight() {
+  local cap need qa qm helper=/usr/bin/omarchy-powerprofiles-asus-quiet-fans
+  on_ac && die "the charger is connected: #42 is about battery. Unplug it and run --temps again."
+  cap=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1)
+  # About 1 %/min under load (33-41 W measured on the G16), idle and recovery included, plus
+  # the 15 % the run stops at.
+  need=$((20 + (TEMPS_MIN + 1 + RECOVERY) * (AB + 1)))
+  ((need <= 100)) || die "--temps $TEMPS_MIN$( ((AB)) && echo ' --ab') needs more than a full battery; shorten it"
+  ((${cap:-0} >= need)) ||
+    die "battery at ${cap:-?}%: charge to at least $need% for this run (or shorten it: --temps 5)"
+  qa=$(profile_of asus-wmi) qm=$(profile_of amd-pmf)
+  if [[ $qa != quiet || $qm != balanced ]]; then
+    note "the quiet fan table is not active (asus-wmi $qa, amd-pmf $qm; want quiet + balanced)"
+    if [[ $qa == balanced && $qm == balanced && -x $helper ]] && ask "Turn it on now with omarchy's helper (sudo $helper on)?"; then
+      as_root "set the asus-wmi platform profile to quiet (amd-pmf stays balanced)" "$helper" on || die "the helper failed"
+    else
+      die "pick the Balanced power profile on battery (Omarchy menu > Setup > Power profile), which turns the quiet fan table on with omarchy-asus 4.0.5-1.1, then run again"
+    fi
+    qa=$(profile_of asus-wmi) qm=$(profile_of amd-pmf)
+    [[ $qa == quiet && $qm == balanced ]] || die "still asus-wmi $qa, amd-pmf $qm"
+  fi
+}
+
+fan_table() { # the factory curve asus-wmi reports for the active profile
+  local fc p i t v
+  fc=$(hwmon_by_name asus_custom_fan_curve) || { echo "no asus_custom_fan_curve hwmon"; return; }
+  for p in 1 2 3; do
+    [[ -e $fc/pwm${p}_auto_point1_temp ]] || continue
+    printf 'pwm%s (enable=%s):' "$p" "$(cat "$fc/pwm${p}_enable" 2>/dev/null)"
+    for i in 1 2 3 4 5 6 7 8; do
+      t=$(cat "$fc/pwm${p}_auto_point${i}_temp" 2>/dev/null) v=$(cat "$fc/pwm${p}_auto_point${i}_pwm" 2>/dev/null)
+      [[ -n $t ]] && printf ' %sC=%s%%' "$t" "$(((v * 100 + 127) / 255))"
+    done
+    printf '\n'
+  done
+}
+
+# One CSV row: t,phase,tctl,apu_edge,dgpu,fan1,fan2,fan3,apu_w,batt_w,mhz_avg,mhz_max,profile,asus,amd
+sample_header='t_s,phase,tctl_c,apu_edge_c,dgpu,fan1_rpm,fan2_rpm,fan3_rpm,apu_w,batt_w,mhz_avg,mhz_max,platform_profile,asus_wmi,amd_pmf'
+sample() {
+  local t=$1 phase=$2 k a fans=() f g rs dg pw bw mhz
+  k=$(cat "$HW_K10/temp1_input" 2>/dev/null || echo)
+  a=$(cat "$HW_AMDGPU/temp1_input" 2>/dev/null || echo)
+  for f in 1 2 3; do fans+=("$(cat "$HW_ASUS/fan${f}_input" 2>/dev/null || echo)"); done
+  rs=$(cat "$DGPU/power/runtime_status" 2>/dev/null || echo absent)
+  dg=$rs
+  if [[ $rs == active ]] && have nvidia-smi; then
+    g=$(timeout 5 nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -n1)
+    [[ -n $g ]] && dg="${g}C"
+  fi
+  pw=$(cat "$HW_AMDGPU/power1_average" 2>/dev/null || cat "$HW_AMDGPU/power1_input" 2>/dev/null || echo)
+  bw=$(cat /sys/class/power_supply/BAT*/power_now 2>/dev/null | head -n1)
+  mhz=$(awk '{s+=$1; if ($1>m) m=$1; n++} END {if (n) printf "%d,%d", s/n/1000, m/1000; else printf ","}' /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null)
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$t" "$phase" \
+    "$([[ -n $k ]] && awk -v x="$k" 'BEGIN{printf "%.1f", x/1000}')" \
+    "$([[ -n $a ]] && awk -v x="$a" 'BEGIN{printf "%.1f", x/1000}')" "$dg" \
+    "${fans[0]}" "${fans[1]}" "${fans[2]}" \
+    "$([[ -n $pw ]] && awk -v x="$pw" 'BEGIN{printf "%.1f", x/1e6}')" \
+    "$([[ -n $bw ]] && awk -v x="$bw" 'BEGIN{printf "%.1f", x/1e6}')" "$mhz" \
+    "$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)" "$(profile_of asus-wmi)" "$(profile_of amd-pmf)"
+}
+
+LOAD_PIDS=()
+stop_load() { local p; for p in "${LOAD_PIDS[@]}"; do kill "$p" 2>/dev/null; done; LOAD_PIDS=(); }
+start_load() { # seconds
+  local n i
+  n=$(nproc)
+  if have stress-ng; then
+    stress-ng --cpu "$n" --timeout "${1}s" --quiet >/dev/null 2>&1 &
+    LOAD_PIDS+=($!)
+    LOAD_KIND="stress-ng --cpu $n"
+  else
+    for ((i = 0; i < n; i++)); do
+      timeout "$1" bash -c 'while :; do :; done' &
+      LOAD_PIDS+=($!)
+    done
+    LOAD_KIND="bash busy loops x$n (stress-ng not installed)"
+  fi
+}
+
+run_phase_set() { # label csv -> runs idle/load/recovery
+  local label=$1 csv=$2 t=0 end phase
+  printf '%s\n' "$sample_header" >"$csv"
+  local idle=60 load=$((TEMPS_MIN * 60)) rec=$((RECOVERY * 60))
+  say "[$label] idle ${idle}s, load ${load}s, recovery ${rec}s, sample every ${INTERVAL}s"
+  end=$((idle + load + rec))
+  local start=$SECONDS loaded=0 tc
+  while ((t <= end)); do
+    if ((t < idle)); then phase=idle
+    elif ((t < idle + load)); then phase=load
+      ((loaded)) || { start_load "$load"; loaded=1; note "load: $LOAD_KIND"; }
+    else phase=recovery; stop_load
+    fi
+    sample "$t" "$phase" >>"$csv"
+    tc=$(tail -n1 "$csv" | cut -d, -f3)
+    printf '\r    %4ds %-8s Tctl %5sC  fans %s  apu %sW   ' "$t" "$phase" "$tc" "$(tail -n1 "$csv" | cut -d, -f6-8)" "$(tail -n1 "$csv" | cut -d, -f9)"
+    if [[ -n $tc ]] && awk -v x="$tc" 'BEGIN {exit !(x >= 100)}'; then
+      stop_load; echo; note "Tctl reached ${tc}C: load stopped early (safety)"; break
+    fi
+    if [[ $(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1) -lt 15 ]]; then
+      stop_load; echo; note "battery below 15%: stopped"; break
+    fi
+    on_ac && { stop_load; echo; note "charger connected during the run: stopped (the run is no longer on battery)"; break; }
+    t=$((t + INTERVAL))
+    local next=$((start + t))
+    ((SECONDS < next)) && sleep $((next - SECONDS))
+  done
+  echo
+  stop_load
+}
+
+summarize() { # csv table_text -> markdown summary
+  python3 -I - "$1" "$2" "$INTERVAL" <<'PY'
+import csv, statistics as st, sys, re
+rows = list(csv.DictReader(open(sys.argv[1])))
+table, interval = sys.argv[2], int(sys.argv[3])
+f = lambda r, k: float(r[k]) if r.get(k) not in (None, "") else None
+load = [r for r in rows if r["phase"] == "load"]
+idle = [r for r in rows if r["phase"] == "idle"]
+rec = [r for r in rows if r["phase"] == "recovery"]
+def col(rs, k): return [v for v in (f(r, k) for r in rs) if v is not None]
+def med(xs): return st.median(xs) if xs else float("nan")
+out = []
+if not load:
+    print("No load samples recorded."); sys.exit()
+tc = col(load, "tctl_c"); tail_n = max(1, int(120 / interval))
+steady = med(tc[-tail_n:]); peak = max(tc) if tc else float("nan")
+t_steady = next((float(r["t_s"]) - float(load[0]["t_s"]) for r in load if f(r, "tctl_c") is not None and f(r, "tctl_c") >= steady - 2), None)
+fans = ["fan1_rpm", "fan2_rpm", "fan3_rpm"]
+def fanmax(rs): return max([v for k in fans for v in col(rs, k)] or [0])
+first_spin = next((r for r in load if any((f(r, k) or 0) > 0 for k in fans)), None)
+mhz_first = med(col(load[: max(1, int(60 / interval))], "mhz_avg")); mhz_last = med(col(load[-tail_n:], "mhz_avg"))
+w_first = med(col(load[: max(1, int(60 / interval))], "apu_w")); w_last = med(col(load[-tail_n:], "apu_w"))
+drop = (1 - mhz_last / mhz_first) * 100 if mhz_first and mhz_first == mhz_first else 0
+throttled = []
+if peak >= 95: throttled.append(f"Tctl peaked at {peak:.1f} C (at or near the 95-100 C limit)")
+if drop > 15: throttled.append(f"average clock fell {drop:.0f}% from the first minute ({mhz_first:.0f} -> {mhz_last:.0f} MHz) while APU power went {w_first:.1f} -> {w_last:.1f} W")
+profiles = sorted({(r["asus_wmi"], r["amd_pmf"]) for r in rows})
+out.append(f"- Idle before load: Tctl {med(col(idle, 'tctl_c')):.1f} C, fans max {fanmax(idle):.0f} rpm, battery draw {med(col(idle, 'batt_w')):.1f} W")
+out.append(f"- Load: peak Tctl **{peak:.1f} C**, steady state (median of the last 2 min) **{steady:.1f} C**" + (f", within 2 C of it after {t_steady:.0f} s" if t_steady is not None else ""))
+out.append(f"- APU power first minute {w_first:.1f} W, last 2 min {w_last:.1f} W; battery draw under load {med(col(load, 'batt_w')):.1f} W; clocks {mhz_first:.0f} -> {mhz_last:.0f} MHz")
+out.append(f"- Throttled: **{'yes' if throttled else 'no'}**" + ("" if not throttled else " (" + "; ".join(throttled) + ")"))
+if first_spin:
+    out.append(f"- Fans: first spun up {float(first_spin['t_s']) - float(load[0]['t_s']):.0f} s into the load at Tctl {first_spin['tctl_c']} C; max {fanmax(load):.0f} rpm under load")
+else:
+    out.append(f"- Fans: stayed at 0 rpm for the whole load")
+m = re.search(r"pwm1 \(enable=[^)]*\):((?: \d+C=\d+%)+)", table)
+if m:
+    pts = [(int(a), int(b)) for a, b in re.findall(r"(\d+)C=(\d+)%", m.group(1))]
+    on = next((t for t, p in pts if p > 0), None)
+    if on is not None and first_spin:
+        spin_t = f(first_spin, "tctl_c")
+        verdict = "consistent with" if spin_t is not None and spin_t >= on - 5 else "earlier than"
+        out.append(f"- Against the quiet table: the CPU fan's first non-zero point is {on} C; the fans started at {spin_t} C ({verdict} the table)")
+    elif on is not None:
+        out.append(f"- Against the quiet table: the CPU fan's first non-zero point is {on} C; Tctl peaked at {peak:.1f} C" + (" without the fans starting (EC overrides the table?)" if peak >= on else ", below it"))
+rt = col(rec, "tctl_c")
+if rt:
+    out.append(f"- Recovery: Tctl {rt[0]:.1f} -> {rt[-1]:.1f} C over {len(rt) * interval} s; fans at the end {', '.join(rec[-1][k] or '-' for k in fans)} rpm")
+out.append(f"- Profiles seen (asus-wmi, amd-pmf): {', '.join('/'.join(p) for p in profiles)}; samples: {len(rows)} every {interval} s")
+print("\n".join(out))
+PY
+}
+
+downsample() { awk -F, -v step="$((30 / INTERVAL > 0 ? 30 / INTERVAL : 1))" 'NR==1 {print; next} (NR-2) % step == 0' "$1"; }
+
+run_temps() {
+  say "Temps (#42): $TEMPS_MIN min load on battery with the quiet fan table, $KREL"
+  temps_preflight
+  HW_K10=$(hwmon_by_name k10temp || true) HW_AMDGPU=$(hwmon_by_name amdgpu || true) HW_ASUS=$(hwmon_by_name asus || true)
+  DGPU=$(dgpu_dir || true)
+  [[ -n $HW_K10 ]] || die "no k10temp hwmon"
+  [[ -n $HW_ASUS ]] || note "no asus hwmon: fan rpm will be empty"
+  trap 'stop_load' EXIT
+  trap 'stop_load; exit 130' INT TERM
+  local table csv body sums
+  table=$(fan_table)
+  note "fan table: ${table//$'\n'/; }"
+  csv=$STATE_DIR/temps-quiet-$STAMP.csv
+  run_phase_set quiet "$csv"
+  sums="### Quiet fan table (asus-wmi quiet, amd-pmf balanced)"$'\n\n'"$(summarize "$csv" "$table")"
+  body="Fan curves reported by asus-wmi for the active profile:"$'\n\n```\n'"$table"$'\n```\n'
+  body+=$'\n<details><summary>Quiet run, one sample per 30 s</summary>\n\n```\n'"$(downsample "$csv")"$'\n```\n</details>\n'
+  if ((AB)); then
+    local helper=/usr/bin/omarchy-powerprofiles-asus-quiet-fans tq csv2 table2 i
+    say "A/B: cooling down, then the same run with the balanced fan table"
+    as_root "switch asus-wmi back to balanced for the comparison run" "$helper" off || die "could not switch to balanced"
+    for ((i = 0; i < 60; i++)); do
+      tq=$(awk '{printf "%.1f", $1/1000}' "$HW_K10/temp1_input")
+      awk -v x="$tq" 'BEGIN {exit !(x < 55)}' && break
+      printf '\r    cooling: Tctl %sC   ' "$tq"; sleep 5
+    done
+    echo
+    table2=$(fan_table)
+    csv2=$STATE_DIR/temps-balanced-$STAMP.csv
+    run_phase_set balanced "$csv2"
+    as_root "put the quiet fan table back" "$helper" on || note "could not switch back to quiet; pick the battery profile again"
+    sums+=$'\n\n'"### Balanced fan table (comparison)"$'\n\n'"$(summarize "$csv2" "$table2")"
+    body+=$'\nBalanced fan curves:\n\n```\n'"$table2"$'\n```\n'
+    body+=$'\n<details><summary>Balanced run, one sample per 30 s</summary>\n\n```\n'"$(downsample "$csv2")"$'\n```\n</details>\n'
+  fi
+  local f=$HOME/omarchy-asus-g16-test-$KREL-$STAMP-temps.md
+  local intro
+  intro="$(header_info)"$'\n'"- Load: $LOAD_KIND, $TEMPS_MIN min after 1 min idle, then $RECOVERY min recovery; sampled every $INTERVAL s"$'\n\n'"$sums"$'\n\n'"$body"
+  write_report "$f" "Sustained load on battery, quiet fan table (#$TEMPS_ISSUE)" "$intro"
+  note "raw samples: ${csv/#$HOME/\~}"
+  offer_post "$f" issue "$TEMPS_ISSUE"
+}
+
+if [[ $MODE == temps ]]; then run_temps; else run_checks; fi

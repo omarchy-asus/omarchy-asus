@@ -1,0 +1,345 @@
+#!/bin/bash
+# Install the PR #8 test kernel (linux-omarchy + headers) on the G16, safely.
+#
+#   recipes/linux-omarchy/g16-test/deploy [--from SRC] [--dry-run] [--no-touchpad]
+#
+#   --from SRC     take the packages from SRC instead of the PR's CI artifact:
+#                  a directory (the build host's bin/build-pkg stage dir, copied
+#                  over), an http(s) URL of such a directory, or an scp source
+#                  like host:path/to/stage. .sig files next to them are verified.
+#   --dry-run      check everything and say what would happen; change nothing,
+#                  download nothing, never ask for a password.
+#   --no-touchpad  skip the 10 s touchpad baseline (it asks you to swipe).
+#
+# What it does, in order (it stops at the first problem and says how to fix it):
+#  1. checks this is a G16 (GA605 DMI) and that a working fallback kernel is
+#     installed: Arch `linux` + `linux-headers` with nvidia DKMS built for it.
+#  2. gets linux-omarchy and linux-omarchy-headers for the version in this
+#     checkout's PKGBUILD (from --from, or the newest CI artifact for PR #8's
+#     head), and checks name, version and any signatures.
+#  3. records the baseline the test compares against (current kernel's log
+#     error counts, Win-lock, asus-armoury values, panel power savings, suspend
+#     counters, dGPU runtime PM, touchpad IRQ rate).
+#  4. takes a snapper snapshot and checks it exists.
+#  5. sudo pacman -U the two packages (DKMS rebuilds nvidia for the new kernel;
+#     mkinitcpio/limine hooks write the boot entry), then checks dkms status.
+#  6. reads the Limine config (never writes it): an entry boots the new kernel
+#     and the fallback `linux` entry is still there.
+# It never removes a kernel and never edits the bootloader. Safe to re-run.
+set -uo pipefail
+# shellcheck source=lib.sh
+source "$(dirname "$(readlink -f "$0")")/lib.sh"
+
+DRY=0 FROM='' TOUCHPAD=1
+while (($#)); do
+  case $1 in
+    --dry-run) DRY=1 ;;
+    --from) FROM=${2:?--from needs a directory, URL or host:path}; shift ;;
+    --from=*) FROM=${1#--from=} ;;
+    --no-touchpad) TOUCHPAD=0 ;;
+    -h | --help) sed -n '2,29s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) die "unknown option $1 (see --help)" ;;
+  esac
+  shift
+done
+((EUID != 0)) || die "run it as your normal user; it uses sudo for the steps that need root"
+FROM=${FROM/#\~/$HOME}
+[[ -n $PKGVER && -n $PKGREL ]] || die "cannot read pkgver/pkgrel from $RECIPE_DIR/PKGBUILD"
+
+F_KERNEL=linux-omarchy-$EXPECT_VER-x86_64.pkg.tar.zst
+F_HEADERS=linux-omarchy-headers-$EXPECT_VER-x86_64.pkg.tar.zst
+PKG_DIR=$STATE_DIR/pkgs-$EXPECT_VER
+ASUS_FPR=0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
+dry() { ((DRY)) && { note "[dry-run] would: $*"; return 0; }; return 1; }
+
+say "G16 test deploy: linux-omarchy $EXPECT_VER (PR #$PR)$( ((DRY)) && echo ', dry run')"
+
+# --------------------------------------------------------------- 1. machine
+is_g16 || die "this is not a GA605 ($(dmi product_name) / $(dmi board_name)); the kit is for the ROG Zephyrus G16 GA605 only"
+note "machine: $(dmi product_name) / $(dmi board_name), BIOS $(dmi bios_version)"
+for t in pacman python3 dkms; do have "$t" || die "$t is missing"; done
+CUR_KREL=$(uname -r)
+INSTALLED=$(pacman -Q linux-omarchy 2>/dev/null | cut -d' ' -f2)
+note "running $CUR_KREL; installed linux-omarchy ${INSTALLED:-none}; target $EXPECT_VER"
+
+if [[ -z $FROM ]] && have git && git -C "$KIT_DIR" rev-parse HEAD >/dev/null 2>&1; then
+  LOCAL_HEAD=$(git -C "$KIT_DIR" rev-parse HEAD)
+else
+  LOCAL_HEAD=''
+fi
+
+grep -qE '^[[:space:]]*LocalFileSigLevel[[:space:]]*=.*Required' /etc/pacman.conf &&
+  die "/etc/pacman.conf has LocalFileSigLevel = Required, and CI packages are unsigned: use --from with signed packages"
+
+# Fallback kernel: Arch linux + headers, nvidia built for it by DKMS.
+say "Fallback kernel"
+FALLBACK_HELP="install it first:  sudo pacman -S --needed linux linux-headers
+    (the dkms hook then builds nvidia for it; check with: dkms status), then run deploy again"
+pacman -Q linux >/dev/null 2>&1 || die "Arch's linux kernel is not installed. It is the boot fallback if $EXPECT_KREL fails; $FALLBACK_HELP"
+pacman -Q linux-headers >/dev/null 2>&1 || die "linux-headers is not installed, so nvidia cannot be built for the fallback; $FALLBACK_HELP"
+FB_KREL=''
+for d in /usr/lib/modules/*; do
+  [[ $(cat "$d/pkgbase" 2>/dev/null) == linux ]] && FB_KREL=${d##*/}
+done
+[[ -n $FB_KREL && -f /usr/lib/modules/$FB_KREL/vmlinuz ]] || die "cannot find the linux package's kernel under /usr/lib/modules; reinstall it: sudo pacman -S linux linux-headers"
+FB_DKMS=$(dkms status -k "$FB_KREL" 2>/dev/null | grep -i nvidia || true)
+if [[ $FB_DKMS != *installed* ]]; then
+  die "nvidia DKMS is not built for the fallback kernel $FB_KREL (dkms status: ${FB_DKMS:-nothing}).
+    Build it:  sudo dkms autoinstall -k $FB_KREL   then run deploy again"
+fi
+note "fallback: linux $(pacman -Q linux | cut -d' ' -f2) ($FB_KREL), nvidia DKMS: ${FB_DKMS//$'\n'/; }"
+
+# --------------------------------------------------------------- 2. packages
+ALREADY=0
+[[ $INSTALLED == "$EXPECT_VER" ]] && ALREADY=1
+
+pr_head() { gh pr view "$PR" -R "$GH_REPO" --json headRefOid -q .headRefOid; }
+pr_branch() { gh pr view "$PR" -R "$GH_REPO" --json headRefName -q .headRefName; }
+
+# Newest unexpired linux-omarchy artifact from a build run of the PR's head.
+fetch_artifact() {
+  have gh || die "gh is not installed (pacman -S github-cli), or use --from"
+  gh auth status >/dev/null 2>&1 || die "gh is not logged in: gh auth login"
+  local head branch runs id status concl started art job
+  head=$(pr_head) || die "cannot read PR #$PR from GitHub"
+  branch=$(pr_branch)
+  if [[ -n $LOCAL_HEAD && $LOCAL_HEAD != "$head" ]]; then
+    printf '%sWARN%s this checkout (%s) is not PR #%s head (%s). Update it: gh pr checkout %s, then run deploy again.\n' "$Y" "$N" "${LOCAL_HEAD:0:9}" "$PR" "${head:0:9}" "$PR"
+    exit 1
+  fi
+  note "PR #$PR head ${head:0:9} on $branch"
+  runs=$(gh api "repos/$GH_REPO/actions/workflows/$WORKFLOW/runs?head_sha=$head&per_page=20" \
+    --jq '.workflow_runs[] | "\(.id) \(.status) \(.conclusion // "-") \(.created_at)"') || die "cannot list CI runs"
+  if [[ -z $runs ]]; then
+    die "no CI build run for PR #$PR head ${head:0:9} yet.
+    Start one:  gh workflow run $WORKFLOW -R $GH_REPO --ref $branch -f recipes=linux-omarchy
+    The kernel takes about 2.5-3 hours; run deploy again after it finishes (gh run list -R $GH_REPO -w $WORKFLOW -b $branch)."
+  fi
+  while read -r id _; do
+    art=$(gh api "repos/$GH_REPO/actions/runs/$id/artifacts" \
+      --jq '.artifacts[] | select((.name | startswith("pkgs-linux-omarchy-")) and (.expired | not)) | .name' | head -n1)
+    if [[ -n $art ]]; then
+      note "artifact $art from run $id"
+      dry "gh run download $id -n $art into ${PKG_DIR/#$HOME/\~}" && return 0
+      rm -rf "$PKG_DIR.tmp" && mkdir -p "$PKG_DIR.tmp"
+      gh run download "$id" -R "$GH_REPO" -n "$art" -D "$PKG_DIR.tmp" || die "download failed"
+      find "$PKG_DIR.tmp" -name '*.pkg.tar.zst' -exec mv -f {} "$PKG_DIR/" \;
+      rm -rf "$PKG_DIR.tmp"
+      return 0
+    fi
+  done <<<"$runs"
+  read -r id status concl started <<<"$(head -n1 <<<"$runs")"
+  job=$(gh api "repos/$GH_REPO/actions/runs/$id/jobs?per_page=50" \
+    --jq '.jobs[] | select(.name == "build (linux-omarchy)") | "\(.status) \(.conclusion // "-") \(.started_at // "-")"' | head -n1)
+  read -r status concl started <<<"${job:-none - -}"
+  case $status in
+    queued | in_progress | waiting | pending)
+      die "the kernel build (run $id) is still $status, started $started; it takes about 2.5-3 hours.
+    Watch it:  gh run watch $id -R $GH_REPO   then run deploy again." ;;
+    completed)
+      if [[ $concl == success ]]; then
+        die "run $id built the kernel, but its artifact has expired (kernel artifacts are kept 7 days).
+    Rebuild:  gh run rerun $id -R $GH_REPO   (about 2.5-3 hours), then run deploy again."
+      fi
+      die "the kernel build in run $id ended: $concl.
+    Log:    gh run view $id -R $GH_REPO --log-failed
+    Retry:  gh run rerun $id -R $GH_REPO --failed" ;;
+    *)
+      die "run $id has no linux-omarchy build job.
+    Start one:  gh workflow run $WORKFLOW -R $GH_REPO --ref $branch -f recipes=linux-omarchy" ;;
+  esac
+}
+
+fetch_from() {
+  local f
+  if dry "copy $F_KERNEL, $F_HEADERS (and .sig files) from $FROM"; then
+    if [[ -d $FROM ]]; then
+      for f in "$F_KERNEL" "$F_HEADERS"; do
+        [[ -f $FROM/$f ]] || die "$FROM/$f does not exist (wrong version? this checkout's PKGBUILD says $EXPECT_VER)"
+      done
+      note "both packages are in $FROM"
+    fi
+    return 0
+  fi
+  for f in "$F_KERNEL" "$F_HEADERS"; do
+    case $FROM in
+      http://* | https://*)
+        curl -fL --proto '=https,http' -o "$PKG_DIR/$f" "${FROM%/}/$f" || die "cannot download ${FROM%/}/$f"
+        curl -fsL -o "$PKG_DIR/$f.sig" "${FROM%/}/$f.sig" 2>/dev/null || rm -f "$PKG_DIR/$f.sig" ;;
+      /* | ./* | ../*)
+        [[ -f $FROM/$f ]] || die "$FROM/$f does not exist (the build output must hold $F_KERNEL and $F_HEADERS)"
+        cp -f "$FROM/$f" "$PKG_DIR/"
+        if [[ -f $FROM/$f.sig ]]; then cp -f "$FROM/$f.sig" "$PKG_DIR/"; else rm -f "$PKG_DIR/$f.sig"; fi ;;
+      *:*)
+        scp -q "${FROM%/}/$f" "$PKG_DIR/" || die "cannot copy ${FROM%/}/$f"
+        scp -q "${FROM%/}/$f.sig" "$PKG_DIR/" 2>/dev/null || rm -f "$PKG_DIR/$f.sig" ;;
+      *)
+        [[ -f $FROM/$f ]] || die "$FROM/$f does not exist"
+        cp -f "$FROM/$f" "$PKG_DIR/"
+        if [[ -f $FROM/$f.sig ]]; then cp -f "$FROM/$f.sig" "$PKG_DIR/"; else rm -f "$PKG_DIR/$f.sig"; fi ;;
+    esac
+  done
+}
+
+say "Packages"
+if ((ALREADY)); then
+  note "linux-omarchy $EXPECT_VER is already installed: skipping download, baseline, snapshot and install"
+else
+  ((DRY)) || mkdir -p "$PKG_DIR"
+  if [[ -n $FROM ]]; then fetch_from; else fetch_artifact; fi
+  if ((!DRY)); then
+    for f in "$F_KERNEL" "$F_HEADERS"; do
+      [[ -f $PKG_DIR/$f ]] || die "the build output has no $f (wrong version? this checkout's PKGBUILD says $EXPECT_VER):
+    $(cd "$PKG_DIR" && ls -- *.pkg.tar.zst 2>/dev/null | tr '\n' ' ')"
+      name=$(LC_ALL=C pacman -Qip "$PKG_DIR/$f" 2>/dev/null | sed -n 's/^Name *: //p')
+      ver=$(LC_ALL=C pacman -Qip "$PKG_DIR/$f" 2>/dev/null | sed -n 's/^Version *: //p')
+      [[ $ver == "$EXPECT_VER" && ( $name == linux-omarchy || $name == linux-omarchy-headers ) ]] ||
+        die "$f says $name $ver, expected $EXPECT_VER"
+      note "ok: $name $ver ($(du -h "$PKG_DIR/$f" | cut -f1), packager: $(LC_ALL=C pacman -Qip "$PKG_DIR/$f" | sed -n 's/^Packager *: //p'))"
+      if [[ -f $PKG_DIR/$f.sig ]]; then
+        printf '%s[sudo]%s verify the signature of %s against pacman'"'"'s keyring (pacman-key --verify)\n' "$Y" "$N" "$f"
+        out=$(sudo pacman-key --verify "$PKG_DIR/$f.sig" "$PKG_DIR/$f" 2>&1) ||
+          die "bad signature on $f: $out"
+        [[ ${out// /} == *"$ASUS_FPR"* || $out == *"omarchy-asus"* ]] || die "$f is signed, but not by the omarchy-asus key: $out"
+        note "signature: good (omarchy-asus key)"
+      else
+        note "signature: none (CI and chroot stage builds are unsigned; pacman accepts local files unsigned)"
+      fi
+    done
+  fi
+fi
+
+# Everything below needs root at some point: ask once, up front.
+if ((!DRY)); then
+  say "The next steps need sudo: snapper snapshot, pacman -U, reading the amd_pmc"
+  note "debugfs counters and the Limine config (read only). Asking for the password once."
+  sudo -v || die "sudo failed"
+  SUDO_OK=1
+elif sudo -n true 2>/dev/null; then
+  SUDO_OK=1
+fi
+
+# --------------------------------------------------------------- 3. baseline
+mkdir -p "$STATE_DIR"
+BASE=$STATE_DIR/baseline.env
+if ((ALREADY)) || [[ $CUR_KREL == "$EXPECT_KREL" ]]; then
+  if [[ -f $BASE ]]; then note "keeping the baseline from $(state_get "$BASE" krel) ($(state_get "$BASE" date))"; else note "no baseline (this kernel was installed without deploy); the test still runs, without comparisons"; fi
+elif ((DRY)); then
+  note "[dry-run] would record the baseline of $CUR_KREL in ${BASE/#$HOME/\~}"
+else
+  say "Baseline of $CUR_KREL"
+  collect_state >"$BASE.tmp"
+  ((SUDO_OK)) && { root_read cat /sys/kernel/debug/amd_pmc/s0ix_stats >"$STATE_DIR/baseline-s0ix_stats.txt" 2>/dev/null || true; }
+  for c in oops amdgpu i2c nvidia; do klog_lines "$c" >"$STATE_DIR/baseline-klog-$c.txt"; done
+  if ((TOUCHPAD)) && [[ -t 0 ]]; then
+    ans=''
+    read -r -p "Touchpad baseline: press Enter, then keep moving a finger on the touchpad for 10 s (s + Enter skips) " ans || ans=s
+    if [[ $ans != [sS]* ]]; then
+      a=$(dw_irq_counts); sleep 10; b=$(dw_irq_counts)
+      rate=$(join <(sort <<<"$a") <(sort <<<"$b") | awk '{d=($3-$2)/10; if (d>m) {m=d; irq=$1}} END {printf "%d %s", m, irq}')
+      printf 'touch_irq_rate=%s\ntouch_irq=%s\n' "${rate% *}" "${rate#* }" >>"$BASE.tmp"
+      note "touchpad: ${rate% *} DesignWare IRQ/s while touching (IRQ ${rate#* })"
+    fi
+  fi
+  mv -f "$BASE.tmp" "$BASE"
+  while IFS='=' read -r k v; do note "$k: $v"; done < <(grep -E '^(krel|klog_|winlock_state|armoury_ppt_pl1|armoury_nomatch|panel_power|suspend_total|dgpu_runtime|touch_irq_rate)' "$BASE")
+  note "saved to ${BASE/#$HOME/\~}"
+fi
+
+# --------------------------------------------------------------- 4. snapshot
+if ((!ALREADY)); then
+  say "Snapshot"
+  have snapper || die "snapper is not installed, so there is no snapshot to roll back to. Omarchy sets it up; install it before testing a kernel."
+  DESC="before linux-omarchy $EXPECT_VER (g16-test)"
+  if ! dry "sudo snapper -c root create -c number -d \"$DESC\" and check it is listed"; then
+    num=$(as_root "create a snapper snapshot of / to roll back to" snapper -c root create -c number -d "$DESC" --print-number) ||
+      die "snapper could not create a snapshot (is the root config set up? sudo snapper list-configs)"
+    [[ $num =~ ^[0-9]+$ ]] || die "snapper printed no snapshot number: $num"
+    sudo -n snapper --csvout -c root list --columns number,description 2>/dev/null | grep -q "^$num,.*g16-test" ||
+      die "snapshot $num was not found in snapper -c root list"
+    note "snapshot $num exists (limine-snapper-sync lists it under Snapshots in the boot menu)"
+  fi
+fi
+
+# --------------------------------------------------------------- 5. install
+if ((!ALREADY)); then
+  say "Install"
+  if ! dry "sudo pacman -U ${PKG_DIR/#$HOME/\~}/{$F_KERNEL,$F_HEADERS}"; then
+    as_root "install linux-omarchy $EXPECT_VER and headers (DKMS builds nvidia for it; the limine hook writes its entry)" \
+      pacman -U --noconfirm "$PKG_DIR/$F_KERNEL" "$PKG_DIR/$F_HEADERS" || die "pacman -U failed; nothing to undo (the old kernel is untouched if pacman stopped before the transaction)"
+  fi
+fi
+INSTALLED=$(pacman -Q linux-omarchy 2>/dev/null | cut -d' ' -f2)
+if ((DRY)) && [[ $INSTALLED != "$EXPECT_VER" ]]; then
+  note "[dry-run] would check: dkms status -k $EXPECT_KREL shows nvidia installed"
+else
+  [[ $INSTALLED == "$EXPECT_VER" ]] || die "linux-omarchy is $INSTALLED after the install, not $EXPECT_VER"
+  NV=$(dkms status -k "$EXPECT_KREL" 2>/dev/null | grep -i nvidia || true)
+  if [[ $NV != *installed* ]]; then
+    die "nvidia DKMS is not installed for $EXPECT_KREL (dkms status: ${NV:-nothing}). Do NOT reboot into it yet.
+    Try:  sudo dkms autoinstall -k $EXPECT_KREL   and check: dkms status -k $EXPECT_KREL
+    If it fails, keep running the current kernel and post the error on PR #$PR."
+  fi
+  note "dkms: $NV"
+fi
+
+# --------------------------------------------------------------- 6. limine (read only)
+say "Limine boot entries (read only)"
+ESP=$(sed -n 's/^ESP_PATH="\{0,1\}\([^"]*\)"\{0,1\}/\1/p' /etc/default/limine 2>/dev/null | tail -n1)
+ESP=${ESP:-/boot}
+if ((!SUDO_OK)); then
+  note "[dry-run] would read the Limine config under $ESP with sudo and check the entries"
+else
+  CONF=''
+  for c in "$ESP/limine.conf" "$ESP/EFI/limine/limine.conf" "$ESP/limine/limine.conf" "$ESP/EFI/BOOT/limine.conf"; do
+    sudo -n test -f "$c" && { CONF=$c; break; }
+  done
+  [[ -n $CONF ]] || die "no limine.conf under $ESP; check the boot menu by hand before rebooting"
+  LCONF=$(sudo -n cat "$CONF")
+  # Entries boot a kernel (kernel_path:) or, with Omarchy's limine-entry-tool, a UKI
+  # (protocol: efi, path: boot():/EFI/Linux/omarchy_<pkg>.efi#<blake2b>). Strip the hash.
+  kpaths=$(grep -E '^[[:space:]]*(kernel_)?path:' <<<"$LCONF" | sed -E 's/^[[:space:]]*(kernel_)?path:[[:space:]]*//; s/#[^/]*$//; s/[[:space:]]*$//')
+  om=$(grep -E '/(vmlinuz-linux-omarchy|omarchy_linux-omarchy\.efi)$' <<<"$kpaths" | head -n1)
+  fb=$(grep -E '/(vmlinuz-linux|omarchy_linux\.efi)$' <<<"$kpaths" | head -n1)
+  [[ -n $om ]] || die "no Limine entry boots linux-omarchy (vmlinuz-linux-omarchy or its UKI) ($CONF); do not reboot, post this on PR #$PR"
+  [[ -n $fb ]] || die "the fallback Limine entry (vmlinuz-linux or its UKI) is missing from $CONF. Do not reboot.
+    Regenerate the entries:  sudo limine-update   then run deploy again."
+  # A UKI names its release in its .uname section; a bzImage in its header. Check the
+  # file the entry boots (a bzImage with an EFI stub is a PE file too, without .uname).
+  kver_of() {
+    sudo -n python3 -I -c '
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    d = f.read()
+if d[:2] == b"MZ":
+    pe = struct.unpack_from("<I", d, 0x3C)[0]
+    if d[pe:pe + 4] == b"PE\0\0":
+        nsec, optsz = struct.unpack_from("<H", d, pe + 6)[0], struct.unpack_from("<H", d, pe + 20)[0]
+        for i in range(nsec):
+            sh = pe + 24 + optsz + 40 * i
+            if d[sh:sh + 8].rstrip(b"\0") == b".uname":
+                vsz, _, rsz, roff = struct.unpack_from("<IIII", d, sh + 8)
+                print(d[roff:roff + min(vsz, rsz)].split(b"\0")[0].decode(errors="replace").strip())
+                sys.exit()
+off = struct.unpack_from("<H", d, 0x20E)[0] + 0x200
+print(d[off:off + 128].split(b"\0")[0].decode(errors="replace").split()[0])
+' "$1" 2>/dev/null
+  }
+  om_ver=$(kver_of "$ESP/${om#*():/}")
+  [[ $om_ver == "$EXPECT_KREL" ]] || die "the linux-omarchy Limine entry boots ${om_ver:-an unreadable kernel} ($om), not $EXPECT_KREL"
+  note "linux-omarchy entry boots $om_ver"
+  fb_ver=$(kver_of "$ESP/${fb#*():/}")
+  [[ -n $fb_ver ]] || die "the fallback entry's kernel ($fb) is unreadable; do not reboot"
+  note "fallback entry boots $fb_ver"
+  FB_TITLE=$(awk -v p="$fb" '/^[[:space:]]*\/+/ {t=$0} index($0, p) {gsub(/^[[:space:]]*\/+/, "", t); print t; exit}' <<<"$LCONF")
+  note "boot order: $(sed -n 's/^BOOT_ORDER=//p' /etc/default/limine 2>/dev/null | tr -d '"')"
+fi
+
+echo
+if ((DRY)); then
+  say "Dry run done: nothing was changed."
+  exit 0
+fi
+printf '%s%sReboot now.%s After the reboot run:  recipes/linux-omarchy/g16-test/test\n' "$B" "$G" "$N"
+printf 'If it does not boot, pick "%s" (Arch linux %s) in the Limine menu,\n' "${FB_TITLE:-linux}" "$FB_KREL"
+printf 'or a "%s" entry under Snapshots.\n' "before linux-omarchy $EXPECT_VER (g16-test)"

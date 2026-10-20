@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 00:00:00 -0400
+Subject: [PATCH] platform/x86: asus-armoury: add power limits quirk for
+ GA605KM
+
+Add a power limits quirk entry for the ASUS ROG Zephyrus G16 GA605KM
+(Ryzen AI 7 350, RTX 5060 Laptop GPU). Without an entry asus-armoury
+logs "No matching power limits found for this system" and every
+ppt_*, nv_dynamic_boost and nv_temp_target attribute returns -ENODEV.
+
+The CPU limits, Dynamic Boost range and thermal target range are taken
+from the model's ThrottleGear configuration ('Ryzen' profile) and match
+the GA605W entry, except Dynamic Boost, which is 5-15 W here.
+
+requires_fan_curve is set: on BIOS 307 the EC applies SPL/SPPT/FPPT
+only while the CPU custom fan curve is enabled. Measured under a
+16-thread load on AC: a 25 W write was ignored in auto fan mode
+(~48 W socket power) and tracked exactly (25.0 W, then 40.0 W for a
+40 W write) once pwm1_enable=1.
+
+nv_tgp is left out on purpose. On this firmware 0x00120098 is an offset
+above the 55 W base TGP (0-35 W), while every upstream entry uses
+absolute watts; the convention is still being settled upstream.
+Omitting nv_tgp_max also hides nv_tgp and nv_base_tgp.
+
+Downstream carry for omarchy-asus (G16 GA605 repo). Not yet submitted
+upstream; drop it once an equivalent GA605KM entry is merged.
+
+Assisted-by: LLM
+---
+ drivers/platform/x86/asus-armoury.h | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/drivers/platform/x86/asus-armoury.h b/drivers/platform/x86/asus-armoury.h
+@@ -1406,6 +1406,36 @@
+ 	},
+ 	{
+ 		.matches = {
++			DMI_MATCH(DMI_BOARD_NAME, "GA605KM"),
++		},
++		.driver_data = &(struct power_data) {
++			.ac_data = &(struct power_limits) {
++				.ppt_pl1_spl_min = 15,
++				.ppt_pl1_spl_max = 80,
++				.ppt_pl2_sppt_min = 35,
++				.ppt_pl2_sppt_max = 80,
++				.ppt_pl3_fppt_min = 35,
++				.ppt_pl3_fppt_max = 80,
++				.nv_dynamic_boost_min = 5,
++				.nv_dynamic_boost_max = 15,
++				.nv_temp_target_min = 75,
++				.nv_temp_target_max = 87,
++			},
++			.dc_data = &(struct power_limits) {
++				.ppt_pl1_spl_min = 25,
++				.ppt_pl1_spl_max = 35,
++				.ppt_pl2_sppt_min = 31,
++				.ppt_pl2_sppt_max = 44,
++				.ppt_pl3_fppt_min = 45,
++				.ppt_pl3_fppt_max = 65,
++				.nv_temp_target_min = 75,
++				.nv_temp_target_max = 87,
++			},
++			.requires_fan_curve = true,
++		},
++	},
++	{
++		.matches = {
+ 			DMI_MATCH(DMI_BOARD_NAME, "GA605W"),
+ 		},
+ 		.driver_data = &(struct power_data) {
