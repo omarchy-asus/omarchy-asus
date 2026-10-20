@@ -1,0 +1,8 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -9 +9 @@
+-pkgdesc='a highly customizable dynamic tiling Wayland compositor'
++pkgdesc='a highly customizable dynamic tiling Wayland compositor (omarchy-asus build)'
+@@ -95 +95 @@
+-	pkgdesc='Plugin manager for Hyprland'
++	pkgdesc='Plugin manager for Hyprland (omarchy-asus build)'

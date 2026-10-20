@@ -4,6 +4,7 @@ upstream arch hyprland
 mode overlay
 take PKGBUILD LICENSE
 keep NOTES.md
+pkgbuild-patch pkgbuild-pkgdesc-label.diff
 patch reconnect-render-offset.patch prepare
 # main has the same fix (e9e2f64c, #16140); flag the first release that contains it
 fixed-upstream hyprwm/Hyprland e9e2f64c v{pkgver}
