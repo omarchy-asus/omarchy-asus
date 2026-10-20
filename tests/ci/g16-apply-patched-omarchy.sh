@@ -106,6 +106,9 @@ patched() {
     for id in 1792123636 1789747667 1792162887; do
         printf 'echo migration %s\n' "$id" >"$ROOT/usr/share/omarchy/migrations/$id.sh"
     done
+    # Patches 0002 and 0003 in omarchy-powerprofiles-set.
+    mkdir -p "$ROOT/usr/bin"
+    printf '%s\n' 'omarchy-hw-asus-rog-usbc-power' 'omarchy-toggle-enabled powerprofiles-autoswitch-off' >"$ROOT/usr/bin/omarchy-powerprofiles-set"
 }
 
 # migration_ran ID: omarchy-migrate's per-user marker for a migration it ran.
@@ -137,6 +140,8 @@ setup_case a
 run --check
 check "hdmi-cursor is missing" row_is hdmi-cursor missing
 check "no patched omarchy note" not grep -qF 'Patched omarchy installed' "$OUT"
+check "usbc-power needs upstream on stock" row_is usbc-power 'upstream PR only'
+check "external-owner needs upstream on stock" row_is external-owner 'upstream PR only'
 
 echo "== b. patched omarchy"
 setup_case b
@@ -150,6 +155,8 @@ check "hdmi-cursor is present" row_is hdmi-cursor present
 check "hybrid-video is present" row_is hybrid-video present
 check "patched omarchy note" grep -qF 'Patched omarchy installed' "$OUT"
 check "rtkit names migration 1789747667" row_has rtkit 1789747667
+check "usbc-power is present from patch 0002" row_is usbc-power present
+check "external-owner is present from patch 0003" row_is external-owner present
 check "nothing called redundant" not grep -qF 'redundant' "$OUT"
 
 echo "== c. patched, with this command's hdmi-cursor lines"

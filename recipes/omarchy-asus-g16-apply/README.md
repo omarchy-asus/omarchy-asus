@@ -359,6 +359,9 @@ Omarchy:
   shell and write the platform profile twice per plug; each write wakes the RTX
   for about 20 s, which is the cost these fixes exist to remove.
 
+  The patched omarchy (4.0.5-1.3 or later) carries both as patches 0002 and
+  0003, so with it installed `--check` reports them as `present`.
+
 ## Undo
 
 - Hyprland: delete the `omarchy-asus-g16-apply` comment line and the line after it from `~/.config/hypr/hyprland.lua`.
