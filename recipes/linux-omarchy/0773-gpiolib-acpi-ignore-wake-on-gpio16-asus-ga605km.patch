@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 00:00:00 -0400
+Subject: [PATCH] gpiolib: acpi: Add a quirk for ASUS ROG Zephyrus G16 GA605KM
+
+With an external monitor connected (HDMI, driven by the dGPU), the
+ASUS ROG Zephyrus G16 GA605KM wakes about 95 ms after entering s2idle,
+on battery and on AC. The wakeup comes from the _AEI event on GPIO 16
+of AMDI0030:00: "ACPI: PM: Wakeup unrelated to ACPI SCI", "GPIO 16 is
+active". Without a monitor the same machine sleeps normally.
+
+Booting with gpiolib_acpi.ignore_wake=AMDI0030:00@16 fixes it: with
+HDMI connected the machine reaches hardware sleep for 10-44 s per
+cycle, and the lid (GPIO 0) and the keyboard still wake it. Add the
+same as a DMI quirk, like the existing ignore_wake entries.
+
+Tested on BIOS GA605KM.307.
+
+Downstream carry for omarchy-asus (G16 GA605 repo). Not yet submitted
+upstream (linux-gpio); drop it once an equivalent entry is merged.
+
+Assisted-by: LLM
+---
+ drivers/gpio/gpiolib-acpi-quirks.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/gpio/gpiolib-acpi-quirks.c b/drivers/gpio/gpiolib-acpi-quirks.c
+--- a/drivers/gpio/gpiolib-acpi-quirks.c
++++ b/drivers/gpio/gpiolib-acpi-quirks.c
+@@ -419,6 +419,21 @@
+ 			.ignore_irq_active_low = "INTC10BC:01@20",
+ 		},
+ 	},
++	{
++		/*
++		 * Spurious wakeups from the _AEI GPIO 16 when an external monitor is
++		 * connected (HDMI, driven by the dGPU): the system wakes ~95 ms after
++		 * entering s2idle. Lid (GPIO 0) and keyboard wakeups are unaffected.
++		 * ASUS ROG Zephyrus G16 GA605KM, BIOS GA605KM.307.
++		 */
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
++			DMI_MATCH(DMI_BOARD_NAME, "GA605KM"),
++		},
++		.driver_data = &(struct acpi_gpiolib_dmi_quirk) {
++			.ignore_wake = "AMDI0030:00@16",
++		},
++	},
+ 	{} /* Terminating entry */
+ };
+ 

@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.8
-pkgrel=9.3
+pkgrel=9.4
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -198,6 +198,7 @@ source=(
   0770-acpi-pm-acer-swift3-sf314-56g-power-resource.patch{,.sig}
   0771-gpiolib-acpi-quirk-irq-active-low-dell-xps.patch{,.sig}
   0772-acpi-pm-acer-aspire-a515-53g-power-resource.patch{,.sig}
+  0773-gpiolib-acpi-ignore-wake-on-gpio16-asus-ga605km.patch
   0800-platform-updates.patch{,.sig}
   0801-amd-pmf-util-unbind-use-after-free.patch{,.sig}
   0802-platform-fixes.patch{,.sig}
@@ -539,6 +540,7 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         'SKIP'
         'bc20469f7602f9ea57feb830919fa485d38d4a3d74079b3aa21449330ca1095b9b2afa5a2366e47e1e850ba11d6d1985f9950be9cf5a6f94fcd9de0293cfaf09'
         'SKIP'
+        '4e2f142a6092054b3995c657faadcef87b62486fd24e492a85a916678866addf4bfe4075da6935f6222591a372667090e7f7a0273da1aa662623abe40e42b83e'
         'f6430036af77a31a9ddd16200bd3c2c7b1b7e46475c7917dee91c835766be046a31736123ba8429ca2f0f8d3b93ef60522873bbec45d50b954cbb8319e6f25ba'
         'SKIP'
         'd7dffb68fd22db7ef41d1ac193dd297fb6150f034f257a44e6cb0a4848dc4a94e328c2e26d5296a72993e2db75d09e3ac46456d337a5bae767fb266082d3cc66'
@@ -894,6 +896,7 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             'SKIP'
             '6ddcb3f0e5a721a793140ff01ce4abaa9c7c2b94dbe2c665bc24ed8567aef0f3'
             'SKIP'
+            '035d13d4aeda33cf242d1937d311409733cb3211f48e69d0186c28d826de0298'
             '6800dd82115ebe71d80dde0bb368fbd8563caa6c29127ffde0d6b5df81b502b0'
             'SKIP'
             'd90cc6570a47c8754e4c5d45834e0434c0a1fcabda9b8933b1fba84e3dabc083'
