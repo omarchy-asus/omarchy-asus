@@ -105,7 +105,7 @@ class FakeHyprland:
 
 class Harness:
     def __init__(self, conf=CONF, asusd=True, on_battery=False, charge_mode=None, bright=None,
-                 slash_getall_fails=False):
+                 slash_getall_fails=False, state_files=None):
         self.tmp = tempfile.mkdtemp(prefix="g16b-")
         t = self.tmp
         self.home = os.path.join(t, "home")
@@ -138,6 +138,10 @@ class Harness:
             os.makedirs(os.path.dirname(self.conf))
             with open(self.conf, "w") as f:
                 f.write(conf)
+        for name, text in (state_files or {}).items():
+            os.makedirs(self.state_dir, exist_ok=True)
+            with open(os.path.join(self.state_dir, name), "w") as f:
+                f.write(text)
         self.winlock = os.path.join(t, "g16-winlock")
         with open(self.winlock, "w") as f:
             f.write("#!/bin/sh\n")
@@ -230,6 +234,14 @@ class Harness:
 
     def power(self, on_battery):
         self.fake({"set": ["/org/freedesktop/UPower", "org.freedesktop.UPower", "OnBattery", "b", on_battery]})
+
+    def curve_calls(self):
+        return [c["call"][3] for c in self.calls() if "call" in c and c["call"][1] == "xyz.ljones.FanCurves"]
+
+    def ppt_sets(self):
+        return [(c["set"][0].rsplit("/", 1)[-1], c["set"][4]) for c in self.calls()
+                if "set" in c and c["set"][2] == "CurrentValue" and "/asus_armoury/ppt_" in c["set"][0]
+                or "set" in c and c["set"][0].endswith("nv_dynamic_boost")]
 
     def fake(self, msg):
         self.fakes.stdin.write(json.dumps(msg) + "\n")
@@ -445,7 +457,9 @@ class BridgeTest(unittest.TestCase):
         with open(os.path.join(h.backlight, "brightness"), "w") as f:
             f.write("90\n")              # turned up by hand on battery
         h.power(False)
-        h.wait(lambda: h.state.get("source") == "ac" and h.state.get("refreshHz") == 240, what="barrel")
+        # Four plugs in a few seconds look like a flapping charger: "weak", which
+        # keeps the barrel (AC) settings.
+        h.wait(lambda: h.state.get("source") in ("ac", "weak") and h.state.get("refreshHz") == 240, what="barrel")
         h.send("get")
         self.assertEqual(h.brightness(), 90, "a brighter manual level is kept")
         calls = [c["call"][3] for c in h.calls() if "call" in c and c["call"][2] == "SetBrightness"]
@@ -481,6 +495,59 @@ class BridgeTest(unittest.TestCase):
         sets = [c["set"][2:5] for c in h.calls() if "set" in c and c["set"][1] == "xyz.ljones.Slash"]
         self.assertEqual(sets, [["Interval", "y", 5], ["Mode", "y", 0x1A]])
         h.wait(lambda: h.state.get("slashPattern") == 5, what="pattern from Mode")
+
+    def test_usb_c_limits_turn_on_the_cpu_curve_then_write_ppt(self):
+        h = self.harness(conf=CONF + 'PPT_USBC="25 30 40"\n', charge_mode=2)
+        h.wait(lambda: len(h.ppt_sets()) == 3, what="USB-C limits")
+        self.assertEqual(h.curve_calls(), [[0, "CPU", True]])
+        self.assertEqual(h.ppt_sets(), [("ppt_pl1_spl", 25), ("ppt_pl2_sppt", 30), ("ppt_pl3_fppt", 40)])
+        calls = [c for c in h.calls() if "call" in c or "set" in c and "/asus_armoury/ppt_" in c["set"][0]]
+        self.assertIn("call", calls[0], "the curve goes on before the limits are written")
+        with open(os.path.join(h.state_dir, "g16-ppt-curves")) as f:
+            self.assertEqual(f.read().strip(), "0")
+        h.power(True)                       # unplugged: curve off, DC defaults back
+        h.wait(lambda: h.curve_calls()[-1:] == [[0, "CPU", False]], what="curve off")
+        h.wait(lambda: h.ppt_sets()[-4:] == [("ppt_pl1_spl", 35), ("ppt_pl2_sppt", 44), ("ppt_pl3_fppt", 65),
+                                             ("nv_dynamic_boost", 0)], what="DC defaults")
+        with open(os.path.join(h.state_dir, "g16-ppt-curves")) as f:
+            self.assertEqual(f.read().strip(), "")
+
+    def test_no_limit_keys_touch_nothing(self):
+        h = self.harness(charge_mode=2)
+        h.wait(lambda: h.state.get("source") == "usbc" and h.state.get("hasAura"), what="USB-C")
+        h.power(True)
+        h.wait(lambda: h.state.get("source") == "battery", what="battery")
+        h.send("get")
+        self.assertEqual((h.curve_calls(), h.ppt_sets()), ([], []))
+
+    def test_flapping_barrel_is_debounced_and_becomes_weak(self):
+        h = self.harness(conf=CONF + 'PPT_WEAK_BARREL="45 55 65"\nBOOST_WEAK_BARREL=5\n', charge_mode=1)
+        h.wait(lambda: h.state.get("source") == "ac" and h.hypr.hz == 240, what="barrel")
+        evals = len(h.hypr.evals)
+        for _ in range(3):                  # the adapter drops out three times in a second
+            h.power(True)
+            h.power(False)
+        h.wait(lambda: h.state.get("source") == "weak", what="weak barrel")
+        self.assertEqual(len(h.hypr.evals), evals, "no refresh-rate flips while it flaps")
+        h.wait(lambda: len(h.ppt_sets()) == 4, what="weak-barrel limits")
+        self.assertEqual(h.ppt_sets(), [("ppt_pl1_spl", 45), ("ppt_pl2_sppt", 55), ("ppt_pl3_fppt", 65),
+                                        ("nv_dynamic_boost", 5)])
+        self.assertEqual(h.curve_calls(), [[0, "CPU", True]])
+        self.assertEqual(h.state["kbdBrightness"], 2, "a weak barrel keeps the AC settings")
+
+    def test_profile_change_moves_the_curve(self):
+        h = self.harness(conf=CONF + 'PPT_USBC="25 30 40"\n', charge_mode=2)
+        h.wait(lambda: h.curve_calls() == [[0, "CPU", True]], what="curve on, profile 0")
+        h.fake({"set": ["/xyz/ljones", "xyz.ljones.Platform", "PlatformProfile", "u", 3]})
+        h.wait(lambda: h.curve_calls()[1:] == [[0, "CPU", False], [3, "CPU", True]], what="curve moved to 3")
+        with open(os.path.join(h.state_dir, "g16-ppt-curves")) as f:
+            self.assertEqual(f.read().strip(), "3")
+
+    def test_a_curve_left_on_by_a_crash_is_turned_off(self):
+        h = self.harness(on_battery=True, state_files={"g16-ppt-curves": "2\n"})
+        h.wait(lambda: h.curve_calls() == [[2, "CPU", False]], what="stale curve off")
+        with open(os.path.join(h.state_dir, "g16-ppt-curves")) as f:
+            self.assertEqual(f.read().strip(), "")
 
     def test_closing_stdin_stops_the_bridge(self):
         h = self.harness()

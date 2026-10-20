@@ -46,9 +46,10 @@ Item {
   property string kbdAC: ""
   property string kbdBattery: ""
   property bool onBattery: false
-  // ac (barrel) | usbc | battery. USB-C uses the battery settings.
+  // ac (barrel) | weak (a barrel that keeps dropping out) | usbc | battery.
+  // USB-C uses the battery settings; a weak barrel the AC ones.
   property string source: "ac"
-  readonly property bool batterySettings: source !== "ac"
+  readonly property bool batterySettings: source === "usbc" || source === "battery"
   property bool kbdBoot: true
   property bool kbdAwake: true
   property bool kbdSleep: true
@@ -137,7 +138,7 @@ Item {
 
   function applyState(s) {
     svc.onBattery = s.onBattery === true
-    svc.source = ["ac", "usbc", "battery"].indexOf(s.source) >= 0 ? s.source : "ac"
+    svc.source = ["ac", "weak", "usbc", "battery"].indexOf(s.source) >= 0 ? s.source : "ac"
     svc.hasAura = s.hasAura === true
     if (svc.hasAura) {
       svc.kbdBrightness = Number(s.kbdBrightness) || 0

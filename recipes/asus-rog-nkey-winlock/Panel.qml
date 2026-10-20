@@ -308,7 +308,9 @@ Panel {
               fontFamily: root.bar.fontFamily
               title: "Keyboard"
               meta: (root.kbdOn ? root.effectiveLevel : "off").toUpperCase()
-              detail: root.powerSource === "usbc" ? "on USB-C" : (root.onBattery ? "on battery" : "on the barrel charger")
+              detail: root.powerSource === "usbc" ? "on USB-C"
+                : root.powerSource === "weak" ? "on a weak barrel charger"
+                : (root.onBattery ? "on battery" : "on the barrel charger")
               iconComponent: Component {
                 KeyboardMark {
                   lit: root.kbdOn
