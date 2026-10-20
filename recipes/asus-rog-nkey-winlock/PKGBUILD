@@ -8,6 +8,8 @@
 #   unit come with it, and the unit is enabled on install (toast mode).
 # asus-zephyrus-g16-control: the "G16 Control" bar widget (keyboard and Slash
 #   LEDs, refresh rate, charge limit, Fn+Super mode). Plugin id omarchy-asus.g16.
+#   Service.qml holds the state once for every bar and follows asusd's D-Bus
+#   signals (gdbus, from glib2) instead of polling.
 #
 # `g16-winlock watch` only sees the toggle with a kernel whose hid-asus passes
 # the Win-lock reports through to hidraw: linux-omarchy from this repo (patch
@@ -21,7 +23,7 @@
 pkgbase=asus-rog-nkey-winlock
 pkgname=(asus-rog-nkey-winlock asus-zephyrus-g16-control)
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Win-key lock helper and Omarchy bar widget for the ASUS ROG Zephyrus G16 (GA605)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -33,16 +35,18 @@ source=(
   'g16-winlock.service'
   'manifest.json'
   'Panel.qml'
+  'Service.qml'
   'g16ctl'
   'README.md'
 )
 sha256sums=('548676e73486095be2621f7e0f0d096b98c5643e898785a809634837804c64fe'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
             '85955d0a7eb12911ead8c0cb68cd89d356aae02d67d4668f187136be3e767bfd'
-            '5cf036a8b150d79f0d8013e82f56396d9d58f0b1e5cf07677de45c613565f575'
-            '5090b5b9550aa6c3fa1563be60de4a92e6452742a5b0c09370934a375c6303b5'
-            '0d8d7044336e5c55d3cac089fb8d0db7420b38780cef7c4181533441d00da630'
-            '414bcee8427aecabca99a1c65570e040923441319bbd00fdc50d22222741dc3f')
+            'd1bb933e3a2fa46380a1fe1b9850a892e11eee0d76ed7bbed538f8c4aff57248'
+            '74408deb17a8cfffde0bae16f623886572706876d3e12fcd442a4b8806a953ea'
+            '19bb40e173d14cca827c677f7ade85e6b758fa595ab560ecabed6e126e31dca0'
+            '0cee6eaf458338a50f5efe5c76bbfa739faae16fac5052383c6d0e852830a5a3'
+            '1ef23c8583bf5e1df375ac7e848a93e150a7f1058fbb448bfb6fc7d962fb3f79')
 
 _plugin_id=omarchy-asus.g16
 
@@ -69,7 +73,7 @@ package_asus-rog-nkey-winlock() {
 
 package_asus-zephyrus-g16-control() {
   pkgdesc='G16 Control bar widget for the Omarchy shell: ASUS ROG Zephyrus G16 LEDs, refresh rate, charge limit and Fn+Super mode'
-  depends=('bash' 'systemd' 'asus-rog-nkey-winlock')
+  depends=('bash' 'systemd' 'glib2' 'asus-rog-nkey-winlock')
   optdepends=(
     'asusctl: keyboard backlight, Slash LEDs and charge limit (asusd D-Bus)'
   )
@@ -80,6 +84,7 @@ package_asus-zephyrus-g16-control() {
   local dest="$pkgdir/usr/share/omarchy/plugins/$_plugin_id"
   install -Dm644 manifest.json "$dest/manifest.json"
   install -Dm644 Panel.qml "$dest/Panel.qml"
+  install -Dm644 Service.qml "$dest/Service.qml"
   install -Dm755 g16ctl "$dest/g16ctl"
   install -Dm644 README.md "$pkgdir/usr/share/doc/asus-zephyrus-g16-control/README.md"
 }

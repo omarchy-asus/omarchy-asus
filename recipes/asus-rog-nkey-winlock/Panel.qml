@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // One control surface for every LED on this Zephyrus G16 (GA605), which is why
@@ -31,50 +32,92 @@ Panel {
   moduleName: "omarchy-asus.g16"
   ipcTarget: "omarchy-asus.g16"
 
-  // g16ctl sits next to this file, wherever the plugin directory is (a user
-  // install or a link to the packaged copy).
-  readonly property string helper:
-    decodeURIComponent(Qt.resolvedUrl("g16ctl").toString().replace(/^file:\/\//, ""))
+  // All state and every process live in Service.qml, which the shell mounts
+  // once (manifest kind "service"). With one bar per monitor this widget used
+  // to exist twice, each copy running `g16ctl get` (~135 forks) every 10s.
+  // Under a bar that does not hand out services, a local copy is started
+  // after a grace period instead, so the widget still works on its own.
+  // The service registers asynchronously; re-ask for it for a while.
+  property int serviceTick: 0
+  readonly property var svc: {
+    var tick = root.serviceTick
+    var host = root.bar ? root.bar.shell : null
+    return host && typeof host.serviceFor === "function" ? host.serviceFor("omarchy-asus.g16") : null
+  }
+  readonly property var g: root.svc ? root.svc : localSvc.item
+
+  Timer {
+    interval: 500
+    repeat: true
+    running: root.svc === null && !localSvc.active
+    onTriggered: {
+      root.serviceTick++
+      if (root.serviceTick >= 20 && root.svc === null) localSvc.active = true
+    }
+  }
+  Loader {
+    id: localSvc
+    active: false
+    visible: false
+    source: "Service.qml"
+  }
+  onSvcChanged: if (root.svc && localSvc.active) {
+    if (root.reportedTo === localSvc.item) { root.reportedOpen = false; root.reportedTo = null }
+    localSvc.active = false
+    root.syncOpen()
+  }
+
+  // Which service this widget told it is open, so a close always reaches the
+  // same object even if the service is swapped underneath.
+  property bool reportedOpen: false
+  property var reportedTo: null
+  function syncOpen() {
+    var want = root.opened && !!root.g
+    if (want === root.reportedOpen && (!want || root.reportedTo === root.g)) return
+    if (root.reportedOpen && root.reportedTo) root.reportedTo.panelClosed()
+    root.reportedOpen = false
+    root.reportedTo = null
+    if (want) { root.g.panelOpened(); root.reportedOpen = true; root.reportedTo = root.g }
+  }
+  onOpenedChanged: syncOpen()
+  onGChanged: syncOpen()
+  Component.onDestruction: if (root.reportedOpen && root.reportedTo) root.reportedTo.panelClosed()
 
   // ---- keyboard ----
-  property bool hasAura: false
-  property int kbdBrightness: 0
-  property string kbdColor: "FF00FF"
-  property string kbdAC: "off"
-  property string kbdBattery: "off"
+  readonly property bool hasAura: g ? g.hasAura : false
+  readonly property int kbdBrightness: g ? g.kbdBrightness : 0
+  readonly property string kbdColor: g ? g.kbdColor : "FF00FF"
+  readonly property string kbdAC: g ? g.kbdAC : "off"
+  readonly property string kbdBattery: g ? g.kbdBattery : "off"
   // omarchy-power-tune (not packaged) owns the per-source levels and refresh
   // rate; without it those sections hide and on/off writes asusctl directly.
-  property bool hasPowerTune: false
-  property bool onBattery: false
-  property bool kbdBoot: true
-  property bool kbdAwake: true
-  property bool kbdSleep: true
-  property bool kbdShutdown: true
+  readonly property bool hasPowerTune: g ? g.hasPowerTune : false
+  readonly property bool onBattery: g ? g.onBattery : false
+  readonly property bool kbdBoot: g ? g.kbdBoot : true
+  readonly property bool kbdAwake: g ? g.kbdAwake : true
+  readonly property bool kbdSleep: g ? g.kbdSleep : true
+  readonly property bool kbdShutdown: g ? g.kbdShutdown : true
 
   // ---- slash ----
-  property bool hasSlash: false
-  property bool slashOn: false
-  property int slashBrightness: 0
-  property int slashPattern: 0
-  property string slashPatternName: ""
-  property bool showOnBoot: false
-  property bool showOnShutdown: false
-  property bool showOnSleep: false
-  property bool showOnBattery: false
-  property bool showBatteryWarning: false
-  property bool showOnLidClosed: false
+  readonly property bool hasSlash: g ? g.hasSlash : false
+  readonly property bool slashOn: g ? g.slashOn : false
+  readonly property int slashBrightness: g ? g.slashBrightness : 0
+  readonly property int slashPattern: g ? g.slashPattern : 0
+  readonly property string slashPatternName: g ? g.slashPatternName : ""
+  readonly property bool showOnBoot: g ? g.showOnBoot : false
+  readonly property bool showOnShutdown: g ? g.showOnShutdown : false
+  readonly property bool showOnSleep: g ? g.showOnSleep : false
+  readonly property bool showOnBattery: g ? g.showOnBattery : false
+  readonly property bool showBatteryWarning: g ? g.showBatteryWarning : false
+  readonly property bool showOnLidClosed: g ? g.showOnLidClosed : false
+  readonly property var slashModes: g ? g.slashModes : []
 
-  property var slashModes: ["Static", "Bounce", "Slash", "Loading", "BitStream",
-                            "Transmission", "Flow", "Flux", "Phantom", "Spectrum",
-                            "Hazard", "Interfacing", "Ramp", "GameOver", "Start", "Buzzer"]
-
-  // 0 = keyboard, 1 = slash
-
-  // Writes queued behind the running one, in order. A newer write to the same
-  // setting drops the queued one and goes to the back, so a slider drag cannot
-  // outrun the daemon, an unrelated action is never dropped, and overlapping
-  // writes always end on the last selection.
-  property var pendingCmds: []
+  // A page that disappears (asusd gone, no Slash) sends the panel back to System.
+  function checkTab() {
+    if ((root.tab === 1 && !root.hasAura) || (root.tab === 2 && !root.hasSlash)) root.tab = 0
+  }
+  onHasAuraChanged: checkTab()
+  onHasSlashChanged: checkTab()
 
   readonly property var levelOptions: [
     { value: "off",  label: "Off"  },
@@ -100,8 +143,11 @@ Panel {
 
   // ---- display (refresh goes through power-tune, never a raw modeset:
   // a hotplug or `hyprctl reload` re-applies monitors.lua and would revert it) ----
-  property int refreshHz: 0
-  property string refreshOverride: "auto"
+  readonly property int refreshHz: g ? g.refreshHz : 0
+  // Shows the click at once; the service's file watch then confirms it.
+  property string refreshPicked: ""
+  readonly property string refreshOverride: refreshPicked !== "" ? refreshPicked
+    : (g ? g.refreshOverride : "auto")
   readonly property bool refreshAvailable: root.refreshHz > 0
   readonly property var refreshOptions: [
     { value: "60",   label: "60Hz"  },
@@ -110,7 +156,7 @@ Panel {
   ]
 
   // ---- battery charge ceiling (asusctl; sysfs is the source of truth) ----
-  property int chargeLimit: 0
+  readonly property int chargeLimit: g ? g.chargeLimit : 0
   readonly property bool chargeAvailable: root.chargeLimit > 0
   readonly property var chargeOptions: [
     { value: "60",  label: "60%"  },
@@ -119,249 +165,38 @@ Panel {
   ]
 
   // ---- Win-lock (firmware Fn+Super; helper + user service) ----
-  property bool hasWinlock: false
-  property string winlockMode: "toast"
-  property string winlockService: "inactive"
+  readonly property bool hasWinlock: g ? g.hasWinlock : false
+  readonly property string winlockMode: g ? g.winlockMode : "toast"
+  readonly property string winlockService: g ? g.winlockService : "inactive"
   readonly property bool winlockAvailable: root.hasWinlock
   readonly property var winlockModeOptions: [
     { value: "toast",  label: "Toast"  },
     { value: "unlock", label: "Unlock" }
   ]
 
-  // queue-begin (pure helpers; exercised by an extracted-function test)
-  // Identifies the setting a command writes: the verb, plus the scope/flag
-  // argument for verbs that address one of several settings.
-  function cmdKey(args) {
-    var verb = args[1]
-    if (verb === "kbd-level" || verb === "kbd-power" || verb === "slash-flag")
-      return verb + " " + args[2]
-    return verb
-  }
-
-  // True when running newArgs makes a queued oldArgs pointless: same setting,
-  // or a kbd-level "both" that covers an earlier "ac"/"battery". A narrower
-  // write never drops a queued "both" (it would lose the other scope).
-  function supersedes(newArgs, oldArgs) {
-    if (cmdKey(newArgs) === cmdKey(oldArgs)) return true
-    return newArgs[1] === "kbd-level" && oldArgs[1] === "kbd-level"
-        && newArgs[2] === "both"
-  }
-
-  // Returns the queue with superseded entries removed and args appended last,
-  // so the final state is always the user's last selection.
-  function enqueue(queue, args) {
-    var q = []
-    for (var i = 0; i < queue.length; i++)
-      if (!supersedes(args, queue[i])) q.push(queue[i])
-    q.push(args)
-    return q
-  }
-  // queue-end
-
-  function runCmd(args) {
-    root.writeGen++
-    if (!actionProc.running) {
-      actionProc.command = args
-      actionProc.running = true
-      return
-    }
-    root.pendingCmds = enqueue(root.pendingCmds, args)
-  }
-
-  // A read taken while writes are queued would put the old values back over the
-  // optimistic ones. Skip it: actionProc refreshes once the queue drains. A
-  // request that arrives mid-read reruns the read when it finishes.
-  // writeGen counts writes; a read remembers the count it started at, and
-  // parseState drops a read that a write overtook (the drain's refresh() then
-  // sets refreshAgain, so a fresh read always follows).
-  property bool refreshAgain: false
-  property int writeGen: 0
-  property int readGen: -1
-  function refresh() {
-    if (actionProc.running || root.pendingCmds.length > 0) return
-    if (stateProc.running) { root.refreshAgain = true; return }
-    root.readGen = root.writeGen
-    stateProc.running = true
-  }
-
-  function bool(v) { return String(v) === "true" }
-
-  function parseState(raw) {
-    if (root.readGen !== root.writeGen || actionProc.running || root.pendingCmds.length > 0)
-      return
-    var lines = String(raw).trim().split("\n")
-    var m = ({})
-    for (var i = 0; i < lines.length; i++) {
-      var eq = lines[i].indexOf("=")
-      if (eq < 0) continue
-      m[lines[i].slice(0, eq).trim()] = lines[i].slice(eq + 1).trim()
-    }
-    if (m["HasAura"] === undefined) return
-
-    root.hasAura = bool(m["HasAura"])
-    root.hasPowerTune = bool(m["HasPowerTune"])
-    root.kbdBrightness = parseInt(m["KbdBrightness"]) || 0
-    if (m["KbdColor"]) root.kbdColor = m["KbdColor"]
-    if (m["KbdAC"]) root.kbdAC = m["KbdAC"]
-    if (m["KbdBattery"]) root.kbdBattery = m["KbdBattery"]
-    root.onBattery = bool(m["OnBattery"])
-    root.kbdBoot = bool(m["KbdBoot"])
-    root.kbdAwake = bool(m["KbdAwake"])
-    root.kbdSleep = bool(m["KbdSleep"])
-    root.kbdShutdown = bool(m["KbdShutdown"])
-
-    root.hasSlash = bool(m["HasSlash"])
-    if ((root.tab === 1 && !root.hasAura) || (root.tab === 2 && !root.hasSlash))
-      root.tab = 0
-    if (root.hasSlash) {
-      root.slashOn = bool(m["SlashEnabled"])
-      // Do not yank the handle out from under a drag in progress.
-      if (!slashSlider.dragging)
-        root.slashBrightness = parseInt(m["SlashBrightness"]) || 0
-      root.slashPattern = parseInt(m["SlashPattern"]) || 0
-      root.slashPatternName = m["SlashPatternName"] || ""
-      root.showOnBoot = bool(m["SlashShowOnBoot"])
-      root.showOnShutdown = bool(m["SlashShowOnShutdown"])
-      root.showOnSleep = bool(m["SlashShowOnSleep"])
-      root.showOnBattery = bool(m["SlashShowOnBattery"])
-      root.showBatteryWarning = bool(m["SlashShowBatteryWarning"])
-      root.showOnLidClosed = bool(m["SlashShowOnLidClosed"])
-    } else {
-      root.slashOn = false
-    }
-
-    root.refreshHz = parseInt(m["RefreshHz"]) || 0
-    if (m["RefreshOverride"]) root.refreshOverride = m["RefreshOverride"]
-    root.chargeLimit = parseInt(m["ChargeLimit"]) || 0
-
-    root.hasWinlock = bool(m["HasWinlock"])
-    if (m["WinlockMode"]) root.winlockMode = m["WinlockMode"]
-    if (m["WinlockService"]) root.winlockService = m["WinlockService"]
-  }
-
-  function parseModes(raw) {
-    var out = []
-    var lines = String(raw).trim().split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var name = lines[i].trim()
-      if (name.length > 0) out.push(name)
-    }
-    if (out.length > 0) root.slashModes = out
-  }
-
-  // Optimistic local update: the restart-and-reapply round trip takes a moment,
-  // and leaving the segmented control on its old value that whole time reads as
-  // a dropped click. A level for the active source (or both) is also the live
-  // brightness, so the keyboard toggle sees it before the next `get`.
-  function setLevel(scope, value) {
-    if (scope === "ac") root.kbdAC = value
-    else if (scope === "battery") root.kbdBattery = value
-    else { root.kbdAC = value; root.kbdBattery = value }
-    var active = !root.hasPowerTune || scope === "both"
-        || scope === (root.onBattery ? "battery" : "ac")
-    if (active) {
-      for (var i = 0; i < root.levelOptions.length; i++)
-        if (root.levelOptions[i].value === value) root.kbdBrightness = i
-    }
-    runCmd([root.helper, "kbd-level", scope, value])
-  }
-
-  // Flips kbdBrightness (0 off, 2 med) right away so a second click before the
-  // next `get` sees the new state instead of queueing the same write again.
-  function toggleKeyboard() {
-    var on = !root.kbdOn
-    root.kbdBrightness = on ? 2 : 0
-    setLevel("both", on ? "med" : "off")
-  }
-
-  function setColor(hex) {
-    root.kbdColor = hex
-    runCmd([root.helper, "kbd-color", hex])
-  }
-
-  // Flag toggles set their property first, like the on/off switches, so a
-  // second click before the next `get` toggles back instead of repeating.
-  function setKbdPower(flag, value) {
-    if (flag === "boot") root.kbdBoot = value
-    else if (flag === "awake") root.kbdAwake = value
-    else if (flag === "sleep") root.kbdSleep = value
-    else if (flag === "shutdown") root.kbdShutdown = value
-    runCmd([root.helper, "kbd-power", flag, value ? "true" : "false"])
-  }
-
-  function toggleSlash() {
-    root.slashOn = !root.slashOn
-    runCmd([root.helper, "slash-enabled", root.slashOn ? "true" : "false"])
-  }
-
-  function setSlashPattern(index) {
-    if (index < 0 || index >= root.slashModes.length) return
-    root.slashPattern = index
-    root.slashPatternName = root.slashModes[index]
-    runCmd([root.helper, "slash-pattern", String(index)])
-  }
-
-  function applySlashBrightness() {
-    runCmd([root.helper, "slash-brightness", String(root.slashBrightness)])
-  }
-
-  function setSlashFlag(name, value) {
-    var prop = ({ ShowOnBoot: "showOnBoot", ShowOnShutdown: "showOnShutdown",
-                  ShowOnSleep: "showOnSleep", ShowOnBattery: "showOnBattery",
-                  ShowBatteryWarning: "showBatteryWarning",
-                  ShowOnLidClosed: "showOnLidClosed" })[name]
-    if (prop) root[prop] = value
-    runCmd([root.helper, "slash-flag", name, value ? "true" : "false"])
-  }
-
+  function setLevel(scope, value) { if (g) g.setLevel(scope, value) }
+  function toggleKeyboard() { if (g) g.toggleKeyboard() }
+  function setColor(hex) { if (g) g.setColor(hex) }
+  function setKbdPower(flag, value) { if (g) g.setKbdPower(flag, value) }
+  function toggleSlash() { if (g) g.toggleSlash() }
+  function setSlashPattern(index) { if (g) g.setSlashPattern(index) }
+  function applySlashBrightness() { if (g) g.applySlashBrightness() }
+  function setSlashFlag(name, value) { if (g) g.setSlashFlag(name, value) }
   // Named setRefreshHz, not setRefresh: refresh() already means "re-read state".
   function setRefreshHz(value) {
-    root.refreshOverride = value
-    runCmd([root.helper, "refresh", value])
+    root.refreshPicked = value
+    refreshPickedClear.restart()
+    if (g) g.setRefreshHz(value)
   }
+  function setChargeLimit(value) { if (g) g.setChargeLimit(value) }
+  function setWinlockMode(value) { if (g) g.setWinlockMode(value) }
+  function refresh() { if (g) g.refresh() }
 
-  function setChargeLimit(value) {
-    root.chargeLimit = parseInt(value) || 0
-    runCmd([root.helper, "battery-limit", value])
-  }
-
-  function setWinlockMode(value) {
-    root.winlockMode = value
-    runCmd([root.helper, "winlock-mode", value])
-  }
+  Timer { id: refreshPickedClear; interval: 4000; onTriggered: root.refreshPicked = "" }
 
   visible: hasAura || hasSlash || refreshAvailable || chargeAvailable || winlockAvailable
   implicitWidth: visible ? button.implicitWidth : 0
   implicitHeight: visible ? button.implicitHeight : 0
-
-  Process {
-    id: stateProc
-    command: [root.helper, "get"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.parseState(text) }
-    onExited: if (root.refreshAgain) { root.refreshAgain = false; root.refresh() }
-  }
-
-  Process {
-    id: modesProc
-    running: true
-    command: [root.helper, "list-modes"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.parseModes(text) }
-  }
-
-  Process {
-    id: actionProc
-    onExited: {
-      if (root.pendingCmds.length > 0) {
-        var q = root.pendingCmds.slice()
-        var next = q.shift()
-        root.pendingCmds = q
-        actionProc.command = next
-        actionProc.running = true
-      } else {
-        root.refresh()
-      }
-    }
-  }
 
   Timer {
     id: slashThrottle
@@ -369,19 +204,6 @@ Panel {
     repeat: false
     onTriggered: root.applySlashBrightness()
   }
-
-  // Polls whether or not the panel is open, so the bar icon still tracks changes
-  // made from a terminal. `get` fans out to several busctl calls, so the closed
-  // interval is kept long.
-  Timer {
-    interval: root.opened ? 3000 : 10000
-    running: true
-    repeat: true
-    triggeredOnStart: true
-    onTriggered: root.refresh()
-  }
-
-  onOpenedChanged: if (opened) refresh()
 
   BarIconButton {
     id: button
@@ -461,7 +283,7 @@ Panel {
             visible: root.hasAura || root.hasSlash
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
-            // Only pages that have content; parseState moves root.tab back to
+            // Only pages that have content; checkTab() moves root.tab back to
             // System if the selected page disappears.
             options: {
               var o = [{ value: "system", label: "System" }]
@@ -491,7 +313,7 @@ Panel {
               iconComponent: Component {
                 KeyboardMark {
                   lit: root.kbdOn
-                  color: root.bar ? root.bar.foreground : Color.foreground
+                  color: root.bar ? root.bar.foreground : Commons.Color.foreground
                   implicitWidth: Style.space(34)
                   implicitHeight: Style.space(26)
                 }
@@ -658,7 +480,7 @@ Panel {
               iconComponent: Component {
                 SlashMark {
                   lit: root.slashOn
-                  color: root.bar ? root.bar.foreground : Color.foreground
+                  color: root.bar ? root.bar.foreground : Commons.Color.foreground
                   implicitWidth: Style.space(26)
                   implicitHeight: Style.space(34)
                 }
@@ -710,14 +532,16 @@ Panel {
                 integer: true
                 value: root.slashBrightness
                 onMoved: function(v) {
-                  root.slashBrightness = Math.round(v)
+                  if (root.g) root.g.slashBrightness = Math.round(v)
                   slashThrottle.restart()
                 }
                 onReleased: function(v) {
-                  root.slashBrightness = Math.round(v)
+                  if (root.g) root.g.slashBrightness = Math.round(v)
                   slashThrottle.stop()
                   root.applySlashBrightness()
                 }
+                // Keeps a re-read from yanking the handle mid-drag.
+                onDraggingChanged: if (root.g) root.g.sliderDragging = dragging
               }
             }
 

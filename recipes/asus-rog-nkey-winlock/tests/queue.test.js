@@ -1,7 +1,7 @@
-// Queue logic of Panel.qml, extracted between the queue-begin/queue-end markers.
+// Queue logic of Service.qml, extracted between the queue-begin/queue-end markers.
 // Run: node tests/queue.test.js
 const fs = require("fs"), assert = require("assert");
-const src = fs.readFileSync(process.argv[2] || require("path").join(__dirname, "..", "Panel.qml"), "utf8");
+const src = fs.readFileSync(process.argv[2] || require("path").join(__dirname, "..", "Service.qml"), "utf8");
 const body = src.slice(src.indexOf("// queue-begin"), src.indexOf("// queue-end"));
 const { enqueue } = new Function(body + "\nreturn { enqueue };")();
 const H = "g16ctl";

@@ -19,8 +19,8 @@
 #    flags are untouched by power-tune, so those go straight over D-Bus.
 #
 # omarchy-power-tune is NOT part of this package (it is a personal script). When
-# it is absent, `get` reports HasPowerTune=false and RefreshHz=0, the panel hides
-# the per-power-source brightness and refresh-rate sections, keyboard on/off goes
+# it is absent, `get` reports HasPowerTune=false, the panel hides the
+# per-power-source brightness and refresh-rate sections, keyboard on/off goes
 # straight to `asusctl leds set`, and `refresh` exits 1 with a message.
 #
 # Commands that need no asusd Aura object (get, battery-limit, winlock-*) still
@@ -58,8 +58,6 @@ arrayvals() { awk '{ for (i = 3; i <= NF; i++) printf "%s ", $i }'; }
 
 modes() { asusctl slash --list 2>/dev/null | sed 's/"//g' | sed '/^$/d'; }
 
-conf_val() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1; }
-
 # Rewrites a KBD_* key in place, appending it if the conf never had one.
 conf_set() {
   local key="$1" val="$2"
@@ -77,14 +75,6 @@ WINLOCK_BIN="$(command -v g16-winlock 2>/dev/null || true)"
 WINLOCK_DROPIN="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/g16-winlock.service.d"
 WINLOCK_MODE_CONF="$WINLOCK_DROPIN/mode.conf"
 
-winlock_mode_get() {
-  local m=toast
-  if [ -r "$WINLOCK_MODE_CONF" ]; then
-    m="$(sed -n 's/^Environment=G16_WINLOCK_MODE=//p' "$WINLOCK_MODE_CONF" | tail -1 | tr -d '"' )"
-  fi
-  case "$m" in toast|unlock) printf '%s\n' "$m" ;; *) printf 'toast\n' ;; esac
-}
-
 winlock_state() {
   if [ -x "$WINLOCK_BIN" ]; then
     echo "HasWinlock=true"
@@ -92,75 +82,55 @@ winlock_state() {
     echo "HasWinlock=false"
     return 0
   fi
-  echo "WinlockMode=$(winlock_mode_get)"
-  echo "WinlockService=$(systemctl --user is-active g16-winlock.service 2>/dev/null || echo inactive)"
-  # Best-effort lock bit from GetFeature (may be flaky); unlocked is what we care about.
-  if out="$("$WINLOCK_BIN" status 2>/dev/null)"; then
-    case "$out" in
-      *locked=True*)  echo "WinlockLocked=true" ;;
-      *locked=False*) echo "WinlockLocked=false" ;;
-      *)              echo "WinlockLocked=unknown" ;;
-    esac
-  else
-    echo "WinlockLocked=unknown"
+  # Bash builtins only: this runs every few seconds while the panel is open.
+  local m=toast line
+  if [ -r "$WINLOCK_MODE_CONF" ]; then
+    while IFS= read -r line; do
+      case "$line" in Environment=G16_WINLOCK_MODE=*) m="${line#Environment=G16_WINLOCK_MODE=}"; m="${m//\"/}" ;; esac
+    done <"$WINLOCK_MODE_CONF"
   fi
+  case "$m" in toast|unlock) ;; *) m=toast ;; esac
+  echo "WinlockMode=$m"
+  echo "WinlockService=$(systemctl --user is-active g16-winlock.service 2>/dev/null || echo inactive)"
+  # No `g16-winlock status` here: it started Python and opened the keyboard's
+  # hidraw for a HIDIOCGFEATURE on every poll, and the panel never showed it.
 }
 
 
+# The asusd part of `get`, in as few processes as possible: one busctl per
+# interface (busctl prints one line per requested property, in order).
 aura_state() {
-  local lmd power supported
-
   echo "HasAura=true"
-  echo "KbdBrightness=$(getp $AURA Brightness | awk '{print $2}')"
+  busctl --system get-property "$SVC" "$P" "$AURA" Brightness LedModeData LedPower 2>/dev/null \
+    | awk '
+        NR == 1 { print "KbdBrightness=" $2 }
+        # (uu(yyy)(yyy)ss) mode zone r1 g1 b1 r2 g2 b2 "speed" "direction"
+        NR == 2 { printf "KbdColor=%02X%02X%02X\n", $4, $5, $6 }
+        # (a(ubbbb)) count zone boot awake sleep shutdown
+        NR == 3 { print "KbdZone=" $3; print "KbdBoot=" $4; print "KbdAwake=" $5
+                  print "KbdSleep=" $6; print "KbdShutdown=" $7 }'
 
-  # (uu(yyy)(yyy)ss) mode zone r1 g1 b1 r2 g2 b2 "speed" "direction"
-  lmd="$(getp $AURA LedModeData)"
-  printf 'KbdColor=%02X%02X%02X\n' \
-    "$(echo "$lmd" | awk '{print $4}')" \
-    "$(echo "$lmd" | awk '{print $5}')" \
-    "$(echo "$lmd" | awk '{print $6}')"
-
-  # Static-only hardware still reports the list; the panel hides the section
-  # when there is nothing to choose between.
-  supported="$(getp $AURA SupportedBasicModes | arrayvals)"
-  # shellcheck disable=SC2086 # word splitting counts the modes
-  echo "SupportedModeCount=$(echo $supported | wc -w)"
-
-  # (a(ubbbb)) count zone boot awake sleep shutdown
-  power="$(getp $AURA LedPower)"
-  echo "KbdZone=$(echo "$power" | awk '{print $3}')"
-  echo "KbdBoot=$(echo "$power" | awk '{print $4}')"
-  echo "KbdAwake=$(echo "$power" | awk '{print $5}')"
-  echo "KbdSleep=$(echo "$power" | awk '{print $6}')"
-  echo "KbdShutdown=$(echo "$power" | awk '{print $7}')"
-
-  # The levels power-tune will re-apply, which are the values that actually stick.
-  if [ "$HAS_POWERTUNE" = true ]; then
-    echo "KbdAC=$(conf_val KBD_AC)"
-    echo "KbdBattery=$(conf_val KBD_BATTERY)"
-  fi
-  if [ "$(busctl --system get-property org.freedesktop.UPower /org/freedesktop/UPower \
-            org.freedesktop.UPower OnBattery 2>/dev/null)" = "b true" ]; then
-    echo "OnBattery=true"
-  else
-    echo "OnBattery=false"
-  fi
-  if [ "$HAS_POWERTUNE" = true ]; then
-    echo "PowerTune=$(systemctl --user is-active power-tune 2>/dev/null)"
-  fi
-
-  if busctl --system introspect "$SVC" "$P" "$SLASH" >/dev/null 2>&1; then
+  local slash
+  if slash="$(busctl --system get-property "$SVC" "$P" "$SLASH" Enabled Brightness Interval \
+        ShowOnBoot ShowOnShutdown ShowOnSleep ShowOnBattery ShowBatteryWarning ShowOnLidClosed \
+        2>/dev/null)" && [ -n "$slash" ]; then
     echo "HasSlash=true"
-    busctl --system introspect "$SVC" "$P" "$SLASH" 2>/dev/null \
-      | awk '$2=="property"{sub(/^\./,"",$1); print "Slash"$1"="$4}'
-    idx="$(getp $SLASH Interval | awk '{print $2}')"
-    echo "SlashPattern=${idx:-0}"
-    echo "SlashPatternName=$(modes | sed -n "$(( ${idx:-0} + 1 ))p")"
+    local names=(Enabled Brightness Pattern ShowOnBoot ShowOnShutdown ShowOnSleep
+                 ShowOnBattery ShowBatteryWarning ShowOnLidClosed) i=0 _sig val
+    while read -r _sig val; do
+      echo "Slash${names[$i]}=$val"
+      i=$((i + 1))
+    done <<<"$slash"
   else
     echo "HasSlash=false"
   fi
 }
 
+# Everything the panel needs. The bar itself does not call this on a timer --
+# Service.qml follows asusd's PropertiesChanged signals, UPower, power-tune.conf
+# and Hyprland directly -- so this runs at startup, when the panel opens, while
+# it is open, and after a control is used. Keyboard levels, on-battery and
+# refresh rate are not printed: Service.qml reads those itself.
 state() {
   echo "HasPowerTune=$HAS_POWERTUNE"
   if [ -n "$P" ]; then
@@ -170,23 +140,12 @@ state() {
     echo "HasSlash=false"
   fi
 
-  # ---- display refresh ----
-  # power-tune owns the modeset: monitors.lua is re-applied on hotplug and on
-  # `hyprctl reload`, so a raw mode set here would be silently reverted.
-  # Last line only: power-tune may print a resolve log before "HZ override".
-  hz_line=""
-  if [ "$HAS_POWERTUNE" = true ]; then
-    hz_line="$("$POWERTUNE" hz get 2>/dev/null | awk 'NF{line=$0} END{print line}')"
-  fi
-  echo "RefreshHz=$(echo "$hz_line" | awk '{print $1+0}')"
-  echo "RefreshOverride=$(echo "$hz_line" | awk '{v=$2; print (v=="" ? "auto" : v)}')"
-
   # ---- battery charge ceiling ----
   # Read from sysfs rather than inferred: asusctl has no query verb.
-  cl=0
+  local cl=0 b
   for b in /sys/class/power_supply/BAT*; do
     [ -r "$b/charge_control_end_threshold" ] || continue
-    cl="$(cat "$b/charge_control_end_threshold" 2>/dev/null || echo 0)"
+    read -r cl <"$b/charge_control_end_threshold" 2>/dev/null || cl=0
     break
   done
   echo "ChargeLimit=$cl"
