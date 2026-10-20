@@ -128,6 +128,10 @@ GH_TOKEN=
 # build-pkg call, whose runuser keeps the environment).
 sandbox_hide=$GH_TOKEN_FILE${GH_TOKEN_FILE:+${OPENROUTER_API_KEY_FILE:+:}}$OPENROUTER_API_KEY_FILE
 
+# The bot's commit identity: its clone has no user config, and as_user's env -i leaves git
+# no global one either (#146).
+AU_GIT_NAME="omarchy-asus auto-update"
+AU_GIT_EMAIL="omarchy-asus-auto-update@users.noreply.github.com"
 # Run a command as the build user, with a fixed environment (root: runuser; user: direct).
 pass_env=(OMARCHY_ASUS_UPSTREAM_OVERRIDE OMARCHY_ASUS_ARCH_GIT_URL OMARCHY_ASUS_OMARCHY_PKGS_GIT_URL
           PII_DENYLIST PII_SCAN SKIP_RECIPES BUILD_NOT_BUILT KEEP_PUBLISHED
@@ -146,7 +150,7 @@ as_user() {
     fi
 }
 to_file() { local f=$1; shift; as_user bash -c 'f=$1; shift; "$@" > "$f"' _ "$f" "$@"; }  # to_file FILE cmd...
-ugit() { as_user git -C "$CLONE" -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
+ugit() { as_user git -C "$CLONE" -c user.name="$AU_GIT_NAME" -c user.email="$AU_GIT_EMAIL" -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 # Fail closed: recipe code never runs outside the sandbox. Run it once, so a missing bwrap
 # or disabled user namespaces stop the run here instead of making check-upstream skip
 # every recipe (it only warns on a recipe whose makepkg --printsrcinfo fails).
