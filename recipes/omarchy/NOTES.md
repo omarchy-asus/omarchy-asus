@@ -108,7 +108,8 @@ the fixes with Omarchy's own recipe instead.
 `omarchy-settings`; it finds a release on omarchy-pkgs' `master`, or a pre-release such as
 4.5.0rc1 on `rc`). `bin/check-upstream` follows Omarchy's stable channel, so while these recipes
 sit on a release candidate it reports them `upstream-older` and auto-update leaves them to a
-human: the rc build is built and published by hand, and the move to 4.5.0 final is a rebase
-by hand too. If a patch stops applying, regenerate it from `asus/v4-5-0-rc1` (or the newest
+human: the rc build is built and published by hand on the RC channel (`bin/build-pkg`,
+`bin/publish` and `bin/sync-release` with `--channel rc`; README.md "Release channels"), and
+the move to 4.5.0 final is a rebase by hand too. If a patch stops applying, regenerate it from `asus/v4-5-0-rc1` (or the newest
 `asus/v<x>-<y>-<z>`) rebased onto the new tag. Drop a patch once a release we build from
 contains it.
