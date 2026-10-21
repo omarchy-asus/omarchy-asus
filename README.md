@@ -208,7 +208,8 @@ Where our fixes are headed:
   ship (they live in your config or `/etc`); `--check` is read-only.
 - `keys/`: the repo signing key.
 - `.github/workflows/`, `ci/`: PR CI on GitHub Actions (lint, build the changed recipes in an Arch
-  container, compile nvidia-open-dkms against linux-omarchy-headers). Artifacts are unsigned;
+  container with the package sources of the channel the PR targets (`ci/channel`), compile
+  nvidia-open-dkms against linux-omarchy-headers). Artifacts are unsigned;
   signing and publishing stay on the maintainer's machine.
 
 Maintained by [@rdoupe](https://github.com/rdoupe) and contributors.

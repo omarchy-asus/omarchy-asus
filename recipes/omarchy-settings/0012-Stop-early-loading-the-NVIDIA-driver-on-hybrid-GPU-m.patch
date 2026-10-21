@@ -1,7 +1,7 @@
-From fd79e555f0b0d02ebe1299cfbd2130f6aa7adf23 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: edbron
 Date: Tue, 25 Aug 2026 18:38:56 +0000
-Subject: [PATCH 12/18] Stop early-loading the NVIDIA driver on hybrid GPU
+Subject: [PATCH 12/24] Stop early-loading the NVIDIA driver on hybrid GPU
  machines
 
 install/hardware/nvidia.sh wrote MODULES+=(nvidia ...) into the initramfs on
@@ -56,10 +56,10 @@ index 00000000..32eb166a
 +
 +((nvidia))
 diff --git a/install/hardware/nvidia.sh b/install/hardware/nvidia.sh
-index 1c36787b..704c15eb 100644
+index 0aa51d76..226b1184 100644
 --- a/install/hardware/nvidia.sh
 +++ b/install/hardware/nvidia.sh
-@@ -21,9 +21,24 @@ if lspci | grep -qi 'nvidia'; then
+@@ -34,9 +34,24 @@ elif lspci | grep -qi 'nvidia'; then
  options nvidia_drm modeset=1
  EOF
  
@@ -113,6 +113,3 @@ index 00000000..1293d11a
 +sudo rm -f "$nvidia_conf"
 +sudo limine-mkinitcpio
 +sudo install -Dm644 /dev/null "$rebuild_marker"
--- 
-2.55.0
-

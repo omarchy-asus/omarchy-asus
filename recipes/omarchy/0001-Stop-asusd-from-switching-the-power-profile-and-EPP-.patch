@@ -1,7 +1,7 @@
-From 72ffb6c92eb4b3e15da993554db189b47e755f45 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:23:55 -0400
-Subject: [PATCH 01/18] Stop asusd from switching the power profile and EPP on
+Subject: [PATCH 01/24] Stop asusd from switching the power profile and EPP on
  ROG laptops
 
 asusd switches the platform profile on plug and unplug and rewrites the
@@ -209,6 +209,3 @@ index 00000000..8d91ba80
 +output=$(run_migration env) || fail "an asusd without a property does not fail the migration" "$output"
 +[[ $(calls) != *PlatformProfileLinkedEpp* ]] || fail "the asusd migration skips a property asusd lacks" "$(calls)"
 +pass "the asusd migration skips properties an older asusd lacks"
--- 
-2.55.0
-

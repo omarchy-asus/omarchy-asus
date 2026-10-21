@@ -1,7 +1,7 @@
-From 33b1c9b04589334a370a1f2abcf40424da925303 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:29:49 -0400
-Subject: [PATCH 17/18] Reconcile clamshell state on logind events instead of a
+Subject: [PATCH 17/24] Reconcile clamshell state on logind events instead of a
  2s poll
 
 While a laptop was docked, the monitor watcher re-ran the whole clamshell sync
@@ -13,9 +13,6 @@ Listen to logind instead: its PrepareForSleep(false) resume signal and its
 LidClosed property change are exactly the moments that drift can happen.
 Each runs the same sync with the delayed retries a monitor change gets.
 
-Backport to v4.0.5: v4.0.5 has no lid-inhibit test (quattro-only), so its
-gdbus stub is dropped; the watcher itself applies unchanged.
-
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 092904dd002552e851bd40439f197b1465c2381b
 Backport-of: 58a8d2e1f7cef99c6096b2f6a3929b5649bbbed2 (fixup)
@@ -23,17 +20,18 @@ Backport-of: 58a8d2e1f7cef99c6096b2f6a3929b5649bbbed2 (fixup)
 (cherry picked from commit 092904dd002552e851bd40439f197b1465c2381b)
 ---
  bin/omarchy-hyprland-monitor-watch        |  62 ++++---
+ test/shell.d/lid-inhibit-test.sh          |   7 +
  test/shell.d/monitor-modeless-test.sh     |   7 +
  test/shell.d/monitor-recovery-test.sh     |  12 +-
  test/shell.d/monitor-watch-events-test.sh | 196 ++++++++++++++++++++++
- 4 files changed, 247 insertions(+), 30 deletions(-)
+ 5 files changed, 254 insertions(+), 30 deletions(-)
  create mode 100644 test/shell.d/monitor-watch-events-test.sh
 
 diff --git a/bin/omarchy-hyprland-monitor-watch b/bin/omarchy-hyprland-monitor-watch
-index 33e8f2c5..8ecb5a5f 100755
+index b7199e17..4d9115fa 100755
 --- a/bin/omarchy-hyprland-monitor-watch
 +++ b/bin/omarchy-hyprland-monitor-watch
-@@ -60,48 +60,55 @@ recover_modeless() {
+@@ -61,48 +61,55 @@ recover_modeless() {
    ) 9>"$MODELESS_LOCK" &
  }
  
@@ -113,7 +111,7 @@ index 33e8f2c5..8ecb5a5f 100755
        recover_modeless
        ;;
      # A reload while the monitor is unpowered leaves it at 0x0 with no hotplug
-@@ -110,5 +117,10 @@ while read -r event; do
+@@ -111,5 +118,10 @@ while read -r event; do
      configreloaded\>\>*)
        recover_modeless
        ;;
@@ -125,11 +123,29 @@ index 33e8f2c5..8ecb5a5f 100755
    esac
 -done < <(socat -U - "UNIX-CONNECT:$SOCKET")
 +done < <(events)
+diff --git a/test/shell.d/lid-inhibit-test.sh b/test/shell.d/lid-inhibit-test.sh
+index 064ea063..de7077f4 100755
+--- a/test/shell.d/lid-inhibit-test.sh
++++ b/test/shell.d/lid-inhibit-test.sh
+@@ -103,6 +103,13 @@ cat >"$fake_bin/omarchy-hw-laptop" <<'SH'
+ [[ $OMARCHY_TEST_LAPTOP == 1 ]]
+ SH
+ 
++# Logind's events are not part of this test; keep the watcher off the real bus.
++cat >"$fake_bin/gdbus" <<'SH'
++#!/bin/bash
++
++exec sleep infinity
++SH
++
+ cat >"$fake_bin/hyprctl" <<'SH'
+ #!/bin/bash
+ 
 diff --git a/test/shell.d/monitor-modeless-test.sh b/test/shell.d/monitor-modeless-test.sh
-index decee06c..e71ecf6e 100755
+index 10242b1e..1c71c916 100755
 --- a/test/shell.d/monitor-modeless-test.sh
 +++ b/test/shell.d/monitor-modeless-test.sh
-@@ -84,6 +84,13 @@ cat >"$fake_bin/socat" <<'SH'
+@@ -93,6 +93,13 @@ cat >"$fake_bin/socat" <<'SH'
  exec cat "$OMARCHY_TEST_EVENTS"
  SH
  
@@ -144,7 +160,7 @@ index decee06c..e71ecf6e 100755
  cat >"$fake_bin/omarchy-hw-laptop" <<'SH'
  #!/bin/bash
 diff --git a/test/shell.d/monitor-recovery-test.sh b/test/shell.d/monitor-recovery-test.sh
-index 3401abc1..3f9b7af9 100755
+index 1e8d119a..3804acb3 100755
 --- a/test/shell.d/monitor-recovery-test.sh
 +++ b/test/shell.d/monitor-recovery-test.sh
 @@ -18,7 +18,6 @@ utilities="$ROOT/default/hypr/bindings/utilities.lua"
@@ -375,6 +391,3 @@ index 00000000..bb45e126
 +wait "$watch_pid" 2>/dev/null || true
 +watch_pid=""
 +pass "a machine without a lid runs no logind monitor"
--- 
-2.55.0
-

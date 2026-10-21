@@ -1,7 +1,7 @@
-From 603657feb7b65123b2fccbc2e9b129fc79288f1d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Zack Siri
 Date: Fri, 18 Sep 2026 23:08:43 +0700
-Subject: [PATCH 10/18] Install rtkit so PipeWire gets realtime priority
+Subject: [PATCH 10/24] Install rtkit so PipeWire gets realtime priority
 
 PipeWire requests realtime scheduling from RealtimeKit at startup, but
 rtkit is not a dependency of Arch's pipewire packages and no rlimits
@@ -26,11 +26,11 @@ Backport-of: c906004781964cf0575b404e88d5d15872363aa4
  create mode 100644 migrations/1789747667.sh
 
 diff --git a/install/omarchy-other.packages b/install/omarchy-other.packages
-index d859fca8..cdc848ea 100644
+index 7183ac3c..a3edbf42 100644
 --- a/install/omarchy-other.packages
 +++ b/install/omarchy-other.packages
-@@ -36,6 +36,7 @@ pipewire-alsa
- pipewire-jack
+@@ -37,6 +37,7 @@ pipewire-jack
+ pipewire-libcamera
  pipewire-pulse
  qt6-wayland
 +rtkit
@@ -55,6 +55,3 @@ index 00000000..dac3cfca
 +# rtkit only takes effect when PipeWire re-requests priority at startup.
 +# Restart the audio units if they are running; harmless when idle or as root.
 +systemctl --user try-restart pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null || true
--- 
-2.55.0
-

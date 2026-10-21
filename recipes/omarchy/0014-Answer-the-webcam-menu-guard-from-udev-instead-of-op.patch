@@ -1,7 +1,7 @@
-From 3a44cbb47399ac95a514196965c627eab64ab738 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:29:12 -0400
-Subject: [PATCH 14/18] Answer the webcam menu guard from udev instead of
+Subject: [PATCH 14/24] Answer the webcam menu guard from udev instead of
  opening cameras
 
 omarchy-hw-webcam ran v4l2-ctl over every video node, opening and powering up
@@ -67,7 +67,7 @@ index 7b25be70..0a48b8a8 100755
 +
 +exit 1
 diff --git a/test/shell.d/screenrecording-test.sh b/test/shell.d/screenrecording-test.sh
-index 7859ec14..1a528f00 100644
+index c7d51035..56518068 100644
 --- a/test/shell.d/screenrecording-test.sh
 +++ b/test/shell.d/screenrecording-test.sh
 @@ -13,6 +13,7 @@ mkdir -p "$stub_bin"
@@ -131,6 +131,3 @@ index 7859ec14..1a528f00 100644
  if OMARCHY_TEST_RAW_WEBCAM=true "$ROOT/bin/omarchy-capture-screenrecording-with-webcam"; then
    fail "screenrecording webcam picker rejects output-only video devices"
  fi
--- 
-2.55.0
-

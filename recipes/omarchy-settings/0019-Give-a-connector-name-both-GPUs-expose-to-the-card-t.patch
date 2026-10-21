@@ -1,8 +1,8 @@
-From 73a15500adbe71356106e983b9b88645573792cf Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 04:02:19 -0400
-Subject: [PATCH] Give a connector name both GPUs expose to the card that has
- it connected
+Subject: [PATCH 19/24] Give a connector name both GPUs expose to the card that
+ has it connected
 
 On a hybrid laptop both cards can expose a connector with the same name (DP-1
 on the iGPU and on the NVIDIA card). The lookup returned the lowest-numbered
@@ -66,6 +66,3 @@ index c9e73e6f..e8cdf4ae 100644
  rm -rf "$OMARCHY_DRM_PATH"
  card 0 0x10de HDMI-A-1 eDP-1
  expect "NVIDIA only: nothing registered" "events=0"
--- 
-2.55.0
-

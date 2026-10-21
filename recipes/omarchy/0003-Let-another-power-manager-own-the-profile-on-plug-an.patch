@@ -1,7 +1,7 @@
-From 3981edccc7004056d8ee74fe0f5a93277335ab78 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:25:29 -0400
-Subject: [PATCH 03/18] Let another power manager own the profile on plug and
+Subject: [PATCH 03/24] Let another power manager own the profile on plug and
  unplug
 
 The battery service re-applies the remembered AC or battery profile on every
@@ -11,7 +11,7 @@ is briefly applied. A powerprofiles-autoswitch-off toggle now makes those
 source-driven restores (and the login autodetect) a no-op, while a profile
 chosen explicitly still applies and is remembered.
 
-Backport to v4.0.5: the toggle check goes ahead of the ASUS ROG USB-C source
+Backport to v4.5.0-rc1: the toggle check goes ahead of the ASUS ROG USB-C source
 resolution added by the previous backport, so a skipped restore never probes
 charge_mode.
 
@@ -27,7 +27,7 @@ Backport-of: 524481be00a132f117b6b04c40bcb8816ff22c75 (fixup)
  3 files changed, 28 insertions(+)
 
 diff --git a/bin/omarchy-powerprofiles-set b/bin/omarchy-powerprofiles-set
-index 0698d559..5d67f819 100755
+index 6358bc53..a6afc2ad 100755
 --- a/bin/omarchy-powerprofiles-set
 +++ b/bin/omarchy-powerprofiles-set
 @@ -29,6 +29,14 @@ case "$action" in
@@ -46,10 +46,10 @@ index 0698d559..5d67f819 100755
  # USB-C charger delivers far less (100 W, against 200-330 W from the
  # barrel), so there it saves power as on battery: balanced unless a profile was
 diff --git a/manual/36-system-sleep.md b/manual/36-system-sleep.md
-index 59eea46d..bebbc13e 100644
+index f981fd01..611fb3a0 100644
 --- a/manual/36-system-sleep.md
 +++ b/manual/36-system-sleep.md
-@@ -8,6 +8,8 @@ On a laptop, Omarchy remembers your power profile separately for plugged in and
+@@ -10,6 +10,8 @@ On a laptop, Omarchy remembers your power profile separately for plugged in and
  
  You can see what your machine offers with `omarchy powerprofiles list`, and set the one you want for the state you're currently in with `omarchy powerprofiles set autodetect power-saver`. To set the other state without unplugging anything, name it directly: `omarchy powerprofiles set battery power-saver`. Whatever you pick is what you'll get back the next time you're in that state. On an ASUS ROG laptop, a USB-C charger is a state of its own, `usb-c`, apart from the barrel adapter's `ac`: it defaults to balanced, and `omarchy powerprofiles set usb-c performance` sets it from anywhere.
  
@@ -94,6 +94,3 @@ index b3c1a2ca..5cbf596e 100755
  rg -F '["omarchy-powerprofiles-set", pendingPowerSource]' "$ROOT/shell/plugins/services/battery/Service.qml" >/dev/null ||
    fail "battery service applies profiles through Omarchy command"
  pass "battery service applies profiles through Omarchy command"
--- 
-2.55.0
-

@@ -1,7 +1,7 @@
-From fe152448b4ec1510f44f5efc6dc0b1b801278659 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:30:17 -0400
-Subject: [PATCH 18/18] Rescan the launcher icon index at most once a minute on
+Subject: [PATCH 18/24] Rescan the launcher icon index at most once a minute on
  open
 
 Opening the menu walked every icon theme with find (about 9,000 paths, 75 ms)
@@ -21,7 +21,7 @@ Backport-of: 2dcec7e710564634614629485ff6c6f68e851b41 (fixup)
  2 files changed, 61 insertions(+), 7 deletions(-)
 
 diff --git a/shell/services/AppLibrary.qml b/shell/services/AppLibrary.qml
-index 738529de..ba6a67dd 100644
+index 66f399f5..f73a205e 100644
 --- a/shell/services/AppLibrary.qml
 +++ b/shell/services/AppLibrary.qml
 @@ -22,6 +22,13 @@ Item {
@@ -54,7 +54,7 @@ index 738529de..ba6a67dd 100644
    }
  
    function launch(desktopId, name) {
-@@ -147,6 +160,17 @@ Item {
+@@ -162,6 +175,17 @@ Item {
        root.pendingIconIndex[name] = value
    }
  
@@ -72,7 +72,7 @@ index 738529de..ba6a67dd 100644
    function hiddenEntryScanCommand() {
      var desktop = [Quickshell.env("XDG_CURRENT_DESKTOP"), Quickshell.env("XDG_SESSION_DESKTOP"), Quickshell.env("DESKTOP_SESSION")].filter(function(v) { return String(v || "").length > 0 }).join(":")
      var script = root.omarchyPath + "/shell/services/hidden-entries.sh"
-@@ -202,11 +226,15 @@ Item {
+@@ -217,11 +241,15 @@ Item {
    Process {
      id: iconIndexScan
      command: ["bash", "-c", root.iconIndexScanCommand()]
@@ -93,7 +93,7 @@ index 738529de..ba6a67dd 100644
    }
  
    // Coalesces bursts of app-list changes (a package install touches many
-@@ -214,7 +242,10 @@ Item {
+@@ -229,7 +257,10 @@ Item {
    Timer {
      id: iconIndexDebounce
      interval: 750
@@ -139,6 +139,3 @@ index 5ebd1cfe..fed8c20e 100644
  const openMatch = menuQml.match(/function openExistingMenu\(initialMenu\) \{([\s\S]*?)\n  \}/)
  assert(openMatch, 'menu openExistingMenu function exists')
  assert(
--- 
-2.55.0
-

@@ -1,7 +1,7 @@
-From c34b4496c125845818737d06f1e114c2f364bf32 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:27:50 -0400
-Subject: [PATCH 08/18] Keep mpv and Chromium video decode on the iGPU of
+Subject: [PATCH 08/24] Keep mpv and Chromium video decode on the iGPU of
  hybrid laptops
 
 Render nodes follow PCI order, so on some hybrids the NVIDIA GPU is
@@ -11,11 +11,10 @@ the display iGPU's by-path node, for new users, browser installs,
 Chromium refreshes and existing installs. Settings the user already
 has are kept, and other machines are untouched.
 
-Backport to v4.0.5: v4.0.5 has no brave-widevine, default-apps or
-platform-app-hooks tests, so their stub updates are dropped;
-install/user/all.sh there has no qualcomm/vm-no-animations steps, so the new
-step follows fix-nouveau-cursor.sh; nvidia.lua keeps the hybrid-cursor require
-after the stale-pin check.
+Backport to v4.5.0-rc1: the brave-widevine and platform-app-hooks tests build a
+stub OMARCHY_PATH, so they stand in a no-op hybrid_video_pin_chromium for the
+new helper; default-apps-test runs on the real tree and needs none. nvidia.lua keeps the
+hybrid-cursor require after the stale-pin check.
 
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 44a952a3bf3e34417b2c1120ecc15c494c0e38fb
@@ -33,10 +32,12 @@ Backport-of: 8c59ae0fa1c09599f66a1ef051845906d25c8639 (fixup)
  install/user/all.sh                          |   1 +
  install/user/hardware/hybrid-video-decode.sh |  10 ++
  migrations/1792123636.sh                     |   6 +
+ test/shell.d/brave-widevine-test.sh          |   2 +
  test/shell.d/browser-handoff-test.sh         |   2 +
  test/shell.d/hw-nvidia-test.sh               |   3 +
  test/shell.d/hybrid-video-decode-test.sh     | 161 +++++++++++++++++++
- 12 files changed, 362 insertions(+), 1 deletion(-)
+ test/shell.d/platform-app-hooks-test.sh      |   2 +
+ 14 files changed, 366 insertions(+), 1 deletion(-)
  create mode 100755 bin/omarchy-refresh-hybrid-video
  create mode 100644 install/helpers/hybrid-video-decode.sh
  create mode 100644 install/user/hardware/hybrid-video-decode.sh
@@ -57,27 +58,27 @@ index a5ec506c..737e40d5 100755
  fi
  
 diff --git a/bin/omarchy-install-browser b/bin/omarchy-install-browser
-index f332ce77..f041c56c 100755
+index 196e89cc..be0846f6 100755
 --- a/bin/omarchy-install-browser
 +++ b/bin/omarchy-install-browser
-@@ -5,6 +5,7 @@
- # omarchy:examples=omarchy install browser firefox | omarchy install browser brave
+@@ -7,6 +7,7 @@
+ set -e
  
  source "$OMARCHY_PATH/install/helpers/browser-policy.sh"
 +source "$OMARCHY_PATH/install/helpers/hybrid-video-decode.sh"
  
- setup_chromium_policy_directory() {
-   browser_policy_setup_dir "$1"
-@@ -18,6 +19,7 @@ announce_browser_installed() {
+ opt_path="${OMARCHY_OPT_PATH:-/opt}"
+ 
+@@ -33,6 +34,7 @@ link_widevine_cdm() {
  copy_chromium_flags() {
    mkdir -p ~/.config
    cp -f "$OMARCHY_PATH/config/chromium-flags.conf" "$1"
 +  hybrid_video_pin_chromium "$1"
    omarchy-install-chromium-copy-url
    omarchy-install-chromium-ytdlp
- }
+   omarchy-install-video-decode
 diff --git a/bin/omarchy-refresh-chromium b/bin/omarchy-refresh-chromium
-index 368373f4..d03f9760 100755
+index 84f75e2c..1b3719dc 100755
 --- a/bin/omarchy-refresh-chromium
 +++ b/bin/omarchy-refresh-chromium
 @@ -2,6 +2,8 @@
@@ -300,13 +301,13 @@ index 00000000..c01834b8
 +  hybrid_video_pin_chromium
 +}
 diff --git a/install/user/all.sh b/install/user/all.sh
-index 39d98ea5..d41883a6 100644
+index 827c1a5d..cedc845c 100644
 --- a/install/user/all.sh
 +++ b/install/user/all.sh
-@@ -9,6 +9,7 @@ run_logged "$OMARCHY_INSTALL/user/hardware/asus/fix-mic.sh"
- run_logged "$OMARCHY_INSTALL/user/hardware/framework/fix-f13-amd-audio-input.sh"
- run_logged "$OMARCHY_INSTALL/user/hardware/dell/xps13-text-scaling.sh"
+@@ -13,6 +13,7 @@ run_logged "$OMARCHY_INSTALL/user/hardware/qualcomm/video-decode.sh"
+ run_logged "$OMARCHY_INSTALL/user/hardware/qualcomm/camera.sh"
  run_logged "$OMARCHY_INSTALL/user/hardware/fix-nouveau-cursor.sh"
+ run_logged "$OMARCHY_INSTALL/user/hardware/vm-no-animations.sh"
 +run_logged "$OMARCHY_INSTALL/user/hardware/hybrid-video-decode.sh"
  
  run_logged "$OMARCHY_INSTALL/user/default-keyring.sh"
@@ -339,6 +340,19 @@ index 00000000..612a68a8
 +
 +hybrid_video_pin_mpv
 +hybrid_video_pin_chromium
+diff --git a/test/shell.d/brave-widevine-test.sh b/test/shell.d/brave-widevine-test.sh
+index ca9750c1..48c4ce63 100644
+--- a/test/shell.d/brave-widevine-test.sh
++++ b/test/shell.d/brave-widevine-test.sh
+@@ -18,6 +18,8 @@ mkdir -p "$stub_bin" "$test_tmp/home" "$omarchy_path/install/helpers" "$omarchy_
+ # stand it in; this test covers only the CDM link. Its as_root goes through the
+ # sudo stub, which logs every link, whatever the test's EUID.
+ printf 'browser_policy_setup_dir() { :; }\nas_root() { sudo "$@"; }\n' >"$omarchy_path/install/helpers/browser-policy.sh"
++# omarchy-install-browser also pins hybrid video decode; that has its own test.
++printf 'hybrid_video_pin_chromium() { :; }\n' >"$omarchy_path/install/helpers/hybrid-video-decode.sh"
+ cp "$ROOT/config/chromium-flags.conf" "$omarchy_path/config/"
+ 
+ for command in omarchy-pkg-add omarchy-pkg-aur-add omarchy-install-chromium-copy-url omarchy-install-chromium-ytdlp omarchy-theme-set-browser omarchy-lifecycle-dispatch; do
 diff --git a/test/shell.d/browser-handoff-test.sh b/test/shell.d/browser-handoff-test.sh
 index c188399d..b7af3d51 100644
 --- a/test/shell.d/browser-handoff-test.sh
@@ -533,6 +547,16 @@ index 00000000..f821352e
 +! grep -qF "by-path" "$home/.config/chromium-flags.conf" "$home/.config/mpv/mpv.conf" || fail "with no iGPU the pins go"
 +grep -qFx 'vaapi-device=/dev/dri/renderD129' "$home/.config/mpv/mpv.conf" || fail "a pin the user set by device number stays"
 +pass "stale render node pins are dropped and re-pinned, at Hyprland start only when needed"
--- 
-2.55.0
-
+diff --git a/test/shell.d/platform-app-hooks-test.sh b/test/shell.d/platform-app-hooks-test.sh
+index 4e516f9e..d12d33f0 100644
+--- a/test/shell.d/platform-app-hooks-test.sh
++++ b/test/shell.d/platform-app-hooks-test.sh
+@@ -36,6 +36,8 @@ omarchy_path=$tmp/omarchy
+ mkdir -p "$stub_bin" "$omarchy_path/install/helpers" "$omarchy_path/config"
+ printf 'browser_policy_setup_dir() { :; }\nbrowser_policy_setup_firefox_distribution() { :; }\nas_root() { "$@"; }\n' \
+   >"$omarchy_path/install/helpers/browser-policy.sh"
++# omarchy-install-browser also pins hybrid video decode; that has its own test.
++printf 'hybrid_video_pin_chromium() { :; }\n' >"$omarchy_path/install/helpers/hybrid-video-decode.sh"
+ cp "$ROOT/config/chromium-flags.conf" "$omarchy_path/config/"
+ for command in omarchy-pkg-add omarchy-pkg-aur-add omarchy-pkg-drop omarchy-install-gaming-gpu-lib32; do
+   printf '#!/bin/bash\nprintf "%%s %%s\\n" "%s" "$*" >>"%s"\n' "$command" "$tmp/calls" >"$stub_bin/$command"
