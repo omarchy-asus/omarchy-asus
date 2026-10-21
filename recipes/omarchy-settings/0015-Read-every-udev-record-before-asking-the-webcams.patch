@@ -1,7 +1,7 @@
-From ce4422b3eca2b534f5643f5001ca61821b200df7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:29:12 -0400
-Subject: [PATCH 15/18] Read every udev record before asking the webcams
+Subject: [PATCH 15/24] Read every udev record before asking the webcams
 
 A node udev had no record for sent the guard straight to
 omarchy-capture-webcam-list, which opens every camera, even when a
@@ -50,7 +50,7 @@ index 0a48b8a8..d1fbb0c9 100755
 +# No recorded capture node: ask the devices, but only if some had no record.
 +((unknown)) && [[ -n $(omarchy-capture-webcam-list) ]]
 diff --git a/test/shell.d/screenrecording-test.sh b/test/shell.d/screenrecording-test.sh
-index 1a528f00..a2de9f82 100644
+index 56518068..3e97b586 100644
 --- a/test/shell.d/screenrecording-test.sh
 +++ b/test/shell.d/screenrecording-test.sh
 @@ -150,6 +150,21 @@ OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDE
@@ -75,6 +75,3 @@ index 1a528f00..a2de9f82 100644
  printf '%s\n' 'E:ID_V4L_CAPABILITIES=:video_output:' >"$udev_data/c81:1"
  if OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDEV_DATA_PATH="$udev_data" \
    "$ROOT/bin/omarchy-hw-webcam"; then
--- 
-2.55.0
-

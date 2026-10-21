@@ -1,7 +1,7 @@
-From 0f73e205d5b746c528391084044b79a2f0db7364 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:24:26 -0400
-Subject: [PATCH 02/18] Save power on USB-C chargers on ASUS ROG Zephyrus
+Subject: [PATCH 02/24] Save power on USB-C chargers on ASUS ROG Zephyrus
  laptops
 
 The ACPI adapter reads online for the barrel and for a USB-C charger
@@ -10,9 +10,8 @@ firmware's charge_mode (asus-armoury, or asus-nb-wmi on older kernels)
 and treat USB-C as its own source: balanced by default, with the profile
 picked there remembered apart from the barrel's.
 
-Backport to v4.0.5: install/user/first-run/enable-user-units.sh there is a single
-`systemctl --user enable --now` list, not quattro's per-unit loop; the new unit
-is appended to that list.
+Backport to v4.5.0-rc1: as on quattro; the new unit is the last entry of
+first-run's per-unit enable loop.
 
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 3ce148092cfb586660879ece87315e4b82c32770
@@ -100,7 +99,7 @@ index 00000000..5e422c4c
 +
 +(( !(charge_mode & 1) && (charge_mode & 2) ))
 diff --git a/bin/omarchy-powerprofiles-set b/bin/omarchy-powerprofiles-set
-index 1135e4d5..0698d559 100755
+index 836ce827..6358bc53 100755
 --- a/bin/omarchy-powerprofiles-set
 +++ b/bin/omarchy-powerprofiles-set
 @@ -1,20 +1,22 @@
@@ -238,21 +237,24 @@ index 00000000..4630839a
 +[Install]
 +WantedBy=graphical-session.target
 diff --git a/install/user/first-run/enable-user-units.sh b/install/user/first-run/enable-user-units.sh
-index 9865fc20..9b301437 100755
+index 0f732622..84b8f621 100755
 --- a/install/user/first-run/enable-user-units.sh
 +++ b/install/user/first-run/enable-user-units.sh
-@@ -18,4 +18,5 @@ systemctl --user enable --now \
+@@ -25,7 +25,8 @@ for unit in \
    omarchy-sleep-lock.service \
    omarchy-migrate-notify.service \
    omarchy-fcitx5.service \
--  omarchy-crash-watch.service
+-  omarchy-crash-watch.service; do
 +  omarchy-crash-watch.service \
-+  omarchy-powerprofiles-source-monitor.service
++  omarchy-powerprofiles-source-monitor.service; do
+   systemctl --user enable --now "$unit" || failed=1
+ done
+ 
 diff --git a/manual/36-system-sleep.md b/manual/36-system-sleep.md
-index df6c8174..59eea46d 100644
+index aa4254e8..f981fd01 100644
 --- a/manual/36-system-sleep.md
 +++ b/manual/36-system-sleep.md
-@@ -6,7 +6,7 @@ Omarchy enables suspend and hibernation by default, but if you're having issues
+@@ -8,7 +8,7 @@ On NVIDIA GB10 machines, such as the DGX Spark and the ASUS Ascent GX10, suspend
  
  On a laptop, Omarchy remembers your power profile separately for plugged in and running on battery, and switches between the two as you plug and unplug. Out of the box that means performance on AC and balanced on battery.
  
@@ -286,10 +288,10 @@ index 00000000..f1c9ebc6
 +  systemctl --user start omarchy-powerprofiles-source-monitor.service >/dev/null 2>&1 || true
 +fi
 diff --git a/shell/plugins/panels/power/Panel.qml b/shell/plugins/panels/power/Panel.qml
-index 4628f8af..d1dd810a 100644
+index c7ceeadd..064c3505 100644
 --- a/shell/plugins/panels/power/Panel.qml
 +++ b/shell/plugins/panels/power/Panel.qml
-@@ -166,7 +166,7 @@ Panel {
+@@ -172,7 +172,7 @@ Panel {
  
    function setProfile(profile) {
      if (!profile || actionProc.running) return
@@ -539,6 +541,3 @@ index 00000000..0569ae4f
 +grep -F 'omarchy-powerprofiles-source-monitor.service' "$ROOT/install/user/first-run/enable-user-units.sh" >/dev/null ||
 +  fail "first run enables the source monitor"
 +pass "the source monitor is enabled everywhere and runs only on ASUS charge_mode hardware"
--- 
-2.55.0
-

@@ -1,7 +1,7 @@
-From 4b55126c436b6a11a7f4a2aa615ffd30737b7d3c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Omarchybot
 Date: Thu, 1 Oct 2026 10:00:24 +0200
-Subject: [PATCH 11/18] Install rtkit on fresh installs and restart the portal
+Subject: [PATCH 11/24] Install rtkit on fresh installs and restart the portal
  before PipeWire
 
 omarchy-other.packages only seeds the ISO's offline mirror; the installer pacstraps omarchy-base.packages, so rtkit listed only in the other list never reaches a fresh install, and fresh installs mark this migration done.
@@ -21,23 +21,23 @@ Backport-of: dac602f5f30f451dca5ac04da02fd89fd3fe5a35
  3 files changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/install/omarchy-base.packages b/install/omarchy-base.packages
-index c5013ba6..83c0e48c 100644
+index a8affbf2..e20674fd 100644
 --- a/install/omarchy-base.packages
 +++ b/install/omarchy-base.packages
-@@ -110,6 +110,7 @@ qrencode
+@@ -125,6 +125,7 @@ qrencode
  qt6-imageformats
  quickshell
  ripgrep
 +rtkit
  ruby
- tensaku
  sddm
+ signed
 diff --git a/install/omarchy-other.packages b/install/omarchy-other.packages
-index cdc848ea..d859fca8 100644
+index a3edbf42..7183ac3c 100644
 --- a/install/omarchy-other.packages
 +++ b/install/omarchy-other.packages
-@@ -36,7 +36,6 @@ pipewire-alsa
- pipewire-jack
+@@ -37,7 +37,6 @@ pipewire-jack
+ pipewire-libcamera
  pipewire-pulse
  qt6-wayland
 -rtkit
@@ -59,6 +59,3 @@ index dac3cfca..47e979b3 100644
  # rtkit only takes effect when PipeWire re-requests priority at startup.
  # Restart the audio units if they are running; harmless when idle or as root.
  systemctl --user try-restart pipewire.service pipewire-pulse.service wireplumber.service 2>/dev/null || true
--- 
-2.55.0
-

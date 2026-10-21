@@ -1,7 +1,7 @@
-From 3e1ed51cacca4a54cd76c462620ba62a5fc8817c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 04:29:38 -0400
-Subject: [PATCH] Repin only the video decode pins Omarchy wrote
+Subject: [PATCH 20/24] Repin only the video decode pins Omarchy wrote
 
 The hybrid video decode pins are checked at Hyprland start and refreshed
 when one names a device that is gone or is the NVIDIA GPU. That check
@@ -267,6 +267,3 @@ index f821352e..156d2ad0 100755
 +cmp -s "$test_tmp/mpv.user" "$home/.config/mpv/mpv.conf" ||
 +  fail "a refresh keeps the user's NVIDIA render node for mpv" "$(cat "$home/.config/mpv/mpv.conf")"
 +pass "a render node the user chose, even the NVIDIA GPU's, is never replaced"
--- 
-2.55.0
-
