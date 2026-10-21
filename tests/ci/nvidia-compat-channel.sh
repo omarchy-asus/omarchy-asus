@@ -8,11 +8,10 @@
 #      stubbed in a copy of ci/), quattro when none is given
 # Offline: no network, no docker, no root.
 set -u
-for t in gpg; do
-    command -v "$t" >/dev/null && continue
-    [[ -n ${CI:-} ]] && { echo "FAIL: $t missing on CI"; exit 1; }
-    echo "skip: $t missing"; exit 0
-done
+if ! command -v gpg >/dev/null; then
+    [[ -n ${CI:-} ]] && { echo "FAIL: gpg missing on CI"; exit 1; }
+    echo "skip: gpg missing"; exit 0
+fi
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
