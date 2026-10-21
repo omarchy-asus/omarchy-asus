@@ -192,7 +192,9 @@ It checks that the target release's signed database exists, takes a snapshot (`-
 without one), rewrites the `[omarchy-asus]` server in `/etc/pacman.d/custom-repos.conf`, then runs
 Omarchy's own `omarchy-channel-set` (it rewrites `/etc/pacman.conf` and the mirrorlist, the hook
 from section 3 puts the Include line back, runs `pacman -Syyuu` and the migrations). `--dry-run`
-prints the steps.
+prints the steps. If the upgrade or a migration fails, the switch stays marked unfinished
+(`~/.local/state/omarchy-asus/channel-switch-pending`): fix the error and run the same command
+again, and it runs the switch again instead of reporting it done.
 
 ## Switching an existing install
 

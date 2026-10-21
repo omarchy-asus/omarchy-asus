@@ -13,6 +13,9 @@
 #   f. the target channel's database can't be downloaded: stops, nothing changed
 #   g. the repo is not set up: stops, nothing changed
 #   h. an unknown channel: usage error
+#   i. omarchy-channel-set rewrites the configs, then its upgrade fails: the switch stays
+#      pending, a rerun runs omarchy-channel-set again (not "already on"), and only a
+#      verified switch clears it
 # Usage: tests/ci/setup-channel.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -50,13 +53,15 @@ cat >"$S/bin/omarchy-channel-set" <<'STUB'
 echo "omarchy-channel-set $*" >>"$OCS_LOG"
 printf '[options]\n\nInclude = %s\n\n[omarchy]\nServer = https://pkgs.omarchy.org/%s/$arch\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' \
     "$OMARCHY_ASUS_CUSTOM_REPOS" "$1" >"$OMARCHY_ASUS_PACMAN_CONF"
+# OCS_FAIL=1: the configs are rewritten, then the -Syyuu / migrations fail
+[[ -z ${OCS_FAIL:-} ]]
 STUB
 for c in pacman-key gpgv bsdtar vercmp; do printf '#!/bin/bash\nexit 0\n' >"$S/bin/$c"; done
 printf '#!/bin/bash\nexec "$@"\n' >"$S/bin/sudo"
 chmod +x "$S"/bin/*
 printf 'y\n' >"$S/tty"
 export PATH=$S/bin:$PATH HOME=$S/home CURL_LOG=$S/curl.log OCS_LOG=$S/ocs.log
-unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME CURL_FAIL
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME CURL_FAIL OCS_FAIL
 export OMARCHY_ASUS_PACMAN_CONF=$S/pacman.conf OMARCHY_ASUS_CUSTOM_REPOS=$S/custom-repos.conf \
     OMARCHY_ASUS_SETUP_TTY=$S/tty OMARCHY_ASUS_SNAPPER_CONFIG=$S/no-snapper
 fail=0
@@ -115,6 +120,8 @@ expect "$(server "$S/custom-repos.conf")" 'https://github.com/omarchy-asus/omarc
 expect "$(cat "$S/ocs.log" 2>/dev/null)" "omarchy-channel-set stable" "omarchy-channel-set stable ran"
 grep -qF 'downgraded to the Quattro versions' "$S/out"; expect $? 0 "says it downgrades"
 expect "$(server "$S/pacman.conf")" 'https://pkgs.omarchy.org/stable/$arch' "[omarchy] on Omarchy stable"
+if [[ -e $S/home/.local/state/omarchy-asus/channel-switch-pending ]]; then r=0; else r=1; fi
+expect "$r" 1 "no switch left pending"
 
 echo "== f. the rc database is missing"
 before=$(sums)
@@ -132,6 +139,19 @@ expect "$(sums)" "$before" "no file changed"
 
 echo "== h. an unknown channel"
 setup --channel edge; expect $? 2 "exits 2"
+
+echo "== i. a switch whose upgrade fails is finished by a rerun"
+P=$S/home/.local/state/omarchy-asus/channel-switch-pending
+conf stable; snippet ''
+OCS_FAIL=1 setup --channel rc; r=$?; expect "$((r != 0))" 1 "the failed switch exits non-zero ($r)"
+expect "$(server "$S/pacman.conf")" 'https://pkgs.omarchy.org/rc/$arch' "the configs are already on rc"
+expect "$(cat "$P" 2>/dev/null)" rc "the rc switch is pending"
+setup --channel rc; expect $? 0 "the rerun exits 0"
+grep -qF 'already on the rc channel' "$S/out"; expect $? 1 "the rerun does not stop at 'already on'"
+expect "$(cat "$S/ocs.log" 2>/dev/null)" "omarchy-channel-set rc" "the rerun runs omarchy-channel-set rc again"
+if [[ -e $P ]]; then r=0; else r=1; fi; expect "$r" 1 "the verified switch clears it"
+setup --channel rc; expect $? 0 "a third run exits 0"
+grep -qF 'already on the rc channel' "$S/out"; expect $? 0 "and says it is already on rc"
 
 ((fail)) && { echo "FAILED"; cat "$S/out"; exit 1; }
 echo "all passed"

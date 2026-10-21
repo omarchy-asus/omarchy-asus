@@ -1710,6 +1710,10 @@ do_uninstall() {
 # first (custom-repos.conf), then Omarchy's own omarchy-channel-set rewrites pacman.conf and
 # the mirrorlist (the pre-refresh hook puts our Include line back), runs pacman -Syyuu, so
 # going back downgrades both to the Quattro versions, and runs the migrations.
+# omarchy-channel-set rewrites the configs before it upgrades and migrates, so matching
+# configs don't prove a switch finished: SWITCH_PENDING names the channel of a switch that
+# started and has not been verified, and a rerun finishes it instead of stopping early.
+SWITCH_PENDING=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-asus/channel-switch-pending
 do_channel() {
   check_user
   check_model
@@ -1720,9 +1724,14 @@ do_channel() {
   info "now:   [omarchy] on Omarchy's $theirs channel, [$REPO] on our $ours channel"
   info "after: [omarchy] on Omarchy's $want channel, [$REPO] on our $CHANNEL channel (the $GH_TAG release)"
   [[ $ours != none ]] || die "the $REPO repo is not set up on this machine; run $SELF first"
+  local pending=''
+  [[ -f $SWITCH_PENDING ]] && pending=$(<"$SWITCH_PENDING")
   if [[ $ours == "$CHANNEL" && $theirs == "$want" ]]; then
-    ok "already on the $CHANNEL channel"
-    return 0
+    if [[ -z $pending ]]; then
+      ok "already on the $CHANNEL channel"
+      return 0
+    fi
+    warn "a switch to the ${pending:-?} channel did not finish (its upgrade or migrations failed); running it again"
   fi
   command -v omarchy-channel-set >/dev/null ||
     die "omarchy-channel-set is missing: this Omarchy can't switch channels; nothing was changed"
@@ -1737,6 +1746,12 @@ do_channel() {
   if ! take_snapshot; then
     ((FORCE)) || die "not switched: without a snapshot a failed migration has no way back. Fix snapper, or run again with --force."
     warn "no snapshot: switching anyway because of --force."
+  fi
+  if ((DRY_RUN)); then
+    info "[dry-run] would record the switch in $SWITCH_PENDING until it is verified"
+  else
+    mkdir -p "${SWITCH_PENDING%/*}" && printf '%s\n' "$CHANNEL" >"$SWITCH_PENDING" ||
+      die "cannot write $SWITCH_PENDING; nothing was changed"
   fi
   install_snippet
   install_hook
@@ -1755,6 +1770,7 @@ do_channel() {
   first=$(first_repo_line)
   [[ -n $inc && $inc -lt $first ]] ||
     die "the $REPO Include line is not above [omarchy]/[core] in $CONF; run $SELF to put it back"
+  rm -f "$SWITCH_PENDING"
   ok "[omarchy] on Omarchy $want, [$REPO] on $CHANNEL ($GH_TAG)"
 }
 
