@@ -13,6 +13,10 @@ Listen to logind instead: its PrepareForSleep(false) resume signal and its
 LidClosed property change are exactly the moments that drift can happen.
 Each runs the same sync with the delayed retries a monitor change gets.
 
+Backport to v4.5.0-rc1: as on quattro, with the lid-inhibit test's gdbus stub
+(that test is new since v4.0.5), so the watcher never listens to the real
+system bus in tests.
+
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 092904dd002552e851bd40439f197b1465c2381b
 Backport-of: 58a8d2e1f7cef99c6096b2f6a3929b5649bbbed2 (fixup)

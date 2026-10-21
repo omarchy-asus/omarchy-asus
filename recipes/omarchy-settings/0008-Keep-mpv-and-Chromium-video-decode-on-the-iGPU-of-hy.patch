@@ -13,8 +13,9 @@ has are kept, and other machines are untouched.
 
 Backport to v4.5.0-rc1: the brave-widevine and platform-app-hooks tests build a
 stub OMARCHY_PATH, so they stand in a no-op hybrid_video_pin_chromium for the
-new helper; default-apps-test runs on the real tree and needs none. nvidia.lua keeps the
-hybrid-cursor require after the stale-pin check.
+new helper; default-apps-test runs on the real tree and needs none. In
+install/user/all.sh the new step follows vm-no-animations.sh; nvidia.lua keeps
+the hybrid-cursor require after the stale-pin check.
 
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 44a952a3bf3e34417b2c1120ecc15c494c0e38fb

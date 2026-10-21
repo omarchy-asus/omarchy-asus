@@ -10,6 +10,10 @@ amd-pmf on balanced: the fans stop (~0.8 W saved) and the CPU still
 boosts fully. A helper with a two-argument sudoers grant does the write,
 only when the state changes, since each write wakes the dGPU for ~20 s.
 
+Backport to v4.5.0-rc1: as on quattro; the quiet-fans call follows the
+shell's `omarchy-shell -q battery refreshPowerProfile` after powerprofilesctl
+set.
+
 Co-Authored-By: Claude Opus 5.5
 Backport-of: c55ffe2b0b6ad1a81bd012dc5130294b36544556
 Backport-of: 2abed31b3cbf71db54d64a6a34dbe24120b6c30c (fixup)

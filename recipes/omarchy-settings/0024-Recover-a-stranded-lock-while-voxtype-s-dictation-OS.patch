@@ -4,7 +4,7 @@ Date: Sun, 18 Oct 2026 21:47:36 -0400
 Subject: [PATCH 24/24] Recover a stranded lock while voxtype's dictation OSD
  is running
 
-Backport-of: omacom/omarchy#15890 (ae5ca034), applies to v4.0.5 unchanged.
+Backport-of: omacom/omarchy#15890 (ae5ca034), applies to v4.5.0-rc1 unchanged.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

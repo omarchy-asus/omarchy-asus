@@ -8,6 +8,10 @@ list and the account list. Only status feeds the bar icon; exit nodes and
 accounts are shown in the panel alone. Fetch those when the panel opens and
 while it is open, so the background poll is one client.
 
+Backport to v4.5.0-rc1: as on quattro; Panel.qml keeps upstream's
+loadedContent focus call on open, and only the tailscale.refresh() call is
+removed.
+
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 1b7804501d4d8b3855e7f7efbdf3a1e2e9512db8
 
