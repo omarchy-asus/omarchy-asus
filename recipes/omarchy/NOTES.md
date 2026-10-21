@@ -2,7 +2,9 @@
 
 **Base:** Omarchy's `omarchy` and `omarchy-settings` 4.5.0rc1-1 recipes (omacom/omarchy-pkgs
 `bed2ea5` "Release omarchy 4.5.0rc1" on its `rc` branch, source omacom/omarchy `v4.5.0-rc1` =
-`03ff1eff`). A release candidate: Omarchy's stable channel is still on 4.0.6. Both
+`03ff1eff`). A release candidate, on the RC channel only (branch `next/omarchy-4.5`, release
+`rc-x86_64`): the Quattro channel (`main`, release `x86_64`) keeps the 4.0.6 recipes until Omarchy's
+stable channel moves. Both
 packages build from the same source tree, so `recipes/omarchy` and `recipes/omarchy-settings`
 carry the **same** patch list, in the same order (their DELTA files must stay in lockstep).
 
