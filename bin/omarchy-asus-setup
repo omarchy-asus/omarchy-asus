@@ -10,6 +10,13 @@
 #   omarchy-asus-setup --uninstall   undo it and go back to the stock builds
 #   omarchy-asus-setup --dry-run     print every privileged command instead of running it
 #   omarchy-asus-setup --force       skip the GA605 model check, and upgrade even when no snapshot could be taken
+#   omarchy-asus-setup --channel rc       move [omarchy] and [omarchy-asus] to their RC channels together
+#   omarchy-asus-setup --channel quattro  move both back to Omarchy stable and our x86_64 release,
+#                                         downgrading to their versions
+#
+# Our channels are pinned to Omarchy's: quattro (the x86_64 release) goes with Omarchy stable,
+# rc (the rc-x86_64 release) with Omarchy rc. A first setup picks the one that matches the
+# machine's Omarchy channel.
 set -euo pipefail
 
 REPO=omarchy-asus
@@ -17,7 +24,6 @@ FPR=0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
 GH_REPO=omarchy-asus/omarchy-asus
 GH_BRANCH=main
 KEY_URL=https://raw.githubusercontent.com/$GH_REPO/$GH_BRANCH/keys/omarchy-asus.asc
-DB_URL=https://github.com/$GH_REPO/releases/download/x86_64/$REPO.db
 KEYRING_PKG=omarchy-asus-keyring
 # Offered as the optional last step on a fresh install.
 G16_PKGS=(omarchy-asus-g16 asus-rog-nkey-winlock omarchy-asus-g16-apply)
@@ -33,11 +39,18 @@ MARKER="Include = $SNIPPET"
 HOOK_DIR=$HOME/.config/omarchy/hooks/pre-refresh-pacman.d
 HOOK=$HOOK_DIR/add-omarchy-asus-repo
 
-# The repo section of /etc/pacman.d/custom-repos.conf (LAPTOP-SETUP.md section 2).
-# shellcheck disable=SC2016 # $arch is expanded by pacman, not by this script
-REPO_BLOCK='[omarchy-asus]
-SigLevel = Required
-Server = https://github.com/omarchy-asus/omarchy-asus/releases/download/$arch'
+# Release channels (README "Release channels"): each of ours rides one of Omarchy's.
+channel_tag() { case $1 in quattro) echo x86_64 ;; rc) echo rc-x86_64 ;; *) return 1 ;; esac; }
+channel_omarchy() { case $1 in quattro) echo stable ;; rc) echo rc ;; *) return 1 ;; esac; }
+
+# The repo section of /etc/pacman.d/custom-repos.conf for a channel (LAPTOP-SETUP.md section 2).
+repo_block() {
+  local prefix=''
+  [[ $1 == quattro ]] || prefix=$1-
+  # shellcheck disable=SC2016 # $arch is expanded by pacman, not by this script
+  printf '[%s]\nSigLevel = Required\nServer = https://github.com/%s/releases/download/%s$arch' \
+    "$REPO" "$GH_REPO" "$prefix"
+}
 
 # The pre-refresh hook (LAPTOP-SETUP.md section 3).
 # shellcheck disable=SC2016 # written out verbatim
@@ -57,6 +70,7 @@ sudo sed -i -E "0,/^\[(omarchy|core)\]$/s||$MARKER\n\n&|" "$CONF"'
 DRY_RUN=0
 FORCE=0
 MODE=install
+CHANNEL_ARG=''
 
 # Test hooks, set only by tests/ci/omarchy-asus-setup-etc-takeover.sh: ROOT prefixes the
 # /etc paths the takeover checks and moves (pacman always gets the real path), TTY stands
@@ -81,20 +95,26 @@ fi
 
 usage() {
   if [[ -f $0 ]]; then
-    sed -n '2,14s/^# \{0,1\}//p' "$0"
+    sed -n '2,19s/^# \{0,1\}//p' "$0"
   else
-    echo "usage: omarchy-asus-setup [--uninstall] [--dry-run] [--force]"
+    echo "usage: omarchy-asus-setup [--uninstall] [--channel quattro|rc] [--dry-run] [--force]"
   fi
 }
 
-for arg in "$@"; do
-  case $arg in
+while (($#)); do
+  case $1 in
     --uninstall) MODE=uninstall ;;
     --dry-run) DRY_RUN=1 ;;
     --force) FORCE=1 ;;
+    --channel)
+      MODE=channel CHANNEL_ARG=${2:-}
+      channel_tag "$CHANNEL_ARG" >/dev/null || { echo "--channel needs quattro or rc" >&2; usage >&2; exit 2; }
+      shift
+      ;;
     -h | --help) usage; exit 0 ;;
-    *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
+  shift
 done
 
 # Prefixed names: tests source this file, and one-letter globals would clobber theirs.
@@ -161,6 +181,58 @@ snippet_without_repo() {
   awk -v sec="[$REPO]" '$0 == sec { skip = 1; next } /^\[/ { skip = 0 } !skip' "$SNIPPET"
 }
 
+# Omarchy's channel, from the [omarchy] server in pacman.conf (as omarchy-version-channel
+# reads it): stable, rc, edge or unknown.
+omarchy_channel() {
+  local server
+  server=$(awk '/^\[/ { sec = $0; next } sec == "[omarchy]" && /^[[:space:]]*Server[[:space:]]*=/ { print; exit }' "$CONF")
+  case $server in
+    *pkgs.omarchy.org/stable/*) echo stable ;;
+    *pkgs.omarchy.org/rc/*) echo rc ;;
+    *pkgs.omarchy.org/edge/*) echo edge ;;
+    *) echo unknown ;;
+  esac
+}
+
+# Our channel, from the [omarchy-asus] server in custom-repos.conf: quattro, rc, other or none.
+asus_channel() {
+  [[ -f $SNIPPET ]] || { echo none; return 0; }
+  local server
+  server=$(awk -v sec="[$REPO]" '/^\[/ { on = ($0 == sec); seen = seen || on; next }
+    on && /^[[:space:]]*Server[[:space:]]*=/ { print; exit } END { if (!seen) print "none" }' "$SNIPPET")
+  case $server in
+    none) echo none ;;
+    */releases/download/rc-\$arch) echo rc ;;
+    */releases/download/\$arch) echo quattro ;;
+    *) echo other ;;
+  esac
+}
+
+# use_channel NAME: the release, database URL and repo section of our channel NAME.
+use_channel() {
+  CHANNEL=$1
+  GH_TAG=$(channel_tag "$CHANNEL")
+  DB_URL=https://github.com/$GH_REPO/releases/download/$GH_TAG/$REPO.db
+  REPO_BLOCK=$(repo_block "$CHANNEL")
+}
+use_channel quattro
+
+# The channel this run sets up: --channel, else the one that matches Omarchy's.
+set_channel() {
+  if [[ -n $CHANNEL_ARG ]]; then
+    use_channel "$CHANNEL_ARG"
+    return 0
+  fi
+  case $(omarchy_channel) in
+    rc) use_channel rc ;;
+    stable) use_channel quattro ;;
+    *)
+      use_channel quattro
+      warn "[omarchy] is on neither Omarchy's stable nor its rc channel; using our quattro channel (Omarchy stable)"
+      ;;
+  esac
+}
+
 # Line numbers of the Include line and of the first [omarchy]/[core] header (0 = absent).
 include_line() { grep -nxF "$MARKER" "$CONF" | head -n1 | cut -d: -f1 || true; }
 first_repo_line() { grep -nE '^\[(omarchy|core)\]$' "$CONF" | head -n1 | cut -d: -f1 || true; }
@@ -224,10 +296,13 @@ fetch_key() {
 
 # Show which installed packages the repo would replace, from its signed database
 # (read-only: nothing on the system changes).
+# With 'required' (a channel switch), a database that can't be downloaded stops the script.
 preview_repo() {
-  step "Packages in the $REPO repo (signed database, read-only check)"
+  step "Packages in the $REPO repo, $CHANNEL channel (signed database, read-only check)"
   if ! curl -fsSL --proto '=https' -o "$TMP/repo.db" "$DB_URL" ||
     ! curl -fsSL --proto '=https' -o "$TMP/repo.db.sig" "$DB_URL.sig"; then
+    [[ ${1:-} == required ]] &&
+      die "could not download the $CHANNEL channel's database ($DB_URL); nothing was changed"
     warn "could not download the repo database; skipping the preview"
     return 0
   fi
@@ -632,7 +707,7 @@ unowned_etc_of() {
       UNOWNED_ERR="the files database has no file name for $name"
       return 2
     fi
-    url=https://github.com/$GH_REPO/releases/download/x86_64/$url
+    url=https://github.com/$GH_REPO/releases/download/$GH_TAG/$url
   fi
   pkg=$TMP/${url##*/}
   if ! curl -fsSL --proto '=https' -o "$pkg" "$url" ||
@@ -1503,10 +1578,15 @@ do_install() {
   banner
   check_user
   check_model
+  set_channel
+  step "Channel"
+  info "[omarchy] is on Omarchy's $(omarchy_channel) channel: setting up our $CHANNEL channel (the $GH_TAG release)."
+  info "Switch both together later with: $SELF --channel quattro|rc"
   preflight_warnings
   confirm "Switch this machine to the EXPERIMENTAL omarchy-asus repo?" || die "cancelled"
   fetch_key
-  preview_repo
+  # The RC release may not exist yet: stop before anything changes rather than at the keyring.
+  if [[ $CHANNEL == rc ]]; then preview_repo required; else preview_repo; fi
   install_key
   install_snippet
   install_hook
@@ -1626,6 +1706,74 @@ do_uninstall() {
   offer_leftover_removal "${snapshot[@]}"
 }
 
+# --channel: move [omarchy] and [omarchy-asus] to a channel pair together. Ours is switched
+# first (custom-repos.conf), then Omarchy's own omarchy-channel-set rewrites pacman.conf and
+# the mirrorlist (the pre-refresh hook puts our Include line back), runs pacman -Syyuu, so
+# going back downgrades both to the Quattro versions, and runs the migrations.
+# omarchy-channel-set rewrites the configs before it upgrades and migrates, so matching
+# configs don't prove a switch finished: SWITCH_PENDING names the channel of a switch that
+# started and has not been verified, and a rerun finishes it instead of stopping early.
+SWITCH_PENDING=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-asus/channel-switch-pending
+do_channel() {
+  check_user
+  check_model
+  set_channel
+  local ours theirs want
+  ours=$(asus_channel) theirs=$(omarchy_channel) want=$(channel_omarchy "$CHANNEL")
+  step "Switching to the $CHANNEL channel"
+  info "now:   [omarchy] on Omarchy's $theirs channel, [$REPO] on our $ours channel"
+  info "after: [omarchy] on Omarchy's $want channel, [$REPO] on our $CHANNEL channel (the $GH_TAG release)"
+  [[ $ours != none ]] || die "the $REPO repo is not set up on this machine; run $SELF first"
+  local pending=''
+  [[ -f $SWITCH_PENDING ]] && pending=$(<"$SWITCH_PENDING")
+  if [[ $ours == "$CHANNEL" && $theirs == "$want" ]]; then
+    if [[ -z $pending ]]; then
+      ok "already on the $CHANNEL channel"
+      return 0
+    fi
+    warn "a switch to the ${pending:-?} channel did not finish (its upgrade or migrations failed); running it again"
+  fi
+  command -v omarchy-channel-set >/dev/null ||
+    die "omarchy-channel-set is missing: this Omarchy can't switch channels; nothing was changed"
+  info "Both move together: Omarchy's migrations can install packages only its matching repo has,"
+  info "and one failed migration holds back every later one, ours included."
+  if [[ $CHANNEL == quattro ]]; then
+    info "Going back runs pacman -Syyuu: the RC builds, Omarchy's and ours, are downgraded to the Quattro versions."
+  fi
+  confirm "Switch [omarchy] to Omarchy $want and [$REPO] to $CHANNEL?" || die "cancelled"
+  fetch_key
+  preview_repo required
+  if ! take_snapshot; then
+    ((FORCE)) || die "not switched: without a snapshot a failed migration has no way back. Fix snapper, or run again with --force."
+    warn "no snapshot: switching anyway because of --force."
+  fi
+  if ((DRY_RUN)); then
+    info "[dry-run] would record the switch in $SWITCH_PENDING until it is verified"
+  else
+    mkdir -p "${SWITCH_PENDING%/*}" && printf '%s\n' "$CHANNEL" >"$SWITCH_PENDING" ||
+      die "cannot write $SWITCH_PENDING; nothing was changed"
+  fi
+  install_snippet
+  install_hook
+  step "Switching Omarchy to its $want channel (omarchy-channel-set $want)"
+  info "It rewrites $CONF and the mirrorlist (the hook puts the $REPO Include line back), runs"
+  info "pacman -Syyuu and then 'omarchy update' for the migrations."
+  if ((DRY_RUN)); then
+    info "[dry-run] omarchy-channel-set $want"
+    return 0
+  fi
+  omarchy-channel-set "$want" <"$TTY" ||
+    die "omarchy-channel-set $want failed; [$REPO] is already on $CHANNEL. Fix the error and run '$SELF --channel $CHANNEL' again."
+  [[ $(omarchy_channel) == "$want" ]] || die "[omarchy] in $CONF is not on Omarchy's $want channel after the switch"
+  local inc first
+  inc=$(include_line)
+  first=$(first_repo_line)
+  [[ -n $inc && $inc -lt $first ]] ||
+    die "the $REPO Include line is not above [omarchy]/[core] in $CONF; run $SELF to put it back"
+  rm -f "$SWITCH_PENDING"
+  ok "[omarchy] on Omarchy $want, [$REPO] on $CHANNEL ($GH_TAG)"
+}
+
 # Tests source this file to call its functions; they stop here, before anything runs.
 [[ ${OMARCHY_ASUS_SETUP_SOURCE_ONLY:-0} == 1 ]] && return 0
 
@@ -1633,4 +1781,5 @@ do_uninstall() {
 case $MODE in
   install) do_install ;;
   uninstall) do_uninstall ;;
+  channel) do_channel ;;
 esac
