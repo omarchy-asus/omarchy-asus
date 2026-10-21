@@ -34,7 +34,10 @@ expect "b: two docker run lines start ci/build-recipe (build and kernel jobs)" \
 expect "b: those docker runs pass no env, privilege, docker socket or seccomp change" \
     "$(printf '%s\n' "$runs" | grep -c -F -e ' -e ' -e '--env' -e '--privileged' -e 'docker.sock' -e 'seccomp')" 0
 expect "b: the kernel run's continuation was joined (its image and script are on one line)" \
-    "$(printf '%s\n' "$runs" | grep -c 'docker run.*"\$DIR/work:/build".*ci/build-recipe linux-omarchy')" 1
+    "$(printf '%s\n' "$runs" | grep -c 'docker run.*"\$DIR/work:/build".*ci/build-recipe --channel "\$CHANNEL" linux-omarchy')" 1
+# The channel reaches the container as an argument, not through its environment (#168).
+expect "b: both docker runs pass the PR's channel to ci/build-recipe" \
+    "$(printf '%s\n' "$runs" | grep -c 'ci/build-recipe --channel "\$CHANNEL" ')" 2
 
 # c. checkout never persists credentials
 expect "c: every persist-credentials value is false" \

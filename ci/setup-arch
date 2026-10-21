@@ -3,12 +3,13 @@
 # root inside ghcr.io/archlinux/archlinux:base-devel):
 #   - the Omarchy signing key from the committed ci/omarchy-signing-key.asc,
 #     checked against OMARCHY_KEY's fingerprint; the keyserver only if that fails
-#   - the same package sources as the build chroot: build/pacman.conf (Omarchy
-#     stable snapshot of Arch + [omarchy]), synced with -uu so every installed
+#   - the same package sources as the channel's build chroot: build/pacman.conf
+#     (Quattro: Omarchy stable snapshot of Arch + [omarchy]) or, with --channel rc,
+#     build/pacman-rc.conf (Omarchy rc), synced with -uu so every installed
 #     package matches the snapshot exactly, downgrades included
 #   - the devtools makepkg.conf that bin/mkchroot gives the chroot
 #   - an unprivileged "builder" user (makepkg refuses root) with sudo for pacman
-# Usage: ci/setup-arch [extra packages to install]
+# Usage: ci/setup-arch [--channel quattro|rc] [extra packages to install]
 # Sourced with SETUP_ARCH_SOURCE_ONLY=1 it only defines the functions (tests/ci).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -59,12 +60,19 @@ import_omarchy_key() {
 
 [[ ${SETUP_ARCH_SOURCE_ONLY:-} == 1 ]] && return 0
 
+channel=quattro
+if [[ ${1:-} == --channel ]]; then
+    channel=${2:?usage: ci/setup-arch [--channel quattro|rc] [packages]}
+    shift 2
+fi
+conf=$("$repo/ci/channel" --conf "$channel")
+
 pacman-key --init >/dev/null 2>&1
 pacman-key --populate archlinux >/dev/null 2>&1
 import_omarchy_key
 
-cp "$repo/build/pacman.conf" /etc/pacman.conf
-echo "==> package sources (build/pacman.conf):"
+cp "$repo/$conf" /etc/pacman.conf
+echo "==> package sources ($channel channel, $conf):"
 grep -E '^(\[|Server)' /etc/pacman.conf
 pacman -Syyuu --noconfirm --needed --noprogressbar omarchy-keyring base-devel devtools "$@"
 pacman-key --populate omarchy >/dev/null
