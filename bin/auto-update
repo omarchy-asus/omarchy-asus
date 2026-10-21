@@ -1,8 +1,15 @@
 #!/bin/bash
 # Daily "keep it current" run for the omarchy-asus repo.
 #
-# Usage: bin/auto-update [--dry-run | --plan] [--recipe NAME]... [--workspace DIR] [--config FILE]
+# Usage: bin/auto-update [--channel quattro|rc] [--dry-run | --plan] [--recipe NAME]... [--workspace DIR] [--config FILE]
 #
+#   --channel     serve this release channel only (bin/env.sh): quattro (main, Omarchy stable,
+#                 the x86_64 release) or rc (next/omarchy-4.5, Omarchy rc, the rc-x86_64
+#                 release). Without it, every channel in SERVE_CHANNELS (config, default
+#                 "quattro rc") is served in turn, each by its own run of this script with
+#                 its own bot clone, lock, log and status; one channel's failure does not stop
+#                 the next, and the exit is 1 when any failed. SERVE_CHANNELS=quattro runs
+#                 exactly the quattro run, in this process.
 #   --plan        only check upstream and print what would be done
 #   --dry-run     also rebase and verify (makepkg --nobuild) in $DATA/auto-update/runs;
 #                 no chroot build, no push/PR/merge, no publish/unpublish/sync
@@ -45,7 +52,12 @@
 #   An unreadable build/revdeps.conf withdraws nothing (attention); retried removals get the check too.
 #   The service compares its installed copy with bin/ of the refreshed bot clone (install stamp
 #   from bin/install-auto-update): any difference records "(pipeline)" attention and stops the
-#   run before any unpublish, publish or sync.
+#   run before any unpublish, publish or sync. The RC run compares it with bin/ of main (the
+#   pipeline is installed from main), not of next/omarchy-4.5.
+#   The RC channel's state lives in $DATA/channel-rc ($CHANNEL_DATA): bot clone, runs, status,
+#   lock and journals; its rebase PRs use branches auto-update-rc/<r> into next/omarchy-4.5.
+#   Its build chroot (bin/mkchroot --channel rc) is created, or re-made from the installed
+#   build/pacman-rc.conf, before its first build when missing or on other package sources.
 #
 # Root vs user: run as root (systemd), only the chroot build runs as root; every other
 # step runs as BUILD_USER via runuser. Run as a normal user, the build uses sudo.
@@ -55,16 +67,18 @@
 set -euo pipefail
 LIB=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
 
-mode=full workspace_arg='' config='' recipes=()
+mode=full workspace_arg='' config='' recipes=() channel_arg=''
+orig_args=("$@")
 while (($#)); do
     case $1 in
+        --channel) channel_arg=${2:?--channel needs quattro or rc}; shift ;;
         --dry-run) mode=dry ;;
         --plan) mode=plan ;;
         --ai-review-state) mode=crstate; cr_pr=$2; shift ;;
         --recipe) recipes+=("$2"); shift ;;
         --workspace) workspace_arg=$(realpath "$2"); shift ;;
         --config) config=$2; shift ;;
-        -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,69p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
     shift
@@ -77,7 +91,8 @@ fi
 if [[ $EUID -eq 0 ]]; then
     config=${config:-/etc/omarchy-asus/auto-update.conf}
     # Running as root: refuse code or config that a non-root user could have changed.
-    bad=$(find "$LIB" "$LIB/.." -maxdepth 1 \( ! -user root -o -perm /022 \) -print 2>/dev/null | head -3)
+    # (build/: the chroots' pacman.confs, which root reads for bin/build-pkg and bin/mkchroot)
+    bad=$(find "$LIB" "$LIB/.." "$LIB/../build" -maxdepth 1 \( ! -user root -o -perm /022 \) -print 2>/dev/null | head -3)
     [[ -z $bad ]] || { echo "refusing to run as root: not root-owned or group/world-writable: $bad" >&2
                        echo "install with bin/install-auto-update; never run a workspace copy as root" >&2; exit 1; }
     [[ -f $config && $(stat -c %u "$config") -eq 0 && $(( 0$(stat -c %a "$config") & 022 )) -eq 0 ]] ||
@@ -89,6 +104,7 @@ BUILD_USER='' GIT_URL='' BASE_BRANCH='' MERGE_MODE=auto REVIEW_TIMEOUT=1200
 SKIP_RECIPES='' BUILD_NOT_BUILT=yes KEEP_PUBLISHED='' FETCH_FAIL_UNPUBLISH_AFTER=2 EXTRA_PATH='' GH_TOKEN_FILE=''
 FAIL_ON_ATTENTION=no AI_REVIEW=required AI_REVIEW_TIMEOUT=1800 AI_REVIEW_EFFORT='' VERIFIER='' OPENROUTER_API_KEY_FILE=''
 MAX_FIX_ROUNDS=2 REPLY_LIMIT=10 DB_MAX_STALE=86400
+SERVE_CHANNELS='quattro rc'   # the release channels a run without --channel serves, in order
 REQUIRE_AGENT_APPROVAL=no   # the fixer's own verdict; the review gate is ai-review (Codex)
 # Passed through to bin/publish, bin/unpublish and bin/sync-release when the config sets them
 # (their own defaults otherwise): PRUNE_GRACE_HOURS=72 (hours before superseded release assets
@@ -108,21 +124,59 @@ else
     BUILD_USER=$(id -un)
 fi
 export BUILD_USER
-source "$LIB/env.sh"   # DATA, REPO_DIR, GH_REPO, ... for BUILD_USER
+# The channel: --channel, else the only one SERVE_CHANNELS names; several: one run of this
+# script per channel, in turn (each takes its own lock), and the worst exit. A config
+# BASE_BRANCH applies to quattro only; the RC run's base is next/omarchy-4.5 (bin/env.sh).
+if [[ -z $channel_arg && $mode != crstate ]]; then
+    read -r -a serve <<<"$SERVE_CHANNELS"
+    ((${#serve[@]})) || { echo "SERVE_CHANNELS is empty in $config" >&2; exit 64; }
+    for c in "${serve[@]}"; do
+        [[ $c == quattro || $c == rc ]] || { echo "SERVE_CHANNELS: unknown channel '$c' (quattro, rc)" >&2; exit 64; }
+    done
+    if ((${#serve[@]} == 1)); then
+        channel_arg=${serve[0]}
+    else
+        worst=0
+        for c in "${serve[@]}"; do
+            echo "auto-update: serving the $c channel"
+            crc=0
+            "$LIB/auto-update" --channel "$c" "${orig_args[@]}" || crc=$?
+            ((crc == 0)) || echo "auto-update: the $c channel's run exited $crc"
+            # a failure (1) outranks a busy lock (75) or a usage error
+            if ((crc != 0)) && ((worst == 0 || crc == 1)); then worst=$crc; fi
+        done
+        exit "$worst"
+    fi
+fi
+export OMARCHY_ASUS_CHANNEL=${channel_arg:-quattro}
+conf_base=$BASE_BRANCH
+source "$LIB/env.sh"   # DATA, REPO_DIR, GH_REPO, CHANNEL, ... for BUILD_USER
 GIT_URL=${GIT_URL:-https://github.com/$GH_REPO.git}
-BASE_BRANCH=${BASE_BRANCH:-$GH_BRANCH}
+if [[ $CHANNEL == quattro ]]; then
+    BASE_BRANCH=${conf_base:-$GH_BRANCH}
+    PIPELINE_BRANCH=$BASE_BRANCH   # where the installed pipeline comes from
+    AU=$DATA/auto-update
+    BRANCH_PREFIX=auto-update
+    LOG_TAG=auto-update
+else
+    BASE_BRANCH=$GH_BRANCH
+    PIPELINE_BRANCH=${conf_base:-main}
+    AU=$CHANNEL_DATA/auto-update
+    BRANCH_PREFIX=auto-update-$CHANNEL
+    LOG_TAG=auto-update-$CHANNEL
+fi
 REVIEW_CMD=${REVIEW_CMD-claude -p --output-format json --no-session-persistence --allowedTools Read Grep Glob --disallowedTools Bash NotebookEdit WebFetch WebSearch}
 user_home=$(getent passwd "$BUILD_USER" | cut -d: -f6)
 # root: a fixed PATH plus EXTRA_PATH (where gh/claude live for the user); user: the caller's
 if [[ $EUID -eq 0 ]]; then user_path=${EXTRA_PATH:+$EXTRA_PATH:}/usr/local/sbin:/usr/local/bin:/usr/bin
 else user_path=${EXTRA_PATH:+$EXTRA_PATH:}$PATH; fi
-AU=$DATA/auto-update
 CLONE=${workspace_arg:-$AU/checkout}
 run_id=$(date +%Y%m%d-%H%M%S)
 RUN=$AU/runs/$run_id
-STATUS=$DATA/status.json
-SUMMARY=$DATA/status.md
-LOG=$DATA/logs/auto-update-$run_id.log
+STATUS=$CHANNEL_DATA/status.json
+SUMMARY=$CHANNEL_DATA/status.md
+LOG=$DATA/logs/$LOG_TAG-$run_id.log
+LOCK=$CHANNEL_DATA/auto-update.lock
 GH_TOKEN=
 # Token files outside /home: bin/recipe-sandbox hides these too (as_user, and the root
 # build-pkg call, whose runuser keeps the environment).
@@ -139,6 +193,7 @@ pass_env=(OMARCHY_ASUS_UPSTREAM_OVERRIDE OMARCHY_ASUS_ARCH_GIT_URL OMARCHY_ASUS_
 as_user() {
     local e=(HOME="$user_home" USER="$BUILD_USER" LOGNAME="$BUILD_USER" LANG=C.UTF-8 PATH="$user_path"
              OMARCHY_ASUS_WORKSPACE="$CLONE" OMARCHY_ASUS_DATA="$DATA" GNUPGHOME="$DATA/gnupg"
+             OMARCHY_ASUS_CHANNEL="$CHANNEL"
              GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1)
     [[ -n $GH_TOKEN ]] && e+=(GH_TOKEN="$GH_TOKEN")
     [[ -n $sandbox_hide ]] && e+=(OMARCHY_ASUS_SANDBOX_HIDE="$sandbox_hide")
@@ -160,20 +215,22 @@ if [[ $mode != crstate ]] && ! as_user "$LIB/recipe-sandbox" -- /usr/bin/true; t
 fi
 
 # ---------------------------------------------------------------- lock + log
-as_user mkdir -p "$DATA/logs" "$AU/runs"
+as_user mkdir -p "$DATA/logs" "$AU/runs" "$CHANNEL_DATA"
 if [[ $EUID -eq 0 ]]; then
     # The lock file lives in the user's state dir; root never opens it. A user-side
     # flock holds it for as long as this process keeps the coprocess's stdin open.
-    coproc LOCKER { runuser -u "$BUILD_USER" -- flock -n "$DATA/auto-update.lock" sh -c 'echo locked; exec cat >/dev/null'; }
+    coproc LOCKER { runuser -u "$BUILD_USER" -- flock -n "$LOCK" sh -c 'echo locked; exec cat >/dev/null'; }
     read -r -t 30 got <&"${LOCKER[0]}" || got=
-    [[ $got == locked ]] || { echo "another auto-update run holds $DATA/auto-update.lock" >&2; exit 75; }
+    [[ $got == locked ]] || { echo "another auto-update run holds $LOCK" >&2; exit 75; }
 else
-    exec 9>"$DATA/auto-update.lock"
-    flock -n 9 || { echo "another auto-update run holds $DATA/auto-update.lock" >&2; exit 75; }
+    exec 9>"$LOCK"
+    flock -n 9 || { echo "another auto-update run holds $LOCK" >&2; exit 75; }
 fi
 exec > >(as_user tee -a "$LOG") 2>&1
 as_user mkdir -p "$RUN"
 echo "auto-update $run_id: mode=$mode user=$BUILD_USER merge=$MERGE_MODE log=$LOG"
+[[ $CHANNEL == quattro ]] ||
+    echo "channel $CHANNEL: $BASE_BRANCH, Omarchy $OMARCHY_CHANNEL, release $GH_TAG, state $CHANNEL_DATA"
 
 if [[ -n $GH_TOKEN_FILE ]]; then
     GH_TOKEN=$(as_user cat "$GH_TOKEN_FILE") || { echo "cannot read GH_TOKEN_FILE $GH_TOKEN_FILE" >&2; exit 1; }
@@ -184,7 +241,7 @@ note() { echo "[$1] $2"; }
 record() { as_user "$LIB/auto-update-state" record "$STATUS" "$run_id" "$@"; }
 
 # ---------------------------------------------------------------- repo helpers
-# bin/publish and bin/unpublish write the journal $DATA/sync-pending before they change the
+# bin/publish and bin/unpublish write the journal $CHANNEL_DATA/sync-pending before they change the
 # local repo, and bin/sync-release removes it only once the release matches the local repo:
 # while it exists the release may lag, and every run syncs first. $AU/sync-pending is the
 # marker older versions of this script wrote; it is still honoured and removed on success.
@@ -194,7 +251,7 @@ sync_now() {
     as_user "$LIB/sync-release" || rc=$?
     if ((rc == 0)); then as_user rm -f "$AU/sync-pending"
     else
-        as_user touch "$DATA/sync-pending"
+        as_user touch "$CHANNEL_DATA/sync-pending"
         note sync "sync-release failed (exit $rc); retried next run"; failed=1
     fi
 }
@@ -639,7 +696,7 @@ current_flags() {  # current_flags <saved flags> <plan note> <recipe dir as prop
 
 # ---------------------------------------------------------------- per-recipe actions
 handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
-    local r=$1 target=$2 in_repo=$3 pnote=$4 branch=auto-update/$1 out=$RUN/$1 report=$RUN/$1.json rc=0
+    local r=$1 target=$2 in_repo=$3 pnote=$4 branch=$BRANCH_PREFIX/$1 out=$RUN/$1 report=$RUN/$1.json rc=0
     local saved=$AU/state/$1.report.json new_ver
     # Already proposed at this version? Resume driving that PR (build, reviews, gates).
     if [[ $mode == full ]] && ugit ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
@@ -696,6 +753,7 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
     # Commit, scan, push, open the PR (ready for review; bin/ai-review reviews it below).
     local body; body=$(as_user jq -r '"Upstream: \(.upstream_source.url) \(.upstream_source.ref)\nFrom \(.from) to \(.to)\nFiles added: \(.files_added|join(", "))\nFiles removed: \(.files_removed|join(", "))\nPatches re-applied: \(.patches|join(", "))\nPatch fuzz: \(if .fuzz then "YES" else "none" end); offset hunks: \(.verify_offset_hunks)\nFlags: \(.flags|join("; "))"' "$report")
     local title="$r: rebase onto upstream $target ($new_ver)" prbody
+    [[ $CHANNEL == quattro ]] || title="$title on the ${CHANNEL^^} channel"
     prbody="Automated rebase by \`bin/auto-update\` (run $run_id). The chroot build, the Codex ai-review (the review gate) and the Claude fixer are reported in one comment per run; it merges itself only when every gate passes.
 
 $body"
@@ -981,6 +1039,33 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
     fi
 }
 
+ensure_chroot() {  # ensure_chroot: 0 when this channel's build chroot exists on its package sources
+    # (bin/env.sh channel_conf_ok against the installed build/<pacman conf>); otherwise runs
+    # bin/mkchroot for the channel (create, or update with the channel's pacman.conf) first.
+    # Only the RC run calls it: the quattro chroot is made by hand (systemd/README.md, Install).
+    local rc=0 log=$RUN/mkchroot.log
+    if [[ -d $CHROOT/root ]] && channel_conf_ok "$CHROOT/root/etc/pacman.conf"; then
+        as_user "$LIB/auto-update-state" forget "$STATUS" "(chroot)" || true
+        return 0
+    fi
+    note chroot "the $CHANNEL build chroot $CHROOT is missing or not on ${PACMAN_CONF##*/}: running bin/mkchroot --channel $CHANNEL"
+    if [[ $EUID -eq 0 ]]; then
+        "$LIB/mkchroot" --channel "$CHANNEL" 2>&1 | as_user tee "$log" >/dev/null || rc=$?
+    else
+        as_user "$LIB/mkchroot" --channel "$CHANNEL" 2>&1 | as_user tee "$log" >/dev/null || rc=$?
+    fi
+    if ((rc == 0)) && [[ -d $CHROOT/root ]] && channel_conf_ok "$CHROOT/root/etc/pacman.conf"; then
+        note chroot "$CHANNEL build chroot ready"
+        as_user "$LIB/auto-update-state" forget "$STATUS" "(chroot)" || true
+        return 0
+    fi
+    local msg="bin/mkchroot --channel $CHANNEL failed (exit $rc, see run $run_id: ${log##*/}): its builds fail until it succeeds"
+    note chroot "$msg"
+    record "(chroot)" failed none class=chroot message="$msg" || true
+    failed=1
+    return 1
+}
+
 upstream_dbs_check() { # upstream_dbs_check <check.json>
     # An upstream db that could not be fetched was used from cache: say so (attention). Past
     # DB_MAX_STALE it is "expired", and the plan withdraws what overrides upstream. Once
@@ -1005,14 +1090,21 @@ upstream_dbs_check() { # upstream_dbs_check <check.json>
 
 pipeline_drift() {  # pipeline_drift <stamp> <installed bin dir> <clone>: 0 and a one-line reason on stdout when the installed pipeline differs from <clone>/bin, 1 when it matches
     # Cheap and offline: sha256sum only, no git, no network. The stamp bin/install-auto-update
-    # writes holds "source <commit>" and one "<sha256>  <name>" line per installed script.
+    # writes holds "source <commit>" and one "<sha256>  <name>" line per installed script, then
+    # one "<sha256>  build/<name>" line per installed build file (the chroots' pacman.confs,
+    # read by root from <installed bin dir>/../build).
     # The clone is read as BUILD_USER (root never reads the user's clone directly).
-    local stamp=$1 dir=$2 clone=$3 re='^([0-9a-f]{64})  ([^/]+)$' line n
-    local names=() changed=() differ=() new=() listed=() why=()
-    local -A stamped=() inst=() cl=()
+    local stamp=$1 dir=$2 clone=$3 re='^([0-9a-f]{64})  ([^/]+)$' bre='^([0-9a-f]{64})  build/([^/]+)$' line n
+    local names=() bnames=() changed=() differ=() new=() listed=() why=()
+    local -A stamped=() inst=() cl=() bstamped=() binst=() bcl=()
     if [[ -f $stamp && -r $stamp ]]; then
         while IFS= read -r line; do
             # "-" would make sha256sum read stdin: never a script name
+            if [[ $line =~ $bre && ${BASH_REMATCH[2]} != - ]]; then
+                bstamped[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
+                bnames+=("${BASH_REMATCH[2]}")
+                continue
+            fi
             [[ $line =~ $re && ${BASH_REMATCH[2]} != - ]] || continue
             stamped[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
             names+=("${BASH_REMATCH[2]}")
@@ -1029,12 +1121,30 @@ pipeline_drift() {  # pipeline_drift <stamp> <installed bin dir> <clone>: 0 and 
         [[ ${inst[$n]:-} == "${stamped[$n]}" ]] || changed+=("$n")
         [[ ${cl[$n]:-} == "${stamped[$n]}" ]] || differ+=("$n")
     done
-    # A script the base branch's installer would add (not installed yet) is drift too.
+    if ((${#bnames[@]})); then
+        while IFS= read -r line; do
+            [[ $line =~ $re ]] && binst[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
+        done < <(cd "$dir/../build" 2>/dev/null && sha256sum -- "${bnames[@]}" 2>/dev/null)
+        while IFS= read -r line; do
+            [[ $line =~ $re ]] && bcl[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}
+        done < <(as_user bash -c 'cd "$1/build" 2>/dev/null && sha256sum -- "${@:2}" 2>/dev/null' _ "$clone" "${bnames[@]}")
+        for n in "${bnames[@]}"; do
+            [[ ${binst[$n]:-} == "${bstamped[$n]}" ]] || changed+=("build/$n")
+            [[ ${bcl[$n]:-} == "${bstamped[$n]}" ]] || differ+=("build/$n")
+        done
+    fi
+    # A script (or build file) the base branch's installer would add (not installed yet) is drift too.
     line=$(as_user grep -m1 '^scripts=(' "$clone/bin/install-auto-update" 2>/dev/null) || line=
     line=${line#"scripts=("}
     line=${line%%")"*}
     read -r -a listed <<<"$line" || true
     for n in "${listed[@]}"; do [[ -n ${stamped[$n]+set} ]] || new+=("$n"); done
+    line=$(as_user grep -m1 '^build_files=(' "$clone/bin/install-auto-update" 2>/dev/null) || line=
+    line=${line#"build_files=("}
+    line=${line%%")"*}
+    listed=()
+    read -r -a listed <<<"$line" || true
+    for n in "${listed[@]}"; do [[ -n ${bstamped[$n]+set} ]] || new+=("build/$n"); done
     if ((${#changed[@]})); then why+=("installed ${changed[*]} changed since install"); fi
     if ((${#differ[@]})); then why+=("differ from bin/ on the base branch: ${differ[*]}"); fi
     if ((${#new[@]})); then why+=("new script(s) on the base branch: ${new[*]}"); fi
@@ -1042,18 +1152,21 @@ pipeline_drift() {  # pipeline_drift <stamp> <installed bin dir> <clone>: 0 and 
     line=$(printf '%s; ' "${why[@]}")
     echo "${line%; }"
 }
-pipeline_guard() {  # pipeline_guard: 0 when the installed pipeline matches bin/ of the refreshed bot clone;
-    # otherwise records "(pipeline)" attention and returns 1: the caller stops the run before any
-    # unpublish, publish or sync (a stale copy would act on a plan the base branch no longer makes)
-    local drift src head msg
-    if ! drift=$(pipeline_drift "$LIB/../installed" "$LIB" "$CLONE"); then
+pipeline_guard() {  # pipeline_guard [<tree>]: 0 when the installed pipeline matches bin/ of <tree> (default:
+    # the refreshed bot clone; the RC run passes main's bin/ and build/, the branch the pipeline is
+    # installed from); otherwise records "(pipeline)" attention and returns 1: the caller stops the
+    # run before any unpublish, publish or sync (a stale copy would act on a plan the base branch
+    # no longer makes)
+    local drift src head msg tree=${1:-$CLONE}
+    if ! drift=$(pipeline_drift "$LIB/../installed" "$LIB" "$tree"); then
         [[ $mode == plan ]] || as_user "$LIB/auto-update-state" forget "$STATUS" "(pipeline)" || true
         return 0
     fi
     src=$(awk '$1 == "source" {print $2; exit}' "$LIB/../installed" 2>/dev/null) || src=
     src=${src:0:12}
-    head=$(ugit rev-parse --short HEAD 2>/dev/null) || head=
-    msg="installed pipeline (source ${src:-unknown}) is stale against $BASE_BRANCH (${head:-unknown}): $drift; nothing published or unpublished this run. Fix: review $BASE_BRANCH, then re-run sudo bin/install-auto-update --apply from that checkout"
+    if [[ $tree == "$CLONE" ]]; then head=$(ugit rev-parse --short HEAD 2>/dev/null) || head=
+    else head=$(ugit rev-parse --short "origin/$PIPELINE_BRANCH" 2>/dev/null) || head=; fi
+    msg="installed pipeline (source ${src:-unknown}) is stale against $PIPELINE_BRANCH (${head:-unknown}): $drift; nothing published or unpublished this run. Fix: review $PIPELINE_BRANCH, then re-run sudo bin/install-auto-update --apply from that checkout"
     note ATTENTION "$msg"
     attention=1
     [[ $mode == plan ]] || record "(pipeline)" attention none message="$msg" || true
@@ -1065,6 +1178,21 @@ if [[ $mode == crstate ]]; then
     as_user env GH_REPO="$GH_REPO" "$LIB/ai-review" pr "$cr_pr" --repo "$GH_REPO"
     exit
 fi
+# A channel branch other than main may be deleted while its release cycle is reset: nothing
+# to serve then (attention, no failure); its published packages stay as they are.
+if [[ -z $workspace_arg && $CHANNEL != quattro ]]; then
+    lsrc=0
+    as_user git ls-remote --exit-code --heads "$GIT_URL" "$BASE_BRANCH" >/dev/null || lsrc=$?
+    if ((lsrc == 2)); then
+        msg="$BASE_BRANCH does not exist on $GH_REPO: nothing built, published or withdrawn on the $CHANNEL channel"
+        note ATTENTION "$msg"
+        [[ $mode == plan ]] || { record "(branch)" attention none message="$msg" || true
+                                 as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" >/dev/null || true; }
+        if [[ $FAIL_ON_ATTENTION == yes ]]; then exit 1; fi
+        exit 0
+    fi
+    [[ $mode == plan ]] || as_user "$LIB/auto-update-state" forget "$STATUS" "(branch)" || true
+fi
 if [[ -z $workspace_arg ]]; then
     as_user bash -euc '
         [[ -d $1/.git ]] || git clone --quiet --branch "$3" "$2" "$1"
@@ -1074,16 +1202,31 @@ if [[ -z $workspace_arg ]]; then
         _ "$CLONE" "$GIT_URL" "$BASE_BRANCH"
 fi
 # The installed service checks its own copy against the clone just refreshed: a stale copy
-# stops here, before any retried unpublish, sync, plan, publish or unpublish.
-if [[ $EUID -eq 0 && -z $workspace_arg ]] && ! pipeline_guard; then
-    as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" || true
-    echo "auto-update: installed pipeline is stale (see $SUMMARY)"
-    exit 1
+# stops here, before any retried unpublish, sync, plan, publish or unpublish. The pipeline is
+# installed from $PIPELINE_BRANCH (main): a channel built from another branch checks it against
+# bin/ and build/ of that branch, exported from its bot clone into the run dir.
+if [[ $EUID -eq 0 && -z $workspace_arg ]]; then
+    guard_tree=$CLONE
+    if [[ $PIPELINE_BRANCH != "$BASE_BRANCH" ]]; then
+        guard_tree=$RUN/pipeline
+        if ! { ugit fetch --quiet origin "+refs/heads/$PIPELINE_BRANCH:refs/remotes/origin/$PIPELINE_BRANCH" &&
+               as_user mkdir -p "$guard_tree" &&
+               as_user bash -c 'git -C "$1" archive "origin/$2" bin build | tar -x -C "$3"' \
+                   _ "$CLONE" "$PIPELINE_BRANCH" "$guard_tree"; }; then
+            # an empty tree: every installed script then differs, so the guard stops the run
+            note pipeline "cannot export bin/ of $PIPELINE_BRANCH to compare the installed pipeline with"
+        fi
+    fi
+    if ! pipeline_guard "$guard_tree"; then
+        as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" || true
+        echo "auto-update: installed pipeline is stale (see $SUMMARY)"
+        exit 1
+    fi
 fi
 [[ $mode == full ]] && retry_unpublish
 # Sync a release left behind (a crash or failure after publish/unpublish) before the plan
 # reads the local db, so the run decides what is current against a release that matches it.
-if [[ $mode == full ]] && { as_user test -e "$DATA/sync-pending" || as_user test -e "$AU/sync-pending"; }; then
+if [[ $mode == full ]] && { as_user test -e "$CHANNEL_DATA/sync-pending" || as_user test -e "$AU/sync-pending"; }; then
     sync_now
 fi
 
@@ -1103,6 +1246,12 @@ while IFS=$'\t' read -r r action _; do
     while read -r line; do [[ -n $line ]] && echo "  $r: reverse-dep check: $line"; done < <(revdep_plan "$r")
 done <<<"$plan"
 [[ $mode == plan ]] && exit 0
+# The RC chroot is the timer's to keep: made before the first build or kernel withdrawal that
+# needs it. When that fails, the builds fail (bin/build-pkg refuses) and their stale packages
+# are withdrawn, as for any failed build.
+if [[ $mode == full && $CHANNEL != quattro ]] && cut -f2 <<<"$plan" | grep -qxE 'rebase|build|unpublish'; then
+    ensure_chroot || true
+fi
 
 # Each recipe runs in a subshell with errexit on: an unexpected error (git, gh, network)
 # ends only that recipe, and the safety net below still unpublishes what is stale.
@@ -1145,7 +1294,7 @@ as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" || src=$
 as_user find "$AU/runs" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 ((src == 1)) && failed=1
 ((src == 2)) && attention=1
-if [[ $mode == full ]] && as_user test -e "$DATA/sync-pending"; then
+if [[ $mode == full ]] && as_user test -e "$CHANNEL_DATA/sync-pending"; then
     note sync "sync pending: the release may lag the local repo; retried next run"; failed=1
 fi
 [[ $mode == full && -n $(as_user cat "$PENDING_UNPUB" 2>/dev/null) ]] &&

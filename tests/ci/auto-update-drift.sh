@@ -11,6 +11,11 @@
 #   6. pipeline_guard on drift: returns 1, records "(pipeline)" attention naming the fix,
 #      and runs no unpublish, publish or sync
 #   7. pipeline_guard once the clone matches again: returns 0, the entry is gone
+#   8. an installed build file (build/pacman-rc.conf, read by root for the chroots) changed
+#      on the base branch, or edited after the install: drift, the reason names it
+#   9. the base branch's installer lists a new build file: drift, the reason names it
+#  10. pipeline_guard against another tree (the RC run passes main's bin/ and build/, not
+#      its own clone's): it decides on that tree and names the pipeline branch
 # Offline: no network, no sudo, no bwrap.
 set -u
 for t in jq python3 sha256sum; do
@@ -41,7 +46,7 @@ record() { "$W/bin/auto-update-state" record "$STATUS" testrun "$@"; }
 sync_now() { echo sync >>"$T/calls"; }
 ugit() { echo abc1234; }
 
-mode=full failed=0 attention=0 BASE_BRANCH=main
+mode=full failed=0 attention=0 BASE_BRANCH=main PIPELINE_BRANCH=main
 LIB=$T/lib/bin CLONE=$T/clone STATUS=$T/status.json STAMP=$T/lib/installed
 mkdir -p "$LIB" "$CLONE/bin"
 # The installed scripts log to $T/calls when run: the guard must run none of them.
@@ -120,4 +125,45 @@ rc=0; pipeline_guard >"$T/out" 2>&1 || rc=$?
 expect "7. guard, no drift: returns 0" "$rc" 0
 expect "7. guard, no drift: \"(pipeline)\" cleared" "$(has_entry "(pipeline)")" false
 expect "7. guard, no drift: nothing ran" "$(cat "$T/calls")" ""
+
+# 8. build files in the stamp: compared like the scripts, under <installed>/../build and <clone>/build
+mkdir -p "$T/lib/build" "$CLONE/build"
+echo 'Server = https://rc.invalid' >"$T/lib/build/pacman-rc.conf"
+cp "$T/lib/build/pacman-rc.conf" "$CLONE/build/"
+(cd "$T/lib" && sha256sum -- build/pacman-rc.conf) >>"$STAMP"
+installer_b() { printf '#!/bin/bash\nscripts=(auto-update publish)\nbuild_files=(%s)\n' "$*" >"$CLONE/bin/install-auto-update"; }
+installer_b pacman-rc.conf
+rc=0; out=$(pipeline_drift "$STAMP" "$LIB" "$CLONE") || rc=$?
+expect "8. build file identical: no drift" "$rc" 1
+echo 'Server = https://other.invalid' >"$CLONE/build/pacman-rc.conf"
+rc=0; out=$(pipeline_drift "$STAMP" "$LIB" "$CLONE") || rc=$?
+expect "8. build file changed on the base branch: drift" "$rc" 0
+expect "8. build file changed: the reason names it" "$(has "$out" "differ from bin/ on the base branch: build/pacman-rc.conf")" yes
+cp "$T/lib/build/pacman-rc.conf" "$CLONE/build/"
+echo '# edited' >>"$T/lib/build/pacman-rc.conf"
+rc=0; out=$(pipeline_drift "$STAMP" "$LIB" "$CLONE") || rc=$?
+expect "8. installed build file edited: drift" "$rc" 0
+expect "8. installed build file edited: the reason names it" "$(has "$out" "installed build/pacman-rc.conf changed since install")" yes
+cp "$CLONE/build/pacman-rc.conf" "$T/lib/build/"
+
+# 9. a new build file on the base branch
+installer_b pacman-rc.conf pacman.conf
+rc=0; out=$(pipeline_drift "$STAMP" "$LIB" "$CLONE") || rc=$?
+expect "9. new build file: drift" "$rc" 0
+expect "9. new build file: the reason names it" "$(has "$out" "new script(s) on the base branch: build/pacman.conf")" yes
+installer_b pacman-rc.conf
+
+# 10. the guard against another tree: main's bin/ differs, the run's own clone does not
+MAIN=$T/main
+mkdir -p "$MAIN/bin" "$MAIN/build"
+cp "$CLONE/bin/"* "$MAIN/bin/"; cp "$CLONE/build/"* "$MAIN/build/"
+echo '# newer on main' >>"$MAIN/bin/publish"
+calls; attention=0
+rc=0; pipeline_guard "$MAIN" >"$T/out" 2>&1 || rc=$?
+expect "10. guard against main: returns 1" "$rc" 1
+expect "10. guard against main: the entry names main" \
+    "$(has "$(jq -c '.recipes["(pipeline)"]' "$STATUS" 2>/dev/null)" "stale against main")" yes
+expect "10. guard against main: nothing ran" "$(cat "$T/calls")" ""
+rc=0; pipeline_guard >"$T/out" 2>&1 || rc=$?
+expect "10. guard against the own clone (matching): returns 0" "$rc" 0
 exit $fails

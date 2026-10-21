@@ -7,7 +7,7 @@
 #     with a PKGBUILD in the checked-out tree are buildable (deleted or
 #     reference-only recipes are skipped)
 #     (exception: *.md files under recipes/linux-omarchy don't trigger the kernel)
-#   - a change to the shared build inputs (build/pacman.conf, bin/build-pkg)
+#   - a change to the shared build inputs (build/pacman.conf, build/pacman-rc.conf, bin/build-pkg)
 #     rebuilds every recipe except the kernel, which builds only when
 #     recipes/linux-omarchy itself changes (or is listed explicitly)
 # Prints GITHUB_OUTPUT lines:
@@ -17,7 +17,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 KERNEL=linux-omarchy NVIDIA=nvidia-open-dkms
-SHARED_INPUTS=(build/pacman.conf bin/build-pkg)
+SHARED_INPUTS=(build/pacman.conf build/pacman-rc.conf bin/build-pkg)
 
 buildable() { [[ -f recipes/$1/PKGBUILD ]]; }
 all_small() { for d in recipes/*/PKGBUILD; do d=${d%/PKGBUILD}; d=${d#recipes/}; [[ $d == "$KERNEL" ]] || echo "$d"; done; }

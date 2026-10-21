@@ -6,7 +6,9 @@
 #   sources are verified against exactly the keys checked into the recipe.
 # Output: the unsigned packages land in $OUT (default /out). The build tree
 # is $WORK/<recipe> (default /build), so it can live on a big disk.
-# Usage: ci/build-recipe <recipe>
+# Usage: ci/build-recipe [--channel quattro|rc] <recipe>
+#   --channel: the release channel the PR targets (ci/channel); the container gets
+#   that channel's package sources (ci/setup-arch). Default quattro.
 #
 # Why no bin/recipe-sandbox here (#79, #89): on the build host, recipe code
 # runs under bin/recipe-sandbox because that host holds the signing key and
@@ -43,12 +45,17 @@ for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TO
     fi
 done
 repo=$(cd "$(dirname "$0")/.." && pwd)
-name=${1:?usage: ci/build-recipe <recipe>}
+channel=quattro
+if [[ ${1:-} == --channel ]]; then
+    channel=${2:?usage: ci/build-recipe [--channel quattro|rc] <recipe>}
+    shift 2
+fi
+name=${1:?usage: ci/build-recipe [--channel quattro|rc] <recipe>}
 src=$repo/recipes/$name
 [[ -f $src/PKGBUILD ]] || { echo "::error::recipes/$name/PKGBUILD not found" >&2; exit 1; }
 OUT=${OUT:-/out} WORK=${WORK:-/build}
 
-"$repo/ci/setup-arch"
+"$repo/ci/setup-arch" --channel "$channel"
 
 work=$WORK/$name
 rm -rf "$work"; mkdir -p "$work" "$OUT"

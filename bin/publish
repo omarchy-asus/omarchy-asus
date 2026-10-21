@@ -4,19 +4,36 @@
 # (PUBLISH_LOCK_WAIT seconds, then exit 75), journals the change in $DATA/sync-pending,
 # builds it in a staging copy of the repo, checks every signature there and only then
 # swaps it in. Any failure exits non-zero and leaves the live repo as it was.
-# Usage: bin/publish $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
+# Usage: bin/publish [--channel quattro|rc] $STAGE_DIR/foo-1-1.1-x86_64.pkg.tar.zst ...
+# The channel (bin/env.sh, default quattro) picks the local repo ($REPO_DIR) and its
+# journal; a package from another channel's stage dir is refused, so an RC build never
+# reaches the x86_64 repo and a Quattro build never reaches the RC one.
 # Release cohort members (build/cohorts.conf, e.g. omarchy + omarchy-settings) are published
 # in one call, or next to a partner already in the db at the same version; otherwise this
 # refuses before anything is copied or signed (bin/release-cohort check-publish). The check
 # reads each archive's .PKGINFO (a file name that disagrees with it is refused) and refuses
 # a missing $WORKSPACE/build/cohorts.conf.
 set -euo pipefail
+# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
+if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
 source "$(dirname "$0")/env.sh"
 # shellcheck source=bin/publish-lib.sh
 source "$(dirname "$0")/publish-lib.sh"
 : "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
 names=()
-for f in "$@"; do names+=("$(basename "$f")"); done
+for f in "$@"; do
+    names+=("$(basename "$f")")
+    real=$(realpath -m -- "$f")
+    for c in "${CHANNELS[@]}"; do
+        [[ $c != "$CHANNEL" ]] || continue
+        other=$(realpath -m -- "$(channel_stage_dir "$c")")
+        if [[ $real == "$other"/* ]]; then
+            echo "publish: refusing $(basename "$f"): it was built for the $c channel ($other)," \
+                "not $CHANNEL; publish it with --channel $c" >&2
+            exit 1
+        fi
+    done
+done
 pub_lock
 # checked under the lock, against the live db, before anything is journaled or staged
 db_args=()

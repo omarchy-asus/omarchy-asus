@@ -6,12 +6,14 @@
 #        bin/install-auto-update --uninstall [--apply]    remove it (state is kept)
 #
 # Installs a root-owned copy of the scripts to /usr/local/lib/omarchy-asus (the service
-# never executes the user-writable workspace), the unit and timer to
+# never executes the user-writable workspace), with the build chroots' pacman.confs
+# (build/pacman.conf, build/pacman-rc.conf: what bin/build-pkg checks a chroot against and
+# bin/mkchroot makes the RC chroot from, as root), the unit and timer to
 # /etc/systemd/system, and /etc/omarchy-asus/auto-update.conf (only if missing, with
 # BUILD_USER set to the sudo user). --enable also starts the timer; without it the
 # timer is installed but off. Re-run after merging changes to bin/ to update the copy.
-# The source commit and sha256 of each installed script go to
-# /usr/local/lib/omarchy-asus/installed; auto-update compares them with the bot clone
+# The source commit and sha256 of each installed script and build file go to
+# /usr/local/lib/omarchy-asus/installed; auto-update compares them with main (its bot clone)
 # and does nothing that publishes or unpublishes while they differ.
 set -euo pipefail
 src=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
@@ -19,6 +21,7 @@ LIB=/usr/local/lib/omarchy-asus
 UNITS=/etc/systemd/system
 CONF=/etc/omarchy-asus/auto-update.conf
 scripts=(ai-review auto-update auto-update-state build-pkg check-upstream env.sh mkchroot publish publish-lib.sh rebase-recipe recipe-sandbox release-cohort revdep-check sync-release unpublish issue)
+build_files=(pacman.conf pacman-rc.conf)
 units=(omarchy-asus-auto-update.service omarchy-asus-auto-update.timer)
 
 apply=0 enable=0 uninstall=0
@@ -27,7 +30,7 @@ for a in "$@"; do
         --apply) apply=1 ;;
         --enable) enable=1 ;;
         --uninstall) uninstall=1 ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) echo "unknown argument: $a" >&2; exit 64 ;;
     esac
 done
@@ -50,13 +53,17 @@ if [[ -n $(cd "$src" && runuser -u "$user" -- git status --porcelain -- bin syst
     echo "warning: bin/ or systemd/ has uncommitted changes; install from a reviewed, committed checkout" >&2
 fi
 echo "source: $src ($(cd "$src" && git rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout'))"
-do_ install -d -o root -g root -m 0755 "$LIB" "$LIB/bin" "$LIB/systemd" /etc/omarchy-asus
+do_ install -d -o root -g root -m 0755 "$LIB" "$LIB/bin" "$LIB/build" "$LIB/systemd" /etc/omarchy-asus
 for s in "${scripts[@]}"; do
     mode=0755; [[ $s == env.sh || $s == publish-lib.sh ]] && mode=0644
     do_ install -o root -g root -m "$mode" "$src/bin/$s" "$LIB/bin/$s"
 done
+for b in "${build_files[@]}"; do
+    do_ install -o root -g root -m 0644 "$src/build/$b" "$LIB/build/$b"
+done
 # Install stamp, read by auto-update as $LIB/bin/../installed (outside $LIB/bin, which it
-# globs): the source commit and the sha256 of the bytes just installed, in scripts order.
+# globs): the source commit and the sha256 of the bytes just installed, in scripts order,
+# then the build files as "build/<name>".
 if ((apply)); then
     commit=$(runuser -u "$user" -- git -C "$src" rev-parse HEAD 2>/dev/null \
         || git -C "$src" rev-parse HEAD 2>/dev/null || echo unknown)
@@ -67,6 +74,7 @@ if ((apply)); then
         echo "# omarchy-asus auto-update install stamp (bin/install-auto-update)"
         echo "source $commit"
         (cd "$src/bin" && sha256sum -- "${scripts[@]}")
+        (cd "$src" && sha256sum -- "${build_files[@]/#/build/}")
     } > "$stamp"
     short=${commit:0:7}; [[ $commit != unknown ]] || short=unknown
     echo "+ write $LIB/installed (source $short)"
@@ -74,7 +82,7 @@ if ((apply)); then
     rm -f "$stamp"
     trap - EXIT
 else
-    echo "would write $LIB/installed (source commit and sha256 of the installed scripts)"
+    echo "would write $LIB/installed (source commit and sha256 of the installed scripts and build files)"
 fi
 do_ install -o root -g root -m 0644 "$src/systemd/README.md" "$src/systemd/auto-update.conf.example" "$LIB/systemd/"
 for u in "${units[@]}"; do do_ install -o root -g root -m 0644 "$src/systemd/$u" "$UNITS/$u"; done
@@ -93,4 +101,6 @@ do_ systemctl daemon-reload
 if ((enable)); then do_ systemctl enable --now omarchy-asus-auto-update.timer
 else echo "timer not enabled; when ready: sudo systemctl enable --now omarchy-asus-auto-update.timer"; fi
 [[ -d /var/lib/omarchy-asus/chroot/root ]] || echo "note: no build chroot yet; run bin/mkchroot once (sudo) before the first run"
+[[ -d /var/lib/omarchy-asus/chroot-rc/root ]] ||
+    echo "note: no RC build chroot yet; the service makes it (bin/mkchroot --channel rc) before its first RC build"
 echo "first run by hand (watch it): sudo systemctl start omarchy-asus-auto-update.service; journalctl -fu omarchy-asus-auto-update"

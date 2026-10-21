@@ -4,6 +4,14 @@
 #   OMARCHY_ASUS_WORKSPACE  checkout whose recipes/ and build/ are used (default: this script's repo)
 #   OMARCHY_ASUS_DATA       state dir (default: ~/.local/share/omarchy-asus of BUILD_USER when
 #                           running as root, else of $HOME)
+#   OMARCHY_ASUS_CHROOT     the channel's chroot parent dir (default /var/lib/omarchy-asus/chroot,
+#                           chroot-rc for rc; the offline tests point it at a temp dir)
+#   OMARCHY_ASUS_CHANNEL    release channel (default quattro; the scripts' --channel sets it):
+#     quattro  the x86_64 release, built from main against Omarchy's stable channel
+#     rc       the rc-x86_64 release, built from next/omarchy-4.5 against Omarchy's rc channel
+#   A channel has its own chroot, pacman.conf, stage dir, local repo and release, and its own
+#   sync journal and publisher record ($CHANNEL_DATA): nothing built or staged for one
+#   reaches the other.
 REPO_NAME=omarchy-asus
 WORKSPACE=${OMARCHY_ASUS_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 if [[ -z ${OMARCHY_ASUS_DATA:-} ]]; then
@@ -16,10 +24,58 @@ fi
 DATA=$OMARCHY_ASUS_DATA
 export GNUPGHOME=$DATA/gnupg              # dedicated signing key; never in git
 SIGN_KEY=$(cat "$DATA/fingerprint" 2>/dev/null || true)
-REPO_DIR=$DATA/repo/x86_64                # local repo; mirrored to the GitHub release
-STAGE_DIR=$DATA/stage                     # chroot build output before signing
 LOG_DIR=$DATA/logs
-CHROOT=/var/lib/omarchy-asus/chroot       # mkarchroot parent dir (btrfs)
 GH_REPO=omarchy-asus/omarchy-asus         # public; pacman pulls from its release
-GH_TAG=x86_64                             # Server = .../releases/download/$arch
-GH_BRANCH=main
+CHANNELS=(quattro rc)
+CHANNEL=${OMARCHY_ASUS_CHANNEL:-quattro}
+# channel_stage_dir <channel>: where bin/build-pkg leaves that channel's packages
+channel_stage_dir() {
+    case $1 in
+        quattro) echo "$DATA/stage" ;;
+        rc) echo "$DATA/stage-rc" ;;
+        *) return 1 ;;
+    esac
+}
+case $CHANNEL in
+    quattro)
+        CHANNEL_DATA=$DATA                        # sync-pending, release-db.sha256, prune-candidates
+        REPO_DIR=$DATA/repo/x86_64                # local repo; mirrored to the GitHub release
+        CHROOT=${OMARCHY_ASUS_CHROOT:-/var/lib/omarchy-asus/chroot}  # mkarchroot parent dir (btrfs)
+        PACMAN_CONF=$WORKSPACE/build/pacman.conf  # chroot package sources
+        OMARCHY_CHANNEL=stable                    # Omarchy's channel this one is built against
+        GH_TAG=x86_64                             # Server = .../releases/download/$arch
+        GH_BRANCH=main
+        RELEASE_NOTES=$WORKSPACE/build/release-notes.md
+        ;;
+    rc)
+        CHANNEL_DATA=$DATA/channel-rc
+        REPO_DIR=$DATA/repo/rc-x86_64
+        CHROOT=${OMARCHY_ASUS_CHROOT:-/var/lib/omarchy-asus/chroot-rc}
+        PACMAN_CONF=$WORKSPACE/build/pacman-rc.conf
+        OMARCHY_CHANNEL=rc
+        GH_TAG=rc-x86_64                          # Server = .../releases/download/rc-$arch
+        GH_BRANCH=next/omarchy-4.5
+        RELEASE_NOTES=$WORKSPACE/build/release-notes-rc.md
+        ;;
+    *)
+        echo "unknown release channel '$CHANNEL' (OMARCHY_ASUS_CHANNEL or --channel: ${CHANNELS[*]})" >&2
+        return 1
+        ;;
+esac
+STAGE_DIR=$(channel_stage_dir "$CHANNEL")     # chroot build output before signing
+export OMARCHY_ASUS_CHANNEL=$CHANNEL          # children (bin/publish's helpers) see the same channel
+
+# channel_conf_ok <pacman.conf>: 0 when that config pulls [omarchy], [core], [extra] and
+# [multilib] from the same servers, in the same order, as this channel's $PACMAN_CONF (a
+# chroot made for the other channel fails it). Read with awk: CI has no pacman-conf.
+channel_servers() {
+    awk '/^[[:space:]]*\[/ {s = $0; gsub(/[[:space:]]/, "", s); next}
+         s ~ /^\[(omarchy|core|extra|multilib)\]$/ && /^[[:space:]]*Server[[:space:]]*=/ {
+             v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); print s, v}' "$1"
+}
+channel_conf_ok() {
+    local want got
+    [[ -r $1 && -r $PACMAN_CONF ]] || return 1
+    want=$(channel_servers "$PACMAN_CONF") && got=$(channel_servers "$1") || return 1
+    [[ -n $want && $want == "$got" ]]
+}
