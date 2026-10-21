@@ -1,9 +1,11 @@
 # Shared publication helpers for bin/publish, bin/unpublish, bin/sync-release (sourced after env.sh).
+# They act on the release channel env.sh selected: its $REPO_DIR and its journal in
+# $CHANNEL_DATA ($DATA for quattro). The lock is one for every channel.
 # A change to the local repo is one transaction:
 #   pub_lock                  serialize on $DATA/publish.lock (exit 75 after
 #                             PUBLISH_LOCK_WAIT seconds, default 600), repair a swap a
 #                             killed run left half done
-#   pub_mark_pending <why>    journal it in $DATA/sync-pending before the repo changes
+#   pub_mark_pending <why>    journal it in $CHANNEL_DATA/sync-pending before the repo changes
 #   pub_stage                 build the change in $REPO_DIR.new ($PUB_STAGE), a hardlink
 #                             copy whose db files are unshared
 #   pub_verify_repo <dir>     every signature by $SIGN_KEY, every package the db names present
@@ -36,12 +38,12 @@ pub_recover() {
 }
 
 pub_mark_pending() {
-    mkdir -p "$DATA" || return 1
-    echo "$(date +%s) $*" >>"$DATA/sync-pending" || return 1
+    mkdir -p "$CHANNEL_DATA" || return 1
+    echo "$(date +%s) $*" >>"$CHANNEL_DATA/sync-pending" || return 1
 }
 
 pub_clear_pending() {
-    rm -f "$DATA/sync-pending"
+    rm -f "$CHANNEL_DATA/sync-pending"
 }
 
 pub_verify_sig() {  # pub_verify_sig <file> [<sigfile>]: 0 only for a good signature by $SIGN_KEY

@@ -1,11 +1,13 @@
 #!/bin/bash
 # Drop packages from the repo db so the stock build flows through again.
-# Usage: bin/unpublish pkgname ...   (record the reason; bin/auto-update writes it to $DATA/status.json)
+# Usage: bin/unpublish [--channel quattro|rc] pkgname ...   (record the reason; bin/auto-update writes it to $DATA/status.json)
 # Same locked, verified transaction as bin/publish (bin/publish-lib.sh; exit 75 when
 # $DATA/publish.lock stays busy): any failure leaves the live repo as it was.
 # Release cohort partners (build/cohorts.conf, e.g. omarchy + omarchy-settings) that the db
 # holds are withdrawn with them (bin/release-cohort members).
 set -euo pipefail
+# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
+if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
 source "$(dirname "$0")/env.sh"
 # shellcheck source=bin/publish-lib.sh
 source "$(dirname "$0")/publish-lib.sh"

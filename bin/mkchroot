@@ -1,11 +1,17 @@
 #!/bin/bash
-# Create (or update) the clean build chroot. Needs sudo.
+# Create (or update) the clean build chroot of a release channel. Needs sudo.
+# Usage: bin/mkchroot [--channel quattro|rc]
+# quattro: $CHROOT from build/pacman.conf (Omarchy stable); rc: its own chroot from
+# build/pacman-rc.conf (Omarchy rc). An update rewrites the chroot's pacman.conf from the
+# channel's, so the two never share package sources.
 set -euo pipefail
+# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
+if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
 source "$(dirname "$0")/env.sh"
 MAKEPKG_CONF=/usr/share/devtools/makepkg.conf.d/x86_64.conf
 if [[ -d $CHROOT/root ]]; then
-    sudo arch-nspawn -C "$WORKSPACE/build/pacman.conf" "$CHROOT/root" pacman -Syu --noconfirm
+    sudo arch-nspawn -C "$PACMAN_CONF" "$CHROOT/root" pacman -Syu --noconfirm
 else
     sudo mkdir -p "$CHROOT"
-    sudo mkarchroot -C "$WORKSPACE/build/pacman.conf" -M "$MAKEPKG_CONF" "$CHROOT/root" base-devel
+    sudo mkarchroot -C "$PACMAN_CONF" -M "$MAKEPKG_CONF" "$CHROOT/root" base-devel
 fi

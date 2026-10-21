@@ -2,7 +2,7 @@
 # Reverse-dependency CI: compile a DKMS package against kernel headers inside a
 # throwaway copy of the clean build chroot. Nothing is installed on the host.
 #
-# Usage: bin/revdep-check --headers <headers .pkg.tar.zst | stock:PKGNAME> --dkms <dkms .pkg.tar.zst> [--log FILE]
+# Usage: bin/revdep-check [--channel quattro|rc] --headers <headers .pkg.tar.zst | stock:PKGNAME> --dkms <dkms .pkg.tar.zst> [--log FILE]
 #
 #   --headers FILE         a freshly built headers package (e.g. linux-omarchy-headers)
 #   --headers stock:NAME   the headers package from the chroot's repos ([omarchy]), for
@@ -19,6 +19,8 @@
 # run as root (bin/auto-update under systemd) it needs BUILD_USER and reads the
 # package files as that user. Exit: 0 built, 1 module failed to build, 2 setup error.
 set -euo pipefail
+# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
+if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
 source "$(dirname "$0")/env.sh"
 
 headers='' dkms='' log=/dev/null
@@ -42,7 +44,9 @@ else
     as_user() { "$@"; }
     as_root() { ${SUDO:-sudo} "$@"; }
 fi
-[[ -d $CHROOT/root ]] || { echo "no build chroot at $CHROOT/root (run bin/mkchroot)" >&2; exit 2; }
+[[ -d $CHROOT/root ]] || { echo "no $CHANNEL build chroot at $CHROOT/root (run bin/mkchroot --channel $CHANNEL)" >&2; exit 2; }
+channel_conf_ok "$CHROOT/root/etc/pacman.conf" ||
+    { echo "$CHROOT/root does not use the $CHANNEL channel's package sources (run bin/mkchroot --channel $CHANNEL)" >&2; exit 2; }
 
 # What to build: the dkms.conf inside the package names the module and version.
 conf=$(as_user bsdtar -xOf "$dkms" 'usr/src/*/dkms.conf') || { echo "no usr/src/*/dkms.conf in $dkms" >&2; exit 2; }

@@ -175,6 +175,25 @@ Before its `-Syuu` prompt it prints the NVIDIA/open-gpu-kernel-modules#1412 hibe
 from section 5. After the `-Syuu` it offers to remove the packages that only this repo ships. The
 default is no.
 
+## Release channels
+
+Our repo has two channels, each pinned to one of Omarchy's (README.md, "Release channels"):
+Quattro (the `x86_64` release) goes with Omarchy stable, RC (the `rc-x86_64` release, Omarchy 4.5
+release candidates) with Omarchy rc. Never mix them: Omarchy's migrations may install packages only
+its matching repo has, and one failed migration holds back every later one. The first setup picks
+the channel that matches your `[omarchy]` server. To switch later, move both together:
+
+```bash
+bash omarchy-asus-setup --channel rc        # [omarchy] to Omarchy rc, [omarchy-asus] to rc-x86_64
+bash omarchy-asus-setup --channel quattro   # both back; pacman -Syyuu downgrades to the Quattro versions
+```
+
+It checks that the target release's signed database exists, takes a snapshot (`--force` goes on
+without one), rewrites the `[omarchy-asus]` server in `/etc/pacman.d/custom-repos.conf`, then runs
+Omarchy's own `omarchy-channel-set` (it rewrites `/etc/pacman.conf` and the mirrorlist, the hook
+from section 3 puts the Include line back, runs `pacman -Syyuu` and the migrations). `--dry-run`
+prints the steps.
+
 ## Switching an existing install
 
 Do it in this order on a G16 that already runs stock Omarchy. The script does step 2 and the upgrade
@@ -282,6 +301,8 @@ Server = https://github.com/omarchy-asus/omarchy-asus/releases/download/$arch
 ```
 
 `SigLevel = Required` covers both the packages and the database, because both are signed.
+On Omarchy's rc channel, use the RC release instead (`.../releases/download/rc-$arch`; see
+[Release channels](#release-channels)).
 
 ## 3. Hook: `~/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo`
 
