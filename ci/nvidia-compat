@@ -3,13 +3,17 @@
 # linux-omarchy-headers with dkms, exactly as the laptop's pacman hook would
 # (run as root inside the Arch container).
 # Each side comes from $PKGS (built earlier in the same workflow) if present,
-# otherwise from the published x86_64 release (signature-verified).
-# Usage: ci/nvidia-compat [pkgs dir]   (default /pkgs)
+# otherwise from the channel's published release (signature-verified): x86_64 for
+# quattro, rc-x86_64 for rc. The container gets the channel's package sources
+# (ci/setup-arch --channel), so an RC PR is checked against the RC counterpart.
+# Usage: ci/nvidia-compat [--channel quattro|rc] [pkgs dir]   (default quattro, /pkgs)
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+channel=quattro
+if [[ ${1:-} == --channel ]]; then channel=${2:?--channel needs quattro or rc}; shift 2; fi
 PKGS=${1:-/pkgs}
 
-"$repo/ci/setup-arch" dkms
+"$repo/ci/setup-arch" --channel "$channel" dkms
 
 pick() {
     local name=$1 f
@@ -20,8 +24,8 @@ pick() {
         echo "==> $name: built in this workflow ($(basename "$f"))" >&2
         echo "$f"; return
     done
-    echo "==> $name: not built in this workflow, using the published release" >&2
-    "$repo/ci/fetch-release" "$name" /tmp/release
+    echo "==> $name: not built in this workflow, using the published $channel release" >&2
+    "$repo/ci/fetch-release" --channel "$channel" "$name" /tmp/release
 }
 headers=$(pick linux-omarchy-headers)
 nvidia=$(pick nvidia-open-dkms)
