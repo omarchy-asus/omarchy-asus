@@ -12,6 +12,9 @@
 #      refused as another publisher (each db is recorded before it goes up)
 #   i. no record yet (an upgraded host adopts the release) and the db upload fails before
 #      it replaces the release's db: the retry still knows that db as this host's
+#   j. --channel rc: repo/rc-x86_64 goes to the rc-x86_64 release only (created on first
+#      sync), with its own record in channel-rc; the x86_64 release and its record are
+#      untouched (#167)
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -33,7 +36,7 @@ printf '# test denylist\nzorbleplex\n' >"$S/denylist"
 export OMARCHY_ASUS_WORKSPACE=$S/ws OMARCHY_ASUS_DATA=$S/data GNUPGHOME=$S/data/gnupg \
     PII_DENYLIST=$S/denylist FAKE_REL=$S/release FAKE_LOG=$S/gh.log FAKE_CALLS=$S/calls \
     PATH=$S/bin:$PATH
-unset PII_SCAN SYNC_ADOPT_REMOTE PRUNE_GRACE_HOURS PUBLISH_LOCK_WAIT OMARCHY_ASUS_PUBLISH_LOCKED
+unset PII_SCAN SYNC_ADOPT_REMOTE PRUNE_GRACE_HOURS PUBLISH_LOCK_WAIT OMARCHY_ASUS_PUBLISH_LOCKED OMARCHY_ASUS_CHANNEL
 # bin/sync-release talks to the live release (env.sh fixes GH_REPO/GH_TAG), so the fake gh
 # must win: a BASH_ENV that puts another dir first on PATH (a wrapper's gh shim) would hand
 # the uploads to the real gh. Drop it, and give any real gh that still runs no credentials.
@@ -55,7 +58,9 @@ cat >"$S/bin/gh" <<'EOF'
 set -u
 echo "gh $*" >>"$FAKE_LOG"
 [[ ${1:-} == release ]] || { echo "fake gh: unsupported: $*" >&2; exit 1; }
-sub=$2; shift 3   # 'release <sub> <tag>'
+sub=$2 tag=${3:-}; shift 3   # 'release <sub> <tag>'
+# the x86_64 release is $FAKE_REL, any other tag's is $FAKE_REL-<tag>
+rel=$FAKE_REL; [[ $tag == x86_64 ]] || rel=$FAKE_REL-$tag
 args=() pat='' dir=''
 while (($#)); do
     case $1 in
@@ -68,8 +73,8 @@ while (($#)); do
 done
 case $sub in
     view)
-        [[ -d $FAKE_REL ]] || exit 1
-        for f in "$FAKE_REL"/*; do
+        [[ -d $rel ]] || exit 1
+        for f in "$rel"/*; do
             [[ -f $f ]] || continue
             printf '%s\t%s\tsha256:%s\n' "$(basename "$f")" "$(stat -c %s "$f")" \
                 "$(sha256sum "$f" | cut -d' ' -f1)"
@@ -78,15 +83,15 @@ case $sub in
         names=()
         # FAKE_DB_UPLOAD_FAILS=1: a db upload fails before anything reaches the release
         if [[ -n ${FAKE_DB_UPLOAD_FAILS:-} && " ${args[*]##*/} " == *" omarchy-asus.db "* ]]; then exit 1; fi
-        for f in "${args[@]}"; do cp "$f" "$FAKE_REL/" || exit 1; names+=("$(basename "$f")"); done
+        for f in "${args[@]}"; do cp "$f" "$rel/" || exit 1; names+=("$(basename "$f")"); done
         echo "upload ${names[*]}" >>"$FAKE_CALLS"
         # FAKE_DB_UPLOAD_DIES=1: the db lands on the release, then the caller dies
         if [[ -n ${FAKE_DB_UPLOAD_DIES:-} && " ${names[*]} " == *" omarchy-asus.db "* ]]; then exit 1; fi ;;
     delete-asset)
-        rm -f "$FAKE_REL/${args[0]}" || exit 1
+        rm -f "$rel/${args[0]}" || exit 1
         echo "delete ${args[0]}" >>"$FAKE_CALLS" ;;
-    download) cp "$FAKE_REL/$pat" "$dir/" ;;
-    create) mkdir -p "$FAKE_REL"; echo create >>"$FAKE_CALLS" ;;
+    download) cp "$rel/$pat" "$dir/" ;;
+    create) mkdir -p "$rel"; echo create >>"$FAKE_CALLS" ;;
     *) echo "fake gh: unsupported: release $sub" >&2; exit 1 ;;
 esac
 EOF
@@ -231,4 +236,23 @@ if ((rc != 0)); then r=0; else r=1; fi; expect "$r" 0 "the failed db upload fail
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 1 "the release still has the adopted db"
 out=$(run_sync); expect $? 0 "the retry is not refused as another publisher"
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the release's db is the local one"
+
+echo "== j. the rc channel syncs to its own release"
+RR=$S/data/repo/rc-x86_64
+mkdir -p "$RR"
+cp -a "$R"/. "$RR"/
+rel_before=$( (cd "$S/release" && sha256sum -- *) )
+rec_before=$(cat "$S/data/release-db.sha256")
+: >"$S/gh.log"; rm -f "$S/calls"
+out=$(run_sync --channel rc); expect $? 0 "an rc sync succeeds"
+grep -q '^create' "$S/calls"; expect $? 0 "it creates the rc release"
+cmp -s "$S/release-rc-x86_64/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release's db is the rc repo's"
+if [[ -f $S/release-rc-x86_64/foo-1-1-x86_64.pkg.tar.zst ]]; then r=0; else r=1; fi; expect "$r" 0 "the package is on the rc release"
+awk '$1 == "gh" && $2 == "release" && $4 != "rc-x86_64" {bad = 1} END {exit !bad}' "$S/gh.log"
+expect $? 1 "every gh release call names rc-x86_64"
+grep -q -- '--target next/omarchy-4.5' "$S/gh.log"; expect $? 0 "the rc release targets next/omarchy-4.5"
+if [[ $( (cd "$S/release" && sha256sum -- *) ) == "$rel_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the x86_64 release unchanged"
+if [[ $(cat "$S/data/release-db.sha256") == "$rec_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the x86_64 record unchanged"
+if [[ $(cat "$S/data/channel-rc/release-db.sha256" 2>/dev/null) == "$(sha256sum "$RR/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi
+expect "$r" 0 "channel-rc/release-db.sha256 records the rc db"
 exit $fail

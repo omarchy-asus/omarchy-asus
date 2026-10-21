@@ -11,6 +11,10 @@
 #   f. a good unpublish: the package's files are gone
 #   g. a swap killed between its two renames ($REPO_DIR only as .prev): recovered
 #   h. no build/cohorts.conf in the workspace: refused, repo unchanged (#89)
+#   i. --channel rc: the package goes to repo/rc-x86_64, journaled in channel-rc/sync-pending;
+#      the x86_64 repo and its journal are untouched (#167)
+#   j. a package from the rc stage dir is refused by a quattro publish, and one from the
+#      quattro stage dir by an rc publish; neither repo changes
 # Throwaway gpg keys and stub repo-add/repo-remove (no pacman); no network, no sudo.
 # Usage: tests/ci/publish-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -34,7 +38,7 @@ mkdir -p "$S/ws" "$S/data" "$S/bin" "$S/pkgs"
 mkdir -p "$S/ws/build" && printf '# test: no cohorts\n' >"$S/ws/build/cohorts.conf"
 mkdir -m 0700 "$S/data/gnupg"
 export OMARCHY_ASUS_WORKSPACE=$S/ws OMARCHY_ASUS_DATA=$S/data GNUPGHOME=$S/data/gnupg
-unset OMARCHY_ASUS_PUBLISH_LOCKED PUBLISH_LOCK_WAIT STUB_SIGN
+unset OMARCHY_ASUS_PUBLISH_LOCKED PUBLISH_LOCK_WAIT STUB_SIGN OMARCHY_ASUS_CHANNEL
 REPO=$S/data/repo/x86_64
 DB=$REPO/omarchy-asus.db.tar.gz
 fail=0
@@ -191,5 +195,31 @@ mv "$S/ws/build/cohorts.conf" "$S/ws/build/cohorts.conf.off"
 publish "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst"; nonzero $? "publish without a cohorts file is refused"
 unchanged "$before" "live repo unchanged"
 mv "$S/ws/build/cohorts.conf.off" "$S/ws/build/cohorts.conf"
+
+echo "== i. the rc channel has its own repo and journal"
+RC=$S/data/repo/rc-x86_64
+rm -f "$S/data/sync-pending"
+before=$(listing)
+publish --channel rc "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst"; expect $? 0 "publish --channel rc foo-1-2"
+bsdtar -xOf "$RC/omarchy-asus.db.tar.gz" 2>/dev/null | grep -qx foo-1-2-x86_64.pkg.tar.zst
+expect $? 0 "the rc db names foo-1-2"
+gpg --batch --verify "$RC/foo-1-2-x86_64.pkg.tar.zst.sig" "$RC/foo-1-2-x86_64.pkg.tar.zst" 2>/dev/null
+expect $? 0 "its signature verifies"
+unchanged "$before" "the x86_64 repo unchanged"
+if [[ -f $S/data/channel-rc/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 0 "journaled in channel-rc/sync-pending"
+if [[ -e $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 1 "the x86_64 journal untouched"
+
+echo "== j. a package from the other channel's stage dir"
+mkdir -p "$S/data/stage" "$S/data/stage-rc"
+cp "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst" "$S/data/stage-rc/"
+cp "$S/pkgs/foo-1-2-x86_64.pkg.tar.zst" "$S/data/stage/"
+rc_before=$( (cd "$RC" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) )
+publish "$S/data/stage-rc/foo-1-2-x86_64.pkg.tar.zst"; nonzero $? "a quattro publish of an rc build is refused"
+grep -q 'built for the rc channel' "$S/out"; expect $? 0 "says it was built for rc"
+unchanged "$before" "the x86_64 repo unchanged"
+publish --channel rc "$S/data/stage/foo-1-2-x86_64.pkg.tar.zst"; nonzero $? "an rc publish of a quattro build is refused"
+grep -q 'built for the quattro channel' "$S/out"; expect $? 0 "says it was built for quattro"
+if [[ $( (cd "$RC" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) ) == "$rc_before" ]]; then r=0; else r=1; fi
+expect "$r" 0 "the rc repo unchanged"
 ((fail)) && { echo "--- last output:"; cat "$S/out"; }
 exit $fail

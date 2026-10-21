@@ -1,7 +1,7 @@
-From d7d31f4a8015fbfa3882f4672581c2f871438d70 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: edbron
 Date: Tue, 25 Aug 2026 19:59:55 +0000
-Subject: [PATCH 13/18] Restore the drop-in when the initramfs rebuild fails,
+Subject: [PATCH 13/24] Restore the drop-in when the initramfs rebuild fails,
  and add tests
 
 If limine-mkinitcpio fails after nvidia.conf is removed, a rerun would exit at
@@ -258,6 +258,3 @@ index 00000000..4f35e41f
 +[[ ! -s $calls ]] || fail "machines without the nvidia drop-in are skipped" "$(cat "$calls")"
 +[[ ! -e $rebuild_marker ]] || fail "a skipped machine is not marked as repaired"
 +pass "migration skips installs it does not apply to"
--- 
-2.55.0
-

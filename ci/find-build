@@ -11,7 +11,9 @@
 #     names them (a package can install its README). Editing those docs, the
 #     hold or the G16 test kit then reuses the earlier build instead of
 #     building linux-omarchy again for 2.5 hours.
-#   - build/pacman.conf (the pinned Omarchy snapshot the deps come from)
+#   - build/pacman.conf (the pinned Omarchy snapshot the deps come from); for
+#     CHANNEL=rc, the channel name and build/pacman-rc.conf instead (Omarchy rc),
+#     so an RC build never reuses a Quattro one. Quattro's inputs are unchanged.
 #   - ci/build-recipe, ci/setup-arch and ci/omarchy-signing-key.asc (how the
 #     container builds it)
 #   - the builder image reference ($BUILDER_IMAGE) and a scheme version
@@ -25,7 +27,8 @@
 #
 # Usage: ci/find-build <recipe> [rev]   (rev defaults to HEAD)
 # Env: GH_TOKEN (actions: read), GITHUB_REPOSITORY, GITHUB_REPOSITORY_ID,
-#      BUILDER_IMAGE; FORCE_BUILD=true skips the lookup.
+#      BUILDER_IMAGE; CHANNEL (quattro|rc, default quattro: ci/channel);
+#      FORCE_BUILD=true skips the lookup.
 # Prints GITHUB_OUTPUT lines:
 #   label=pkgs-<recipe>-<hash>   the artifact name to look up and upload
 #   run_id=<id>|""               the run whose artifact can be reused
@@ -52,11 +55,14 @@ recipe_inputs() {
     done
 }
 
+CHANNEL=${CHANNEL:-quattro}
+conf=$(ci/channel --conf "$CHANNEL")
 inputs=$(
     echo "scheme $SCHEME"
+    [[ $CHANNEL == quattro ]] || echo "channel $CHANNEL"
     echo "image ${BUILDER_IMAGE:?}"
     echo "recipes/$recipe $(recipe_inputs | sha256sum | cut -c1-40)"
-    for p in build/pacman.conf ci/build-recipe ci/setup-arch ci/omarchy-signing-key.asc; do
+    for p in "$conf" ci/build-recipe ci/setup-arch ci/omarchy-signing-key.asc; do
         echo "$p $(git rev-parse --verify --quiet "$rev:$p" || echo missing)"
     done
 )

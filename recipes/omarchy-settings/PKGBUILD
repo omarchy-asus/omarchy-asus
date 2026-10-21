@@ -10,10 +10,10 @@
 #    provenance only (empty when cut from a bare commit). omarchy and
 #    omarchy-settings must always carry identical _tag/_commit/pkgver/sha256sums.
 pkgname='omarchy-settings'
-_tag='v4.0.6'
-_commit='237f1b4071a0bff2296c6d740ba2b9fd695ebfa0'
-pkgver=4.0.6
-pkgrel=1.2
+_tag='v4.5.0-rc1'
+_commit='03ff1eff3812933f7088484533784d2f63eaf19a'
+pkgver=4.5.0rc1
+pkgrel=1.1
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -159,31 +159,31 @@ else
         0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch
         0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch
         0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch)
-  sha256sums=('f89ae5e85d18d8364f5c89ae05cd0fd170a8c4c93dd62e396b2b0a7fa5be4428'
-              '13bad35cf1cc779ade5304debb026327026a3e165848aba62c6b3f3995562503'
-              '29c1d4fdf427d9c389d25228c07ca564271c140653b622cf1e760c93677454b0'
-              'e13e04227d4a63d8d1ea431a6864d438490740543bfe596f215f597fb764270d'
-              '14a109bed45c2e93cc0517e0c4bddb7400ba99ec9d11170f1054da00a9edee9c'
-              '7539cff1b5d2cab6485b012df8009465d8e521e10716eaaaf8b3ca675f48408a'
-              '776691c0fd21274c1dc09b836666f501dc7ba4b12ebc8d091ef9ed22bfe7ff3f'
-              '1f669d9384ecc084d23b6b7e70b9feddba400a65172041bd6dbefa340534e554'
-              'e0e26b272c64f91ce8559feadbb4a672e3601e65022559b748a023931384540f'
-              'b0812e8b40c7b26f3b6d74fc73b5f4620448d63a56d37af534752915d8996153'
-              '090ee53bf1cd890e1b36dae5edecdcf3203ed802199c23aa5375a8800cdef720'
-              '056fdabb2e2ba5aa4ad0123a4b10570225913cbd2ff04ce5a1792444fcb32289'
-              '525051cc78104b58b98087b298828b4e3104c60833ba0fadcb044bd17e94e3d8'
-              'bc2b050ab8b837399d5f0a9064abbaac05dc8f51305924aa0c2ff09e6adece03'
-              '858b59be4c6383a38211aecd30bcde3f4d9d32fca0e03d6d2d6b183355d7f4a8'
-              '57fec2dda1bf51bb985c431b15304c1a7077abf534e2fe1d6347cb10bf67dee0'
-              '105eef9c0431df70e0a1a80a739f7bb97ba91759bf8b028beb1f9c827ea54f6e'
-              '1ebd57eaec1d9ffdad97b24f50ae9be86ce79dd259ae2c29a0fd7580d6a2aeec'
-              '6468816ed154cf9eb6ae74f0e1af0a861346719b848f927336187fd8fa2db465'
-              '64c86dd99a4b5a71df44f287ccdd1e4469d9eb69811fb89dcbce690e5896dd93'
-              'c79b725a3df1bc6b7003e5e48ce4256ece94909ec504a4eff50e7206dec0edb1'
-              '0801323e5cf288f80d7177b66892c9a79aeebf3bdbd871e406ad93c982174d9b'
-              '4f94f5e6c2cf30d2be3d7eee91c928f053a5f1caa233e5d213873cea578644d7'
-              'e273ac9a2c4b80cd9031064ce881fd0dfabab135d643dce356240ab49d897932'
-              '44fa2f67b5fddbe14123d4b1f650a0c0da48f0be89df4efe36921abaaf539562')
+  sha256sums=('532a3d500a3b96d429ec14a113f577b49406b11071a99105eaaf59506975485f'
+              'b86866617b28d01f3c59a963a2c8202802d3960d549a54c9d0cb926b60eb6433'
+              'd88f78f5a59dbd031b3a42b5c4cf604e3f14f0b4d237ddae2bad579580f7949e'
+              '04b38059006e7869af62dcbd03ab9d2a43d8144691c1507e94f57958b859736f'
+              '5383d200ea3a24d342ae0042e9900d6370ad0405b2d7e07f6a5e6fdf75a016b6'
+              'bb2b08741850535f2ea03a7b4ec84e96c1c60ad97c53ec5d218bbb49db5c202b'
+              '862067554f69867a558114da5d1b22dffffe29ba039fd463460bb07981358692'
+              '96389d48dc7f43a4ea2cb524bf18ec5ba03463c7d48f6ae9fdf4e7a3d9c64c37'
+              'f2b9a13f26bd460a52044d59e5d355f8388a8e82f6afa1782c0175d8215c4fed'
+              '50931d24c256636ce67a8d63380c3be48d0662e398d604ed073140228763231f'
+              'fb79d29885d0087779e53da2ab7b168ad4cac1f4d6180f63d4c87258a88a75e6'
+              'f42d3acc18a09b6f498a2c0d5a103a487381c9a59b689496a587a9b56a3bff06'
+              '937809a3b3412d5db240e98a9cd51c6eee999b64db7e30ca8b8c39fea9b767a8'
+              '3b56da054d6126dfa64715c45c85124f927e564a74b38aa7d6cd29e4762fd6c6'
+              '821965b3d2b7caece587b1869731c3cfdca0e2af31ddb19fba2e64eb93397da5'
+              'bb543747b1867af60999478b7bf80b24375c2dd76108afc9ec6019f81911c317'
+              '2616dbab39c53b1f3c54a967ba246156c0c3ef77536c6ec8bafb78bc7743615f'
+              'c94044fa6a7fc732190d1df89c5da5f9613701fdd7ca959c3602ae6957398115'
+              '19208fceac618fc74eefacbd1e551d945e89719b276142bcd68ad8d862106473'
+              '6f9aeb0ec6b52d995ea1afd6755ff66cd8bec8ae930dedfbde0268d501514b39'
+              '1f7b0dec99c60830061d36c12524b77fbd96082ae25f564b9ad777d0a05c71db'
+              'ae380acd6edee4e028c294e54978a87cd64e5da59bf5b861ab2acdbd03203749'
+              'bd5c52f6c42113944ee3486354e816613fb37c1fe78c349f151b00ba74498fd6'
+              '236fd084a6fca8f6805743069eb5f73121c758002be1d24ac774b621be750489'
+              'ca17782d1fed711b9061a203f5393ac948b55011d030ad70f538f10528284833')
 fi
 
 prepare() {

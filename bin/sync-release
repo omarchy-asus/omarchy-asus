@@ -1,7 +1,12 @@
 #!/bin/bash
 # Mirror $REPO_DIR to the GitHub release that pacman pulls from:
 #   Server = https://github.com/$GH_REPO/releases/download/$GH_TAG
-# Usage: bin/sync-release [--dry-run]
+# Usage: bin/sync-release [--channel quattro|rc] [--dry-run]
+#   The channel (bin/env.sh, default quattro) picks the local repo and the release: quattro
+#   mirrors $DATA/repo/x86_64 to the x86_64 release, rc mirrors $DATA/repo/rc-x86_64 to the
+#   rc-x86_64 release. Each keeps its own journal, publisher record and prune list in
+#   $CHANNEL_DATA ($DATA for quattro, $DATA/channel-rc for rc), so one channel's sync never
+#   reads or clears the other's.
 #        bin/sync-release --pii-scan FILE...   (only run the PII scan below on these files)
 #        bin/sync-release --pii-scan-text FILE...   (the same scan, each file read as plain text)
 #
@@ -10,7 +15,7 @@
 # whole run: snapshot, uploads, verification and pruning (--dry-run too).
 # - The snapshot's db and files must carry a good signature by $SIGN_KEY, and so
 #   must every package (+ .sig) about to go up; otherwise nothing is uploaded.
-# - One publisher: $DATA/release-db.sha256 records the db this host last put on the
+# - One publisher: $CHANNEL_DATA/release-db.sha256 records the db this host last put on the
 #   release (plus any it uploaded since without verifying: each is appended before its
 #   upload). If the release's db is none of those nor the local one, someone else
 #   published: refuse (checked again right before the db upload) unless
@@ -23,9 +28,9 @@
 #   up first, the db/files (+ .sig) last and only when they changed.
 # - Journal: after the uploads the release is read again and every db file, package
 #   and signature the db names must match the local bytes. Only then is the db sum
-#   recorded and $DATA/sync-pending cleared; any mismatch keeps it, for a retry.
+#   recorded and $CHANNEL_DATA/sync-pending cleared; any mismatch keeps it, for a retry.
 # - Grace period: an asset the db no longer names is not deleted at once (a client
-#   may hold the previous db). It is listed in $DATA/prune-candidates with the time
+#   may hold the previous db). It is listed in $CHANNEL_DATA/prune-candidates with the time
 #   it was first seen unreferenced, and deleted by a later verified sync once it is
 #   PRUNE_GRACE_HOURS (default 72; 0 deletes at once) old.
 # Release assets can't be symlinks, so the db/files links are uploaded as real
@@ -47,6 +52,8 @@
 # --pii-scan-text scans files as plain text, never as archives (bin/auto-update scans
 # its PR comments and replies with it; build/pii-allow-packages does not apply).
 set -euo pipefail
+# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
+if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
 source "$(dirname "$0")/env.sh"
 dry=0 scan_only=0 as_text=0
 case ${1:-} in
@@ -271,6 +278,8 @@ grace_h=${PRUNE_GRACE_HOURS:-72}
 # Set the EXIT trap before pub_lock, so a trap the lock sets up is not replaced.
 remote_dl=$(mktemp -d); trap 'rm -rf "$up" "$remote_dl"' EXIT
 pub_lock  # held until exit: snapshot, uploads, verification and pruning
+mkdir -p "$CHANNEL_DATA"
+echo "channel $CHANNEL: $REPO_DIR -> release $GH_TAG"
 
 for f in "$REPO_DIR"/*; do
     case $(basename "$f") in *.tar.gz|*.tar.gz.sig|*.old|*.old.sig) continue ;; esac
@@ -320,7 +329,7 @@ if ! read_assets; then
     echo "release $GH_TAG does not exist yet"
     run gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
         --prerelease --title "EXPERIMENTAL omarchy-asus pacman repo ($GH_TAG) - ROG Zephyrus G16 GA605 only" \
-        --notes-file "$WORKSPACE/build/release-notes.md"
+        --notes-file "$RELEASE_NOTES"
     rsize=(); rdigest=(); release_missing=1
 fi
 
@@ -345,13 +354,13 @@ check_publisher() {  # check_publisher [first]: exits 1 on a foreign db
         [[ ${1:-} == first ]] && echo "SYNC_ADOPT_REMOTE=1: taking over the release whatever db it has"
         return 0
     fi
-    if [[ ! -e $DATA/release-db.sha256 ]]; then
+    if [[ ! -e $CHANNEL_DATA/release-db.sha256 ]]; then
         [[ ${1:-} == first ]] &&
-            echo "note: no $DATA/release-db.sha256 yet; this host adopts the release as it is"
+            echo "note: no $CHANNEL_DATA/release-db.sha256 yet; this host adopts the release as it is"
         return 0
     fi
     [[ -n ${rsize[$REPO_NAME.db]:-} ]] || return 0
-    rec=$DATA/release-db.sha256
+    rec=$CHANNEL_DATA/release-db.sha256
     rs=$(remote_sum "$REPO_NAME.db") || rc=$?
     # The record lists every db this host uploaded since its last verified sync (one per
     # line, see below): a sync killed after its db upload must not look like another publisher.
@@ -439,15 +448,15 @@ if ((${#upload_db[@]})); then
     if ((!dry)); then
         # No record yet (the release was adopted as it is): record the adopted db too, so
         # an upload that fails before replacing it does not make it look foreign later.
-        if [[ ! -e $DATA/release-db.sha256 && -n ${rsize[$REPO_NAME.db]:-} ]]; then
+        if [[ ! -e $CHANNEL_DATA/release-db.sha256 && -n ${rsize[$REPO_NAME.db]:-} ]]; then
             arc=0; adopted=$(remote_sum "$REPO_NAME.db") || arc=$?
             ((arc == 0)) && [[ -n $adopted ]] ||
                 { echo "refusing: cannot hash the release's $REPO_NAME.db to record it; db not uploaded" >&2; exit 1; }
-            printf '%s\n' "$adopted" >>"$DATA/release-db.sha256" ||
-                { echo "refusing: cannot write $DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
+            printf '%s\n' "$adopted" >>"$CHANNEL_DATA/release-db.sha256" ||
+                { echo "refusing: cannot write $CHANNEL_DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
         fi
-        printf '%s\n' "$db_sum" >>"$DATA/release-db.sha256" ||
-            { echo "refusing: cannot write $DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
+        printf '%s\n' "$db_sum" >>"$CHANNEL_DATA/release-db.sha256" ||
+            { echo "refusing: cannot write $CHANNEL_DATA/release-db.sha256; db not uploaded" >&2; exit 1; }
     fi
     run gh release upload "$GH_TAG" -R "$GH_REPO" --clobber "${upload_db[@]}"
 fi
@@ -460,24 +469,24 @@ verify_asset() {  # verify_asset <name>: 0 the release has exactly the bytes of 
 }
 if ((dry)); then
     echo "dry run: would verify the release against the db, record $db_sum in" \
-        "$DATA/release-db.sha256 and clear $DATA/sync-pending"
+        "$CHANNEL_DATA/release-db.sha256 and clear $CHANNEL_DATA/sync-pending"
 else
     read_assets ||
-        { echo "sync incomplete: cannot read release $GH_TAG to verify it; $DATA/sync-pending kept" >&2; exit 1; }
+        { echo "sync incomplete: cannot read release $GH_TAG to verify it; $CHANNEL_DATA/sync-pending kept" >&2; exit 1; }
     want=("${dbfiles[@]}")
     for f in "${db_pkgs[@]}"; do want+=("$f" "$f.sig"); done
     for n in "${want[@]}"; do
         verify_asset "$n" ||
-            { echo "sync incomplete: $n on the release does not match; $DATA/sync-pending kept" >&2; exit 1; }
+            { echo "sync incomplete: $n on the release does not match; $CHANNEL_DATA/sync-pending kept" >&2; exit 1; }
     done
-    printf '%s\n' "$db_sum" >"$DATA/release-db.sha256.tmp"
-    mv -f "$DATA/release-db.sha256.tmp" "$DATA/release-db.sha256"
+    printf '%s\n' "$db_sum" >"$CHANNEL_DATA/release-db.sha256.tmp"
+    mv -f "$CHANNEL_DATA/release-db.sha256.tmp" "$CHANNEL_DATA/release-db.sha256"
     pub_clear_pending
 fi
 
 # --- prune what the db no longer names, after a grace period ---
-# $DATA/prune-candidates: '<asset>\t<epoch first seen unreferenced>' per line.
-cand=$DATA/prune-candidates now=$(date +%s) grace_s=$((10#$grace_h * 3600)) deleted=0 waiting=0
+# $CHANNEL_DATA/prune-candidates: '<asset>\t<epoch first seen unreferenced>' per line.
+cand=$CHANNEL_DATA/prune-candidates now=$(date +%s) grace_s=$((10#$grace_h * 3600)) deleted=0 waiting=0
 declare -A first_seen=()
 if [[ -e $cand ]]; then
     while IFS=$'\t' read -r n t; do

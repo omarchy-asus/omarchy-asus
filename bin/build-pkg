@@ -1,6 +1,11 @@
 #!/bin/bash
 # Build one recipe in a clean chroot copy at low priority; output lands in $STAGE_DIR.
-# Usage: bin/build-pkg recipes/<name> [extra makechrootpkg args]
+# Usage: bin/build-pkg [--channel quattro|rc] recipes/<name> [extra makechrootpkg args]
+# The channel (bin/env.sh) picks the chroot and the stage dir: an RC build runs in the rc
+# chroot (Omarchy's rc packages, bin/mkchroot --channel rc) and lands in the rc stage dir,
+# so bin/publish for the other channel refuses it. A chroot whose pacman.conf does not
+# match the channel's (build/pacman.conf, build/pacman-rc.conf) is refused before anything
+# is built.
 #
 # Run as a normal user: makechrootpkg is started through sudo (SUDO="sudo -S"
 # reads the password from stdin). Run as root (bin/auto-update under systemd):
@@ -16,6 +21,8 @@
 # /etc/makepkg.conf.d/*.conf are still read, the user overrides are not.
 # PACKAGER still comes from the chroot's own /etc/makepkg.conf.d.
 set -euo pipefail
+# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
+if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
 source "$(dirname "$0")/env.sh"
 lib=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
 recipe=$(realpath "$1"); shift
@@ -35,6 +42,13 @@ else
     chroot_user=()
 fi
 
+[[ -d $CHROOT/root ]] || { echo "no $CHANNEL build chroot at $CHROOT/root (run bin/mkchroot --channel $CHANNEL)" >&2; exit 1; }
+channel_conf_ok "$CHROOT/root/etc/pacman.conf" || {
+    echo "$CHROOT/root/etc/pacman.conf does not use the $CHANNEL channel's package sources" \
+        "(${PACMAN_CONF#"$WORKSPACE"/}); run bin/mkchroot --channel $CHANNEL" >&2
+    exit 1
+}
+echo "==> channel $CHANNEL: chroot $CHROOT, Omarchy $OMARCHY_CHANNEL, stage $STAGE_DIR"
 as_user mkdir -p "$STAGE_DIR" "$LOG_DIR"
 work=$(as_user mktemp -d "$DATA/work-$name.XXXX")
 log=$LOG_DIR/$name-$(date +%Y%m%d-%H%M%S).log

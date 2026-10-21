@@ -109,6 +109,10 @@ else
 fi
 export BUILD_USER
 source "$LIB/env.sh"   # DATA, REPO_DIR, GH_REPO, ... for BUILD_USER
+# The timer keeps the quattro channel (main, the x86_64 release) current; the RC channel is
+# built and published by hand (bin/build-pkg, bin/publish, bin/sync-release --channel rc).
+[[ $CHANNEL == quattro ]] ||
+    { echo "bin/auto-update serves the quattro channel only (OMARCHY_ASUS_CHANNEL=$CHANNEL)" >&2; exit 64; }
 GIT_URL=${GIT_URL:-https://github.com/$GH_REPO.git}
 BASE_BRANCH=${BASE_BRANCH:-$GH_BRANCH}
 REVIEW_CMD=${REVIEW_CMD-claude -p --output-format json --no-session-persistence --allowedTools Read Grep Glob --disallowedTools Bash NotebookEdit WebFetch WebSearch}

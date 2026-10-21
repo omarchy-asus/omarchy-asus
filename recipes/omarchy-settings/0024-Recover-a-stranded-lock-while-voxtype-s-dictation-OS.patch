@@ -1,10 +1,10 @@
-From 763f418214693962cd6ff9037d654cadba86802b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 21:47:36 -0400
 Subject: [PATCH 24/24] Recover a stranded lock while voxtype's dictation OSD
  is running
 
-Backport-of: omacom/omarchy#15890 (ae5ca034), applies to v4.0.5 unchanged.
+Backport-of: omacom/omarchy#15890 (ae5ca034), applies to v4.5.0-rc1 unchanged.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -13,7 +13,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 23 insertions(+), 5 deletions(-)
 
 diff --git a/bin/omarchy-hyprland-session-lock-stranded b/bin/omarchy-hyprland-session-lock-stranded
-index 05b8a56cc..267417fa7 100755
+index 05b8a56c..267417fa 100755
 --- a/bin/omarchy-hyprland-session-lock-stranded
 +++ b/bin/omarchy-hyprland-session-lock-stranded
 @@ -12,8 +12,14 @@
@@ -33,7 +33,7 @@ index 05b8a56cc..267417fa7 100755
    exit 2
  fi
 diff --git a/test/shell.d/hyprland-session-lock-stranded-test.sh b/test/shell.d/hyprland-session-lock-stranded-test.sh
-index ba1db1f18..52cafa2be 100755
+index ba1db1f1..52cafa2b 100755
 --- a/test/shell.d/hyprland-session-lock-stranded-test.sh
 +++ b/test/shell.d/hyprland-session-lock-stranded-test.sh
 @@ -17,9 +17,9 @@ SH
@@ -71,6 +71,3 @@ index ba1db1f18..52cafa2be 100755
 +assert_status 2 0 "$voxtype"$'\n'"$other_shell" "voxtype's OSD does not hide another shell"
 +assert_status 0 0 "$shell"$'\n'"$voxtype_user" "voxtype's per-user OSD copy does not count as a locker"
 +assert_status 2 0 "$shell"$'\n'"$not_voxtype" "only voxtype's own config is skipped, not a path that starts like it"
--- 
-2.56.0
-

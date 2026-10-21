@@ -1,7 +1,7 @@
-From 6494916356e269f984850dc2091e089ddc4c703f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:26:37 -0400
-Subject: [PATCH 05/18] Use a software cursor while a monitor on the NVIDIA GPU
+Subject: [PATCH 05/24] Use a software cursor while a monitor on the NVIDIA GPU
  is plugged into a hybrid laptop
 
 On a hybrid the iGPU renders, but ports such as HDMI are often wired to
@@ -266,6 +266,3 @@ index 00000000..c9e73e6f
 +
 +rm -rf "$OMARCHY_DRM_PATH"
 +expect "no DRM cards: nothing registered" "events=0"
--- 
-2.55.0
-

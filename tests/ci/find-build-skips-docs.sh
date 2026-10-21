@@ -7,6 +7,8 @@
 #   3. a README.md the PKGBUILD names (installed doc): new label
 #   4. a new file at the recipe root: new label
 #   5. build/pacman.conf: new label
+#   6. CHANNEL=rc: its own label, keyed on build/pacman-rc.conf; Quattro's ignores
+#      that file; ci/channel maps next/omarchy-4.5 to rc and the rest to quattro
 # Usage: tests/ci/find-build-skips-docs.sh [keep]
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -20,9 +22,10 @@ check() {
 
 R=$S/repo
 mkdir -p "$R/ci" "$R/build" "$R/recipes/k/g16-test" "$R/recipes/k/tests" "$R/recipes/d"
-cp "$W/ci/find-build" "$R/ci/"
+cp "$W/ci/find-build" "$W/ci/channel" "$R/ci/"
 printf 'stub\n' >"$R/ci/build-recipe"; printf 'stub\n' >"$R/ci/setup-arch"; printf 'key\n' >"$R/ci/omarchy-signing-key.asc"
 printf '[options]\n' >"$R/build/pacman.conf"
+printf '[options]\n# rc\n' >"$R/build/pacman-rc.conf"
 printf "pkgname=k\nsource=(0001-fix.patch)\n" >"$R/recipes/k/PKGBUILD"
 printf 'patch\n' >"$R/recipes/k/0001-fix.patch"
 for f in NOTES.md DELTA README.md; do printf '%s\n' "$f" >"$R/recipes/k/$f"; done
@@ -31,7 +34,7 @@ printf "pkgname=d\nsource=(README.md)\n" >"$R/recipes/d/PKGBUILD"
 printf 'doc\n' >"$R/recipes/d/README.md"
 git -C "$R" init -q && git -C "$R" add -A && git -C "$R" -c user.name=t -c user.email=t@t commit -qm base
 
-label() { (cd "$R" && BUILDER_IMAGE=img FORCE_BUILD=true ci/find-build "$1" 2>/dev/null | sed -n 's/^label=//p'); }
+label() { (cd "$R" && BUILDER_IMAGE=img FORCE_BUILD=true CHANNEL=${CHANNEL:-} ci/find-build "$1" 2>/dev/null | sed -n 's/^label=//p'); }
 commit() { git -C "$R" add -A && git -C "$R" -c user.name=t -c user.email=t@t commit -qm "$1"; }
 
 k0=$(label k) d0=$(label d)
@@ -63,7 +66,20 @@ check "new label after a new config file" [ "$k3" != "$k2" ]
 
 echo "== 5. build inputs outside the recipe count"
 printf 'Server = x\n' >>"$R/build/pacman.conf"; commit pacman
-check "new label after build/pacman.conf" [ "$(label k)" != "$k3" ]
+k4=$(label k)
+check "new label after build/pacman.conf" [ "$k4" != "$k3" ]
+
+echo "== 6. the RC channel builds against its own sources"
+check "CHANNEL=quattro is the default label" [ "$(CHANNEL=quattro label k)" = "$k4" ]
+r0=$(CHANNEL=rc label k)
+check "CHANNEL=rc gets its own label" [ -n "$r0" ] && [ "$r0" != "$k4" ]
+printf 'Server = rc\n' >>"$R/build/pacman-rc.conf"; commit pacman-rc
+check "new rc label after build/pacman-rc.conf" [ "$(CHANNEL=rc label k)" != "$r0" ]
+check "Quattro label unchanged by build/pacman-rc.conf" [ "$(label k)" = "$k4" ]
+check "an unknown channel gives no label" [ -z "$(CHANNEL=edge label k)" ]
+check "ci/channel: next/omarchy-4.5 is rc" [ "$("$W/ci/channel" next/omarchy-4.5)" = rc ]
+check "ci/channel: main is quattro" [ "$("$W/ci/channel" main)" = quattro ]
+check "ci/channel: rc conf is build/pacman-rc.conf" [ "$("$W/ci/channel" --conf rc)" = build/pacman-rc.conf ]
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"

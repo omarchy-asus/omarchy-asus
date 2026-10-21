@@ -1,7 +1,7 @@
-From 57bd9950650fa798ea21197469546f490b8bd376 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:27:05 -0400
-Subject: [PATCH 07/18] Decode video on the iGPU when it is a non-VGA display
+Subject: [PATCH 07/24] Decode video on the iGPU when it is a non-VGA display
  controller
 
 AMD Krackan (Zephyrus G16 GA605) presents its iGPU as a non-VGA display
@@ -126,6 +126,3 @@ index f0ec8e20..bb52b9ee 100755
 +  fi
 +done
 +pass "the migration asks for a reboot only while the old NVIDIA override is live"
--- 
-2.55.0
-

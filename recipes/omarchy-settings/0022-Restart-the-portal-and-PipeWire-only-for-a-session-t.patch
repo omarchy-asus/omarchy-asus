@@ -1,7 +1,7 @@
-From d9cff9ec2717c96108e04088aee542afb3e0709f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 04:54:21 -0400
-Subject: [PATCH 22/23] Restart the portal and PipeWire only for a session that
+Subject: [PATCH 22/24] Restart the portal and PipeWire only for a session that
  started without rtkit
 
 The rtkit migration restarted xdg-desktop-portal and the PipeWire units on
@@ -158,6 +158,3 @@ index 00000000..0ff26f5e
 +grep -qF 'systemctl --user try-restart xdg-desktop-portal.service' "$CALL_LOG" ||
 +  fail "a portal that started before rtkit is restarted" "$(cat "$CALL_LOG")"
 +pass "a portal that started before rtkit is restarted even when PipeWire did not"
--- 
-2.55.0
-

@@ -216,6 +216,12 @@ across rebases. 7.2.8-9.3 passed it on 2026-10-20 (PR #8). It reads the
 expected version from the PKGBUILD, so it serves the next kernel's boot test
 as is.
 
+The kit installs the kernel next to whatever Omarchy channel the G16 is on, so test a build
+from the matching channel: a Quattro build (`main`, `bin/build-pkg`) on Omarchy stable with
+`[omarchy-asus]` on `x86_64`, an RC build (`next/omarchy-4.5`, `bin/build-pkg --channel rc`,
+staged in the rc stage dir) on Omarchy rc with `[omarchy-asus]` on `rc-x86_64`. Switch both with
+`omarchy-asus-setup --channel rc|quattro` first (README.md, "Release channels").
+
 On the G16, from a clone of this repo:
 
 ```sh

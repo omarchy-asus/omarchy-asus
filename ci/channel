@@ -1,0 +1,20 @@
+#!/bin/bash
+# Print the release channel a branch builds for, and the chroot pacman.conf of that channel
+# (README.md "Release channels", bin/env.sh): next/omarchy-4.5 is the RC channel, built against
+# Omarchy's rc repos (build/pacman-rc.conf); every other branch is Quattro (build/pacman.conf).
+# CI passes it to ci/find-build and ci/build-recipe, so a PR builds against the package sources
+# of the channel it will be published to.
+# Usage: ci/channel <branch>          prints quattro|rc
+#        ci/channel --conf <channel>  prints the channel's pacman.conf path (repo-relative)
+set -euo pipefail
+case ${1:?usage: ci/channel <branch> | --conf <channel>} in
+    --conf)
+        case ${2:?usage: ci/channel --conf <channel>} in
+            quattro) echo build/pacman.conf ;;
+            rc) echo build/pacman-rc.conf ;;
+            *) echo "ci/channel: unknown channel '$2' (quattro, rc)" >&2; exit 1 ;;
+        esac
+        ;;
+    next/omarchy-4.5) echo rc ;;
+    *) echo quattro ;;
+esac
