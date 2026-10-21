@@ -12,7 +12,9 @@ The delta: recipes/<name>/DELTA, one directive per line (# comments):
 
   upstream arch <pkgbase>          Arch packaging git, tag <version> (':' -> '-')
   upstream omarchy-pkgs <path>     omacom/omarchy-pkgs, newest master commit whose
-                                   <path>/PKGBUILD has that pkgver/pkgrel
+                                   <path>/PKGBUILD has that pkgver/pkgrel; failing
+                                   that, the newest such commit on the rc branch
+                                   (pre-releases like 4.5.0rc1 are cut there)
   mode overlay|template            overlay (default): start from upstream's files and
                                    re-apply the edits below. template: our PKGBUILD is
                                    kept as is (e.g. a trimmed split package); only
@@ -175,6 +177,10 @@ def fetch_arch(pkgbase, version, dest, cache):
     return {"url": url, "ref": tag, "commit": commit}
 
 
+# Stable releases are on master; pre-releases (pkgver X.Y.ZrcN) only on rc.
+OMARCHY_PKGS_BRANCHES = ("master", "rc")
+
+
 def fetch_omarchy_pkgs(path, version, dest, cache):
     repo = os.path.join(cache, "omarchy-pkgs")
     url = OMARCHY_PKGS_GIT_URL
@@ -186,19 +192,26 @@ def fetch_omarchy_pkgs(path, version, dest, cache):
             git("clone", "--quiet", "--filter=blob:none", "--no-checkout", "--single-branch",
                 "--branch", "master", url, repo)
         git("remote", "set-url", "origin", url, cwd=repo)
-        git("fetch", "--quiet", "--force", "origin", "master", cwd=repo)
+        git("fetch", "--quiet", "--force", "origin", "+refs/heads/master:refs/remotes/origin/master", cwd=repo)
     except subprocess.CalledProcessError as e:
         raise Fail(3, "fetch", f"{url}: {e.output.strip()[-500:]}")
+    # rc is optional: a mirror without it still serves stable releases from master
+    git("fetch", "--quiet", "--force", "origin", "+refs/heads/rc:refs/remotes/origin/rc", cwd=repo, check=False)
     _, want_ver, want_rel = split_version(version)
-    commits = git("log", "--format=%H", "-n", "200", "FETCH_HEAD", "--", f"{path}/PKGBUILD", cwd=repo).stdout.split()
-    for c in commits:
-        text = git("show", f"{c}:{path}/PKGBUILD", cwd=repo, check=False).stdout
-        v = re.search(r"^pkgver=['\"]?([^'\"\s]+)", text, re.M)
-        r = re.search(r"^pkgrel=['\"]?([^'\"\s]+)", text, re.M)
-        if v and r and v.group(1) == want_ver and r.group(1) == want_rel:
-            export_tree(repo, c, path, dest)
-            return {"url": url, "ref": f"{path}@{c[:12]}", "commit": c}
-    raise Fail(3, "fetch", f"{url}: no commit of {path}/PKGBUILD in the last 200 has {want_ver}-{want_rel}")
+    for branch in OMARCHY_PKGS_BRANCHES:
+        ref = f"refs/remotes/origin/{branch}"
+        if git("rev-parse", "--verify", "--quiet", ref, cwd=repo, check=False).returncode != 0:
+            continue
+        commits = git("log", "--format=%H", "-n", "200", ref, "--", f"{path}/PKGBUILD", cwd=repo).stdout.split()
+        for c in commits:
+            text = git("show", f"{c}:{path}/PKGBUILD", cwd=repo, check=False).stdout
+            v = re.search(r"^pkgver=['\"]?([^'\"\s]+)", text, re.M)
+            r = re.search(r"^pkgrel=['\"]?([^'\"\s]+)", text, re.M)
+            if v and r and v.group(1) == want_ver and r.group(1) == want_rel:
+                export_tree(repo, c, path, dest)
+                return {"url": url, "ref": f"{path}@{c[:12]}", "branch": branch, "commit": c}
+    raise Fail(3, "fetch", f"{url}: no commit of {path}/PKGBUILD in the last 200 on "
+                           f"{' or '.join(OMARCHY_PKGS_BRANCHES)} has {want_ver}-{want_rel}")
 
 
 def export_tree(repo, commit, path, dest):
