@@ -54,7 +54,11 @@ case $1 in
   show-environment) echo "OMARCHY_PATH=$STUB/omarchy" ;;
   is-active) [[ $2 == -q ]] && shift; [[ -e $STUB/active/$2 ]] ;;
   stop) echo "stop $2" >>"$STUB/log"; rm -f "$STUB/active/$2"; [[ -e $STUB/slow-stop ]] && sleep 3 ;;
-  start) echo "start $2" >>"$STUB/log"; touch "$STUB/active/$2" ;;
+  start)
+    echo "start $2" >>"$STUB/log"
+    # fail-start-UNIT: refuse this start once.
+    [[ -e $STUB/fail-start-$2 ]] && { rm -f "$STUB/fail-start-$2"; exit 1; }
+    touch "$STUB/active/$2" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -69,7 +73,9 @@ rm -f "$STUB/shell"; echo "kill shell" >>"$STUB/log"
 EOF
 cat >"$B/omarchy-restart-shell" <<'EOF'
 #!/bin/bash
-touch "$STUB/shell"; echo "restart shell" >>"$STUB/log"
+echo "restart shell" >>"$STUB/log"
+[[ -e $STUB/fail-restart ]] && exit 1
+touch "$STUB/shell"
 EOF
 cat >"$B/omarchy-toggle-idle" <<'EOF'
 #!/bin/bash
@@ -91,6 +97,10 @@ case $2 in
   *) exit 1 ;;
 esac
 EOF
+cat >"$B/powerprofilesctl" <<'EOF'
+#!/bin/bash
+[[ $1 == get ]] && cat "$STUB/profile"
+EOF
 chmod +x "$B"/*
 
 reset() {
@@ -100,6 +110,8 @@ reset() {
   mkdir -p "$T/home/.config/agent-pii"
   printf '# test denylist\nnot-in-any-report-xyzzy\n' >"$T/home/.config/agent-pii/denylist"
   echo 2 >"$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings"
+  echo 0 >"$S/class/power_supply/ACAD/online"
+  echo balanced >"$ST/profile"
 }
 run() { # args...
   env -u OMARCHY_PATH HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT=none G16_IDLE_SYS="$S" \
@@ -172,6 +184,30 @@ kill -TERM "$pid"; wait "$pid" 2>/dev/null
 [[ -e $ST/active/omarchy-fcitx5.service ]] && ok "killed during stop: omarchy-fcitx5 started again" || bad "killed during stop: omarchy-fcitx5 left stopped ($(cat "$ST/log"))"
 [[ -e $T/home/.local/state/omarchy/indicators/stay-awake ]] && bad "killed: stay-awake left on" || ok "killed: stay-awake cleared"
 [[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 2 ]] && ok "killed: panel_power_savings untouched" || bad "killed: panel_power_savings changed"
+
+# ------------------------------------- 5. a unit that doesn't start again
+reset
+touch "$ST/fail-start-owed.service"
+out=$(run "${FAST[@]}" --no-post 2>&1); rc=$?
+((rc == 1)) && ok "failed start: run stops with exit 1" || bad "failed start: exit $rc"
+grep -q 'owed did not start again; stopping the run' <<<"$out" && ok "failed start: says which" || bad "failed start: no message: $out"
+grep -q '^kill shell' "$ST/log" && bad "failed start: went on measuring" || ok "failed start: no later phases"
+[[ $(grep -c '^start owed.service' "$ST/log") == 2 && -e $ST/active/owed.service ]] && ok "failed start: restore tried again and owed runs" || bad "failed start: owed not retried ($(cat "$ST/log"))"
+reset
+touch "$ST/fail-restart"
+out=$(run "${FAST[@]}" --no-post 2>&1); rc=$?
+((rc == 1)) && ok "shell never back: exit 1" || bad "shell never back: exit $rc"
+grep -q 'still stopped: @shell' <<<"$out" && ok "shell never back: named at exit" || bad "shell never back: not named: $out"
+[[ $(grep -c '^restart shell' "$ST/log") == 2 ]] && ok "shell never back: restore tried again" || bad "shell never back: $(grep -c '^restart shell' "$ST/log") restarts"
+
+# --------------------------- 6. started on the charger: context is battery's
+reset
+echo 1 >"$S/class/power_supply/ACAD/online"
+echo performance >"$ST/profile"
+( sleep 1; echo power-saver >"$ST/profile"; echo 0 >"$S/class/power_supply/ACAD/online" ) &
+run "${FAST[@]}" --no-cacp --no-post >/dev/null 2>&1
+wait
+grep -q '^- power profile: power-saver' "$T/home/report.md" && ok "context read after unplugging" || bad "context: $(grep '^- power profile' "$T/home/report.md")"
 
 # Root helper: only its commands, only levels 0-4.
 reply=$(printf 'cacp 9\nfoo\nrapl\n' | "$W/bin/g16-idle-power" --root-helper "$S" 1)
