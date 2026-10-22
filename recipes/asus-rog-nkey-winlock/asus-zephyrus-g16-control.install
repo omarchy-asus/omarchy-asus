@@ -1,0 +1,19 @@
+_moved() {
+  cat <<'MSG'
+==> G16 Control is an Omarchy plugin now: https://github.com/omarchy-asus/g16-control
+    This package no longer ships the widget. Switch with, as your user:
+      rm ~/.config/omarchy/plugins/omarchy-asus.g16    # the old link into /usr/share
+      omarchy-plugin-add https://github.com/omarchy-asus/g16-control --enable
+    (or: omarchy-asus-g16-apply g16-widget). Your settings carry over, and
+    omarchy-plugin-update keeps it current. Then remove this package:
+      sudo pacman -R asus-zephyrus-g16-control
+MSG
+}
+
+post_install() {
+  _moved
+}
+
+post_upgrade() {
+  _moved
+}

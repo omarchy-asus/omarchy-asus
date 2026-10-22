@@ -46,7 +46,7 @@ declare -A DESC=(
   [winlock]="enable the g16-winlock user service (asus-rog-nkey-winlock)"
   [initramfs-no-nvidia]="opt-in: drop NVIDIA early load from the initramfs and rebuild it (fork carry/initramfs-8263)"
   [quiet-fans]="opt-in, EXPERIMENTAL: fans off at idle on battery (fork asus/ga605km-quiet-fans helper)"
-  [g16-widget]="opt-in: link and enable the G16 Control bar widget (asus-zephyrus-g16-control)"
+  [g16-widget]="opt-in: add and enable the G16 Control bar widget (the omarchy-asus/g16-control plugin)"
 )
 
 DRY_RUN=0 CHECK=0 YES=0 FORCE=0
@@ -867,16 +867,30 @@ apply_winlock() {
 # ---------------------------------------------------------------------------
 # g16-widget (opt-in)
 
+# The widget is an Omarchy plugin (a git repo in ~/.config/omarchy/plugins,
+# updated with omarchy-plugin-update; the shell reloads it when it changes).
+# It used to be the asus-zephyrus-g16-control package, linked from /usr/share.
 WIDGET_ID=omarchy-asus.g16
+WIDGET_URL=https://github.com/omarchy-asus/g16-control
+OLD_WIDGET_DIR=/usr/share/omarchy/plugins/$WIDGET_ID
+
+old_widget_link() {
+  local dest=$HOME/.config/omarchy/plugins/$WIDGET_ID
+  [[ -L $dest && $(readlink "$dest") == "$OLD_WIDGET_DIR" ]]
+}
 
 check_g16_widget() {
-  local d
-  if [[ ! -d $(r "/usr/share/omarchy/plugins/$WIDGET_ID") ]]; then
-    ST=n/a DETAIL="asus-zephyrus-g16-control is not installed"
+  local d dest=$HOME/.config/omarchy/plugins/$WIDGET_ID
+  if old_widget_link; then
+    ST=missing DETAIL="the old packaged widget is linked; it is a plugin now ($WIDGET_URL)"
     return
   fi
-  if [[ -e $HOME/.config/omarchy/plugins/$WIDGET_ID ]]; then
-    ST=applied DETAIL="$(tilde "$HOME/.config/omarchy/plugins/$WIDGET_ID")"
+  if [[ -d $dest/.git ]]; then
+    ST=applied DETAIL="$(tilde "$dest") (plugin)"
+    return
+  fi
+  if [[ -e $dest || -L $dest ]]; then
+    ST=local DETAIL="$(tilde "$dest") is not the G16 Control plugin; left alone"
     return
   fi
   for d in "$HOME"/.config/omarchy/plugins/*/; do
@@ -884,17 +898,18 @@ check_g16_widget() {
     ST=local DETAIL="a G16 widget of your own in $(tilde "${d%/}"); left alone"
     return
   done
-  ST=missing DETAIL="the widget is installed but not linked into ~/.config/omarchy/plugins"
+  ST=missing DETAIL="not installed: omarchy-plugin-add $WIDGET_URL --enable"
 }
 
 apply_g16_widget() {
-  run mkdir -p "$HOME/.config/omarchy/plugins"
-  run ln -s "/usr/share/omarchy/plugins/$WIDGET_ID" "$HOME/.config/omarchy/plugins/$WIDGET_ID" || return 1
-  if command -v omarchy-plugin-enable >/dev/null || ((DRY_RUN)); then
-    run omarchy-plugin-enable "$WIDGET_ID"
-  else
-    warn "omarchy-plugin-enable not found; enable $WIDGET_ID in the bar settings"
+  if old_widget_link; then
+    run rm "$HOME/.config/omarchy/plugins/$WIDGET_ID" || return 1
   fi
+  if ! command -v omarchy-plugin-add >/dev/null && ((!DRY_RUN)); then
+    warn "omarchy-plugin-add not found; add $WIDGET_URL in Omarchy's plugin settings"
+    return 1
+  fi
+  run omarchy-plugin-add "$WIDGET_URL" --enable --yes
 }
 
 # ---------------------------------------------------------------------------
