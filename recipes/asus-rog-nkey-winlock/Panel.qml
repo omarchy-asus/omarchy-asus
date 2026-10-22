@@ -77,7 +77,7 @@ Panel {
     root.reportedTo = null
     if (want) { root.g.panelOpened(); root.reportedOpen = true; root.reportedTo = root.g }
   }
-  onOpenedChanged: syncOpen()
+  onOpenedChanged: { syncOpen(); root.slashCursor = -1 }
   onGChanged: syncOpen()
   Component.onDestruction: if (root.reportedOpen && root.reportedTo) root.reportedTo.panelClosed()
 
@@ -179,6 +179,47 @@ Panel {
   function setKbdPower(flag, value) { if (g) g.setKbdPower(flag, value) }
   function toggleSlash() { if (g) g.toggleSlash() }
   function setSlashPattern(index) { if (g) g.setSlashPattern(index) }
+
+  // ---- keyboard: the Slash pattern grid (arrows or h/j/k/l move, Enter or
+  // Space picks; Tab still switches panels, as everywhere in Omarchy) ----
+  readonly property int slashColumns: 3
+  // -1 until a key is pressed on the Slash tab; then it starts on the
+  // current pattern. A click moves it too, so mouse and keys agree.
+  property int slashCursor: -1
+
+  // cursor-begin (pure; exercised by tests/cursor.test.js)
+  // Next cursor position in a grid of `count` cells, `columns` wide. -1 (no
+  // cursor yet) lands on `current`. Left/right step one cell and run on
+  // across rows; up/down move a row. Never leaves the grid.
+  function nextCursor(cursor, dx, dy, count, columns, current) {
+    if (count <= 0) return -1
+    if (cursor < 0 || cursor >= count) return Math.max(0, Math.min(count - 1, current))
+    var next = cursor + dx + dy * columns
+    if (next < 0 || next >= count) return dy !== 0 ? cursor : Math.max(0, Math.min(count - 1, next))
+    return next
+  }
+  // cursor-end
+
+  function moveCursor(dx, dy) {
+    if (root.tab !== 2 || !root.hasSlash) return
+    root.slashCursor = nextCursor(root.slashCursor, dx, dy, root.slashModes.length,
+                                  root.slashColumns, root.slashPattern)
+    root.revealCursor()
+  }
+  function activateCursor() {
+    if (root.tab !== 2 || root.slashCursor < 0) return
+    root.setSlashPattern(root.slashCursor)
+  }
+  // On the 1600 px internal panel the panel scrolls: keep the cursor's row in view.
+  function revealCursor() {
+    var cell = modeRepeater.itemAt(root.slashCursor)
+    if (!cell || !panelScroll.interactive) return
+    var y = cell.mapToItem(column, 0, 0).y
+    if (y < panelScroll.contentY) panelScroll.contentY = y
+    else if (y + cell.height > panelScroll.contentY + panelScroll.height)
+      panelScroll.contentY = y + cell.height - panelScroll.height
+  }
+  onTabChanged: root.slashCursor = -1
   function applySlashBrightness() { if (g) g.applySlashBrightness() }
   function setSlashFlag(name, value) { if (g) g.setSlashFlag(name, value) }
   // Named setRefreshHz, not setRefresh: refresh() already means "re-read state".
@@ -255,6 +296,8 @@ Panel {
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
+      onActivateRequested: root.activateCursor()
 
       Flickable {
         id: panelScroll
@@ -568,6 +611,7 @@ Panel {
                   (width - spacing * (columns - 1)) / columns
 
                 Repeater {
+                  id: modeRepeater
                   model: root.slashModes
                   Button {
                     required property var modelData
@@ -581,14 +625,16 @@ Panel {
                     verticalPadding: Style.spacing.controlPaddingY
                     bordered: true
                     active: root.slashPattern === index
-                    onClicked: root.setSlashPattern(index)
+                    hasCursor: root.tab === 2 && root.slashCursor === index
+                    onClicked: { root.slashCursor = index; root.setSlashPattern(index) }
                   }
                 }
               }
 
               Text {
                 width: parent.width
-                text: "Static is the steady one. Most others animate, and a few sit dark between plays."
+                text: "Static is the steady one. Most others animate, and a few sit dark between plays. "
+                    + "Arrow keys (or h/j/k/l) move, Enter picks."
                 color: Qt.darker(root.bar.foreground, 1.5)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
