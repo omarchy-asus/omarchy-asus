@@ -146,7 +146,7 @@ and in `omarchy-refresh-hybrid-video`. So each pin has one owner:
 misses the Krackan iGPU (a non-VGA display controller with no `boot_vga`), and
 render node numbering puts the RTX first. Every browser video and mpv clip then
 wakes the RTX (AV1 1080p60: 0.36 s CPU on the iGPU vs 2.61 s in software;
-YouTube on battery about 9 W instead of 12 W).
+YouTube on battery about 9 W instead of 14 W).
 
 **Mirrors:** fork branch `asus/hybrid-video-decode` (`c0b4e886`). The mpv and
 Chromium edits are the fork's `install/helpers/hybrid-video-decode.sh` and
