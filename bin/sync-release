@@ -2,6 +2,8 @@
 # Mirror $REPO_DIR to the GitHub release that pacman pulls from:
 #   Server = https://github.com/$GH_REPO/releases/download/$GH_TAG
 # Usage: bin/sync-release [--channel quattro|rc] [--dry-run]
+#   Exit: 0 synced (or would be), 3 withheld (the channel is not complete, below), 75 the
+#   publication lock is busy, 1 anything else.
 #   The channel (bin/env.sh, default quattro) picks the local repo and the release: quattro
 #   mirrors $DATA/repo/x86_64 to the x86_64 release, rc mirrors $DATA/repo/rc-x86_64 to the
 #   rc-x86_64 release. Each keeps its own journal, publisher record and prune list in
@@ -33,6 +35,18 @@
 #   may hold the previous db). It is listed in $CHANNEL_DATA/prune-candidates with the time
 #   it was first seen unreferenced, and deleted by a later verified sync once it is
 #   PRUNE_GRACE_HOURS (default 72; 0 deletes at once) old.
+# - Whole channel or nothing (#201): the db goes up only when it serves every package of
+#   every recipe on the channel's branch that is not held, at the recipe's version
+#   (bin/check-upstream --complete against $WORKSPACE/recipes, offline). An incomplete db
+#   still goes up when it adds nothing to the release's db (every package it names is there
+#   at the same version), or when it withdraws a package the release serves: a withdrawal
+#   lets the stock build flow through where our stale copy would block or break updates, so
+#   it is never held back, and the builds in the same db go up with it (a warning says so).
+#   Any other incomplete db (a first publish, a build published while another recipe is
+#   still unbuilt or behind) is withheld: nothing is uploaded, the gaps are printed and
+#   written to $CHANNEL_DATA/release-withheld, $CHANNEL_DATA/sync-pending stays, and the
+#   exit is 3. The release keeps serving the set it had. A sync that goes through removes
+#   release-withheld.
 # Release assets can't be symlinks, so the db/files links are uploaded as real
 # files under the names pacman requests.
 #
@@ -325,13 +339,7 @@ read_assets() {  # fill rsize/rdigest from the release; 1 if it cannot be read
     done <<<"$assets"
 }
 release_missing=0
-if ! read_assets; then
-    echo "release $GH_TAG does not exist yet"
-    run gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
-        --prerelease --title "EXPERIMENTAL omarchy-asus pacman repo ($GH_TAG) - ROG Zephyrus G16 GA605 only" \
-        --notes-file "$RELEASE_NOTES"
-    rsize=(); rdigest=(); release_missing=1
-fi
+read_assets || release_missing=1
 
 remote_sum() {  # remote_sum <asset name>: print the release asset's sha256 (from the API's
                 # digest, else by downloading it); 1 the asset is absent, 2 the download failed
@@ -373,6 +381,62 @@ check_publisher() {  # check_publisher [first]: exits 1 on a foreign db
     exit 1
 }
 check_publisher first
+
+# --- whole channel or nothing: a complete set, nothing new, or a withdrawal ---
+withheld=$CHANNEL_DATA/release-withheld crc=0
+OMARCHY_ASUS_WORKSPACE=$WORKSPACE "$(dirname "$0")/check-upstream" --complete "$up/$REPO_NAME.db" >"$up/.gaps" 2>"$up/.gaps.err" || crc=$?
+if ((crc == 10)); then
+    entries() { bsdtar -tf "$1" | { grep '/$' || true; } | sort -u; }   # "<name>-<version>/" per package
+    entries "$up/$REPO_NAME.db" >"$up/.local-entries" ||
+        { echo "cannot list $REPO_DIR/$REPO_NAME.db; nothing uploaded" >&2; exit 1; }
+    : >"$up/.release-entries"
+    if [[ -n ${rsize[$REPO_NAME.db]:-} ]]; then
+        rm -f "$remote_dl/$REPO_NAME.db"
+        if ! { gh release download "$GH_TAG" -R "$GH_REPO" -p "$REPO_NAME.db" -D "$remote_dl" --clobber >/dev/null 2>&1 &&
+               entries "$remote_dl/$REPO_NAME.db" >"$up/.release-entries"; }; then
+            echo "refusing: cannot read the release's $REPO_NAME.db to compare with an incomplete local db;" \
+                "nothing uploaded" >&2
+            exit 1
+        fi
+        rm -f "$remote_dl/$REPO_NAME.db"
+    fi
+    # package names of "<name>-<pkgver>-<pkgrel>/" entries
+    names() { sed 's,/$,,; s,-[^-]*-[^-]*$,,' "$1" | sort -u; }
+    added=$(comm -23 "$up/.local-entries" "$up/.release-entries")
+    names "$up/.local-entries" >"$up/.local-names"
+    names "$up/.release-entries" >"$up/.release-names"
+    dropped=$(comm -23 "$up/.release-names" "$up/.local-names")
+    if [[ -z $added ]]; then
+        echo "the $CHANNEL channel is not complete, but this db adds nothing to the release's: syncing"
+    elif [[ -n $dropped ]]; then
+        echo "warning: the $CHANNEL channel is not complete, but this db withdraws $(paste -sd' ' <<<"$dropped")" \
+            "from release $GH_TAG: a withdrawal is never held back, so it goes up with the builds it carries" >&2
+    else
+        echo "withheld: the $CHANNEL channel is not complete, and its db adds to what release $GH_TAG serves;" \
+            "nothing uploaded, the release keeps its set. Not served at the recipe version (recipes from $WORKSPACE):" >&2
+        sed 's/^/  /' "$up/.gaps" >&2
+        if ((!dry)); then
+            if ! { cp "$up/.gaps" "$withheld.tmp" && mv -f "$withheld.tmp" "$withheld"; }; then
+                echo "warning: could not write $withheld" >&2
+            fi
+        fi
+        exit 3
+    fi
+    sed 's/^/  /' "$up/.gaps"
+elif ((crc != 0)); then
+    sed 's/^/  /' "$up/.gaps.err" >&2
+    echo "refusing: cannot check that the $CHANNEL channel is complete (bin/check-upstream --complete" \
+        "exit $crc); nothing uploaded" >&2
+    exit 1
+fi
+
+if ((release_missing)); then
+    echo "release $GH_TAG does not exist yet"
+    run gh release create "$GH_TAG" -R "$GH_REPO" --target "$GH_BRANCH" --latest=false \
+        --prerelease --title "EXPERIMENTAL omarchy-asus pacman repo ($GH_TAG) - ROG Zephyrus G16 GA605 only" \
+        --notes-file "$RELEASE_NOTES"
+    rsize=(); rdigest=()
+fi
 
 same() {  # same <local file>: 0 the remote asset of that name has the same bytes, 1 it differs
           # (or is absent), 2 unknown (no digest from the API and the download failed)
@@ -482,6 +546,7 @@ else
     printf '%s\n' "$db_sum" >"$CHANNEL_DATA/release-db.sha256.tmp"
     mv -f "$CHANNEL_DATA/release-db.sha256.tmp" "$CHANNEL_DATA/release-db.sha256"
     pub_clear_pending
+    rm -f "$withheld"
 fi
 
 # --- prune what the db no longer names, after a grace period ---

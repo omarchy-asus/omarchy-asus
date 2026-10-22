@@ -42,6 +42,10 @@
 #   While the journal $DATA/sync-pending exists (written by bin/publish and bin/unpublish
 #   before the local repo changes, removed by bin/sync-release once the release is verified)
 #   the release may lag: the next run syncs before planning, and the run fails until it clears.
+#   Whole channel or nothing (#201): bin/sync-release withholds a db that leaves a recipe of the
+#   channel unpublished or behind (unless it adds nothing to the release's db, or withdraws), exit 3; the run then records
+#   "(release)" attention with the gaps instead of failing, and a later sync of the run puts the
+#   whole set up once the last recipe (the kernel, built last) is published.
 #   Before the first push or GitHub write, every commit (messages, author/committer, paths,
 #   patch text) and the PR title/body pass the PII scan and a local-path check; a hit
 #   pushes nothing and records class=pii.
@@ -78,7 +82,7 @@ while (($#)); do
         --recipe) recipes+=("$2"); shift ;;
         --workspace) workspace_arg=$(realpath "$2"); shift ;;
         --config) config=$2; shift ;;
-        -h|--help) sed -n '2,69p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
     shift
@@ -245,12 +249,20 @@ record() { as_user "$LIB/auto-update-state" record "$STATUS" "$run_id" "$@"; }
 # local repo, and bin/sync-release removes it only once the release matches the local repo:
 # while it exists the release may lag, and every run syncs first. $AU/sync-pending is the
 # marker older versions of this script wrote; it is still honoured and removed on success.
+# Exit 3 is a release withheld on purpose (bin/sync-release: the channel is not complete and
+# its db does more than withdraw; it wrote the gaps to $CHANNEL_DATA/release-withheld): not a
+# failure. The journal stays, so the next sync of this run (or of the next run) puts the whole
+# set up once the last recipe is published. Any other failed sync drops release-withheld, so
+# the end of the run reports a failure, not a withheld release.
 sync_now() {
     [[ $mode == full ]] || { note dry "would run bin/sync-release"; return 0; }
     local rc=0
     as_user "$LIB/sync-release" || rc=$?
     if ((rc == 0)); then as_user rm -f "$AU/sync-pending"
+    elif ((rc == 3)); then
+        note sync "release withheld until every recipe of the $CHANNEL channel is published at its version"
     else
+        as_user rm -f "$CHANNEL_DATA/release-withheld"
         as_user touch "$CHANNEL_DATA/sync-pending"
         note sync "sync-release failed (exit $rc); retried next run"; failed=1
     fi
@@ -1066,6 +1078,25 @@ ensure_chroot() {  # ensure_chroot: 0 when this channel's build chroot exists on
     return 1
 }
 
+sync_state_check() {  # sync_state_check: at the end of the run, before the summary. A sync still
+    # pending fails the run, unless the release was withheld on purpose (sync_now): then it is
+    # attention, recorded as "(release)" with the gaps. A synced release drops that entry.
+    [[ $mode == full ]] || return 0
+    local gaps msg
+    if as_user test -e "$CHANNEL_DATA/sync-pending" && as_user test -e "$CHANNEL_DATA/release-withheld"; then
+        gaps=$(as_user cat "$CHANNEL_DATA/release-withheld" | paste -sd';' -) || gaps=
+        msg="release $GH_TAG withheld: the $CHANNEL channel is not complete, so the release keeps its last set (${gaps:-see the log}); the whole set goes up once every recipe is published"
+        note ATTENTION "$msg"
+        record "(release)" attention none message="$msg" || true
+        attention=1
+        return 0
+    fi
+    as_user "$LIB/auto-update-state" forget "$STATUS" "(release)" || true
+    if as_user test -e "$CHANNEL_DATA/sync-pending"; then
+        note sync "sync pending: the release may lag the local repo; retried next run"; failed=1
+    fi
+}
+
 upstream_dbs_check() { # upstream_dbs_check <check.json>
     # An upstream db that could not be fetched was used from cache: say so (attention). Past
     # DB_MAX_STALE it is "expired", and the plan withdraws what overrides upstream. Once
@@ -1289,14 +1320,12 @@ while IFS=$'\t' read -r r action target in_repo names pnote; do
     fi
 done <<<"$plan"
 
+sync_state_check
 src=0
 as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" || src=$?
 as_user find "$AU/runs" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 ((src == 1)) && failed=1
 ((src == 2)) && attention=1
-if [[ $mode == full ]] && as_user test -e "$CHANNEL_DATA/sync-pending"; then
-    note sync "sync pending: the release may lag the local repo; retried next run"; failed=1
-fi
 [[ $mode == full && -n $(as_user cat "$PENDING_UNPUB" 2>/dev/null) ]] &&
     { note unpublish "still published, removal pending: $(as_user cat "$PENDING_UNPUB" | paste -sd' ')"; failed=1; }
 if ((failed)); then echo "auto-update: FAILED (see $SUMMARY)"; exit 1; fi

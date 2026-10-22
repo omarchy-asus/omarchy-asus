@@ -15,6 +15,14 @@
 #   j. --channel rc: repo/rc-x86_64 goes to the rc-x86_64 release only (created on first
 #      sync), with its own record in channel-rc; the x86_64 release and its record are
 #      untouched (#167)
+#   k. whole channel or nothing (#201), on a fresh rc release, with recipes read through a
+#      stub sandbox: a first publish that lacks a recipe's package is withheld (no release
+#      made, nothing uploaded, the gap in channel-rc/release-withheld); a complete set (a held
+#      recipe does not count) goes up; a db that adds a build while another recipe is behind
+#      is withheld; a db that adds nothing to the release's goes up; a db that withdraws a
+#      package the release serves goes up even with a build in it, and the next build is
+#      withheld while the withdrawn recipe is missing; a recipe whose makepkg --printsrcinfo
+#      fails is a gap; no recipes/ at all refuses (exit 1)
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -29,7 +37,7 @@ S=$(mktemp -d)
 cleanup() { GNUPGHOME=$S/data/gnupg gpgconf --kill gpg-agent >/dev/null 2>&1; rm -rf "$S"; }
 [[ ${1:-} == keep ]] && echo "state: $S" || trap cleanup EXIT
 R=$S/data/repo/x86_64
-mkdir -p "$S/ws/build" "$S/data/gnupg" "$R" "$S/release" "$S/bin" \
+mkdir -p "$S/ws/build" "$S/ws/recipes" "$S/data/gnupg" "$R" "$S/release" "$S/bin" \
     "$S/src/pkg" "$S/src/db/foo-1-1" "$S/src/files/foo-1-1"
 chmod 700 "$S/data/gnupg"
 printf '# test denylist\nzorbleplex\n' >"$S/denylist"
@@ -255,4 +263,123 @@ if [[ $( (cd "$S/release" && sha256sum -- *) ) == "$rel_before" ]]; then r=0; el
 if [[ $(cat "$S/data/release-db.sha256") == "$rec_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the x86_64 record unchanged"
 if [[ $(cat "$S/data/channel-rc/release-db.sha256" 2>/dev/null) == "$(sha256sum "$RR/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi
 expect "$r" 0 "channel-rc/release-db.sha256 records the rc db"
+
+echo "== k. whole channel or nothing"
+# bin/ with a stub sandbox (runs the command in --chdir) and a makepkg that prints the
+# recipe's SRCINFO file (or fails when the recipe has a FAIL file)
+L=$S/lib
+mkdir -p "$L" "$S/pool"
+cp "$W/bin/sync-release" "$W/bin/env.sh" "$W/bin/publish-lib.sh" "$W/bin/check-upstream" "$L/"
+cat >"$L/recipe-sandbox" <<'STUB'
+#!/bin/bash
+dir=.
+while (($#)) && [[ $1 != -- ]]; do [[ $1 == --chdir ]] && { dir=$2; shift; }; shift; done
+shift; cd "$dir" && exec "$@"
+STUB
+cat >"$S/bin/makepkg" <<'STUB'
+#!/bin/bash
+[[ $* == --printsrcinfo && -f SRCINFO && ! -e FAIL ]] || exit 1
+cat SRCINFO
+STUB
+chmod +x "$L"/* "$S/bin/makepkg"
+recipe() {  # recipe <dir> <pkgver-pkgrel> <pkgname>...: a recipe makepkg reports at that version
+    local d=$S/ws/recipes/$1 v=$2 n; shift 2
+    mkdir -p "$d"; : >"$d/PKGBUILD"
+    { printf 'pkgbase = %s\n\tpkgver = %s\n\tpkgrel = %s\n' "${d##*/}" "${v%-*}" "${v##*-}"
+      for n; do printf '\npkgname = %s\n' "$n"; done; } >"$d/SRCINFO"
+}
+mkdb() {  # mkdb <repo dir> <name>-<pkgver>-<pkgrel>...: those packages (the same bytes every
+          # time: a pool), and a signed db and files naming them, as bin/publish leaves a repo
+    local dir=$1 e n v d k=$S/k; shift
+    rm -rf "$dir" "$k"; mkdir -p "$dir" "$k/db" "$k/files" "$k/pkg"
+    for e; do
+        n=${e%-*-*} v=${e#"$n"-}
+        if [[ ! -e $S/pool/$e-x86_64.pkg.tar.zst ]]; then
+            printf 'pkgname = %s\npkgver = %s\n' "$n" "$v" >"$k/pkg/.PKGINFO"
+            bsdtar -cf "$S/pool/$e-x86_64.pkg.tar.zst" -C "$k/pkg" .PKGINFO
+        fi
+        cp "$S/pool/$e-x86_64.pkg.tar.zst" "$dir/"
+        sign "$K1" "$dir/$e-x86_64.pkg.tar.zst" "$dir/$e-x86_64.pkg.tar.zst.sig"
+        mkdir -p "$k/db/$e" "$k/files/$e"
+        printf '%%FILENAME%%\n%s\n\n%%NAME%%\n%s\n\n%%VERSION%%\n%s\n' "$e-x86_64.pkg.tar.zst" "$n" "$v" \
+            >"$k/db/$e/desc"
+        cp "$k/db/$e/desc" "$k/files/$e/desc"
+    done
+    bsdtar -czf "$dir/omarchy-asus.db.tar.gz" -C "$k/db" "$@"
+    bsdtar -czf "$dir/omarchy-asus.files.tar.gz" -C "$k/files" "$@"
+    for d in db files; do
+        sign "$K1" "$dir/omarchy-asus.$d.tar.gz" "$dir/omarchy-asus.$d.tar.gz.sig"
+        ln -sf "omarchy-asus.$d.tar.gz" "$dir/omarchy-asus.$d"
+        ln -sf "omarchy-asus.$d.tar.gz.sig" "$dir/omarchy-asus.$d.sig"
+    done
+}
+KR=$S/release-rc-x86_64 KD=$S/data/channel-rc
+rm -rf "$KR" "$KD"; mkdir -p "$KD"
+run_k() { "$L/sync-release" --channel rc "$@" 2>&1; }
+exists() { if [[ -e $1 ]]; then echo 0; else echo 1; fi; }
+
+recipe foo 1-1 foo; recipe bar 1-1 bar bar-extra
+mkdb "$RR" foo-1-1
+touch "$KD/sync-pending"; rm -f "$S/calls"
+out=$(run_k); expect $? 3 "a first publish without recipes/bar's packages is withheld"
+expect "$(exists "$KR")" 1 "no rc release is made"
+uploaded; expect $? 1 "nothing uploaded"
+grep -qx 'not-built bar 1-1 (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names bar"
+grep -qx 'not-built bar-extra 1-1 (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "and its split package"
+grep -q 'not-built bar 1-1' <<<"$out"; expect $? 0 "the output names the gap"
+expect "$(exists "$KD/sync-pending")" 0 "sync-pending is kept"
+out=$(run_k --dry-run); expect $? 3 "a dry run says withheld too"
+
+recipe baz 1-1 baz; printf 'waits for a G16 boot\n' >"$S/ws/recipes/baz/HOLD"
+mkdb "$RR" foo-1-1 bar-1-1 bar-extra-1-1
+out=$(run_k); expect $? 0 "a complete set goes up (the held recipes/baz does not count)"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves it"
+expect "$(exists "$KD/release-withheld")" 1 "release-withheld is removed"
+expect "$(exists "$KD/sync-pending")" 1 "sync-pending is cleared"
+
+rm "$S/ws/recipes/baz/HOLD"
+out=$(run_k); expect $? 0 "the release's own set re-syncs while baz is unheld and unbuilt"
+grep -q 'adds nothing' <<<"$out"; expect $? 0 "says it adds nothing"
+printf 'waits for a G16 boot\n' >"$S/ws/recipes/baz/HOLD"
+
+synced=$(sha256sum "$KR/omarchy-asus.db" | cut -d' ' -f1)
+recipe foo 1-2 foo; recipe bar 1-2 bar bar-extra
+mkdb "$RR" foo-1-2 bar-1-1 bar-extra-1-1
+rm -f "$S/calls"
+out=$(run_k); expect $? 3 "foo 1-2 while recipes/bar is behind is withheld"
+uploaded; expect $? 1 "nothing uploaded"
+expect "$(exists "$KR/foo-1-2-x86_64.pkg.tar.zst")" 1 "not even foo 1-2's package"
+if [[ $(sha256sum "$KR/omarchy-asus.db" | cut -d' ' -f1) == "$synced" ]]; then r=0; else r=1; fi
+expect "$r" 0 "the release keeps its set"
+grep -qx 'repo-stale bar 1-1, recipe 1-2 (recipes/bar)' "$KD/release-withheld" 2>/dev/null
+expect $? 0 "release-withheld names bar as behind"
+
+mkdb "$RR" foo-1-1
+out=$(run_k); expect $? 0 "back to foo 1-1 alone (nothing the release lacks) goes up"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves the withdrawal"
+
+mkdb "$RR" foo-1-2 bar-1-2 bar-extra-1-2
+touch "$S/ws/recipes/bar/FAIL"
+out=$(run_k); expect $? 3 "a recipe whose makepkg --printsrcinfo fails is a gap"
+grep -qx 'inventory-error recipes/bar' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names it"
+rm "$S/ws/recipes/bar/FAIL"
+out=$(run_k); expect $? 0 "foo and bar at their recipe versions go up together"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves them"
+
+recipe foo 1-3 foo
+mkdb "$RR" foo-1-3
+out=$(run_k); expect $? 0 "a db that withdraws bar is not held back, though it carries foo 1-3"
+grep -q 'withdraws bar bar-extra' <<<"$out"; expect $? 0 "a warning names the withdrawal"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves it"
+recipe foo 1-4 foo
+mkdb "$RR" foo-1-4
+out=$(run_k); expect $? 3 "then foo 1-4, while bar is still withdrawn, is withheld"
+
+mv "$S/ws/recipes" "$S/ws/recipes.away"
+rm -f "$S/calls"
+mkdb "$RR" foo-1-2
+out=$(run_k); expect $? 1 "no recipes/ to check against refuses"
+grep -q 'cannot check' <<<"$out"; expect $? 0 "says it cannot check"
+uploaded; expect $? 1 "nothing uploaded"
+mv "$S/ws/recipes.away" "$S/ws/recipes"
 exit $fail

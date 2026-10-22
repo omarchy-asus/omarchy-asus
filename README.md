@@ -193,7 +193,10 @@ Where our fixes are headed:
   partner), and warns when the members' `_tag`, `_commit`, `pkgver`, `pkgrel`, sources or
   checksums differ (`--strict`: refuses; offline test: `tests/ci/release-cohort.sh`).
 - `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release (`--channel rc`: the
-  RC repo to the `rc-x86_64` release).
+  RC repo to the `rc-x86_64` release). It uploads nothing (exit 3) while a recipe of the
+  checkout it runs from, held ones aside, is missing from the repo or behind, unless the db adds
+  nothing to the release's or withdraws a package from it (systemd/README.md, "Whole channel or
+  nothing"), so run it from a checkout of the channel's branch.
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:
   `python3 -I tests/test_issue.py`.
