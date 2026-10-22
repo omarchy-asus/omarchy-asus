@@ -15,6 +15,9 @@
 #      the x86_64 repo and its journal are untouched (#167)
 #   j. a package from the rc stage dir is refused by a quattro publish, and one from the
 #      quattro stage dir by an rc publish; neither repo changes
+#   k. a filename the other channel already has with other bytes (its local repo, or its
+#      release listing, release-assets.tsv, with a different or no digest) is refused and
+#      names the recipe to bump; the same bytes, or a name it lacks, publish (#201)
 # Throwaway gpg keys and stub repo-add/repo-remove (no pacman); no network, no sudo.
 # Usage: tests/ci/publish-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -221,5 +224,33 @@ publish --channel rc "$S/data/stage/foo-1-2-x86_64.pkg.tar.zst"; nonzero $? "an 
 grep -q 'built for the quattro channel' "$S/out"; expect $? 0 "says it was built for quattro"
 if [[ $( (cd "$RC" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) ) == "$rc_before" ]]; then r=0; else r=1; fi
 expect "$r" 0 "the rc repo unchanged"
+
+echo "== k. one filename, one file, on every channel"
+rc_listing() { (cd "$RC" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum); }
+mkdir -p "$S/other"
+printf 'pkgname = foo\npkgbase = foo\npkgver = 1-1\nbuilddate = 2\n' >"$S/other/.PKGINFO"
+bsdtar -cf "$S/other/foo-1-1-x86_64.pkg.tar.zst" -C "$S/other" .PKGINFO
+rc_before=$(rc_listing)
+publish --channel rc "$S/other/foo-1-1-x86_64.pkg.tar.zst"
+nonzero $? "an rc foo-1-1 with other bytes than quattro's local one is refused"
+grep -q "quattro channel's local repo .* has a different foo-1-1" "$S/out"; expect $? 0 "says where the other file is"
+grep -q 'bump pkgrel in recipes/foo' "$S/out"; expect $? 0 "names the recipe to bump"
+if [[ $(rc_listing) == "$rc_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the rc repo unchanged"
+mkpkg bar 1 1
+bar=$S/pkgs/bar-1-1-x86_64.pkg.tar.zst
+bar_sum=$(sha256sum "$bar" | cut -d' ' -f1)
+before=$(listing)
+printf 'bar-1-1-x86_64.pkg.tar.zst\t10\tsha256:%064d\n' 0 >"$S/data/channel-rc/release-assets.tsv"
+publish "$bar"; nonzero $? "a name the rc release serves with another digest is refused"
+grep -q "rc channel's release serves a different bar-1-1" "$S/out"; expect $? 0 "says the rc release has it"
+unchanged "$before" "the x86_64 repo unchanged"
+printf 'bar-1-1-x86_64.pkg.tar.zst\t10\t\n' >"$S/data/channel-rc/release-assets.tsv"
+publish "$bar"; nonzero $? "a name the rc release serves with no digest is refused"
+grep -q 'digest is unknown' "$S/out"; expect $? 0 "says the digest is unknown"
+unchanged "$before" "the x86_64 repo unchanged"
+printf 'bar-1-1-x86_64.pkg.tar.zst\t10\tsha256:%s\n' "$bar_sum" >"$S/data/channel-rc/release-assets.tsv"
+publish "$bar"; expect $? 0 "the same bytes as the rc release's publish"
+db_names bar-1-1-x86_64.pkg.tar.zst; expect $? 0 "the db names bar-1-1"
+publish --channel rc "$S/pkgs/foo-1-1-x86_64.pkg.tar.zst"; expect $? 0 "the same bytes as quattro's local foo-1-1 publish on rc"
 ((fail)) && { echo "--- last output:"; cat "$S/out"; }
 exit $fail

@@ -131,6 +131,15 @@ and personal-information checks. A package staged for one channel is refused by 
 channel with the same gates (systemd/README.md, "Release channels"): Quattro from `main`, RC
 from `next/omarchy-4.5` in the RC chroot, published to `rc-x86_64`.
 
+A package filename names one file on both channels, since pacman caches by filename. The RC
+channel's `pkgrel` sits in its own range: a package rebuilt from a stock one is
+`<upstream pkgrel>.101` and up on RC (`.1` to `.99` on Quattro), and our own packages are 101 and
+up on RC (1 to 99 on Quattro). `bin/rebase-recipe --channel rc` starts at `.101`, the recipes lint
+(`ci/check-pkgrel`) checks the range of the channel a PR targets, and `bin/publish` refuses a
+filename the other channel's repo or release already has with different bytes. RC sorts above
+Quattro for the same upstream release, so a switch back to Quattro is a downgrade, which
+`omarchy-asus-setup --channel quattro` already does.
+
 ## Supported hardware
 
 | Model | CPU / GPU | Status |

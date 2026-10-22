@@ -13,6 +13,12 @@
 # refuses before anything is copied or signed (bin/release-cohort check-publish). The check
 # reads each archive's .PKGINFO (a file name that disagrees with it is refused) and refuses
 # a missing $WORKSPACE/build/cohorts.conf.
+# A filename names one file on every channel: pacman caches by filename, and each release
+# only refuses its own duplicates. A package whose name the other channel's local repo or
+# release (its last listing, $CHANNEL_DATA/release-assets.tsv of that channel, written by
+# bin/sync-release) already has with other bytes, or with a digest that can't be compared,
+# is refused: bump the recipe's pkgrel (the RC channel's range starts at .101, 101 for our
+# own packages; bin/rebase-recipe --channel rc).
 set -euo pipefail
 # --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
 if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
@@ -35,6 +41,40 @@ for f in "$@"; do
     done
 done
 pub_lock
+# cross_channel_clash <file> <channel>: print why the other <channel> already has another
+# file by this name; nothing (exit 1) when it has none or the same bytes
+cross_channel_clash() {
+    local f=$1 c=$2 b sum repo assets d
+    b=$(basename "$f")
+    sum=$(sha256sum "$f" | cut -d' ' -f1) || { echo "cannot read $f"; return 0; }
+    repo=$(channel_repo_dir "$c")
+    [[ -e $repo || ! -e $repo.prev ]] || repo=$repo.prev   # a swap a killed run left half done
+    if [[ -e $repo/$b && $(sha256sum "$repo/$b" | cut -d' ' -f1) != "$sum" ]]; then
+        echo "the $c channel's local repo ($repo) has a different $b"; return 0
+    fi
+    assets=$(channel_data_dir "$c")/release-assets.tsv
+    [[ -f $assets ]] || return 1
+    d=$(awk -F'\t' -v n="$b" '$1 == n {print $3; f = 1; exit} END {exit !f}' "$assets") || return 1
+    if [[ $d != sha256:?* ]]; then
+        echo "the $c channel's release serves a $b whose digest is unknown ($assets)"; return 0
+    fi
+    if [[ ${d#sha256:} != "$sum" ]]; then
+        echo "the $c channel's release serves a different $b ($assets)"; return 0
+    fi
+    return 1
+}
+for f in "$@"; do
+    for c in "${CHANNELS[@]}"; do
+        [[ $c != "$CHANNEL" ]] || continue
+        if why=$(cross_channel_clash "$f" "$c"); then
+            base=$(bsdtar -xOf "$f" .PKGINFO 2>/dev/null | awk '$1 == "pkgbase" {print $3; exit}') || true
+            echo "publish: refusing $(basename "$f"): $why. A filename must name one file on every" \
+                "channel (pacman caches by filename): bump pkgrel in recipes/${base:-<its recipe>}" \
+                "(on the RC channel .101 and up, 101 for our own packages) and rebuild" >&2
+            exit 1
+        fi
+    done
+done
 # checked under the lock, against the live db, before anything is journaled or staged
 db_args=()
 if [[ -f "$REPO_DIR/$REPO_NAME.db.tar.gz" ]]; then

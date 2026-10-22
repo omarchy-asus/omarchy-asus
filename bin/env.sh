@@ -36,15 +36,33 @@ channel_stage_dir() {
         *) return 1 ;;
     esac
 }
+# channel_repo_dir / channel_data_dir <channel>: that channel's local repo and state dir
+# (bin/publish reads the other channel's to keep a filename from naming two different files)
+channel_repo_dir() {
+    case $1 in
+        quattro) echo "$DATA/repo/x86_64" ;;
+        rc) echo "$DATA/repo/rc-x86_64" ;;
+        *) return 1 ;;
+    esac
+}
+channel_data_dir() {
+    case $1 in
+        quattro) echo "$DATA" ;;
+        rc) echo "$DATA/channel-rc" ;;
+        *) return 1 ;;
+    esac
+}
 case $CHANNEL in
     quattro)
-        CHANNEL_DATA=$DATA                        # sync-pending, release-db.sha256, prune-candidates
+        CHANNEL_DATA=$DATA                        # sync-pending, release-db.sha256, prune-candidates,
+                                                  # release-assets.tsv
         REPO_DIR=$DATA/repo/x86_64                # local repo; mirrored to the GitHub release
         CHROOT=${OMARCHY_ASUS_CHROOT:-/var/lib/omarchy-asus/chroot}  # mkarchroot parent dir (btrfs)
         PACMAN_CONF=$WORKSPACE/build/pacman.conf  # chroot package sources
         OMARCHY_CHANNEL=stable                    # Omarchy's channel this one is built against
         GH_TAG=x86_64                             # Server = .../releases/download/$arch
         GH_BRANCH=main
+        SUBREL=1                                  # first pkgrel subrelease (.1 to .99; bin/rebase-recipe)
         RELEASE_NOTES=$WORKSPACE/build/release-notes.md
         ;;
     rc)
@@ -55,6 +73,7 @@ case $CHANNEL in
         OMARCHY_CHANNEL=rc
         GH_TAG=rc-x86_64                          # Server = .../releases/download/rc-$arch
         GH_BRANCH=next/omarchy-4.5
+        SUBREL=101                                # .101 and up: never a Quattro filename (#201)
         RELEASE_NOTES=$WORKSPACE/build/release-notes-rc.md
         ;;
     *)

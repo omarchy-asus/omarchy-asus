@@ -29,6 +29,9 @@
 # - Journal: after the uploads the release is read again and every db file, package
 #   and signature the db names must match the local bytes. Only then is the db sum
 #   recorded and $CHANNEL_DATA/sync-pending cleared; any mismatch keeps it, for a retry.
+# - Every read of the release's assets is kept in $CHANNEL_DATA/release-assets.tsv (name,
+#   size, digest) for the other channel's bin/publish (a filename one release serves is
+#   never published with other bytes on the other one).
 # - Grace period: an asset the db no longer names is not deleted at once (a client
 #   may hold the previous db). It is listed in $CHANNEL_DATA/prune-candidates with the time
 #   it was first seen unreferenced, and deleted by a later verified sync once it is
@@ -323,6 +326,11 @@ read_assets() {  # fill rsize/rdigest from the release; 1 if it cannot be read
         [[ -n $n ]] || continue
         rsize[$n]=$s; rdigest[$n]=$d
     done <<<"$assets"
+    # bin/publish of the other channel reads this listing (no API call of its own) to
+    # refuse a filename this release already serves with other bytes
+    { mkdir -p "$CHANNEL_DATA" && printf '%s\n' "$assets" >"$CHANNEL_DATA/release-assets.tsv.tmp" &&
+        mv -f "$CHANNEL_DATA/release-assets.tsv.tmp" "$CHANNEL_DATA/release-assets.tsv"; } ||
+        echo "warning: cannot write $CHANNEL_DATA/release-assets.tsv" >&2
 }
 release_missing=0
 if ! read_assets; then
