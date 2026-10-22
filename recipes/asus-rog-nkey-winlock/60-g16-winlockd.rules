@@ -1,0 +1,4 @@
+# ROG N-Key keyboard (G16): start g16-winlockd for its hidraw nodes. No access is
+# granted: the nodes stay root-only and the service is the only reader. The tag
+# stays on change events too, or systemd would drop the device unit the service binds to.
+SUBSYSTEM=="hidraw", ACTION!="remove", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="19b6", TAG+="systemd", ENV{SYSTEMD_WANTS}+="g16-winlockd@%k.service"

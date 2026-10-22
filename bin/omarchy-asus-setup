@@ -1135,7 +1135,8 @@ prepare_power_owner() {
 # installs: a unit in the user unit dir that shadows the packaged one in
 # /usr/lib/systemd/user, its drop-in dir (which still applies to the packaged unit), the
 # <target>.wants link that enabled it (dangling once the unit moves), and a udev rule in
-# /etc/udev/rules.d next to the packaged 70-g16-winlock-hidraw.rules. Once the package is
+# /etc/udev/rules.d that gives the user the keyboard's hidraw node, which the packaged
+# g16-winlockd owns now (0.1.0-13; before, a packaged rule did the same). Once the package is
 # installed, offer to move them aside. Nothing is deleted except a dangling link.
 WINLOCK_USER_DIR=$USER_UNIT_DIR
 WINLOCK_LOCAL=$WINLOCK_USER_DIR/g16-winlock.service
@@ -1252,7 +1253,7 @@ retire_local_winlock() {
     info "  ${l/#$HOME/\~}: the link that enabled your unit"
   done
   for f in "${rules[@]}"; do
-    info "  $f: your udev rule, next to the packaged 70-g16-winlock-hidraw.rules"
+    info "  $f: your udev rule; it opens the keyboard's raw node to you, which g16-winlockd no longer needs"
   done
   if ((shadow_bin)); then
     warn "${WINLOCK_LOCAL_BIN/#$HOME/\~} shadows /usr/bin/g16-winlock on your PATH when you run"
@@ -1318,7 +1319,7 @@ retire_local_winlock() {
   # A separate question: this one needs sudo. udev reads only *.rules, so the
   # .before-omarchy-asus suffix is enough to stop it.
   if ((${#rules[@]})); then
-    if confirm "Move ${rules[*]} aside (needs sudo)? The packaged 70-g16-winlock-hidraw.rules does the same."; then
+    if confirm "Move ${rules[*]} aside (needs sudo)? g16-winlockd reads the keyboard now; nothing needs the rule."; then
       for f in "${rules[@]}"; do
         a=$(aside_path "$f")
         if as_root mv "$f" "$a"; then
@@ -1333,7 +1334,7 @@ retire_local_winlock() {
         as_root udevadm trigger --subsystem-match=hidraw --action=add || warn "udevadm trigger failed"
       fi
     else
-      warn "kept: ${rules[*]} still applies next to the packaged rule."
+      warn "kept: ${rules[*]} still opens the keyboard's raw node to your user."
     fi
   fi
 
@@ -1397,7 +1398,7 @@ retire_local_g16_fixes() {
         as_root udevadm trigger --action=add --subsystem-match=i2c '--sysname-match=i2c-ASUF1209:*' || warn "udevadm trigger failed"
       fi
     else
-      warn "kept: ${rules[*]} still applies next to the packaged rule."
+      warn "kept: ${rules[*]} still opens the keyboard's raw node to your user."
     fi
   fi
 
