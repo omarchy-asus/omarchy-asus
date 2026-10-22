@@ -124,8 +124,7 @@ To switch over:
    systemctl --user disable g16-winlock.service    # drops your own link; the packaged unit stays enabled
    systemctl --user restart g16-winlock.service
    ```
-4. The widget: see [omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin#readme),
-   which also covers moving from `omarchy-power-tune`.
+4. The widget: see [omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin#readme).
 
 ## No toast? Checklist
 

@@ -22,7 +22,7 @@
 pkgbase=asus-rog-nkey-winlock
 pkgname=(asus-rog-nkey-winlock asus-zephyrus-g16-control)
 pkgver=0.1.0
-pkgrel=11
+pkgrel=12
 pkgdesc='Win-key lock helper for the ASUS ROG Zephyrus G16 (GA605)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -37,7 +37,7 @@ source=(
 sha256sums=('548676e73486095be2621f7e0f0d096b98c5643e898785a809634837804c64fe'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
             '85955d0a7eb12911ead8c0cb68cd89d356aae02d67d4668f187136be3e767bfd'
-            '9c5b1018ae4af5053620ed130adac71b5c37530ba2c22b83f7b8cc23213669b4')
+            '92f948dc0eb532efd16cb4bb7f5762b5147e2dd4081071c3ea4dd5fa254b7df5')
 
 package_asus-rog-nkey-winlock() {
   install=asus-rog-nkey-winlock.install
