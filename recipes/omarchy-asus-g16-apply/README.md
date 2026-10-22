@@ -340,7 +340,7 @@ The ASUS handler goes back to balanced at the next profile change.
 ### g16-widget
 
 **What:** adds the omarchy-asus plugin, an Omarchy bar widget
-([omarchy-asus/omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin), id `io.github.omarchy-asus.plugin`), with
+([omarchy-asus/omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin), id `io.github.omarchy-asus.panel`), with
 `omarchy-plugin-add https://github.com/omarchy-asus/omarchy-asus-plugin --enable`. The old G16 Control widget under its old id
 `omarchy-asus.g16` is removed first: the packaged copy's link (into
 `/usr/share/omarchy/plugins`, from `asus-zephyrus-g16-control`) or the first plugin clone
