@@ -757,22 +757,29 @@ do_hibernate() {
 }
 
 do_suspend() {
-  local s0 f0 i
+  local s0 f0 t0 t1 i
   ask "Suspend (s2idle) now for about 30 s? The RTC wakes it; unlock the screen after." || return 1
   s0=$(cat /sys/power/suspend_stats/success) f0=$(cat /sys/power/suspend_stats/fail)
-  as_root "Set an RTC alarm 30 s ahead so the laptop wakes itself from the #185 suspend test" rtcwake -m no -s 30 >/dev/null || true
-  as_root "Suspend the laptop for 30 s for the #185 quiet fan table test; an RTC alarm wakes it" systemctl suspend || die "systemctl suspend refused"
+  t0=$(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo 0)
+  # One authorization for both: an alarm armed before a slow second prompt
+  # could fire before the suspend, leaving the laptop asleep until a button press.
+  as_root "Suspend the laptop for 30 s for the #185 quiet fan table test; an RTC alarm wakes it" \
+    sh -c 'rtcwake -m no -s 30 >/dev/null && exec systemctl suspend' || die "setting the RTC alarm or suspending was refused"
   for ((i = 0; i < 300; i++)); do
     (($(cat /sys/power/suspend_stats/success) > s0 || $(cat /sys/power/suspend_stats/fail) > f0)) && break
     sleep 1
   done
   (($(cat /sys/power/suspend_stats/fail) > f0)) && die "the suspend failed"
   (($(cat /sys/power/suspend_stats/success) > s0)) || die "no completed suspend within 5 min (suspend_stats success unchanged)"
+  # An immediate wake also counts as a success: require time in hardware sleep (s0i3).
+  t1=$(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo 0)
+  ((t1 > t0)) || die "resumed without hardware sleep (total_hw_sleep $t0 -> $t1 us): s0i3 not reached, so this is no s2idle test"
   sleep 3
 }
 
 # After a resume that lost the table: write quiet again; if that is not enough,
-# go through balanced. Sets FIX to same, via-balanced or neither.
+# go through balanced. Sets FIX to same, via-balanced, neither, or unclear when
+# the last probe can't tell (power capped, readings missing).
 FIX=''
 reassert() { # resume kind
   write_profile quiet
@@ -782,7 +789,7 @@ reassert() { # resume kind
   sleep 2
   write_profile quiet
   probe "$1: balanced then quiet written"
-  if [[ $PROBE == quiet ]]; then FIX=via-balanced; else FIX=neither; fi
+  case $PROBE in quiet) FIX=via-balanced ;; lost) FIX=neither ;; *) FIX=unclear ;; esac
 }
 
 run_resume() {
@@ -839,7 +846,7 @@ run_resume() {
   intro+=$'\n'"- Hibernate resumes this boot before the run: $since0"$'\n\n'"### Result"$'\n\n'
   intro+="- Hibernate: table **$hib** after $n cycle(s)${hfix:+; writing the profile again: **$hfix**}"$'\n'
   intro+="- s2idle: table **$sus**${sfix:+; writing the profile again: **$sfix**}"$'\n'
-  intro+="- Verdict per step: quiet = idle fans 0 rpm and at most 35 W under load; lost = idle fans spinning or at least 37 W"$'\n\n'
+  intro+="- Verdict per step (probe-verdict.py): quiet = at most 35 W (and at least 30 W) with peak Tctl below 90 C; lost = at least 37 W, peak Tctl 90 C or more, or fans spinning on an idle below 50 C; else unclear"$'\n\n'
   intro+="| Step | asus-wmi/amd-pmf | Idle fans rpm | Idle Tctl C | Peak Tctl C | APU W | MHz | Verdict |"$'\n'"|---|---|---|---|---|---|---|---|"$'\n'
   intro+=$(printf '%s\n' "${RROWS[@]}")
   intro+=$'\n\n'"Fan curves reported by asus-wmi at the start:"$'\n\n```\n'"$table"$'\n```\n'
