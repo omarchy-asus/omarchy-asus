@@ -1,0 +1,16 @@
+#!/bin/sh
+# DISTCC_SSH wrapper (docs/distcc.md): installed as <key dir>/ssh, run inside the build
+# chroot, where bin/build-pkg mounts the key dir at /distcc. distcc runs it as
+# "ssh [-l user] <helper> distccd --inetd ..."; it adds the chroot's gcc and binutils
+# versions to that command as one last word, omarchy-asus-toolchain=gcc-<ver>,binutils-<ver>.
+# The helper's forced command (build/distccd-gate) runs distccd only when its own
+# versions are the same, so a helper on another compiler is refused and distcc compiles
+# locally instead (#163). If the versions can't be read, it doesn't connect at all.
+tc=$(pacman -Q gcc binutils 2>/dev/null | tr ' ' '-' | paste -sd, -)
+case $tc in
+    gcc-*,binutils-*) ;;
+    *) echo "distcc ssh: can't read the chroot's gcc and binutils versions; compiling locally" >&2; exit 1 ;;
+esac
+exec ssh -F none -i /distcc/id_ed25519 -o IdentitiesOnly=yes \
+    -o UserKnownHostsFile=/distcc/known_hosts -o StrictHostKeyChecking=yes \
+    -o BatchMode=yes -o ConnectTimeout=5 "$@" "omarchy-asus-toolchain=$tc"

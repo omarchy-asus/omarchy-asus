@@ -80,13 +80,25 @@ makepkg_args=()
 # /distcc. The chroot's /etc/makepkg.conf.d/distcc.conf (local, not in this
 # repo) points distcc at the helper; without the key or helper, distcc falls
 # back to local compiles. Build code can read the key: DISTCC_KEY_DIR= (empty)
-# leaves it out of this build.
+# leaves it out of this build. Without the mount the chroot's DISTCC_SSH wrapper
+# is missing and every job compiles locally (#163), which is how it stays off:
+#   - for a recipe with a NO_DISTCC file (its first line is the reason; e.g.
+#     hyprland's precompiled headers, which distcc can't share);
+#   - when the key dir's ssh wrapper is not this repo's build/distcc-ssh, which
+#     sends the chroot's gcc and binutils versions for the helper's
+#     build/distccd-gate to compare (an older wrapper sends none).
 distcc_dir=${DISTCC_KEY_DIR-$DATA/distcc}
 distcc_bind=()
 if [[ -n $distcc_dir && -f $distcc_dir/id_ed25519 ]]; then
     distcc_dir=$(realpath "$distcc_dir")  # absolute: makechrootpkg runs after cd "$work"
-    distcc_bind=(-D "$distcc_dir:/distcc")
-    echo "==> distcc: key dir mounted read-only at /distcc"
+    if [[ -f $work/NO_DISTCC ]]; then
+        echo "==> distcc: off for $name (recipes/$name/NO_DISTCC)"
+    elif ! cmp -s "$lib/../build/distcc-ssh" "$distcc_dir/ssh"; then
+        echo "==> distcc: off: $distcc_dir/ssh is not build/distcc-ssh (install it: docs/distcc.md)"
+    else
+        distcc_bind=(-D "$distcc_dir:/distcc")
+        echo "==> distcc: key dir mounted read-only at /distcc"
+    fi
 fi
 # Persistent compiler cache (optional): if the cache dir exists, mount it
 # read-write at /ccache; the chroot's /etc/makepkg.conf.d/ccache.conf (local)

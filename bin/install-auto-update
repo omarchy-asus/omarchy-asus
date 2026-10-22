@@ -8,7 +8,8 @@
 # Installs a root-owned copy of the scripts to /usr/local/lib/omarchy-asus (the service
 # never executes the user-writable workspace), with the build chroots' pacman.confs
 # (build/pacman.conf, build/pacman-rc.conf: what bin/build-pkg checks a chroot against and
-# bin/mkchroot makes the RC chroot from, as root), the unit and timer to
+# bin/mkchroot makes the RC chroot from, as root) and build/distcc-ssh (the DISTCC_SSH wrapper
+# bin/build-pkg requires in the distcc key dir before it mounts it), the unit and timer to
 # /etc/systemd/system, and /etc/omarchy-asus/auto-update.conf (only if missing, with
 # BUILD_USER set to the sudo user). --enable also starts the timer; without it the
 # timer is installed but off. Re-run after merging changes to bin/ to update the copy.
@@ -21,7 +22,7 @@ LIB=/usr/local/lib/omarchy-asus
 UNITS=/etc/systemd/system
 CONF=/etc/omarchy-asus/auto-update.conf
 scripts=(ai-review auto-update auto-update-state build-pkg check-upstream env.sh mkchroot publish publish-lib.sh rebase-recipe recipe-sandbox release-cohort revdep-check sync-release unpublish issue)
-build_files=(pacman.conf pacman-rc.conf)
+build_files=(pacman.conf pacman-rc.conf distcc-ssh)
 units=(omarchy-asus-auto-update.service omarchy-asus-auto-update.timer)
 
 apply=0 enable=0 uninstall=0
