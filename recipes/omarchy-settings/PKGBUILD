@@ -13,7 +13,7 @@ pkgname='omarchy-settings'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.1
+pkgrel=1.2
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -183,7 +183,7 @@ else
               'ae380acd6edee4e028c294e54978a87cd64e5da59bf5b861ab2acdbd03203749'
               'bd5c52f6c42113944ee3486354e816613fb37c1fe78c349f151b00ba74498fd6'
               '236fd084a6fca8f6805743069eb5f73121c758002be1d24ac774b621be750489'
-              'ca17782d1fed711b9061a203f5393ac948b55011d030ad70f538f10528284833')
+              '5c930fa21b4e83a280d04b7d07b19bb739ddce140f01580b5aeca21a8eb2a379')
 fi
 
 prepare() {
