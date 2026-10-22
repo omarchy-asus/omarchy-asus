@@ -707,7 +707,7 @@ asus_profile_dir() {
 write_profile() { # value
   local d
   d=$(asus_profile_dir) || die "no asus-wmi platform-profile handler"
-  printf '%s\n' "$1" | as_root "write $1 to the asus-wmi platform profile" tee "$d/profile" >/dev/null ||
+  printf '%s\n' "$1" | as_root "Write $1 to the asus-wmi platform profile for the #185 quiet fan table test" tee "$d/profile" >/dev/null ||
     die "writing $1 to $d/profile failed"
 }
 
@@ -760,7 +760,7 @@ do_hibernate() {
   printf 'keep the default Limine entry, unlock. The test carries on by itself.%s\n' "$N"
   ask "Hibernate now?" || return 1
   since=$(date '+%Y-%m-%d %H:%M:%S')
-  as_root "hibernate (through sudo: logind asks for authentication outside the seat session)" systemctl hibernate ||
+  as_root "Hibernate the laptop for the #185 quiet fan table test; it resumes with one power-button press" systemctl hibernate ||
     die "systemctl hibernate refused"
   until journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'PM: hibernation: hibernation exit'; do sleep 1; done
   sleep 3
@@ -770,8 +770,8 @@ do_suspend() {
   local s0 f0 i
   ask "Suspend (s2idle) now for about 30 s? The RTC wakes it; unlock the screen after." || return 1
   s0=$(cat /sys/power/suspend_stats/success) f0=$(cat /sys/power/suspend_stats/fail)
-  as_root "set an RTC alarm 30 s ahead so the laptop wakes by itself" rtcwake -m no -s 30 >/dev/null || true
-  as_root "suspend (through sudo, as for hibernate)" systemctl suspend || die "systemctl suspend refused"
+  as_root "Set an RTC alarm 30 s ahead so the laptop wakes itself from the #185 suspend test" rtcwake -m no -s 30 >/dev/null || true
+  as_root "Suspend the laptop for 30 s for the #185 quiet fan table test; an RTC alarm wakes it" systemctl suspend || die "systemctl suspend refused"
   for ((i = 0; i < 300; i++)); do
     (($(cat /sys/power/suspend_stats/success) > s0 || $(cat /sys/power/suspend_stats/fail) > f0)) && break
     sleep 1

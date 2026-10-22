@@ -36,7 +36,13 @@ as_root() {
   printf '       %s%s%s\n' "$D" "$*" "$N" >&2
   if [[ ${G16_ROOT:-} == pkexec ]]; then
     # Through polkit: from the user manager, the desktop session's agent asks.
-    systemd-run --user --wait -q -P pkexec --disable-internal-agent "$@"
+    # G16_POLKIT_REASON names a wrapper (`W run REASON -- pkexec CMD`) that shows
+    # the reason in the dialog; without it the dialog shows only the command.
+    if [[ -n ${G16_POLKIT_REASON:-} ]]; then
+      systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$why" -- pkexec "$@"
+    else
+      systemd-run --user --wait -q -P pkexec --disable-internal-agent "$@"
+    fi
   else
     sudo "$@"
   fi
