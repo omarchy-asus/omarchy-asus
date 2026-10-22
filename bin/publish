@@ -15,10 +15,12 @@
 # a missing $WORKSPACE/build/cohorts.conf.
 # A filename names one file on every channel: pacman caches by filename, and each release
 # only refuses its own duplicates. A package whose name the other channel's local repo or
-# release (its last listing, $CHANNEL_DATA/release-assets.tsv of that channel, written by
-# bin/sync-release) already has with other bytes, or with a digest that can't be compared,
-# is refused: bump the recipe's pkgrel (the RC channel's range starts at .101, 101 for our
-# own packages; bin/rebase-recipe --channel rc).
+# release already has with other bytes, or with a digest that can't be compared, is
+# refused: bump the recipe's pkgrel (the RC channel's range starts at .101, 101 for our own
+# packages; bin/rebase-recipe --channel rc). The other release is read live (one gh call,
+# kept as that channel's $CHANNEL_DATA/release-assets.tsv, which bin/sync-release also
+# writes); if gh can't read it, the last such listing stands in, and without one the
+# publish is refused.
 set -euo pipefail
 # --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
 if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
@@ -52,8 +54,7 @@ cross_channel_clash() {
     if [[ -e $repo/$b && $(sha256sum "$repo/$b" | cut -d' ' -f1) != "$sum" ]]; then
         echo "the $c channel's local repo ($repo) has a different $b"; return 0
     fi
-    assets=$(channel_data_dir "$c")/release-assets.tsv
-    [[ -f $assets ]] || return 1
+    assets=$(channel_data_dir "$c")/release-assets.tsv   # made current by other_release_listing
     d=$(awk -F'\t' -v n="$b" '$1 == n {print $3; f = 1; exit} END {exit !f}' "$assets") || return 1
     if [[ $d != sha256:?* ]]; then
         echo "the $c channel's release serves a $b whose digest is unknown ($assets)"; return 0
@@ -63,6 +64,29 @@ cross_channel_clash() {
     fi
     return 1
 }
+# other_release_listing <channel>: refresh that channel's release-assets.tsv from its
+# release (a release not made yet has no assets); 1 when there is neither a fresh nor a
+# previous listing, so nothing about that release is known
+other_release_listing() {
+    local c=$1 tag dir rc=0
+    tag=$(channel_gh_tag "$c") && dir=$(channel_data_dir "$c") && mkdir -p "$dir" || return 1
+    pub_release_assets "$tag" >"$dir/release-assets.tsv.tmp" || rc=$?
+    if ((rc == 2)); then : >"$dir/release-assets.tsv.tmp"; rc=0; fi
+    if ((rc == 0)) && mv -f "$dir/release-assets.tsv.tmp" "$dir/release-assets.tsv"; then return 0; fi
+    rm -f "$dir/release-assets.tsv.tmp"
+    if [[ -f $dir/release-assets.tsv ]]; then
+        echo "publish: warning: cannot read the $tag release; checking against its last listing" \
+            "($dir/release-assets.tsv)" >&2
+        return 0
+    fi
+    echo "publish: refusing: cannot read the $tag release and have no listing of it" \
+        "($dir/release-assets.tsv): a file it serves under one of these names could differ" >&2
+    return 1
+}
+for c in "${CHANNELS[@]}"; do
+    [[ $c != "$CHANNEL" ]] || continue
+    other_release_listing "$c" || exit 1
+done
 for f in "$@"; do
     for c in "${CHANNELS[@]}"; do
         [[ $c != "$CHANNEL" ]] || continue

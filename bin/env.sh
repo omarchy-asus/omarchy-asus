@@ -36,12 +36,20 @@ channel_stage_dir() {
         *) return 1 ;;
     esac
 }
-# channel_repo_dir / channel_data_dir <channel>: that channel's local repo and state dir
+# channel_repo_dir / channel_gh_tag / channel_data_dir <channel>: that channel's local repo,
+# release tag and state dir
 # (bin/publish reads the other channel's to keep a filename from naming two different files)
 channel_repo_dir() {
     case $1 in
         quattro) echo "$DATA/repo/x86_64" ;;
         rc) echo "$DATA/repo/rc-x86_64" ;;
+        *) return 1 ;;
+    esac
+}
+channel_gh_tag() {
+    case $1 in
+        quattro) echo x86_64 ;;
+        rc) echo rc-x86_64 ;;
         *) return 1 ;;
     esac
 }

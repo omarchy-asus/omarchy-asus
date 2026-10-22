@@ -148,3 +148,19 @@ pub_abort() {
         rm -rf "$PUB_STAGE"
     fi
 }
+
+# pub_release_assets <tag>: print the release's assets, one "name<TAB>size<TAB>digest" line
+# each (one API call, the listing bin/sync-release reads); 2 when the release does not
+# exist, 1 when it cannot be read
+pub_release_assets() {
+    local err out rc=0
+    err=$(mktemp) || return 1
+    out=$(gh release view "$1" -R "$GH_REPO" --json assets \
+        --jq '.assets[] | [.name, (.size|tostring), (.digest // "")] | @tsv' 2>"$err") || rc=$?
+    if ((rc == 0)); then
+        rm -f "$err"; [[ -z $out ]] || printf '%s\n' "$out"; return 0
+    fi
+    if grep -qi 'release not found' "$err"; then rc=2; else rc=1; fi
+    rm -f "$err"
+    return $rc
+}
