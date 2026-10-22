@@ -74,9 +74,19 @@ expect "d: cleanup is the kernel job's last step" \
     "$(awk '/^  kernel:/ { on = 1; next } /^  [^ ]/ { on = 0 } on && /^      - name: / { last = $0 } END { print last }' "$WF" | grep -c 'Clean up the build tree')" 1
 
 # f. the runner's job-started hook (build/kernel-runner-job-started.sh)
-HOOK=$W/build/kernel-runner-job-started.sh
 R=omarchy-asus/omarchy-asus WREF="omarchy-asus/omarchy-asus/.github/workflows/build-pr.yml@refs/pull/1/merge"
 hev=$(mktemp -d)
+# The hook refuses an account that can reach the system docker, which a hosted
+# runner (where this test runs) can. The cases below run a copy whose socket and
+# group are this test's own; f2 checks the real ones and that both refuse.
+REAL_HOOK=$W/build/kernel-runner-job-started.sh
+expect "f: the hook checks the system docker socket" "$(grep -c '\[\[ -w /var/run/docker.sock \]\]' "$REAL_HOOK")" 1
+expect "f: the hook checks the docker group" "$(grep -c "grep -qx docker &&" "$REAL_HOOK")" 1
+hook_copy() {  # hook_copy <socket> <group>: the hook with those in place of the real ones
+    sed -e "s#/var/run/docker.sock#$1#g" -e "s#grep -qx docker#grep -qx $2#" "$REAL_HOOK" >"$hev/hook.sh"
+}
+hook_copy "$hev/no-such.sock" no-such-group-here
+HOOK=$hev/hook.sh
 printf '{"pull_request":{"head":{"repo":{"full_name":"%s"}}}}\n' "$R" >"$hev/own.json"
 printf '{"pull_request":{"head":{"repo":{"full_name":"someone/omarchy-asus"}}}}\n' >"$hev/fork.json"
 printf '{"pull_request":{"head":{"repo":null}}}\n' >"$hev/deleted.json"
@@ -101,6 +111,11 @@ hook() {  # hook <event> <payload> [VAR=value...]: accepted | refused | refused-
     else echo refused; fi
 }
 expect "f: own branch's PR: accepted" "$(hook pull_request "$hev/own.json")" accepted
+: >"$hev/docker.sock"; hook_copy "$hev/docker.sock" no-such-group-here
+expect "f2: system docker socket writable: refused" "$(hook pull_request "$hev/own.json")" refused
+hook_copy "$hev/no-such.sock" "$(id -gn)"
+expect "f2: in the docker group: refused" "$(hook pull_request "$hev/own.json")" refused
+hook_copy "$hev/no-such.sock" no-such-group-here
 expect "f: dispatch: accepted" "$(hook workflow_dispatch /nonexistent)" accepted
 expect "f: fork's PR: refused, and the job's next step never runs" "$(hook pull_request "$hev/fork.json")" refused
 expect "f: PR whose head repository is gone: refused" "$(hook pull_request "$hev/deleted.json")" refused

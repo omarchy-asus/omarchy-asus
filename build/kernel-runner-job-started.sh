@@ -24,7 +24,8 @@
 # It lets through only, on this repository:
 #   - pull_request from a branch of this repository (never a fork),
 #   - workflow_dispatch (needs write access to start),
-# and only the kernel job of build-pr.yml.
+# and only the kernel job of build-pr.yml, and only while the runner account
+# can't reach the system docker.
 set -euo pipefail
 # Fixed, not from the environment: a workflow's env must not be able to move it.
 REPO=omarchy-asus/omarchy-asus
@@ -51,6 +52,12 @@ refuse() {
     exit 1
 }
 
+# Its docker must be rootless (docs/kernel-runner.md): the system docker socket, or
+# the docker group that opens it, is root on the build host for any workflow.
+[[ -w /var/run/docker.sock ]] &&
+    refuse "this account can use the system docker (/var/run/docker.sock), which is root-equivalent; use its rootless docker"
+id -nG | tr ' ' '\n' | grep -qx docker &&
+    refuse "this account is in the docker group, which is root-equivalent; use its rootless docker"
 [[ ${GITHUB_REPOSITORY:-} == "$REPO" ]] || refuse "repository '${GITHUB_REPOSITORY:-}' is not $REPO"
 [[ ${GITHUB_JOB:-} == kernel ]] || refuse "job '${GITHUB_JOB:-}' is not build-pr.yml's kernel job"
 case ${GITHUB_WORKFLOW_REF:-} in

@@ -35,10 +35,12 @@ the distcc key at. What keeps the rest of the build host out of reach:
 
 - The runner is a dedicated system account, not the build user. It has no
   sudo, no signing key, no `gh` login, and can't read the build user's home.
-- It is in the `docker` group, which is root-equivalent: workflow code from a
-  branch could start a privileged container. That is the cost of building in
-  the same container as CI. Don't register the runner on a repository whose
-  branches you don't control.
+- It is not in the `docker` group (that would be root-equivalent: any
+  workflow could start a privileged container). It runs its own rootless
+  dockerd (rootlesskit, pasta networking): root in its containers is the
+  runner account's own uid on the host, and the rest of the container's uids
+  are its subuid range. A privileged container from branch code gets no more
+  than the runner account has. The system docker socket refuses it.
 - The runner's job-started hook, a root-owned copy of
   `build/kernel-runner-job-started.sh` that no workflow can change, ends any job
   that isn't build-pr.yml's `kernel` job on this repository, started by a
@@ -62,13 +64,49 @@ software comes from <https://github.com/actions/runner/releases> (check the
 SHA-256 the release page lists):
 
 ```bash
-useradd --system --create-home --home-dir /var/lib/<runner> --shell /usr/bin/nologin -G docker <runner>
+useradd --system --create-home --home-dir /var/lib/<runner> --shell /usr/bin/nologin <runner>
 chmod 700 /var/lib/<runner>
 runuser -u <runner> -- bash -c '
     cd ~ && mkdir actions-runner && cd actions-runner &&
     curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v<ver>/actions-runner-linux-x64-<ver>.tar.gz &&
     echo "<sha256>  r.tgz" | sha256sum -c && tar xzf r.tgz && rm r.tgz'
 ```
+
+Its rootless docker. Arch's docker package doesn't ship
+`dockerd-rootless.sh`; take it from moby's `contrib/` at the tag of the
+installed docker (`docker-v<ver>`), read it, and install it root-owned. The
+subuid range must not overlap another user's in `/etc/subuid`:
+
+```bash
+pacman -S --needed rootlesskit passt
+install -o root -g root -m 755 dockerd-rootless.sh /usr/local/bin/dockerd-rootless.sh
+usermod --add-subuids <start>-<start+65535> --add-subgids <start>-<start+65535> <runner>
+loginctl enable-linger <runner>    # its user services run without a login
+runuser -u <runner> -- bash -c 'mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/docker.service' <<'EOF'
+[Unit]
+Description=Docker (rootless) for the kernel CI runner
+
+[Service]
+Environment=PATH=/usr/local/bin:/usr/bin
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=pasta
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=implicit
+ExecStart=/usr/local/bin/dockerd-rootless.sh
+Restart=on-failure
+Delegate=yes
+Type=notify
+NotifyAccess=all
+KillMode=mixed
+
+[Install]
+WantedBy=default.target
+EOF
+runuser -u <runner> -- env XDG_RUNTIME_DIR=/run/user/$(id -u <runner>) systemctl --user enable --now docker.service
+echo "DOCKER_HOST=unix:///run/user/$(id -u <runner>)/docker.sock" >> /var/lib/<runner>/actions-runner/.env
+```
+
+pasta makes the containers' connections from the host's own network stack,
+so the helper sees the build host's address (its `from=` limit still holds).
+`docker info` as the runner lists `name=rootless` under security options.
 
 Register it with a one-hour token (repository admin):
 
