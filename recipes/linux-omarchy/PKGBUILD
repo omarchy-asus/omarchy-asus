@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.8
-pkgrel=9.4
+pkgrel=9.5
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -115,6 +115,7 @@ source=(
   0479-amd-hdmi-allm-hf-vsif-in-vsp-infopacket.patch{,.sig}
   0480-drm-amdgpu-skip-noirq-suspend-reset-for-switcheroo-parked-gpu.patch{,.sig}
   0481-drm-amd-display-power-backports.patch
+  0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch
   0510-sound-updates.patch{,.sig}
   0511-asoc-updates.patch{,.sig}
   0512-sound-fixes-1.patch{,.sig}
@@ -377,6 +378,7 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         'ffd6563c440e75506dc72f86de050d3f6d155799d7d8f7b8ed652e13323c1f3c05662c8a4fa88042240b957a56c52d3c9ace93cdc1afb8d9738a79dfb6bbd432'
         'SKIP'
         '080cef736139c7409ee2e838c1910318bb95bdab5aa3a2156b314f6b86fb0eeb7718a734ee03aec7a232fb2158f14bed0a6ddbdb3e734ca92f5fb372d802a1b2'
+        '912d46320dd426b67e7b8a93f9d135ffa69fdc1db50ab949102b82613270ee018f2e8d348e5b665ef374c631c801813a3500343cf7625681dd3414c15e2aa0d7'
         '0963ee814b6f64903d67757c5c55a93ec1f5b16374af16aeff2e7e494254d19031d4e1422428f4f7a8167592b7750a1db87476871eeb5cba851b377e59911149'
         'SKIP'
         'dcb350ef2987b801e481b5cf32cdfbe47018939f6b43e45b6dcff87eb75cc1a48f25e679caa823f3fe6391048f216ed9d95ae79b9cac237041857458f56e7f7a'
@@ -733,6 +735,7 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             '9d41637c2ecc3c0284ddf9a2efd032c3a6759ad9625a8fa3568e77141e73b846'
             'SKIP'
             '36cc15f66a2caeaf2b98c1e383b46552876c458e148b0a032951559d0086a09f'
+            '0476b8a7380c6d22e7ac0795676708a29b9380a0fa22e9b617ae0ac39cfd1ac3'
             '0fe32924142868879ac9417c67b0233b6ef8ddb0163183352479f5163bf7b5df'
             'SKIP'
             '7444186ad4f6d8e2b52a3729064f649b035af6eae4f4ad46b9768c006419fdbc'

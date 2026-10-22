@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.4**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.5**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,9 +14,9 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.4` (kernel release string becomes `7.2.8-9.4-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.5` (kernel release string becomes `7.2.8-9.5-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
-   9.4 added 0773.
+   9.4 added 0773; 9.5 added 0482.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -32,6 +32,8 @@ Compared with upstream, only:
    (three amdgpu display backports, CACP default off; see "0481" below).
 6. New patch `0773-gpiolib-acpi-ignore-wake-on-gpio16-asus-ga605km.patch` after
    `0772-...` (GA605KM: ignore GPIO 16 wakeups; see "0773" below).
+8. New patch `0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch` after
+   `0481-...` (USB4 dock monitors after a replug in suspend; see "0482" below).
 7. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
@@ -265,8 +267,8 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0568, 0569, 0807, 9900).
-2. Add them back to `source=()`: 0481 after `0480`, 0568 and 0569 after the last `056x` patch,
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 9900).
+2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 after the last `080x` patch (renumber if upstream took the number),
    9900 last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
@@ -340,3 +342,55 @@ cat /sys/class/drm/card*-eDP-1/amdgpu/panel_power_savings   # expect 0
 # s0i3: suspend, resume, then check the residency counter grew
 sudo cat /sys/kernel/debug/amd_pmc/s0ix_stats
 ```
+
+## 0482: amdgpu replays DMUB HPDs skipped during resume (#205)
+
+**What.** `0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch`, after
+0481 (no later patch touches `amdgpu_dm.c`/`.h`). `dmub_hpd_callback()` still
+skips a DMUB HPD that arrives while `adev->in_suspend` is set, but now records
+its link in `dm->hpd_skipped_in_suspend`. A new DM `.complete` callback (it runs
+after `amdgpu_device_resume()` has cleared `in_suspend`) queues
+`dm->hpd_replay_work` on the HPD offload workqueue, which runs
+`handle_hpd_irq_helper()` for each recorded link: the same path the HPD takes
+outside suspend. It is queued on every resume, recorded links or not: an HPD
+work item that saw `in_suspend` set may not have recorded its link yet, and
+the workqueue is ordered, so the replay runs after it. `dm_suspend()` cancels a replay still pending; its links are
+kept for the next resume. A replay logs `Replay DMUB HPD skipped in
+suspend/resume: link_index=N`.
+
+**Why.** With the G16 docked on a USB4 dock (two DP monitors), unplugging the
+dock with the lid closed suspends it. Replugging the dock during suspend and
+resuming left both monitors dark until the next suspend. `dm_resume()` probes
+the connectors early in resume, when the thunderbolt driver has not set up the
+dock's DP tunnels yet. The DPIA HPDs for the new tunnels arrive later, while
+`in_suspend` is still set, and were dropped (`Skip DMUB HPD IRQ callback in
+suspend/resume`). Nothing read the DPRX caps, so 12 s later the connection
+manager tore the tunnels down (`(DP): not active, tearing down`) and dropped
+the DP IN adapters until their next hotplug, which only a suspend brings.
+Mainline and amd-staging-drm-next (2026-10-20) still drop these HPDs; there is
+no fix to backport.
+
+**Not covered.** #205's second failure (a DPIA link trained at RBR after a
+resume although HBR3 is verified) has no root cause yet; `test --dock` records
+every DP link's `link_settings` so the next occurrence has the data. The
+thunderbolt side (a DP IN dropped after a DPRX timeout is not offered again
+when a new DP OUT appears) is unchanged: with 0482 that timeout should no
+longer happen after resume.
+
+**Default behaviour and risk.** It changes behaviour only when an HPD was
+skipped during suspend or resume: one extra detection per such link once
+resume completes. On a link that did not change, detection finds the same
+sink and sends no hotplug event. Runtime PM resume (dGPUs) does not run
+`.complete`, so it behaves as before. Risk: low.
+
+**Test** (on the G16, booted on this kernel, docked with the DP monitors on):
+```bash
+recipes/linux-omarchy/g16-test/test --dock   # the 0482 line walks through #205's steps
+```
+By hand: close the lid, unplug the dock, wait for the suspend, plug the dock
+back in, open the lid. Then `journalctl -k -b | grep -E 'Skip DMUB HPD|Replay
+DMUB HPD|not active, tearing down'` shows skips followed by replays and no
+teardown, and both monitors are lit.
+
+**Upstream.** Not submitted (target: amd-gfx). A draft report is on #205.
+Drop it once upstream handles HPDs that arrive late in resume.
