@@ -870,27 +870,33 @@ apply_winlock() {
 # The widget is an Omarchy plugin (a git repo in ~/.config/omarchy/plugins,
 # updated with omarchy-plugin-update; the shell reloads it when it changes).
 # It used to be the asus-zephyrus-g16-control package, linked from /usr/share
-# under the id omarchy-asus.g16, and briefly a plugin under that id.
-WIDGET_ID=io.github.omarchy-asus.plugin
+# under the id omarchy-asus.g16, then a plugin under that id, and briefly
+# io.github.omarchy-asus.plugin.
+WIDGET_ID=io.github.omarchy-asus.panel
 WIDGET_URL=https://github.com/omarchy-asus/omarchy-asus-plugin
-OLD_ID=omarchy-asus.g16
-OLD_WIDGET_DIR=/usr/share/omarchy/plugins/$OLD_ID
+OLD_IDS=(omarchy-asus.g16 io.github.omarchy-asus.plugin)
+OLD_WIDGET_DIR=/usr/share/omarchy/plugins/omarchy-asus.g16
 
-# The old widget, under its old id: the packaged copy's link, or the first
-# plugin (a clone of omarchy-asus/g16-control, now omarchy-asus-plugin).
+# The old widget under an old id: the packaged copy's link, or a clone of the
+# plugin (omarchy-asus/g16-control, now omarchy-asus-plugin). Sets OLD_ID.
 old_widget() {
-  local old=$HOME/.config/omarchy/plugins/$OLD_ID
-  if [[ -L $old ]]; then
-    [[ $(readlink "$old") == "$OLD_WIDGET_DIR" ]]
-    return
-  fi
-  [[ -d $old/.git ]] && grep -qE 'omarchy-asus/(g16-control|omarchy-asus-plugin)' "$old/.git/config" 2>/dev/null
+  local id old
+  for id in "${OLD_IDS[@]}"; do
+    old=$HOME/.config/omarchy/plugins/$id
+    OLD_ID=$id
+    if [[ -L $old ]]; then
+      [[ $(readlink "$old") == "$OLD_WIDGET_DIR" ]] && return 0
+      continue
+    fi
+    [[ -d $old/.git ]] && grep -qE 'omarchy-asus/(g16-control|omarchy-asus-plugin)' "$old/.git/config" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 check_g16_widget() {
   local d dest=$HOME/.config/omarchy/plugins/$WIDGET_ID
   if old_widget; then
-    ST=missing DETAIL="the old G16 Control widget ($OLD_ID) is installed; it is the omarchy-asus plugin now ($WIDGET_URL)"
+    ST=missing DETAIL="the widget under its old id $OLD_ID is installed; it is the omarchy-asus plugin now ($WIDGET_URL, id $WIDGET_ID)"
     return
   fi
   if [[ -d $dest/.git ]]; then

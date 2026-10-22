@@ -100,7 +100,7 @@ nothing until you remove those copies:
   `/usr/lib/systemd/user/`. Drop-ins in `g16-winlock.service.d/` (such as
   `mode.conf`) apply to either one.
 - A widget installed by hand under its old id keeps running from its own
-  directory. The plugin has its own id (`io.github.omarchy-asus.plugin`), so the two do not
+  directory. The plugin has its own id (`io.github.omarchy-asus.panel`), so the two do not
   collide, but they show the same panel.
 
 To switch over:

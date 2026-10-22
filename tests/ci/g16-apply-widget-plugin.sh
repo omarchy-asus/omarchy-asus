@@ -14,6 +14,8 @@
 #   f. the first plugin under the old id (a clone of omarchy-asus/g16-control at
 #      omarchy-asus.g16): missing; applying removes it with omarchy-plugin-remove and adds
 #      the plugin under its new id
+#   g. the plugin under its short-lived id io.github.omarchy-asus.plugin: missing;
+#      applying removes it and adds io.github.omarchy-asus.panel
 # Usage: tests/ci/g16-apply-widget-plugin.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -29,7 +31,7 @@ fi
 RECIPE=$W/recipes/omarchy-asus-g16-apply
 TOOL=$RECIPE/omarchy-asus-g16-apply
 URL=https://github.com/omarchy-asus/omarchy-asus-plugin
-ID=io.github.omarchy-asus.plugin
+ID=io.github.omarchy-asus.panel
 OLD=omarchy-asus.g16
 # The package's share and lib dirs, laid out as package() installs them.
 export OMARCHY_ASUS_G16_APPLY_SHARE=$S/share OMARCHY_ASUS_G16_APPLY_LIB=$S/lib
@@ -48,7 +50,7 @@ printf '#!/bin/bash\nexit 0\n' >"$S/bin/sudo"
 cat >"$S/bin/omarchy-plugin-add" <<'STUB'
 #!/bin/bash
 echo "omarchy-plugin-add $*" >>"$PLUGIN_LOG"
-mkdir -p "$HOME/.config/omarchy/plugins/io.github.omarchy-asus.plugin/.git"
+mkdir -p "$HOME/.config/omarchy/plugins/io.github.omarchy-asus.panel/.git"
 STUB
 # omarchy-plugin-remove ID --yes: record the call and remove the plugin's dir.
 cat >"$S/bin/omarchy-plugin-remove" <<'STUB'
@@ -157,6 +159,20 @@ apply g16-widget
 check "the old plugin removed" grep -qxF "omarchy-plugin-remove $OLD --yes" "$PLUGIN_LOG"
 check "the new plugin added" grep -qxF "omarchy-plugin-add $URL --enable --yes" "$PLUGIN_LOG"
 check "old dir gone" not [ -e "$(P $OLD)" ]
+run --check
+check "applied afterwards" row_is g16-widget applied
+
+echo "== g. the plugin under io.github.omarchy-asus.plugin"
+setup_case g
+PREV=io.github.omarchy-asus.plugin
+mkdir -p "$(P $PREV)/.git"
+printf '[remote "origin"]\n\turl = https://github.com/omarchy-asus/omarchy-asus-plugin\n' >"$(P $PREV)/.git/config"
+run --check
+check "missing" row_is g16-widget 'missing \(opt-in\)'
+check "names the old id" row_has g16-widget "$PREV"
+apply g16-widget
+check "the old id removed" grep -qxF "omarchy-plugin-remove $PREV --yes" "$PLUGIN_LOG"
+check "the new id added" grep -qxF "omarchy-plugin-add $URL --enable --yes" "$PLUGIN_LOG"
 run --check
 check "applied afterwards" row_is g16-widget applied
 
