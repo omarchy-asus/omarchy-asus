@@ -57,6 +57,62 @@ OUT=${OUT:-/out} WORK=${WORK:-/build}
 
 "$repo/ci/setup-arch" --channel "$channel"
 
+# distcc (the build host's kernel runner only; docs/kernel-runner.md): when the
+# workflow mounts the runner's compile-only key dir at /mnt/distcc (id_ed25519,
+# known_hosts, and hosts: one DISTCC_HOSTS entry per line, e.g.
+# <account>@<helper>/<jobs>), compiles go there over ssh through this repo's
+# build/distcc-ssh, the wrapper the release builds use, so the helper's
+# build/distccd-gate refuses it on another gcc or binutils and distcc compiles
+# here instead. The key is copied for the builder user (makepkg runs as it) to
+# /distcc, where the wrapper looks. Hosted runners mount nothing.
+if [[ -f /mnt/distcc/id_ed25519 && -f /mnt/distcc/known_hosts && -s /mnt/distcc/hosts ]]; then
+    pacman -S --needed --noconfirm --noprogressbar distcc openssh
+    install -d -o builder -g builder -m 700 /distcc
+    install -o builder -g builder -m 600 /mnt/distcc/id_ed25519 /mnt/distcc/known_hosts /distcc/
+    install -m 755 "$repo/build/distcc-ssh" /distcc/ssh
+    mapfile -t helpers < <(grep -v -E '^[[:space:]]*(#|$)' /mnt/distcc/hosts)
+    slots=0
+    for h in "${helpers[@]}"; do [[ $h =~ /([0-9]+) ]] && slots=$((slots + BASH_REMATCH[1])); done
+    # After zz-ci.conf: localhost first keeps $(nproc) jobs here, the helpers take
+    # the rest, so -j has to cover both (docs/distcc.md).
+    cat >/etc/makepkg.conf.d/zz-distcc.conf <<EOF
+BUILDENV=(distcc color !ccache check !sign)
+DISTCC_HOSTS="localhost/$(nproc) ${helpers[*]}"
+MAKEFLAGS="-j$(( $(nproc) + slots ))"
+export DISTCC_SSH=/distcc/ssh
+EOF
+    echo "==> distcc: ${#helpers[@]} helper(s), $slots slots on top of $(nproc) here"
+fi
+
+# ccache (the build host's kernel runner only): when the workflow mounts the
+# runner's own cache dir at /mnt/ccache, compiles go through ccache, and on a
+# miss through distcc if that is on (makepkg sets CCACHE_PREFIX=distcc). A kernel
+# PR that changes a few patches then rebuilds a few objects, not all ~25,000.
+# The cache is the runner's, shared only by its CI builds; the release builds
+# keep their own. Its files are the container builder's, so the dir must be
+# writable by it (mode 1777 on the host). zz-zccache.conf loads after
+# zz-distcc.conf and keeps its distcc setting.
+#
+# PATH is Arch's default, as in the release chroot. The builder image puts
+# /usr/sbin before /usr/bin, so ccache finds gcc as /usr/sbin/gcc and hands
+# distcc that path; the helper's distccd (no --enable-tcp-insecure) refuses
+# every compiler path it doesn't know ("compiler name </usr/sbin/gcc> cannot
+# be an absolute path"), and the build compiles locally while distcc backs
+# the helper off. /usr/sbin is a link to /usr/bin on Arch, so nothing is lost.
+if [[ -d /mnt/ccache ]]; then
+    pacman -S --needed --noconfirm --noprogressbar ccache
+    distcc=!distcc
+    [[ -f /etc/makepkg.conf.d/zz-distcc.conf ]] && distcc=distcc
+    cat >/etc/makepkg.conf.d/zz-zccache.conf <<EOF
+BUILDENV=($distcc color ccache check !sign)
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
+export CCACHE_DIR=/mnt/ccache
+export CCACHE_MAXSIZE=15G
+EOF
+    echo "==> ccache: /mnt/ccache ($(runuser -u builder -- env CCACHE_DIR=/mnt/ccache ccache --print-stats 2>/dev/null |
+        awk -F'\t' '$1 == "files_in_cache" { print $2 " files" }'))"
+fi
+
 work=$WORK/$name
 rm -rf "$work"; mkdir -p "$work" "$OUT"
 cp -a "$src"/. "$work"/
