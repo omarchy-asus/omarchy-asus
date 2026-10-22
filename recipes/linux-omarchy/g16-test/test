@@ -60,6 +60,8 @@ while (($#)); do
   esac
   shift
 done
+[[ ${G16_ROOT:-} != pkexec || $MODE == resume ]] ||
+  die "G16_ROOT=pkexec covers --resume-profile only; the other modes read root-only files with sudo"
 for v in TEMPS_MIN INTERVAL RECOVERY HIBERNATES; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || die "$v must be a positive number"; done
 ((EUID != 0)) || die "run it as your normal user; it uses sudo where it must"
 is_g16 || die "this is not a GA605; the kit is for the ROG Zephyrus G16 GA605 only"
@@ -777,6 +779,7 @@ do_suspend() {
     sleep 1
   done
   (($(cat /sys/power/suspend_stats/fail) > f0)) && die "the suspend failed"
+  (($(cat /sys/power/suspend_stats/success) > s0)) || die "no completed suspend within 5 min (suspend_stats success unchanged)"
   sleep 3
 }
 
@@ -785,12 +788,12 @@ do_suspend() {
 FIX=''
 reassert() { # resume kind
   write_profile quiet
-  probe "$1, quiet written again"
+  probe "$1: quiet written again"
   [[ $PROBE == quiet ]] && { FIX=same; return; }
   write_profile balanced
   sleep 2
   write_profile quiet
-  probe "$1, balanced then quiet written"
+  probe "$1: balanced then quiet written"
   if [[ $PROBE == quiet ]]; then FIX=via-balanced; else FIX=neither; fi
 }
 
@@ -818,7 +821,8 @@ run_resume() {
   table=$(fan_table)
 
   probe baseline
-  [[ $PROBE == quiet ]] || note "the baseline is already $PROBE: the table may be lost before any resume"
+  # A resume can only be blamed for losing the table if it was in force before.
+  [[ $PROBE == quiet ]] || die "the baseline is already $PROBE, before any resume: reboot (no suspend or hibernate) and run again"
 
   for ((i = 1; i <= HIBERNATES; i++)); do
     do_hibernate || break
@@ -830,7 +834,9 @@ run_resume() {
   : "${hib:=kept}"
   [[ $hib == lost || $hib == unclear ]] && { reassert "hibernate $n"; hfix=$FIX; }
 
-  if do_suspend; then
+  if [[ $hfix == neither ]]; then
+    sus="not run (the quiet table could not be restored after hibernate)"
+  elif do_suspend; then
     probe "after s2idle"
     sus=$PROBE
     [[ $sus == quiet ]] && sus=kept
