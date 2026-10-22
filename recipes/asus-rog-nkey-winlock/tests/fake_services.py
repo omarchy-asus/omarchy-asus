@@ -48,6 +48,7 @@ ASUSD_XML = """
   <interface name="xyz.ljones.Platform">
     <property name="ChargeControlEndThreshold" type="y" access="readwrite"/>
     <property name="PlatformProfile" type="u" access="readwrite"/>
+    <property name="EnablePptGroup" type="b" access="readwrite"/>
   </interface>
   <interface name="xyz.ljones.FanCurves">
     <method name="SetProfileFanCurveEnabled">
@@ -133,6 +134,34 @@ for attr, (ac, dc) in RANGES.items():
         "DefaultValue": GLib.Variant("i", ac[2])}
 
 
+# asusd's PPT tuning groups, one per (plugged, profile): while the current
+# one is off, a PPT write is stored but not applied ("profile tuning is
+# disabled for current profile and power state"); turning it on applies the
+# stored values, turning it off re-applies the profile (limits back to default).
+groups = {}       # (plugged, profile) -> bool
+stored = {}       # (plugged, profile) -> {attr: value}
+
+
+def plugged():
+    return not values[("/org/freedesktop/UPower", "org.freedesktop.UPower")]["OnBattery"].unpack()
+
+
+def profile():
+    return values[("/xyz/ljones", "xyz.ljones.Platform")]["PlatformProfile"].unpack()
+
+
+def ppt_path(attr):
+    return f"/xyz/ljones/asus_armoury/{attr}"
+
+
+def reset_ppt(conn):
+    for attr in RANGES:
+        v = values[(ppt_path(attr), "xyz.ljones.AsusArmoury")]
+        if v["CurrentValue"].unpack() != v["DefaultValue"].unpack():
+            v["CurrentValue"] = GLib.Variant("i", v["DefaultValue"].unpack())
+            changed(conn, ppt_path(attr), "xyz.ljones.AsusArmoury", "CurrentValue")
+
+
 def set_ranges(on_battery):
     for attr, (ac, dc) in RANGES.items():
         lo, hi, default = dc if on_battery else ac
@@ -151,10 +180,29 @@ def changed(conn, path, iface, prop):
 
 
 def get_property(conn, sender, path, iface, prop):
+    if iface == "xyz.ljones.Platform" and prop == "EnablePptGroup":
+        return GLib.Variant("b", groups.get((plugged(), profile()), False))
     return values[(path, iface)][prop]
 
 
 def set_property(conn, sender, path, iface, prop, value):
+    key = (plugged(), profile())
+    if iface == "xyz.ljones.Platform" and prop == "EnablePptGroup":
+        log({"set": [path, iface, prop, "b", value.unpack(), "plugged" if key[0] else "battery", key[1]]})
+        groups[key] = value.unpack()
+        if value.unpack():
+            for attr, v in stored.get(key, {}).items():
+                values[(ppt_path(attr), "xyz.ljones.AsusArmoury")]["CurrentValue"] = GLib.Variant("i", v)
+                changed(conn, ppt_path(attr), "xyz.ljones.AsusArmoury", "CurrentValue")
+        else:
+            reset_ppt(conn)
+        return True
+    attr = path.rsplit("/", 1)[-1]
+    if prop == "CurrentValue" and attr in RANGES:
+        stored.setdefault(key, {})[attr] = value.unpack()
+        if not groups.get(key, False):
+            log({"refused": [attr, value.unpack()]})
+            return True
     log({"set": [path, iface, prop, value.get_type_string(), value.unpack()]})
     values[(path, iface)][prop] = value
     changed(conn, path, iface, prop)
@@ -257,8 +305,15 @@ def stdin_cb(fd, cond):
             if sig.startswith("("):
                 val = tuple(val)
             values[(path, iface)][prop] = GLib.Variant(sig, val)
+            if prop == "EnablePptGroup":       # the user (asusctl) turning a group on or off
+                groups[(plugged(), profile())] = bool(val)
+                print("done", flush=True)
+                continue
             if prop == "OnBattery":
+                values[(path, iface)][prop] = GLib.Variant(sig, val)
                 set_ranges(bool(val))
+                if not groups.get((plugged(), profile()), False):
+                    reset_ppt(system)     # the firmware's limits for the new source
             changed(upower if path.startswith("/org/freedesktop/UPower") else system, path, iface, prop)
         elif "noise" in msg:
             nm = Gio.DBusConnection.new_for_address_sync(
