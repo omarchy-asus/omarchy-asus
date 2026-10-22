@@ -85,6 +85,8 @@ LIMINE_CONF=${OMARCHY_ASUS_LIMINE_CONF:-$ROOT/boot/limine.conf}
 SNAPPER_CONFIG=${OMARCHY_ASUS_SNAPPER_CONFIG:-$ROOT/etc/snapper/configs/root}
 DKMS_SRC_ROOT=${OMARCHY_ASUS_DKMS_SRC_ROOT:-$ROOT/usr/src}
 DKMS_DISABLED_DIR=${OMARCHY_ASUS_DKMS_DISABLED_DIR:-$ROOT/usr/local/src/dkms-disabled}
+# And for tests/ci/setup-channel.sh: where the model check reads the DMI product and board.
+DMI_DIR=${OMARCHY_ASUS_DMI_DIR:-/sys/class/dmi/id}
 
 # Under `curl ... | bash`, $0 is "bash", not this file: fall back to the URL.
 if [[ -f $0 ]]; then
@@ -262,8 +264,8 @@ check_user() {
 
 check_model() {
   local product board
-  product=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
-  board=$(cat /sys/class/dmi/id/board_name 2>/dev/null || true)
+  product=$(cat "$DMI_DIR/product_name" 2>/dev/null || true)
+  board=$(cat "$DMI_DIR/board_name" 2>/dev/null || true)
   step "Checking the machine model"
   if [[ $product == *GA605* || $board == *GA605* ]]; then
     ok "ASUS ROG Zephyrus G16 GA605 ($product / $board)"
@@ -324,6 +326,8 @@ preview_repo() {
   else
     warn "could not download the repo files database"
   fi
+  bsdtar -xOf "$TMP/repo.db" '*/desc' |
+    awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n, v }' | sort >"$TMP/repo.list"
   local name version installed
   while read -r name version; do
     if installed=$(pacman -Q "$name" 2>/dev/null); then
@@ -336,8 +340,97 @@ preview_repo() {
     else
       info "$name  $version (not installed, not pulled in)"
     fi
-  done < <(bsdtar -xOf "$TMP/repo.db" '*/desc' |
-    awk '/^%NAME%$/ { getline n } /^%VERSION%$/ { getline v; print n, v }' | sort)
+  done <"$TMP/repo.list"
+}
+
+# Installed packages that are our builds, one name per line, linux-omarchy first (#201): the
+# ones whose installed version is the one in the synced [omarchy-asus] database (pacman -Sl
+# marks them [installed]), an older build of ours (our rebuilds of stock packages carry a
+# .N pkgrel), any installed package of ours no other repo has, and REPO_ONLY_PKGS in case
+# the database isn't synced. A build of ours that has been withdrawn from the database is
+# found from the installed package itself: one of STOCK_REBUILD_PKGS with a .N pkgrel, or
+# any package whose packager is ours. pacman runs in the C locale: the fields and the
+# [installed] marks it prints are translated otherwise (German: Packer, [Installiert]).
+STOCK_REBUILD_PKGS=(linux-omarchy linux-omarchy-headers nvidia-open-dkms hyprland hyprpm omarchy omarchy-settings)
+ours_installed() {
+  local pkg
+  {
+    LC_ALL=C pacman -Qi 2>/dev/null | awk -v rebuilds=" ${STOCK_REBUILD_PKGS[*]} " '
+      /^Name +:/ { n = $3 } /^Version +:/ { v = $3 }
+      /^Packager +:/ { p = $0; sub(/^Packager +: */, "", p)
+        if (p == "omarchy-asus" || (index(rebuilds, " " n " ") && v ~ /-[0-9]+\.[0-9]+$/)) print n }' || true
+    LC_ALL=C pacman -Sl 2>/dev/null | awk -v repo="$REPO" '
+      $1 == repo { in_ours[$2] = 1
+        if ($4 == "[installed]") mine[$2] = 1
+        else if ($4 == "[installed:") { iv = $5; sub(/]$/, "", iv); inst[$2] = iv } next }
+      { elsewhere[$2] = 1 }
+      END { for (n in in_ours) if (mine[n] || (n in inst && (!elsewhere[n] || inst[n] ~ /-[0-9]+\.[0-9]+$/))) print n }' || true
+    for pkg in "${REPO_ONLY_PKGS[@]}"; do
+      if pacman -Q "$pkg" >/dev/null 2>&1; then echo "$pkg"; fi
+    done
+  } | sort -u | awk '$0 == "linux-omarchy" { print; next } { rest[++n] = $0 } END { for (i = 1; i <= n; i++) print rest[i] }'
+}
+
+installed_version() { pacman -Q "$1" 2>/dev/null | cut -d' ' -f2 || echo 'none'; }
+
+# A channel switch runs pacman -Syyuu, which allows downgrades: a package of ours the target
+# channel lacks silently falls back to another repo's build (#201: our kernel was replaced by
+# Omarchy's stock one). Lists them from the target database preview_repo fetched, and stops
+# the switch unless --force. Returns with OURS set to our installed packages.
+OURS=()
+check_target_has_ours() {
+  local pkg missing=()
+  # A rerun of a switch that did not finish also counts the packages recorded when it started:
+  # one that was replaced since no longer looks like ours.
+  mapfile -t OURS < <({ ours_installed; [[ -f $SWITCH_PENDING ]] && tail -n +2 "$SWITCH_PENDING"; } |
+    awk '!seen[$0]++ && NF')
+  step "Packages from [$REPO] on this machine that the $CHANNEL channel lacks"
+  for pkg in "${OURS[@]}"; do
+    awk -v n="$pkg" '$1 == n { found = 1 } END { exit !found }' "$TMP/repo.list" || missing+=("$pkg")
+  done
+  if ((${#missing[@]} == 0)); then
+    ok "none: all ${#OURS[@]} installed packages of ours are on the $CHANNEL channel"
+    return 0
+  fi
+  for pkg in "${missing[@]}"; do
+    info "$pkg  $(installed_version "$pkg") installed, not on the $CHANNEL channel"
+  done
+  info "The switch's pacman -Syyuu would replace these with another repo's build (or leave them"
+  info "without updates if no other repo has them)."
+  if [[ " ${missing[*]} " == *" linux-omarchy "* ]]; then
+    info "linux-omarchy would become Omarchy's stock kernel, without our patches."
+  fi
+  if ((FORCE)); then
+    warn "switching anyway because of --force: ${missing[*]} will not be our builds afterwards,"
+    warn "so the check after the switch fails and it stays pending until the channel has them."
+    return 0
+  fi
+  die "not switched: the $CHANNEL channel ($GH_TAG) does not have ${missing[*]} yet; nothing was changed.
+       Wait until it is published there and run this again, or use --force to switch without it."
+}
+
+# After the switch: every package of ours must be the target channel's build (pacman -Sl
+# marks it [installed]), linux-omarchy first, or the switch fails and stays pending. That
+# includes one --force let through because the channel lacks it: the switch went ahead, but
+# the machine is not on our builds until the channel has it and a rerun installs it.
+check_still_ours() {
+  local pkg lost=() sl
+  step "Checking that our packages are still ours"
+  sl=$(LC_ALL=C pacman -Sl "$REPO" 2>/dev/null) || sl=''
+  for pkg in "${OURS[@]}"; do
+    if ! awk -v n="$pkg" '$1 == n { found = 1 } END { exit !found }' "$TMP/repo.list"; then
+      lost+=("$pkg")
+      info "$pkg  $(installed_version "$pkg") installed; the $CHANNEL channel has no build of it (switched with --force)"
+    elif ! awk -v n="$pkg" '$2 == n && $4 == "[installed]" { found = 1 } END { exit !found }' <<<"$sl"; then
+      lost+=("$pkg")
+      info "$pkg  $(installed_version "$pkg") installed, not the [$REPO] $CHANNEL build"
+    fi
+  done
+  if ((${#lost[@]})); then
+    die "after the switch, ${lost[*]} not the [$REPO] $CHANNEL builds (see above).
+       Run '$SELF --channel $CHANNEL' again (once the channel has them): its pacman -Syyuu installs them."
+  fi
+  ok "all ${#OURS[@]} installed packages of ours are the [$REPO] $CHANNEL builds"
 }
 
 # Whether the fallback kernel K is really a way back (#85): headers for DKMS, an NVIDIA DKMS
@@ -1712,7 +1805,8 @@ do_uninstall() {
 # going back downgrades both to the Quattro versions, and runs the migrations.
 # omarchy-channel-set rewrites the configs before it upgrades and migrates, so matching
 # configs don't prove a switch finished: SWITCH_PENDING names the channel of a switch that
-# started and has not been verified, and a rerun finishes it instead of stopping early.
+# started and has not been verified (then, one per line, the packages of ours installed when it
+# started), and a rerun finishes it instead of stopping early.
 SWITCH_PENDING=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-asus/channel-switch-pending
 do_channel() {
   check_user
@@ -1725,7 +1819,7 @@ do_channel() {
   info "after: [omarchy] on Omarchy's $want channel, [$REPO] on our $CHANNEL channel (the $GH_TAG release)"
   [[ $ours != none ]] || die "the $REPO repo is not set up on this machine; run $SELF first"
   local pending=''
-  [[ -f $SWITCH_PENDING ]] && pending=$(<"$SWITCH_PENDING")
+  [[ -f $SWITCH_PENDING ]] && pending=$(head -n1 "$SWITCH_PENDING")
   if [[ $ours == "$CHANNEL" && $theirs == "$want" ]]; then
     if [[ -z $pending ]]; then
       ok "already on the $CHANNEL channel"
@@ -1740,9 +1834,10 @@ do_channel() {
   if [[ $CHANNEL == quattro ]]; then
     info "Going back runs pacman -Syyuu: the RC builds, Omarchy's and ours, are downgraded to the Quattro versions."
   fi
-  confirm "Switch [omarchy] to Omarchy $want and [$REPO] to $CHANNEL?" || die "cancelled"
   fetch_key
   preview_repo required
+  check_target_has_ours
+  confirm "Switch [omarchy] to Omarchy $want and [$REPO] to $CHANNEL?" || die "cancelled"
   if ! take_snapshot; then
     ((FORCE)) || die "not switched: without a snapshot a failed migration has no way back. Fix snapper, or run again with --force."
     warn "no snapshot: switching anyway because of --force."
@@ -1750,7 +1845,7 @@ do_channel() {
   if ((DRY_RUN)); then
     info "[dry-run] would record the switch in $SWITCH_PENDING until it is verified"
   else
-    mkdir -p "${SWITCH_PENDING%/*}" && printf '%s\n' "$CHANNEL" >"$SWITCH_PENDING" ||
+    mkdir -p "${SWITCH_PENDING%/*}" && printf '%s\n' "$CHANNEL" "${OURS[@]}" >"$SWITCH_PENDING" ||
       die "cannot write $SWITCH_PENDING; nothing was changed"
   fi
   install_snippet
@@ -1770,6 +1865,7 @@ do_channel() {
   first=$(first_repo_line)
   [[ -n $inc && $inc -lt $first ]] ||
     die "the $REPO Include line is not above [omarchy]/[core] in $CONF; run $SELF to put it back"
+  check_still_ours
   rm -f "$SWITCH_PENDING"
   ok "[omarchy] on Omarchy $want, [$REPO] on $CHANNEL ($GH_TAG)"
 }

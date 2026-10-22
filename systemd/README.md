@@ -99,7 +99,8 @@ What differs for RC:
   `next/omarchy-4.5`, so the RC branch's own copy of `bin/` never stops (or runs) anything.
 - **The RC chroot is the service's to make.** Before the first build (or kernel withdrawal) that
   needs it, the RC run checks that `/var/lib/omarchy-asus/chroot-rc` exists and uses the servers
-  of the installed `build/pacman-rc.conf`; otherwise it runs `bin/mkchroot --channel rc` (as
+  of the installed `build/pacman-rc.conf` and carries our packager (`PACKAGER="omarchy-asus"`
+  in `/etc/makepkg.conf.d/packager.conf`); otherwise it runs `bin/mkchroot --channel rc` (as
   root, from the root-owned copy). If that fails, the run records a `(chroot)` failure, the
   RC builds fail and their stale packages are withdrawn, as for any failed build. The Quattro
   chroot is still made by hand (Install, below).
@@ -250,7 +251,8 @@ Throttling is the main external constraint, so every GitHub call is bounded:
 
 Prerequisites:
 
-1. The Quattro build chroot: `bin/mkchroot` (once, with sudo). The RC chroot needs nothing:
+1. The Quattro build chroot: `bin/mkchroot` (once, with sudo; it writes the packager into
+   each chroot it makes or updates, so rerun it on an older one). The RC chroot needs nothing:
    the service makes it (`bin/mkchroot --channel rc`) before its first RC build.
 2. The signing key in `~/.local/share/omarchy-asus` (as today).
 3. `gh` access for the user (see `GH_TOKEN_FILE`).
