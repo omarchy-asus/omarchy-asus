@@ -119,6 +119,21 @@ rm -f "$hev/out"
 (env -i PATH="$PATH" GITHUB_REPOSITORY=someone/omarchy-asus setsid -w bash -c \
     'bash "$1" 2>/dev/null; echo ran >"$2"' _ "$HOOK" "$hev/out"; true) >/dev/null 2>&1
 expect "f: no Runner.Worker: fails closed (its process group is killed)" "$([[ -f $hev/out ]] && echo ran || echo stopped)" stopped
+# A Runner.Worker further up is not this job's (this repo's CI runs this test on a
+# hosted runner): a refusal must leave it alone and fall back to its own group.
+mkdir -p "$hev/outer"
+cat >"$hev/outer/Runner.Worker" <<'EOF'
+#!/bin/bash
+bash -c '(setsid -w bash -c "bash \"\$HOOK\" 2>/dev/null; echo ran >\"\$OUT.inner\""; :)'
+echo survived >"$OUT"
+EOF
+chmod +x "$hev/outer/Runner.Worker"
+rm -f "$hev/out" "$hev/out.inner"
+(env -i PATH="$PATH" HOOK="$HOOK" OUT="$hev/out" GITHUB_REPOSITORY=someone/omarchy-asus \
+    setsid -w "$hev/outer/Runner.Worker"; true) >/dev/null 2>&1
+expect "f: a Runner.Worker above the parent and grandparent is not killed" \
+    "$(cat "$hev/out" 2>/dev/null)" survived
+expect "f: ...and the refusal still stops what runs after it" "$([[ -f $hev/out.inner ]] && echo ran || echo stopped)" stopped
 expect "f: the installed hook's name ends in .sh (the runner picks the interpreter by extension)" \
     "$(grep -c 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/omarchy-asus/kernel-runner-job-started\.sh"' "$W/docs/kernel-runner.md")" 1
 rm -rf "$hev"

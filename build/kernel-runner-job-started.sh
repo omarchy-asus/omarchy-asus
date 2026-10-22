@@ -12,8 +12,11 @@
 # its own conditions. So a refusal kills the job's Runner.Worker, the process
 # that runs the job's steps (this hook is one of them), and nothing else of
 # that job can run. The runner's listener sees the worker die, reports the job
-# failed and takes the next one. If no Runner.Worker is found above this hook,
-# it fails closed: it kills its whole process group as well.
+# failed and takes the next one. The runner starts the hook as the worker's own
+# child, so only the hook's parent and grandparent are looked at: a Runner.Worker
+# further up is some other runner's (this repo's CI runs these tests on one),
+# not this job's. If neither is a Runner.Worker, it fails closed: it kills its
+# whole process group instead.
 #
 # The runner picks a hook's interpreter by its extension, so the installed copy
 # must end in .sh.
@@ -23,15 +26,15 @@
 #   - workflow_dispatch (needs write access to start),
 # and only the kernel job of build-pr.yml.
 set -euo pipefail
-REPO=${KERNEL_RUNNER_REPO:-omarchy-asus/omarchy-asus}
-# worker_pid: the nearest ancestor named Runner.Worker, if any
+# Fixed, not from the environment: a workflow's env must not be able to move it.
+REPO=omarchy-asus/omarchy-asus
+# worker_pid: the hook's parent or grandparent, if it is named Runner.Worker
 worker_pid() {
-    local pid=$$ comm ppid
-    while (( pid > 1 )); do
-        comm=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
-        [[ $comm == Runner.Worker ]] && { echo "$pid"; return 0; }
-        ppid=$(awk '{ print $4 }' "/proc/$pid/stat" 2>/dev/null) || return 1
-        pid=$ppid
+    local pid=$$ _
+    for _ in 1 2; do
+        pid=$(awk '{ print $4 }' "/proc/$pid/stat" 2>/dev/null) || return 1
+        (( pid > 1 )) || return 1
+        [[ $(cat "/proc/$pid/comm" 2>/dev/null) == Runner.Worker ]] && { echo "$pid"; return 0; }
     done
     return 1
 }
