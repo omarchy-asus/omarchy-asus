@@ -15,7 +15,8 @@ ExecStart=/usr/local/lib/omarchy-asus/bin/auto-update
 Nice=10
 IOSchedulingClass=idle
 CPUSchedulingPolicy=batch
-TimeoutStartSec=8h
+# One run per release channel (SERVE_CHANNELS), each of which may rebuild a kernel.
+TimeoutStartSec=12h
 KillMode=control-group
 PrivateTmp=yes
 # makechrootpkg needs systemd-nspawn, btrfs subvolumes, bind mounts and sudo -u, so the

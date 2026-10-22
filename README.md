@@ -49,9 +49,10 @@ The signed `[omarchy-asus]` repo, served from the
 | | | nvidia-modeset no longer leaks memory per composited frame (gigabytes over days) | [NVIDIA/open-gpu-kernel-modules#1368](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1368), open |
 | `hyprland`, `hyprpm` | 0.56.2-4.1 | Windows no longer render off-screen after an HDMI replug | Fixed on main by [hyprwm/Hyprland#16140](https://github.com/hyprwm/Hyprland/pull/16140), unreleased; dropped when 0.57 ships |
 | `omarchy-asus-g16` | 1.0.0-1 | GA605KM: the touchpad no longer wakes the laptop; hibernate powers off cleanly (`HibernateMode=shutdown`); Dynamic Boost keeps working after many charger plug-ins (nvidia-powerd start limit) | Not yet proposed upstream; files are byte-identical to the [omarchy fork](https://github.com/omarchy-asus/omarchy)'s, under `/usr/lib` ([notes](recipes/omarchy-asus-g16/README.md)) |
-| `asus-rog-nkey-winlock`, `asus-zephyrus-g16-control` | 0.1.0-2 (main: 0.1.0-3) | A toast when Fn+Super locks or unlocks the Windows key (needs the kernel's Win-lock patch); the G16 Control widget holds the switch and, from 0.1.0-3, applies the per-charger keyboard, refresh-rate, overdrive and backlight settings that a separate power script used to | Userspace for the kernel patch; the widget needs Omarchy to load system-wide plugins ([notes](recipes/asus-rog-nkey-winlock/README.md)) |
+| `asus-rog-nkey-winlock` | 0.1.0-9 (main: 0.1.0-10) | A toast when Fn+Super locks or unlocks the Windows key, or auto-unlock (needs the kernel's Win-lock patch) | Userspace for the kernel patch ([notes](recipes/asus-rog-nkey-winlock/README.md)) |
+| **omarchy-asus plugin**: the bar widget, [omarchy-asus/omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin) (Omarchy plugin) | 1.4.0 | One panel for the laptop's hardware: keyboard and Slash LEDs; per-charger keyboard, refresh rate, backlight and CPU power limits; charge limit; the Fn+Super switch. Install: `omarchy-plugin-add https://github.com/omarchy-asus/omarchy-asus-plugin --enable`. It replaced the `asus-zephyrus-g16-control` package (transitional) | Ours |
 | `omarchy`, `omarchy-settings` | 4.0.6-1.1 | **Experimental.** Stock Omarchy 4.0.6 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes; a crashed shell gets its lock screen back while dictation is installed. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
-| `omarchy-asus-g16-apply` | 0.1.0-6 | A command you run yourself. It reports every known G16 fix with `--check` and applies the ones that live in your own config or `/etc` | Local tool ([notes](recipes/omarchy-asus-g16-apply/README.md)) |
+| `omarchy-asus-g16-apply` | 0.1.0-7 (main: 0.1.0-8) | A command you run yourself. It reports every known G16 fix with `--check` and applies the ones that live in your own config or `/etc` | Local tool ([notes](recipes/omarchy-asus-g16-apply/README.md)) |
 
 Versions are what the release serves now. When main gets ahead, the daily auto-update
 publishes the new build.
@@ -125,8 +126,9 @@ On the build host, the build and publish scripts take `--channel rc` (default `q
 --channel rc` builds in it and stages in its own dir, and `bin/publish`/`bin/sync-release
 --channel rc` sign and upload to the RC repo and release only, with the same signature, checksum
 and personal-information checks. A package staged for one channel is refused by the other's
-`bin/publish`. `bin/auto-update` keeps the Quattro channel current; the RC channel is built and
-published by hand.
+`bin/publish`. The daily `bin/auto-update` timer keeps both channels current, one run per
+channel with the same gates (systemd/README.md, "Release channels"): Quattro from `main`, RC
+from `next/omarchy-4.5` in the RC chroot, published to `rc-x86_64`.
 
 ## Supported hardware
 
