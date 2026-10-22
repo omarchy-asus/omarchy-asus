@@ -7,7 +7,8 @@
 #   2. a real run stops each unit (and the shell) in turn, starts each again,
 #      sets and clears stay-awake, measures the CACP levels and puts the original
 #      level back, and posts to #198 and the CACP table to #172;
-#   3. a run killed mid-phase puts everything back too.
+#   3. a run killed mid-phase, or during a unit's stop, puts everything back too;
+#   4. posting goes through bin/issue: a denylist hit, or no denylist, posts nothing.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -52,7 +53,7 @@ cat >"$B/systemctl" <<'EOF'
 case $1 in
   show-environment) echo "OMARCHY_PATH=$STUB/omarchy" ;;
   is-active) [[ $2 == -q ]] && shift; [[ -e $STUB/active/$2 ]] ;;
-  stop) echo "stop $2" >>"$STUB/log"; rm -f "$STUB/active/$2" ;;
+  stop) echo "stop $2" >>"$STUB/log"; rm -f "$STUB/active/$2"; [[ -e $STUB/slow-stop ]] && sleep 3 ;;
   start) echo "start $2" >>"$STUB/log"; touch "$STUB/active/$2" ;;
   *) exit 1 ;;
 esac
@@ -79,12 +80,16 @@ case $1 in
 esac
 echo "idle $1" >>"$STUB/log"
 EOF
+# bin/issue's two gh calls: the issue list (for the target's state) and the
+# comment, whose body comes on stdin.
 cat >"$B/gh" <<'EOF'
 #!/bin/bash
-[[ $1 == issue && $2 == comment ]] || exit 1
-n=$3; shift 3
-while (($#)); do [[ $1 == --body-file ]] && cp "$2" "$STUB/posted-$n"; shift; done
-echo "post $n" >>"$STUB/log"
+[[ $1 == issue ]] || exit 1
+case $2 in
+  list) echo '[{"number":198,"title":"G16 idle","state":"OPEN","labels":[],"body":""},{"number":172,"title":"CACP","state":"OPEN","labels":[],"body":""}]' ;;
+  comment) cat >"$STUB/posted-$3"; echo "post $3" >>"$STUB/log"; echo "https://example.invalid/c" ;;
+  *) exit 1 ;;
+esac
 EOF
 chmod +x "$B"/*
 
@@ -92,6 +97,8 @@ reset() {
   rm -rf "${ST:?}" "${T:?}/home"
   mkdir -p "$ST/active" "$T/home"
   touch "$ST/active/omarchy-fcitx5.service" "$ST/active/owed.service" "$ST/shell" "$ST/log"
+  mkdir -p "$T/home/.config/agent-pii"
+  printf '# test denylist\nnot-in-any-report-xyzzy\n' >"$T/home/.config/agent-pii/denylist"
   echo 2 >"$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings"
 }
 run() { # args...
@@ -128,6 +135,20 @@ grep -q '^| no-owed |' "$T/home/report.md" && ok "report written" || bad "no rep
 [[ -e $ST/posted-198 ]] && grep -q 'G16 idle power by phase' "$ST/posted-198" && ok "posted to #198" || bad "not posted to #198"
 [[ -e $ST/posted-172 ]] && grep -q '^### CACP' "$ST/posted-172" && ok "CACP table posted to #172" || bad "CACP table not posted to #172"
 grep -qF "$T/home" "$ST/posted-198" && bad "home path in the post" || ok "post has no home path"
+grep -q 'via bin/issue' "$ST/posted-198" && ok "posted through bin/issue" || bad "post did not go through bin/issue"
+
+# ------------------------------------------- 2b. the denylist blocks posting
+reset
+echo 'Zephyrus' >>"$T/home/.config/agent-pii/denylist"
+out=$(run "${FAST[@]}" --no-cacp 2>&1); rc=$?
+((rc == 0)) && ok "denylist hit: run still exits 0" || bad "denylist hit: exit $rc"
+[[ -e $ST/posted-198 ]] && bad "denylist hit: posted anyway" || ok "denylist hit: nothing posted"
+grep -q 'not posted' <<<"$out" && ok "denylist hit: says not posted" || bad "denylist hit: no 'not posted' line"
+[[ -s $T/home/report.md ]] && ok "denylist hit: report kept" || bad "denylist hit: no report"
+reset
+rm "$T/home/.config/agent-pii/denylist"
+run "${FAST[@]}" --no-cacp >/dev/null 2>&1
+[[ -e $ST/posted-198 ]] && bad "no denylist: posted anyway" || ok "no denylist: nothing posted"
 
 # ------------------------------------------------- 3. killed mid-measurement
 reset
@@ -139,6 +160,16 @@ for _ in $(seq 1 300); do grep -q '^stop omarchy-fcitx5' "$ST/log" && break; sle
 kill -TERM "$pid"; wait "$pid" 2>/dev/null
 sleep 0.5
 for u in omarchy-fcitx5.service owed.service; do [[ -e $ST/active/$u ]] && ok "killed: $u running" || bad "killed: $u left stopped"; done
+
+# ------------------------------------------- 3b. killed during systemctl stop
+reset
+touch "$ST/slow-stop"
+env -u OMARCHY_PATH HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT=none G16_IDLE_SYS="$S" \
+  G16_IDLE_REPORT="$T/home/report.md" "$W/bin/g16-idle-power" --measure 2 --settle 0 --interval 1 --no-post >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 300); do grep -q '^stop omarchy-fcitx5' "$ST/log" && break; sleep 0.1; done
+kill -TERM "$pid"; wait "$pid" 2>/dev/null
+[[ -e $ST/active/omarchy-fcitx5.service ]] && ok "killed during stop: omarchy-fcitx5 started again" || bad "killed during stop: omarchy-fcitx5 left stopped ($(cat "$ST/log"))"
 [[ -e $T/home/.local/state/omarchy/indicators/stay-awake ]] && bad "killed: stay-awake left on" || ok "killed: stay-awake cleared"
 [[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 2 ]] && ok "killed: panel_power_savings untouched" || bad "killed: panel_power_savings changed"
 
