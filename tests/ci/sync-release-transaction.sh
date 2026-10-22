@@ -22,7 +22,7 @@
 #      is withheld; a db that adds nothing to the release's goes up; a db that withdraws a
 #      package the release serves goes up even with a build in it, and the next build is
 #      withheld while the withdrawn recipe is missing; a recipe whose makepkg --printsrcinfo
-#      fails is a gap; no recipes/ at all refuses (exit 1)
+#      fails is a gap, unless it is held; no recipes/ at all refuses (exit 1)
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -363,7 +363,9 @@ touch "$S/ws/recipes/bar/FAIL"
 out=$(run_k); expect $? 3 "a recipe whose makepkg --printsrcinfo fails is a gap"
 grep -qx 'inventory-error recipes/bar' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names it"
 rm "$S/ws/recipes/bar/FAIL"
-out=$(run_k); expect $? 0 "foo and bar at their recipe versions go up together"
+touch "$S/ws/recipes/baz/FAIL"
+out=$(run_k); expect $? 0 "foo and bar at their recipe versions go up together (a held recipe's failing makepkg is no gap)"
+rm "$S/ws/recipes/baz/FAIL"
 cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves them"
 
 recipe foo 1-3 foo

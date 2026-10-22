@@ -70,7 +70,8 @@ Exit: 0 all current, 10 something needs action (including a stale db), 1 error.
 pacman db DB serve every package of every recipe in recipes/ that is not held (HOLD) at the
 recipe's version? One line per gap: "not-built NAME VERSION (recipes/DIR)", "repo-stale NAME
 DB_VERSION, recipe VERSION (recipes/DIR)" or "inventory-error recipes/DIR" (its
-`makepkg --printsrcinfo` failed: what it ships is unknown, so it counts as a gap).
+`makepkg --printsrcinfo` failed: what it ships is unknown, so it counts as a gap, unless
+the recipe is held).
 Packages in DB with no recipe are not gaps. Exit: 0 complete, 10 a gap, 1 error.
 """
 import argparse
@@ -270,7 +271,7 @@ def completeness(db_path):
     with open(db_path, "rb") as f:
         served = parse_db(f.read())
     recipes, errors = recipe_packages()
-    gaps = [f"inventory-error recipes/{d}" for d in errors]
+    gaps = [f"inventory-error recipes/{d}" for d in errors if hold_reason(d) is None]
     for recipe, name, ver, _ in recipes:
         if hold_reason(recipe) is not None:
             continue
