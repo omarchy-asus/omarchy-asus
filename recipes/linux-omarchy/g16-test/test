@@ -362,14 +362,16 @@ dp_low_rate() {
 }
 
 check_dock() {
-  local f st=PASS det=() since s0 s1 teardown skipped replayed links low
+  local f n st=PASS det=() since s0 s1 teardown skipped replayed links before n0 n1 low
   f=$(modinfo -F filename amdgpu 2>/dev/null)
+  # grep -c reads the whole stream: with -q the decompressor dies on the closed
+  # pipe and pipefail turns a match into a failure
   case $f in
-    *.zst) have zstdcat && zstdcat "$f" 2>/dev/null | grep -aq 'Replay DMUB HPD skipped' ;;
-    *.xz) xzcat "$f" 2>/dev/null | grep -aq 'Replay DMUB HPD skipped' ;;
-    ?*) grep -aq 'Replay DMUB HPD skipped' "$f" ;;
-    *) false ;;
-  esac || { result FAIL 0482 "the amdgpu module (${f:-not found}) has no HPD replay: not this kernel's build?"; return; }
+    *.zst) have zstdcat && n=$(zstdcat "$f" 2>/dev/null | grep -ac 'Replay DMUB HPD skipped') ;;
+    *.xz) n=$(xzcat "$f" 2>/dev/null | grep -ac 'Replay DMUB HPD skipped') ;;
+    ?*) n=$(grep -ac 'Replay DMUB HPD skipped' "$f") ;;
+  esac
+  ((${n:-0} > 0)) || { result FAIL 0482 "the amdgpu module (${f:-not found}) has no HPD replay: not this kernel's build?"; return; }
   det+=("amdgpu module: ${f##*/} has the HPD replay")
   teardown=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -E '\(DP\): not active, tearing down')
   [[ -z $teardown ]] || { st=FAIL; det+=("DP tunnels torn down as not active earlier in this boot:" "$teardown"); }
@@ -383,6 +385,9 @@ check_dock() {
   printf 'and lit. Then: close the lid, unplug the dock, wait until the laptop has suspended,\n'
   printf 'plug the dock back in, open the lid and unlock. Come back here and press Enter.\n'
   ask "Ready (dock connected, monitors lit)?" || { result SKIP 0482 "declined" "${det[@]}"; return; }
+  # Connector names can change across a dock replug, so compare how many are connected.
+  before=$(dp_links) n0=$(grep -c ' connected' <<<"$before")
+  ((n0 > 0)) || { result SKIP 0482 "no DP connector is connected: dock the G16 with its monitors on first" "${det[@]}"; return; }
   since=$(date '+%Y-%m-%d %H:%M:%S') s0=$(cat /sys/power/suspend_stats/success)
   read -r -p "Press Enter after the resume, with the lid open and the session unlocked... " _ || true
   note "waiting 20 s: a failed DP tunnel is torn down 12 s after it is set up"
@@ -391,20 +396,20 @@ check_dock() {
   skipped=$(journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -c 'Skip DMUB HPD IRQ callback')
   replayed=$(journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep 'Replay DMUB HPD skipped')
   teardown=$(journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -E '\(DP\): not active, tearing down')
-  links=$(dp_links)
+  links=$(dp_links) n1=$(grep -c ' connected' <<<"$links")
   low=$(dp_low_rate <<<"$links")
   det+=("suspend_stats success $s0 -> $s1" "HPDs skipped during the resume: $skipped" "replayed:" "${replayed:-none}"
-    "DP connectors after the resume:" "$links")
+    "DP connectors before ($n0 connected):" "$before" "DP connectors after the resume ($n1 connected):" "$links")
   if ((s1 == s0)); then
     result FAIL 0482 "no suspend happened between the prompts (did logind suspend after the unplug?)" "${det[@]}"
   elif [[ -n $teardown ]]; then
     result FAIL 0482 "DP tunnels torn down as not active after the resume (#205 not fixed)" "${det[@]}" "$teardown"
-  elif ! grep -q ' connected' <<<"$links"; then
-    result FAIL 0482 "no DP connector came back connected after the resume" "${det[@]}"
+  elif ((n1 < n0)); then
+    result FAIL 0482 "only $n1 of $n0 DP monitors came back connected after the resume" "${det[@]}"
   elif [[ -n $low ]]; then
     result WARN 0482 "monitors back; link below its verified rate on: ${low//$'\n'/ } (#205 failure 2, not covered by 0482)" "${det[@]}"
   else
-    result "$st" 0482 "monitors back after the dock was replugged in suspend; $skipped HPD(s) skipped, $(grep -c . <<<"$replayed") replayed" "${det[@]}"
+    result "$st" 0482 "all $n0 DP monitors back after the dock was replugged in suspend; $skipped HPD(s) skipped, $(grep -c . <<<"$replayed") replayed" "${det[@]}"
   fi
 }
 
