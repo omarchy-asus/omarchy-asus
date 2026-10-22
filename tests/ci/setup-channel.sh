@@ -24,6 +24,9 @@
 #      record) and passes once it is ours again
 #   m. our kernel was withdrawn from the database the machine is on: still found as ours (a
 #      .N pkgrel), as is a package whose packager is ours, and the switch refuses
+# The pacman stub answers in German (Packer, [Installiert]) unless it runs with LC_ALL=C, as
+# pacman does under LANG=de_DE.UTF-8, so every case above also checks that the script parses
+# pacman in the C locale.
 # Usage: tests/ci/setup-channel.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -33,13 +36,17 @@ mkdir -p "$S/bin" "$S/home" "$S/dmi"
 echo GA605KM >"$S/dmi/product_name"
 FPR=$(sed -n 's/^FPR=//p' "$W/bin/omarchy-asus-setup")
 # pacman: -Q NAME and -Qi from $PKG_Q ("name version [packager]" lines; none: nothing
-# installed), -Sl [REPO] from $PKG_SL (pacman -Sl lines)
+# installed), -Sl [REPO] from $PKG_SL (pacman -Sl lines). Outside the C locale, -Qi and -Sl
+# print German, as pacman does under LANG=de_DE.UTF-8.
 cat >"$S/bin/pacman" <<'STUB'
 #!/bin/bash
+de=1; [[ ${LC_ALL:-} == C ]] && de=0
 case ${1:-} in
     -Q) [[ -f ${PKG_Q:-} ]] && awk -v n="${2:-}" '$1 == n { print $1, $2; f = 1 } END { exit !f }' "$PKG_Q" ;;
-    -Qi) [[ -f ${PKG_Q:-} ]] && awk '{ printf "Name            : %s\nVersion         : %s\nPackager        : %s\n\n", $1, $2, ($3 == "" ? "Unknown Packager" : $3) }' "$PKG_Q"; exit 0 ;;
-    -Sl) [[ -f ${PKG_SL:-} ]] && awk -v r="${2:-}" 'r == "" || $1 == r' "$PKG_SL"; exit 0 ;;
+    -Qi) [[ -f ${PKG_Q:-} ]] && awk -v de=$de '{ printf "Name            : %s\nVersion         : %s\n%s: %s\n\n", $1, $2,
+        (de ? "Packer          " : "Packager        "), ($3 == "" ? "Unknown Packager" : $3) }' "$PKG_Q"; exit 0 ;;
+    -Sl) [[ -f ${PKG_SL:-} ]] && awk -v r="${2:-}" -v de=$de 'r == "" || $1 == r {
+        if (de) { sub(/\[installed\]/, "[Installiert]"); sub(/\[installed:/, "[Installiert:") } print }' "$PKG_SL"; exit 0 ;;
     *) exit 0 ;;
 esac
 STUB
@@ -84,7 +91,7 @@ printf '#!/bin/bash\nexec "$@"\n' >"$S/bin/sudo"
 chmod +x "$S"/bin/*
 printf 'y\n' >"$S/tty"
 export PATH=$S/bin:$PATH HOME=$S/home CURL_LOG=$S/curl.log OCS_LOG=$S/ocs.log
-unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME CURL_FAIL OCS_FAIL PKG_Q PKG_SL PKG_SL_AFTER TARGET_DESC
+unset LC_ALL XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME CURL_FAIL OCS_FAIL PKG_Q PKG_SL PKG_SL_AFTER TARGET_DESC
 export OMARCHY_ASUS_PACMAN_CONF=$S/pacman.conf OMARCHY_ASUS_CUSTOM_REPOS=$S/custom-repos.conf \
     OMARCHY_ASUS_SETUP_TTY=$S/tty OMARCHY_ASUS_SNAPPER_CONFIG=$S/no-snapper OMARCHY_ASUS_DMI_DIR=$S/dmi
 fail=0

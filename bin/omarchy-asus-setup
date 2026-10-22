@@ -349,16 +349,17 @@ preview_repo() {
 # .N pkgrel), any installed package of ours no other repo has, and REPO_ONLY_PKGS in case
 # the database isn't synced. A build of ours that has been withdrawn from the database is
 # found from the installed package itself: one of STOCK_REBUILD_PKGS with a .N pkgrel, or
-# any package whose packager is ours.
+# any package whose packager is ours. pacman runs in the C locale: the fields and the
+# [installed] marks it prints are translated otherwise (German: Packer, [Installiert]).
 STOCK_REBUILD_PKGS=(linux-omarchy linux-omarchy-headers nvidia-open-dkms hyprland hyprpm omarchy omarchy-settings)
 ours_installed() {
   local pkg
   {
-    pacman -Qi 2>/dev/null | awk -v rebuilds=" ${STOCK_REBUILD_PKGS[*]} " '
+    LC_ALL=C pacman -Qi 2>/dev/null | awk -v rebuilds=" ${STOCK_REBUILD_PKGS[*]} " '
       /^Name +:/ { n = $3 } /^Version +:/ { v = $3 }
       /^Packager +:/ { p = $0; sub(/^Packager +: */, "", p)
         if (p == "omarchy-asus" || (index(rebuilds, " " n " ") && v ~ /-[0-9]+\.[0-9]+$/)) print n }' || true
-    pacman -Sl 2>/dev/null | awk -v repo="$REPO" '
+    LC_ALL=C pacman -Sl 2>/dev/null | awk -v repo="$REPO" '
       $1 == repo { in_ours[$2] = 1
         if ($4 == "[installed]") mine[$2] = 1
         else if ($4 == "[installed:") { iv = $5; sub(/]$/, "", iv); inst[$2] = iv } next }
@@ -415,7 +416,7 @@ check_target_has_ours() {
 check_still_ours() {
   local pkg lost=() sl
   step "Checking that our packages are still ours"
-  sl=$(pacman -Sl "$REPO" 2>/dev/null) || sl=''
+  sl=$(LC_ALL=C pacman -Sl "$REPO" 2>/dev/null) || sl=''
   for pkg in "${OURS[@]}"; do
     if ! awk -v n="$pkg" '$1 == n { found = 1 } END { exit !found }' "$TMP/repo.list"; then
       lost+=("$pkg")
