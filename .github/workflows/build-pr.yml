@@ -13,9 +13,16 @@ name: Build changed packages
 # a key or a secret, and the token is read-only.
 #
 # ci/changed-recipes has the planning rules. linux-omarchy has its own job
-# (big disk, long timeout); when it or nvidia-open-dkms builds, nvidia-compat
+# (big disk, long timeout, and optionally the build host's runner: below); when it or nvidia-open-dkms builds, nvidia-compat
 # compiles our NVIDIA module against our kernel headers with dkms, taking
 # whichever side this run did not build from the signed x86_64 release.
+#
+# The kernel job can run on a self-hosted runner on the build host instead, where
+# distcc sends compiles to the helper (docs/kernel-runner.md). It is opt-in: the
+# repository variable KERNEL_RUNNER holds the runner's labels as JSON (e.g.
+# ["self-hosted","omarchy-asus-kernel"]); unset, the job runs on ubuntu-24.04.
+# Only runs on this repository's own branches and maintainer dispatches use it: a
+# fork's PR always gets the hosted runner. Every other job stays hosted.
 #
 # No paths filter: `result` reports on every PR (a PR without recipe changes
 # plans an empty matrix and passes in seconds).
@@ -169,7 +176,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.kernel == 'true'
     name: build (linux-omarchy)
-    runs-on: ubuntu-24.04
+    # tests/ci/kernel-runner.sh checks this expression (forks always hosted).
+    runs-on: ${{ (vars.KERNEL_RUNNER != '' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.KERNEL_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 350
     permissions:
       contents: read
@@ -188,9 +196,10 @@ jobs:
       # The kernel tree, its objects and the packages need ~30 GB; a stock
       # runner has ~20 GB free on /. Drop the preinstalled toolchains we never
       # use (no third-party action) and build on whichever disk is bigger.
-      # A reused build needs none of that.
+      # A reused build needs none of that, and the build host's runner never
+      # does it (it has no sudo, and those are the host's own files).
       - name: Free disk space
-        if: steps.prev.outputs.run_id == ''
+        if: steps.prev.outputs.run_id == '' && runner.environment == 'github-hosted'
         run: |
           df -h / /mnt || true
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
@@ -201,7 +210,17 @@ jobs:
       - name: Pick the build disk
         if: steps.prev.outputs.run_id == ''
         id: disk
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
         run: |
+          if [[ $RUNNER_KIND == self-hosted ]]; then
+            # The job's own temp dir only: nothing the build host publishes from.
+            dir=$RUNNER_TEMP/omarchy-asus-build
+            mkdir -p "$dir/work" "$dir/out"
+            echo "dir=$dir" >> "$GITHUB_OUTPUT"
+            echo "building in $dir ($(df -h --output=avail "$dir" | tail -1) free), $(nproc) CPUs, $(free -g | awk '/Mem/{print $2}') GB RAM"
+            exit 0
+          fi
           root=$(df --output=avail -B1 / | tail -1)
           mnt=$(df --output=avail -B1 /mnt 2>/dev/null | tail -1 || echo 0)
           if (( ${mnt:-0} > root )); then dir=/mnt/omarchy-asus-build; else dir=$RUNNER_TEMP/omarchy-asus-build; fi
@@ -230,14 +249,27 @@ jobs:
             echo; echo '```'; ls -l "$DIR/out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # No -e/--env, no docker socket: the container holds no credentials
       # (ci/build-recipe header, tests/ci/build-recipe-no-secrets.sh).
+      # On the build host's runner, two more arguments: a lower CPU weight, so
+      # the person at the build host comes first, and, when the runner's
+      # environment names one (OMARCHY_ASUS_CI_DISTCC, docs/kernel-runner.md),
+      # its compile-only distcc key dir, read-only at /mnt/distcc.
       - name: Build linux-omarchy
         if: steps.prev.outputs.run_id == ''
         env:
           DIR: ${{ steps.disk.outputs.dir }}
           CHANNEL: ${{ needs.changes.outputs.channel }}
+          RUNNER_KIND: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/repo:ro" -v "$DIR/out:/out" -v "$DIR/work:/build" \
+          host=()
+          if [[ $RUNNER_KIND == self-hosted ]]; then
+            host=(--cpu-shares 256)
+            if [[ -n ${OMARCHY_ASUS_CI_DISTCC:-} ]]; then
+              host+=(-v "$OMARCHY_ASUS_CI_DISTCC:/mnt/distcc:ro")
+              echo "distcc: $OMARCHY_ASUS_CI_DISTCC mounted read-only at /mnt/distcc"
+            fi
+          fi
+          docker run --rm -v "$PWD:/repo:ro" -v "$DIR/out:/out" -v "$DIR/work:/build" "${host[@]}" \
             "$BUILDER_IMAGE" /repo/ci/build-recipe --channel "$CHANNEL" linux-omarchy
           ls -l "$DIR/out"
           { echo "### linux-omarchy"; echo; echo '```'; ls -l "$DIR/out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -252,6 +284,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      # The container writes the build tree and packages as root, which the
+      # build host's runner can't delete; remove them from a container, pass
+      # or fail, so no run leaves ~30 GB behind. Dangling builder images go too.
+      - name: Clean up the build tree
+        if: always() && runner.environment == 'self-hosted' && steps.disk.outputs.dir != ''
+        env:
+          DIR: ${{ steps.disk.outputs.dir }}
+        run: |
+          docker run --rm -v "$DIR:/d" "$BUILDER_IMAGE" rm -rf /d/work /d/out
+          rmdir "$DIR" || true
+          docker image prune --force >/dev/null
 
   nvidia-compat:
     needs: [changes, build, kernel]

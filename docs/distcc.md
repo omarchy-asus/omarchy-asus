@@ -41,6 +41,9 @@ being changed, not read. Treat the key as exposed to every build that mounts it:
   unprivileged account, from the build host's addresses.
 - To revoke it, delete its line from the helper's `authorized_keys`; make a
   new key the same way.
+- The PR check's kernel job can use the helper too, from the build host's
+  runner, with a key of its own and only for this repository's own branches
+  (docs/kernel-runner.md).
 
 ## Setup
 
