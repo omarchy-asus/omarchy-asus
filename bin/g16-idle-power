@@ -1,0 +1,620 @@
+#!/bin/bash
+# g16-idle-power: measure where the G16's idle battery power goes, unattended,
+# and post the numbers to issue #198 (and the CACP table to #172). EXPERIMENTAL.
+#
+#   g16-idle-power                run it (about 50 minutes on battery), then post
+#   g16-idle-power --dry-run      stop nothing, write nothing, post nothing; short
+#                                 phases unless --measure/--settle are given
+#   g16-idle-power --no-post      run it, write the report, don't post it
+#   g16-idle-power --no-cacp      skip the panel_power_savings levels (#172)
+#   g16-idle-power --also UNIT    also stop this systemd --user unit in its own phase
+#                                 (repeatable)
+#   g16-idle-power --measure S --settle S --interval S
+#                                 seconds measured per phase (300), settling after
+#                                 each change (60), between samples (5)
+#
+# Run it as your normal user in the desktop session, with the charger plugged in
+# or not: it asks for root once (one polkit dialog), then waits for the charger to
+# be unplugged. Leave the laptop alone until it says it's done; it keeps the
+# screen on (Omarchy's stay-awake) and the brightness where it is.
+#
+# Phases, each settled and then measured on battery:
+#   baseline, then each of these stopped in turn and started again: omarchy-fcitx5,
+#   owed, the Omarchy shell, omarchy-powerprofiles-source-monitor, voxtype (the ones
+#   that are running), then all of them at once, then baseline again (drift),
+#   one powertop run (60 s) for the top wake-up sources, then CACP levels 1-4 if
+#   the panel has panel_power_savings.
+# Per phase: battery watts (power_now, or current_now x voltage_now), the SoC's
+# amdgpu PPT sensor, RAPL package and core watts (root), CPU idle-state residency
+# (cpuidle), interrupts and context switches per second, the dGPU's runtime-PM
+# awake time, and the top processes and interrupt sources.
+#
+# It puts everything back on exit, Ctrl-C included: the units it stopped, the
+# shell, stay-awake, and panel_power_savings (the root helper restores that when
+# the script goes away). The report, without user or host names, goes to
+# ~/omarchy-asus-g16-idle-power-<date>.md, and is posted through bin/issue next to this
+# script (its denylist scan refuses a hit; without bin/issue nothing is posted).
+#
+# Root: G16_ROOT=pkexec (default: pkexec through the desktop's polkit agent, via
+# systemd-run --user), sudo, or none (tests only). G16_POLKIT_REASON=<wrapper>
+# runs `<wrapper> run REASON -- pkexec ...` so the dialog says why.
+#
+# Exit status: 0 when the run finished, 1 on a problem, 2 on bad usage.
+set -uo pipefail
+
+ISSUE=198 CACP_ISSUE=172
+SYS=${G16_IDLE_SYS:-/sys}   # the overrides are for tests only
+PROC=${G16_IDLE_PROC:-/proc}
+
+# ------------------------------------------------------------- root helper
+# Runs as root for the whole measurement, started once. Reads one command per
+# line on stdin and answers on stdout; nothing else is accepted:
+#   rapl          -> "rapl PKG_UJ PKG_MAX CORE_UJ CORE_MAX" (- when absent)
+#   cacp N        -> writes N (0-4) to the panel's panel_power_savings
+#   powertop S    -> powertop's CSV for S seconds (S <= 120), then "end"
+# On EOF (the script exited or died) it restores panel_power_savings.
+if [[ ${1:-} == --root-helper ]]; then
+  sys=${2:?} dry=${3:-0}
+  rapl_dir() { local d n; for d in "$sys"/class/powercap/intel-rapl:*; do n=''; read -r n 2>/dev/null <"$d/name"; [[ $n == "$1" ]] && { printf '%s\n' "$d"; return 0; }; done; return 1; }
+  rapl_read() { local d=$1 e m; [[ -n $d ]] && read -r e 2>/dev/null <"$d/energy_uj" && read -r m 2>/dev/null <"$d/max_energy_range_uj" && { printf '%s %s' "$e" "$m"; return; }; printf -- '- -'; }
+  pkg=$(rapl_dir package-0) core=''
+  [[ -n $pkg ]] && for d in "$pkg":*; do n=''; read -r n 2>/dev/null <"$d/name"; [[ $n == core ]] && core=$d; done
+  cacp=''
+  for c in "$sys"/class/drm/card*-eDP-*; do
+    s=''; read -r s 2>/dev/null <"$c/status"
+    [[ $s == connected && -f $c/amdgpu/panel_power_savings ]] && { cacp=$c/amdgpu/panel_power_savings; break; }
+  done
+  cacp_orig=''
+  [[ -n $cacp ]] && read -r cacp_orig 2>/dev/null <"$cacp"
+  restore() { [[ -n $cacp && -n $cacp_orig && $dry == 0 ]] && printf '%s\n' "$cacp_orig" >"$cacp" 2>/dev/null; }
+  trap restore EXIT
+  trap 'exit 0' HUP INT TERM PIPE
+  printf 'ready %s %s\n' "$(id -u)" "${cacp_orig:--}"
+  while read -r cmd arg; do
+    case $cmd in
+      rapl) printf 'rapl %s %s\n' "$(rapl_read "$pkg")" "$(rapl_read "$core")" ;;
+      cacp)
+        if [[ ! $arg =~ ^[0-4]$ ]]; then echo "err bad level"
+        elif [[ -z $cacp ]]; then echo "err absent"
+        elif ((dry)); then echo "ok dry"
+        elif printf '%s\n' "$arg" >"$cacp" 2>/dev/null; then echo "ok $(cat "$cacp" 2>/dev/null)"
+        else echo "err write refused"
+        fi
+        ;;
+      powertop)
+        if [[ ! $arg =~ ^[0-9]+$ ]] || ((arg < 1 || arg > 120)); then echo "end"
+        elif ! command -v powertop >/dev/null 2>&1; then echo "end"
+        else
+          t=$(mktemp)
+          powertop --csv="$t" --time="$arg" >/dev/null 2>&1
+          sed 's/^/| /' "$t"
+          rm -f "$t"
+          echo "end"
+        fi
+        ;;
+      quit) exit 0 ;;
+      *) echo "err unknown" ;;
+    esac
+  done
+  exit 0
+fi
+
+# ------------------------------------------------------------------ options
+DRY=0 POST=1 CACP=1 MEASURE='' SETTLE='' INTERVAL=5 ALSO=()
+while (($#)); do
+  case $1 in
+    --dry-run) DRY=1 ;;
+    --no-post) POST=0 ;;
+    --no-cacp) CACP=0 ;;
+    --also) ALSO+=("${2:?--also needs a unit}"); shift ;;
+    --measure) MEASURE=${2:-}; shift ;;
+    --settle) SETTLE=${2:-}; shift ;;
+    --interval) INTERVAL=${2:-}; shift ;;
+    -h | --help) sed -n '2,42s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+if ((DRY)); then : "${MEASURE:=20}" "${SETTLE:=5}"; POST=0; else : "${MEASURE:=300}" "${SETTLE:=60}"; fi
+for v in MEASURE SETTLE INTERVAL; do
+  [[ ${!v} =~ ^[0-9]+$ ]] || { echo "--${v,,} needs a number of seconds" >&2; exit 2; }
+done
+((INTERVAL > 0 && MEASURE >= INTERVAL)) || { echo "--measure must be at least --interval, and --interval above 0" >&2; exit 2; }
+for u in "${ALSO[@]}"; do [[ $u =~ ^[A-Za-z0-9@._:-]+$ ]] || { echo "bad unit name: $u" >&2; exit 2; }; done
+
+if [[ -t 1 ]]; then B=$'\e[1m' R=$'\e[31m' Y=$'\e[33m' N=$'\e[0m'; else B='' R='' Y='' N=''; fi
+say() { printf '%s==>%s %s\n' "$B" "$N" "$*"; }
+note() { printf '    %s\n' "$*"; }
+die() { printf '%sERROR:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+((EUID != 0)) || die "run it as your normal user; it asks for root once, for the reads that need it"
+have python3 || die "python3 is missing"
+SELF=$(readlink -f "$0")
+ISSUE_HELPER=${G16_IDLE_ISSUE:-$(dirname "$SELF")/issue}
+[[ -x $SELF ]] || die "$SELF is not executable (chmod +x it): the root helper runs it"
+dmi() { local v=''; read -r v 2>/dev/null <"$SYS/class/dmi/id/$1"; printf '%s' "$v"; }
+if [[ $(dmi product_name) != *GA605* && $(dmi board_name) != *GA605* ]]; then
+  ((DRY)) || die "this is not a GA605 ($(dmi product_name)); the measurement is for the ROG Zephyrus G16 GA605"
+  note "${Y}not a GA605 ($(dmi product_name)): dry run only${N}"
+fi
+
+STAMP=$(date +%Y%m%d-%H%M)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/g16-idle-power.XXXXXX")
+REPORT=${G16_IDLE_REPORT:-$HOME/omarchy-asus-g16-idle-power-$STAMP.md}
+REV=$(git -C "$(dirname "$SELF")" rev-parse --short HEAD 2>/dev/null || sha256sum "$SELF" | cut -c1-12)
+
+# ------------------------------------------------------------------ sensors
+BAT=''
+for s in "$SYS"/class/power_supply/*; do
+  t='' sc=''
+  read -r t 2>/dev/null <"$s/type"
+  read -r sc 2>/dev/null <"$s/scope"
+  [[ $t == Battery && $sc != Device ]] && { BAT=$s; break; }
+done
+[[ -n $BAT ]] || ((DRY)) || die "no battery under $SYS/class/power_supply"
+AMDGPU='' PPT=''
+for h in "$SYS"/class/drm/card*/device/hwmon/hwmon*; do
+  n=''; read -r n 2>/dev/null <"$h/name"
+  [[ $n == amdgpu ]] || continue
+  AMDGPU=$(readlink -f "$h/../..")
+  for p in power1_input power1_average; do [[ -r $h/$p ]] && { PPT=$h/$p; break; }; done
+  break
+done
+
+on_ac() {
+  local s t o
+  for s in "$SYS"/class/power_supply/*; do
+    t='' o=''
+    read -r t 2>/dev/null <"$s/type"
+    [[ $t == Mains ]] || continue
+    read -r o 2>/dev/null <"$s/online"
+    [[ $o == 1 ]] && return 0
+  done
+  return 1
+}
+bat_uw() { # battery draw in microwatts, or empty
+  local p c v
+  [[ -n $BAT ]] || return 0
+  if read -r p 2>/dev/null <"$BAT/power_now"; then printf '%s' "${p#-}"; return; fi
+  read -r c 2>/dev/null <"$BAT/current_now" && read -r v 2>/dev/null <"$BAT/voltage_now" || return 0
+  printf '%s' "$(( ${c#-} * v / 1000000 ))"
+}
+
+# ------------------------------------------------------------- root helper
+ROOT=${G16_ROOT:-pkexec}
+WHY="Read the CPU's RAPL energy counters and set the OLED panel's power saving level for the G16 idle power measurement (#$ISSUE); everything is put back when it ends"
+case $ROOT in
+  pkexec)
+    if [[ -n ${G16_POLKIT_REASON:-} ]]; then
+      HELPER_CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "$SELF" --root-helper "$SYS" "$DRY")
+    else
+      HELPER_CMD=(systemd-run --user --wait -q -P pkexec --disable-internal-agent "$SELF" --root-helper "$SYS" "$DRY")
+    fi
+    ;;
+  sudo) HELPER_CMD=(sudo ${SUDO_ASKPASS:+-A} "$SELF" --root-helper "$SYS" "$DRY") ;;
+  none) HELPER_CMD=("$SELF" --root-helper "$SYS" "$DRY") ;;
+  *) die "G16_ROOT must be pkexec, sudo or none" ;;
+esac
+
+# ------------------------------------------------------------- restore state
+STOPPED=() SHELL_KILLED=0 STAY_AWAKE_SET=0 RESTORED=0
+SHELL_DIR=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^OMARCHY_PATH=//p' | tail -n1)
+SHELL_DIR=${SHELL_DIR:-${OMARCHY_PATH:-/usr/share/omarchy}}/shell
+STAY_FILE=$HOME/.local/state/omarchy/indicators/stay-awake
+
+shell_running() { pgrep -u "$EUID" -f "quickshell .*-p $SHELL_DIR" >/dev/null 2>&1; }
+start_units() { # unit... -> 1 when one did not start (it stays in STOPPED)
+  local u rc=0
+  for u in "$@"; do
+    if [[ $u == @shell ]]; then
+      ((SHELL_KILLED)) || continue
+      shell_running || omarchy-restart-shell >/dev/null 2>&1
+      if ! shell_running; then note "${R}the shell did not come back: run omarchy-restart-shell${N}"; rc=1; continue; fi
+      SHELL_KILLED=0
+    elif ! systemctl --user start "$u" 2>/dev/null; then
+      note "${R}$u did not start again: systemctl --user start $u${N}"; rc=1; continue
+    fi
+    local keep=() s
+    for s in "${STOPPED[@]}"; do [[ $s == "$u" ]] || keep+=("$s"); done
+    STOPPED=("${keep[@]}")
+  done
+  return "$rc"
+}
+# Between phases: a unit that didn't come back would spoil every later phase,
+# so stop the run (restore tries once more on the way out).
+start_or_stop_run() { start_units "$@" || die "$(for u in "${STOPPED[@]}"; do label "$u"; done | paste -sd' ') did not start again; stopping the run"; }
+stop_units() { # unit...
+  local u
+  for u in "$@"; do
+    if ((DRY)); then note "[dry-run] would stop $u"; continue; fi
+    # Recorded first: a signal during the stop must still start it again.
+    STOPPED+=("$u")
+    if [[ $u == @shell ]]; then
+      SHELL_KILLED=1
+      local n=0
+      while ((n++ < 5)) && timeout 30 quickshell kill -p "$SHELL_DIR" --any-display >/dev/null 2>&1; do :; done
+    else
+      systemctl --user stop "$u" 2>/dev/null
+    fi
+  done
+}
+restore() {
+  ((RESTORED)) && return
+  RESTORED=1
+  local left=0
+  if ((${#STOPPED[@]})); then start_units "${STOPPED[@]}" || left=1; fi
+  if ((STAY_AWAKE_SET)); then
+    if have omarchy-toggle-idle; then omarchy-toggle-idle allow-idle >/dev/null 2>&1; else rm -f "$STAY_FILE"; fi
+  fi
+  if [[ -n ${HELPER_PID:-} ]]; then
+    local fd=${HELPER[1]:-}
+    if [[ -n $fd ]]; then printf 'quit\n' 1>&"$fd" 2>/dev/null; exec {fd}>&-; fi
+    wait "$HELPER_PID" 2>/dev/null
+  fi
+  rm -rf "$WORK"
+  if ((left)); then
+    printf '%sERROR:%s still stopped: %s\n' "$R" "$N" "${STOPPED[*]}" >&2
+    exit 1
+  fi
+}
+trap restore EXIT
+trap 'echo; say "interrupted: putting everything back"; exit 1' INT TERM HUP
+
+ask_root() { # command -> reply line
+  local line
+  printf '%s\n' "$1" 1>&"${HELPER[1]}" 2>/dev/null || return 1
+  IFS= read -r -t 30 line <&"${HELPER[0]}" || return 1
+  printf '%s\n' "$line"
+}
+
+# --------------------------------------------------------------- snapshots
+# Everything that is a counter, read once at the start and once at the end of a
+# phase; the report takes the differences.
+snapshot() { # out-file
+  python3 -I - "$PROC" "$SYS" "${AMDGPU:-}" >"$1" <<'PY'
+import glob, json, os, sys, time
+proc, sysfs, amdgpu = sys.argv[1:4]
+def rd(p, d=None):
+    try:
+        with open(p) as f: return f.read().strip()
+    except OSError: return d
+out = {"mono": time.monotonic(), "cpuidle": {}, "ncpu": 0, "procs": {}, "irqs": {}}
+for cpu in glob.glob(sysfs + "/devices/system/cpu/cpu[0-9]*"):
+    states = glob.glob(cpu + "/cpuidle/state[0-9]*")
+    if states: out["ncpu"] += 1
+    for st in states:
+        name, t = rd(st + "/name"), rd(st + "/time")
+        if name and t and t.isdigit():
+            out["cpuidle"][name] = out["cpuidle"].get(name, 0) + int(t)
+for line in (rd(proc + "/stat", "") or "").splitlines():
+    f = line.split()
+    if f and f[0] in ("ctxt", "intr"): out[f[0]] = int(f[1])
+lines = (rd(proc + "/interrupts", "") or "").splitlines()
+ncols = len(lines[0].split()) if lines else 0
+for line in lines[1:]:
+    f = line.split()
+    if not f or not f[0].endswith(":"): continue
+    counts, rest = [], f[1:]
+    while rest and rest[0].isdigit() and len(counts) < ncols:
+        counts.append(int(rest.pop(0)))
+    if not counts: continue
+    name = f[0][:-1]
+    label = name + " " + " ".join(rest[-2:]) if name.isdigit() else name + " " + " ".join(rest)
+    out["irqs"][label.strip()[:48]] = sum(counts)
+for st in glob.glob(proc + "/[0-9]*/stat"):
+    s = rd(st)
+    if not s or ")" not in s: continue
+    comm = s[s.index("(") + 1:s.rindex(")")]
+    f = s[s.rindex(")") + 2:].split()
+    try: out["procs"][st.split("/")[-2]] = [comm, int(f[11]) + int(f[12])]
+    except (IndexError, ValueError): pass
+out["clk_tck"] = os.sysconf("SC_CLK_TCK")
+for d in glob.glob(sysfs + "/bus/pci/devices/*"):
+    if rd(d + "/vendor") == "0x10de" and (rd(d + "/class") or "").startswith("0x03"):
+        out["dgpu"] = {k: rd(d + "/power/" + k) for k in ("runtime_status", "runtime_active_time", "runtime_suspended_time")}
+        break
+json.dump(out, sys.stdout)
+PY
+}
+
+# One phase: settle, snapshot, sample, snapshot. Writes $WORK/<n>-<name>/.
+PHASES=()
+measure() { # name note
+  local name=$1 dir n end r
+  n=$(printf '%02d' "${#PHASES[@]}")
+  dir=$WORK/$n-$name
+  mkdir -p "$dir"
+  PHASES+=("$n-$name")
+  printf '%s\n' "${2:-}" >"$dir/note"
+  printf '%s  %-22s settle %ss, measure %ss%s\n' "$(date +%H:%M)" "$name" "$SETTLE" "$MEASURE" "${2:+ ($2)}"
+  sleep "$SETTLE"
+  wait_battery
+  r=$(ask_root rapl) || r='rapl - - - -'
+  printf '%s\n' "$r" >"$dir/rapl0"
+  snapshot "$dir/s0.json"
+  end=$((SECONDS + MEASURE))
+  while ((SECONDS < end)); do
+    printf '%s\t%s\t%s\t%s\t%s\n' "${EPOCHREALTIME}" "$(bat_uw)" \
+      "$( [[ -n $PPT ]] && cat "$PPT" 2>/dev/null)" \
+      "$( [[ -n $AMDGPU ]] && cat "$AMDGPU/gpu_busy_percent" 2>/dev/null)" \
+      "$(on_ac && echo 1 || echo 0)" >>"$dir/samples.tsv"
+    sleep "$INTERVAL"
+  done
+  r=$(ask_root rapl) || r='rapl - - - -'
+  printf '%s\n' "$r" >"$dir/rapl1"
+  snapshot "$dir/s1.json"
+  cat "$SYS"/class/backlight/*/actual_brightness 2>/dev/null | head -n1 >"$dir/brightness"
+}
+
+wait_battery() {
+  local waited=0
+  on_ac || return 0
+  ((DRY)) && { note "[dry-run] on mains power; measuring anyway"; return 0; }
+  say "unplug the charger now; the measurement starts on battery (waiting up to 15 minutes)"
+  while on_ac; do
+    ((waited >= 900)) && die "still on mains power after 15 minutes; nothing was changed"
+    sleep 5; waited=$((waited + 5))
+  done
+  note "on battery; settling ${SETTLE}s"
+  sleep "$SETTLE"
+}
+
+# ------------------------------------------------------------------- start
+say "G16 idle power measurement (#$ISSUE)$( ((DRY)) && echo ', dry run')"
+note "asking for root once (RAPL counters, panel power saving)"
+coproc HELPER { "${HELPER_CMD[@]}" 2>/dev/null; }
+HELPER_PID=$HELPER_PID
+IFS= read -r -t 180 HELLO <&"${HELPER[0]}" || HELLO=''
+[[ $HELLO == ready\ * ]] || die "the root helper did not start (polkit dialog dismissed, or no agent); nothing was changed"
+read -r _ HELPER_UID CACP_ORIG <<<"$HELLO"
+[[ $ROOT == none || $HELPER_UID == 0 ]] || die "the root helper is not root"
+
+# Units to take out in turn: the ones that run all the time and came with (or
+# changed in) Omarchy 4.5, plus voxtype (#171) and --also.
+UNITS=() SKIPPED=()
+for u in omarchy-fcitx5.service owed.service @shell omarchy-powerprofiles-source-monitor.service voxtype.service "${ALSO[@]}"; do
+  if [[ $u == @shell ]]; then shell_running && UNITS+=("$u") || SKIPPED+=("the shell")
+  elif systemctl --user is-active -q "$u" 2>/dev/null; then UNITS+=("$u")
+  else SKIPPED+=("$u")
+  fi
+done
+label() { [[ $1 == @shell ]] && echo shell || echo "${1%.service}"; }
+((${#SKIPPED[@]})) && note "not running, no phase: ${SKIPPED[*]}"
+n=$((${#UNITS[@]} + 2 + (${#UNITS[@]} > 1) ))
+((CACP)) && [[ $CACP_ORIG != - ]] && n=$((n + 5))
+note "$n phases, about $(( (SETTLE + MEASURE) * n / 60 + 2 )) minutes; leave the laptop alone until it says done"
+
+if ((DRY)); then note "[dry-run] would keep the screen on (omarchy-toggle-idle stay-awake)"
+elif [[ ! -e $STAY_FILE ]]; then
+  if have omarchy-toggle-idle; then omarchy-toggle-idle stay-awake >/dev/null 2>&1; else mkdir -p "${STAY_FILE%/*}" && touch "$STAY_FILE"; fi
+  STAY_AWAKE_SET=1
+fi
+wait_battery
+# Context, read once on battery, after the switch has settled, so the profile,
+# EPP and refresh rate are the ones the phases run under. hyprctl needs the instance when run from outside the session.
+if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  h=$(find "${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2-)
+  [[ -n $h ]] && export HYPRLAND_INSTANCE_SIGNATURE=${h##*/}
+fi
+ctx() { printf -- '- %s: %s\n' "$1" "${2:-?}" >>"$WORK/context"; }
+pkgv() { pacman -Q "$1" 2>/dev/null | cut -d' ' -f2; }
+: >"$WORK/context"
+ctx machine "$(dmi product_name), BIOS $(dmi bios_version)"
+ctx kernel "$(uname -r)"
+ctx packages "omarchy $(pkgv omarchy), owe $(pkgv owe), hyprland $(pkgv hyprland), nvidia-open-dkms $(pkgv nvidia-open-dkms), power-profiles-daemon $(pkgv power-profiles-daemon)"
+pp=''; for d in "$SYS"/class/platform-profile/platform-profile-*; do [[ -d $d ]] || continue; pp+="$(cat "$d/name" 2>/dev/null)=$(cat "$d/profile" 2>/dev/null) "; done
+ctx "power profile" "$(powerprofilesctl get 2>/dev/null); platform ${pp% }; EPP $(cat "$SYS"/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)"
+bl=$(for b in "$SYS"/class/backlight/*; do [[ -r $b/max_brightness ]] && printf '%s %s%% ' "${b##*/}" "$(( $(cat "$b/actual_brightness" 2>/dev/null || echo 0) * 100 / $(cat "$b/max_brightness" 2>/dev/null || echo 1) ))"; done)
+ctx brightness "$bl"
+ctx display "$(hyprctl monitors -j 2>/dev/null | python3 -I -c 'import json,sys
+try: print("; ".join("%s %sx%s@%.0fHz vrr=%s" % (m["name"], m["width"], m["height"], m["refreshRate"], m.get("vrr")) for m in json.load(sys.stdin)))
+except Exception: print("?")')"
+ctx "panel_power_savings" "${CACP_ORIG/#-/absent on this kernel}"
+ctx sensors "battery $( [[ -n $BAT ]] && { [[ -r $BAT/power_now ]] && echo power_now || echo current_now×voltage_now; } || echo none), SoC $( [[ -n $PPT ]] && echo amdgpu PPT || echo none), RAPL $(r=$(ask_root rapl); [[ $r == 'rapl -'* ]] && echo absent || echo package+core)"
+
+
+# ------------------------------------------------------------------ phases
+measure baseline
+for u in "${UNITS[@]}"; do
+  stop_units "$u"
+  measure "no-$(label "$u")"
+  if [[ $u == @shell ]] && ((DRY == 0)) && shell_running; then printf 'the shell came back by itself\n' >>"$WORK/${PHASES[-1]}/note"; fi
+  if [[ $u != @shell ]] && ((DRY == 0)) && systemctl --user is-active -q "$u" 2>/dev/null; then printf '%s came back by itself\n' "$u" >>"$WORK/${PHASES[-1]}/note"; fi
+  ((DRY)) || start_or_stop_run "$u"
+done
+if ((${#UNITS[@]} > 1)); then
+  stop_units "${UNITS[@]}"
+  measure all-stopped "$(for u in "${UNITS[@]}"; do label "$u"; done | paste -sd' ')"
+  ((DRY)) || start_or_stop_run "${UNITS[@]}"
+fi
+measure baseline-again
+
+say "powertop, 60 s"
+# Many lines come back, so not through ask_root.
+: >"$WORK/powertop.csv"
+printf 'powertop 60\n' 1>&"${HELPER[1]}" 2>/dev/null
+while IFS= read -r -t 90 line <&"${HELPER[0]}"; do
+  [[ $line == end ]] && break
+  printf '%s\n' "${line#| }" >>"$WORK/powertop.csv"
+done
+
+CACP_RAN=0
+if ((CACP)) && [[ $CACP_ORIG != - ]]; then
+  CACP_RAN=1
+  for lvl in 0 1 2 3 4; do
+    r=$(ask_root "cacp $lvl")
+    [[ $r == ok* ]] || { note "panel_power_savings $lvl: $r"; continue; }
+    measure "cacp-$lvl" "panel_power_savings=$lvl"
+  done
+  ask_root "cacp $CACP_ORIG" >/dev/null
+fi
+
+# ------------------------------------------------------------------ report
+say "putting everything back"
+((${#STOPPED[@]} == 0)) || start_or_stop_run "${STOPPED[@]}"
+python3 -I - "$WORK" "$ISSUE" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$CACP_RAN" "$DRY" "${PHASES[@]}" >"$WORK/report.md" <<'PY'
+import csv, io, json, statistics, sys
+work, issue, rev, settle, measure, interval, cacp_ran, dry, *phases = sys.argv[1:]
+def load(p):
+    try:
+        with open(p) as f: return f.read()
+    except OSError: return ""
+def rapl_w(r0, r1, dt, i):
+    a, b = r0.split(), r1.split()
+    try:
+        e0, e1, mx = int(a[1 + i]), int(b[1 + i]), int(a[2 + i])
+    except (IndexError, ValueError): return None
+    d = e1 - e0
+    if d < 0: d += mx
+    return d / 1e6 / dt if dt > 0 else None
+rows = []
+for ph in phases:
+    d = f"{work}/{ph}"
+    s0, s1 = json.loads(load(d + "/s0.json") or "{}"), json.loads(load(d + "/s1.json") or "{}")
+    dt = s1.get("mono", 0) - s0.get("mono", 0)
+    bat, ppt, busy, ac = [], [], [], 0
+    for line in load(d + "/samples.tsv").splitlines():
+        f = (line.split("\t") + [""] * 5)[:5]
+        if f[1].isdigit(): bat.append(int(f[1]) / 1e6)
+        if f[2].isdigit(): ppt.append(int(f[2]) / 1e6)
+        if f[3].isdigit(): busy.append(int(f[3]))
+        if f[4] == "1": ac += 1
+    r0, r1 = load(d + "/rapl0").strip(), load(d + "/rapl1").strip()
+    idle = {}
+    ncpu = s1.get("ncpu") or 1
+    for k, v in s1.get("cpuidle", {}).items():
+        idle[k] = (v - s0.get("cpuidle", {}).get(k, 0)) / 1e6 / (dt * ncpu) * 100 if dt > 0 else 0
+    tck = s1.get("clk_tck", 100)
+    cpu = {}
+    for pid, (comm, t) in s1.get("procs", {}).items():
+        if pid in s0.get("procs", {}):
+            cpu[comm] = cpu.get(comm, 0) + (t - s0["procs"][pid][1]) / tck / dt * 100 if dt > 0 else 0
+    irqs = {k: (v - s0.get("irqs", {}).get(k, 0)) / dt for k, v in s1.get("irqs", {}).items() if dt > 0}
+    g0, g1 = s0.get("dgpu") or {}, s1.get("dgpu") or {}
+    try: gact = int(g1["runtime_active_time"]) - int(g0["runtime_active_time"])
+    except (KeyError, TypeError, ValueError): gact = None
+    rate = lambda k: (s1.get(k, 0) - s0.get(k, 0)) / dt if dt > 0 and k in s1 else None
+    rows.append(dict(name=ph.split("-", 1)[1], note=load(d + "/note").strip().replace("\n", "; "),
+        bat=statistics.mean(bat) if bat else None, batsd=statistics.pstdev(bat) if len(bat) > 1 else None,
+        batmin=min(bat) if bat else None, ppt=statistics.mean(ppt) if ppt else None,
+        busy=statistics.mean(busy) if busy else None, ac=ac, n=len(bat),
+        pkg=rapl_w(r0, r1, dt, 0), core=rapl_w(r0, r1, dt, 2), idle=idle,
+        cpu=sorted(cpu.items(), key=lambda x: -x[1])[:6], irqs=sorted(irqs.items(), key=lambda x: -x[1])[:6],
+        irq=rate("intr"), ctxt=rate("ctxt"), gact=gact, gstat=g1.get("runtime_status"),
+        brightness=load(d + "/brightness").strip()))
+fmt = lambda v, p=2: "–" if v is None else f"{v:.{p}f}"
+base = next((r for r in rows if r["name"] == "baseline"), None)
+def delta(r):
+    if not base or r is base or r["bat"] is None or base["bat"] is None: return ""
+    return f"{r['bat'] - base['bat']:+.2f}"
+def deepest(r):
+    names = sorted(k for k in r["idle"] if k != "POLL")
+    return f"{names[-1]} {r['idle'][names[-1]]:.0f}%" if names else "–"
+o = []
+o.append(f"## G16 idle power by phase{' (dry run, not a measurement)' if dry == '1' else ''}\n")
+o.append(load(work + "/context").rstrip())
+o.append(f"- method: each phase settles {settle} s after its change, then {measure} s are measured, a sample every {interval} s; "
+         "screen kept on (stay-awake), brightness untouched. C-states are cpuidle residency over all CPUs "
+         "(no turbostat; amd_pmc only counts suspend). SoC is the amdgpu PPT sensor; RAPL needs root.\n")
+o.append("| phase | battery W (sd, min) | Δ vs baseline | SoC PPT W | RAPL pkg W | RAPL core W | deepest C-state | irq/s | ctx/s | dGPU awake ms | note |")
+o.append("|---|---|---|---|---|---|---|---|---|---|---|")
+for r in rows:
+    note = r["note"]
+    if r["ac"]: note = (note + "; " if note else "") + f"**on mains for {r['ac']}/{r['n']} samples: ignore**"
+    inp = sum(v for k, v in r["irqs"] if "AMDI0010" in k or "i8042" in k)
+    if inp >= 50: note = (note + "; " if note else "") + f"input activity ({inp:.0f} touchpad/keyboard irq/s)"
+    if base and r["brightness"] != base["brightness"]: note = (note + "; " if note else "") + "brightness changed"
+    gpu = "–" if r["gact"] is None else f"{r['gact']} ({r['gstat']})"
+    o.append(f"| {r['name']} | {fmt(r['bat'])} ({fmt(r['batsd'])}, {fmt(r['batmin'])}) | {delta(r)} | {fmt(r['ppt'])} | "
+             f"{fmt(r['pkg'])} | {fmt(r['core'])} | {deepest(r)} | {fmt(r['irq'], 0)} | {fmt(r['ctxt'], 0)} | {gpu} | {note} |")
+# A first reading of the numbers; the conclusion is still a human's.
+o.append("\n### Reading\n")
+stops = [r for r in rows if r["name"].startswith("no-") or r["name"] == "all-stopped"]
+if not base or base["bat"] is None:
+    o.append("- no battery readings: nothing to compare.")
+else:
+    again = next((r for r in rows if r["name"] == "baseline-again"), None)
+    if again and again["bat"] is not None:
+        o.append(f"- baseline drift over the run: {again['bat'] - base['bat']:+.2f} W (differences smaller than {abs(again['bat'] - base['bat']):.2f} W are noise).")
+    valid = [r for r in stops if r["bat"] is not None and not r["ac"]]
+    if valid:
+        best = min(valid, key=lambda r: r["bat"])
+        d = best["bat"] - base["bat"]
+        o.append(f"- lowest phase: **{best['name']}**, {d:+.2f} W on the battery against the baseline.")
+        if best["ppt"] is not None and base["ppt"] is not None:
+            ds = best["ppt"] - base["ppt"]
+            where = "mostly SoC/CPU (wake-ups or GPU work)" if abs(ds) >= 0.5 * abs(d) else "mostly outside the SoC (display content or platform)"
+            o.append(f"- of that, the SoC sensor moved {ds:+.2f} W: {where}.")
+    if base["ppt"] is not None:
+        o.append(f"- baseline split: SoC {base['ppt']:.2f} W of {base['bat']:.2f} W, so {base['bat'] - base['ppt']:.2f} W is panel, memory, dGPU rail, SSD, Wi-Fi and conversion losses.")
+o.append("\n<details><summary>Top processes and interrupts per phase</summary>\n")
+for r in rows:
+    o.append(f"**{r['name']}**: CPU " + ", ".join(f"{c} {v:.1f}%" for c, v in r["cpu"] if v >= 0.05) +
+             "; irq/s " + ", ".join(f"{k} {v:.0f}" for k, v in r["irqs"] if v >= 1) +
+             "; C-states " + ", ".join(f"{k} {v:.0f}%" for k, v in sorted(r["idle"].items())) +
+             (f"; GPU busy {r['busy']:.1f}%" if r["busy"] is not None else "") + "\n")
+o.append("</details>\n")
+pt = load(work + "/powertop.csv")
+if pt.strip():
+    # powertop's CSV: take the "Overview of Software Power Consumers" block.
+    lines, keep, block = pt.splitlines(), [], False
+    for ln in lines:
+        if "Overview of Software Power Consumers" in ln: block = True; continue
+        if block:
+            if ln.startswith("____") or (keep and not ln.strip()): break
+            if ln.strip(): keep.append(ln)
+    if keep:
+        o.append("<details><summary>powertop, 60 s after the last baseline: top wake-up sources</summary>\n")
+        o.append("```\n" + "\n".join(keep[:16]) + "\n```\n</details>\n")
+else:
+    o.append("powertop: not installed or no output.\n")
+if cacp_ran == "1":
+    o.append("### CACP (panel_power_savings, #172)\n")
+    o.append("| level | battery W | Δ vs level 0 | SoC PPT W |\n|---|---|---|---|")
+    c = [r for r in rows if r["name"].startswith("cacp-")]
+    z = next((r for r in c if r["name"] == "cacp-0"), None)
+    for r in c:
+        dz = f"{r['bat'] - z['bat']:+.2f}" if z and r["bat"] is not None and z["bat"] is not None else ""
+        o.append(f"| {r['name'][5:]} | {fmt(r['bat'])} | {dz} | {fmt(r['ppt'])} |")
+    o.append("\nColour or brightness pumping is not measured; look at the panel before enabling a level.\n")
+o.append(f"\n<sub>bin/g16-idle-power {rev}</sub>")
+print("\n".join(o))
+PY
+[[ -s $WORK/report.md ]] || die "the report is empty"
+
+# Strip the user name, host name, $HOME, MAC/IP addresses and UUIDs.
+python3 -I -c '
+import re, sys
+home, me, host = sys.argv[1:4]
+t = sys.stdin.read()
+if home and home != "/": t = t.replace(home, "~")
+for word, mark in ((host, "<host>"), (me, "<user>")):
+    if len(word) >= 2: t = re.sub(r"(?<![A-Za-z0-9_.-])" + re.escape(word) + r"(?![A-Za-z0-9_-])", mark, t)
+t = re.sub(r"\b[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}\b", "<mac>", t)
+t = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "<uuid>", t)
+t = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<ip>", t)
+# Control characters (powertop, process names) would make bin/issue refuse the post.
+t = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", t)
+sys.stdout.write(t)
+' "$HOME" "$(id -un)" "$(cat /proc/sys/kernel/hostname 2>/dev/null)" <"$WORK/report.md" >"$REPORT"
+
+say "done: report in ${REPORT/#$HOME/\~}"
+cat "$REPORT"
+# Posting goes through bin/issue: its denylist scan refuses the whole comment on a
+# hit, or when the denylist is missing. Without bin/issue nothing is posted.
+if ((POST)); then
+  if [[ ! -x $ISSUE_HELPER ]]; then
+    note "${R}not posted${N}: no bin/issue next to this script ($ISSUE_HELPER); from a checkout: bin/issue comment $ISSUE --body-file ${REPORT/#$HOME/\~}"
+  elif "$ISSUE_HELPER" comment "$ISSUE" --agent g16-idle-power --body-file "$REPORT" >/dev/null; then
+    say "posted to #$ISSUE"
+    if ((CACP_RAN)); then
+      sed -n '/^### CACP/,/^Colour or brightness/p' "$REPORT" >"$WORK/cacp.md"
+      printf '\nFrom the idle power run on #%s.\n' "$ISSUE" >>"$WORK/cacp.md"
+      "$ISSUE_HELPER" comment "$CACP_ISSUE" --agent g16-idle-power --body-file "$WORK/cacp.md" >/dev/null && say "CACP table posted to #$CACP_ISSUE"
+    fi
+  else
+    note "${R}not posted${N} (bin/issue refused it, see above); the report is in ${REPORT/#$HOME/\~}"
+  fi
+fi
+exit 0
