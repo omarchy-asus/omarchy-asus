@@ -92,12 +92,20 @@ fi
 # keep their own. Its files are the container builder's, so the dir must be
 # writable by it (mode 1777 on the host). zz-zccache.conf loads after
 # zz-distcc.conf and keeps its distcc setting.
+#
+# PATH is Arch's default, as in the release chroot. The builder image puts
+# /usr/sbin before /usr/bin, so ccache finds gcc as /usr/sbin/gcc and hands
+# distcc that path; the helper's distccd (no --enable-tcp-insecure) refuses
+# every compiler path it doesn't know ("compiler name </usr/sbin/gcc> cannot
+# be an absolute path"), and the build compiles locally while distcc backs
+# the helper off. /usr/sbin is a link to /usr/bin on Arch, so nothing is lost.
 if [[ -d /mnt/ccache ]]; then
     pacman -S --needed --noconfirm --noprogressbar ccache
     distcc=!distcc
     [[ -f /etc/makepkg.conf.d/zz-distcc.conf ]] && distcc=distcc
     cat >/etc/makepkg.conf.d/zz-zccache.conf <<EOF
 BUILDENV=($distcc color ccache check !sign)
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
 export CCACHE_DIR=/mnt/ccache
 export CCACHE_MAXSIZE=15G
 EOF

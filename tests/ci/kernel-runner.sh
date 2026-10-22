@@ -199,6 +199,8 @@ expect "g: no cache dir: no ccache config" "$([[ -e $cconf ]] && echo 1 || echo 
 mkdir -p "$t/mnt/ccache"
 out=$(run_cblock)
 expect "g: with distcc: ccache in front of distcc" "$(grep -c '^BUILDENV=(distcc color ccache check !sign)$' "$cconf")" 1
+expect "g: PATH without /usr/sbin, so ccache hands distcc /usr/bin/gcc (#202)" \
+    "$(grep -c '^export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin$' "$cconf")" 1
 expect "g: the cache is the mounted dir" "$(grep -c "^export CCACHE_DIR=$t/mnt/ccache$" "$cconf")" 1
 expect "g: the cache has a size limit" "$(grep -c '^export CCACHE_MAXSIZE=' "$cconf")" 1
 expect "g: says it is on" "$(grep -c '==> ccache:' <<<"$out")" 1
