@@ -1,13 +1,13 @@
 # Win-key lock helper for the ROG N-Key keyboard (USB 0b05:19b6) of the ASUS ROG
-# Zephyrus G16 GA605. Its switch is in the G16 Control bar widget, an Omarchy
-# plugin (https://github.com/omarchy-asus/g16-control).
+# Zephyrus G16 GA605. Its switch is in the omarchy-asus plugin, an Omarchy bar
+# widget (https://github.com/omarchy-asus/omarchy-asus-plugin).
 #
 # asus-rog-nkey-winlock: `g16-winlock`, which shows an Omarchy OSD when Fn+Super
 #   toggles the firmware Win-key lock and can clear the lock again (auto-unlock),
 #   plus one-shot lock/unlock/status/toggle over hidraw. Its udev rule and user
 #   unit come with it, and the unit is enabled on install (toast mode).
 # asus-zephyrus-g16-control: transitional. The widget it shipped is the
-#   g16-control Omarchy plugin now (#183); this version removes the packaged
+#   omarchy-asus plugin now (#183); this version removes the packaged
 #   copy and says how to switch.
 #
 # `g16-winlock watch` only sees the toggle with a kernel whose hid-asus passes
@@ -22,7 +22,7 @@
 pkgbase=asus-rog-nkey-winlock
 pkgname=(asus-rog-nkey-winlock asus-zephyrus-g16-control)
 pkgver=0.1.0
-pkgrel=9
+pkgrel=10
 pkgdesc='Win-key lock helper for the ASUS ROG Zephyrus G16 (GA605)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -37,7 +37,7 @@ source=(
 sha256sums=('548676e73486095be2621f7e0f0d096b98c5643e898785a809634837804c64fe'
             'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
             '85955d0a7eb12911ead8c0cb68cd89d356aae02d67d4668f187136be3e767bfd'
-            '9c4bfab076ed5e22f828e7e63dd0f18fe4d7cf8d12142f46b870281b9db289e8')
+            'c7f8740391ccace2a7223c97c52d9831bd6b235022f4f207ccb9d555c41ee71b')
 
 package_asus-rog-nkey-winlock() {
   install=asus-rog-nkey-winlock.install
@@ -61,10 +61,10 @@ package_asus-rog-nkey-winlock() {
 
 package_asus-zephyrus-g16-control() {
   # Transitional: the widget is an Omarchy plugin now
-  # (https://github.com/omarchy-asus/g16-control, #183). This version removes
+  # (https://github.com/omarchy-asus/omarchy-asus-plugin, #183). This version removes
   # the packaged copy and its install message says how to switch. Drop this
   # package from the recipe once the G16 has switched.
-  pkgdesc='(transitional) G16 Control moved to an Omarchy plugin: omarchy-asus/g16-control'
+  pkgdesc='(transitional) G16 Control is the omarchy-asus plugin now: omarchy-asus/omarchy-asus-plugin'
   depends=()
   install=asus-zephyrus-g16-control.install
   install -Dm644 README.md "$pkgdir/usr/share/doc/asus-zephyrus-g16-control/README.md"
