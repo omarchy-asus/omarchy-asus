@@ -6,7 +6,16 @@
 # (~BUILD_USER/.local/share/omarchy-asus). Everything except makechrootpkg runs as this user.
 BUILD_USER=
 
-# Bot clone source and the branch PRs target.
+# Release channels each run serves, in order (bin/env.sh): quattro (main, Omarchy stable,
+# the x86_64 release) and rc (next/omarchy-4.5, Omarchy rc, the rc-x86_64 release). Each
+# channel gets its own run with its own bot clone, lock, log and status (rc: in
+# ~BUILD_USER/.local/share/omarchy-asus/channel-rc); a failure in one does not stop the other.
+# quattro alone is exactly the quattro-only service this was before the RC channel.
+#SERVE_CHANNELS="quattro rc"
+
+# Bot clone source and the branch quattro's PRs target. BASE_BRANCH applies to quattro
+# only; the rc run's base is next/omarchy-4.5, and its pipeline check compares the
+# installed scripts with BASE_BRANCH (main), which they are installed from.
 #GIT_URL=https://github.com/omarchy-asus/omarchy-asus.git
 #BASE_BRANCH=main
 
@@ -44,9 +53,10 @@ BUILD_USER=
 # in a file owned by BUILD_USER, mode 0600, and name it here.
 #GH_TOKEN_FILE=/home/<user>/.config/omarchy-asus/gh-token
 
+# The settings below apply to every channel served.
 # Recipes the timer leaves alone (space separated), e.g. while testing one by hand.
 #SKIP_RECIPES=
-# Build and publish recipes on BASE_BRANCH that are not in the repo db yet (yes/no).
+# Build and publish recipes on the channel's base branch that are not in its repo db yet (yes/no).
 #BUILD_NOT_BUILT=yes
 # Repo-db packages with no recipe are unpublished (the recipe was removed). Package names
 # listed here (space separated) are kept and only reported for attention.

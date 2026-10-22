@@ -106,6 +106,30 @@ stale pin. That check is `bin/auto-update`, run by a daily systemd timer: it ope
 pull request, builds it in a clean chroot as CI, and merges and publishes only after
 a verified AI review (`bin/ai-review`) and an agent review pass. The timer runs daily on the build host.
 
+## Release channels
+
+Each of our channels is pinned to one of Omarchy's, and a machine switches both together:
+
+| our channel | built from | chroot and machines use Omarchy's | release (`Server`) |
+|---|---|---|---|
+| Quattro | `main` | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` | [`x86_64`](https://github.com/omarchy-asus/omarchy-asus/releases/tag/x86_64) (`.../releases/download/$arch`) |
+| RC | `next/omarchy-4.5` | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` | `rc-x86_64` (`.../releases/download/rc-$arch`) |
+
+Mixing them breaks upgrades: Omarchy 4.5's migrations install packages that may only exist in
+Omarchy's rc repo, and one failed migration holds back every later one, ours included. On a G16,
+`omarchy-asus-setup --channel rc` moves `[omarchy]` and `[omarchy-asus]` to RC, and
+`omarchy-asus-setup --channel quattro` moves both back, downgrading to the Quattro versions. A
+first setup picks the channel that matches the machine's Omarchy channel.
+
+On the build host, the build and publish scripts take `--channel rc` (default `quattro`):
+`bin/mkchroot --channel rc` makes the RC chroot from `build/pacman-rc.conf`, `bin/build-pkg
+--channel rc` builds in it and stages in its own dir, and `bin/publish`/`bin/sync-release
+--channel rc` sign and upload to the RC repo and release only, with the same signature, checksum
+and personal-information checks. A package staged for one channel is refused by the other's
+`bin/publish`. The daily `bin/auto-update` timer keeps both channels current, one run per
+channel with the same gates (systemd/README.md, "Release channels"): Quattro from `main`, RC
+from `next/omarchy-4.5` in the RC chroot, published to `rc-x86_64`.
+
 ## Supported hardware
 
 | Model | CPU / GPU | Status |
@@ -151,7 +175,8 @@ Where our fixes are headed:
 - `recipes/*/UPSTREAM_PRS`: upstream pull requests a recipe carries; `bin/check-upstream`
   reports their state.
 - `build/pacman.conf`: package sources for the build chroot (the Omarchy stable snapshot plus
-  `[omarchy]`).
+  `[omarchy]`); `build/pacman-rc.conf` is the RC channel's (Omarchy rc). `bin/env.sh` maps each
+  channel to its chroot, stage dir, local repo and release.
 - `bin/mkchroot`: creates or updates the clean devtools chroot.
 - `bin/build-pkg recipes/X`: `makechrootpkg -c -u` at idle CPU and IO priority.
 - `bin/publish FILES`: signs the packages and runs `repo-add --sign --verify --remove`. It
@@ -166,7 +191,8 @@ Where our fixes are headed:
   as `=${pkgver}-${pkgrel}` (never the build-time `depends=()`: the chroot only has the stock
   partner), and warns when the members' `_tag`, `_commit`, `pkgver`, `pkgrel`, sources or
   checksums differ (`--strict`: refuses; offline test: `tests/ci/release-cohort.sh`).
-- `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release.
+- `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release (`--channel rc`: the
+  RC repo to the `rc-x86_64` release).
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:
   `python3 -I tests/test_issue.py`.
@@ -184,7 +210,8 @@ Where our fixes are headed:
   ship (they live in your config or `/etc`); `--check` is read-only.
 - `keys/`: the repo signing key.
 - `.github/workflows/`, `ci/`: PR CI on GitHub Actions (lint, build the changed recipes in an Arch
-  container, compile nvidia-open-dkms against linux-omarchy-headers). Artifacts are unsigned;
+  container with the package sources of the channel the PR targets (`ci/channel`), compile
+  nvidia-open-dkms against linux-omarchy-headers). Artifacts are unsigned;
   signing and publishing stay on the maintainer's machine.
 
 Maintained by [@rdoupe](https://github.com/rdoupe) and contributors.

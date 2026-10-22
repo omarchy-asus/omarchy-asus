@@ -1,9 +1,11 @@
 name: Build changed packages
 
 # Build every recipe a PR touches, one job per recipe, in a stock Arch
-# container set up with the production package sources (build/pacman.conf:
-# Omarchy stable snapshot + [omarchy]) and the devtools makepkg.conf. Shaped
-# after omarchy-pkgs' build-pr.yml (changes -> build matrix -> result).
+# container set up with the production package sources of the channel the PR
+# targets (ci/channel: a PR into next/omarchy-4.5 builds against Omarchy rc,
+# build/pacman-rc.conf; any other against Omarchy stable, build/pacman.conf)
+# and the devtools makepkg.conf. Shaped after omarchy-pkgs' build-pr.yml
+# (changes -> build matrix -> result).
 #
 # Artifacts are UNSIGNED and short-lived; they exist for review and for the
 # NVIDIA check below. Signing and publishing stay on the maintainer's machine
@@ -58,11 +60,19 @@ jobs:
       kernel: ${{ steps.plan.outputs.kernel }}
       nvidia_built: ${{ steps.plan.outputs.nvidia_built }}
       nvidia_compat: ${{ steps.plan.outputs.nvidia_compat }}
+      channel: ${{ steps.channel.outputs.channel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The release channel is the target branch's (README.md "Release channels").
+      - id: channel
+        env:
+          BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          echo "channel=$(ci/channel "$BRANCH")" | tee -a "$GITHUB_OUTPUT"
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
@@ -79,7 +89,7 @@ jobs:
           {
             echo "### Build plan"
             echo
-            sed 's/^/- /' "$GITHUB_OUTPUT" | grep -E '^- (recipes|kernel|nvidia_compat)='
+            sed 's/^/- /' "$GITHUB_OUTPUT" | grep -E '^- (channel|recipes|kernel|nvidia_compat)='
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:
@@ -105,6 +115,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
           RECIPE: ${{ matrix.recipe }}
+          CHANNEL: ${{ needs.changes.outputs.channel }}
         run: ci/find-build "$RECIPE" | tee -a "$GITHUB_OUTPUT"
       - name: Reuse ${{ matrix.recipe }} from run ${{ steps.prev.outputs.run_id }}
         if: steps.prev.outputs.run_id != ''
@@ -132,10 +143,11 @@ jobs:
         if: steps.prev.outputs.run_id == ''
         env:
           RECIPE: ${{ matrix.recipe }}
+          CHANNEL: ${{ needs.changes.outputs.channel }}
         run: |
           set -euo pipefail
           mkdir -p out
-          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/out:/out" "$BUILDER_IMAGE" /repo/ci/build-recipe "$RECIPE"
+          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/out:/out" "$BUILDER_IMAGE" /repo/ci/build-recipe --channel "$CHANNEL" "$RECIPE"
           ls -l out
           { echo "### $RECIPE"; echo; echo '```'; (cd out && ls -l -- *.pkg.tar.zst); echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # -debug packages (devtools makepkg.conf enables debug) are not
@@ -171,6 +183,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          CHANNEL: ${{ needs.changes.outputs.channel }}
         run: ci/find-build linux-omarchy | tee -a "$GITHUB_OUTPUT"
       # The kernel tree, its objects and the packages need ~30 GB; a stock
       # runner has ~20 GB free on /. Drop the preinstalled toolchains we never
@@ -221,10 +234,11 @@ jobs:
         if: steps.prev.outputs.run_id == ''
         env:
           DIR: ${{ steps.disk.outputs.dir }}
+          CHANNEL: ${{ needs.changes.outputs.channel }}
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD:/repo:ro" -v "$DIR/out:/out" -v "$DIR/work:/build" \
-            "$BUILDER_IMAGE" /repo/ci/build-recipe linux-omarchy
+            "$BUILDER_IMAGE" /repo/ci/build-recipe --channel "$CHANNEL" linux-omarchy
           ls -l "$DIR/out"
           { echo "### linux-omarchy"; echo; echo '```'; ls -l "$DIR/out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # ~260 MB (kernel + headers); kept a week, so the next push to a kernel
@@ -269,10 +283,14 @@ jobs:
           pattern: pkgs-nvidia-open-dkms-*
           merge-multiple: true
           path: pkgs
+      # Against the channel the PR targets: its package sources, and its release
+      # for the side this run did not build.
       - name: dkms build nvidia against linux-omarchy-headers
+        env:
+          CHANNEL: ${{ needs.changes.outputs.channel }}
         run: |
           mkdir -p pkgs && ls -l pkgs
-          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/pkgs:/pkgs:ro" "$BUILDER_IMAGE" /repo/ci/nvidia-compat /pkgs
+          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/pkgs:/pkgs:ro" "$BUILDER_IMAGE" /repo/ci/nvidia-compat --channel "$CHANNEL" /pkgs
 
   # One stable check name for branch protection, as in omarchy-pkgs.
   result:
