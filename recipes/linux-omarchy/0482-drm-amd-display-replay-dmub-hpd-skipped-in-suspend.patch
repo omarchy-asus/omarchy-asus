@@ -44,12 +44,12 @@ resume.
 
 Assisted-by: LLM
 ---
- drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 77 ++++++++++++++++++++++-
+ drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 81 ++++++++++++++++++++++-
  drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h | 17 +++++
- 2 files changed, 93 insertions(+), 1 deletion(-)
+ 2 files changed, 97 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
-index b1a7903..712e56a 100644
+index b1a7903..c04a475 100644
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 @@ -911,9 +911,16 @@ static void dmub_hpd_callback(struct amdgpu_device *adev,
@@ -152,7 +152,7 @@ index b1a7903..712e56a 100644
  	if (!adev->dm.cached_state) {
  		int r = dm_cache_state(adev);
  
-@@ -4040,6 +4101,19 @@ static int dm_resume(struct amdgpu_ip_block *ip_block)
+@@ -4040,6 +4101,23 @@ static int dm_resume(struct amdgpu_ip_block *ip_block)
   * The functions to do so are provided as hooks in &struct amd_ip_funcs.
   */
  
@@ -160,19 +160,23 @@ index b1a7903..712e56a 100644
 + * dm_complete - replay DMUB HPDs that dmub_hpd_callback() skipped while
 + * adev->in_suspend was set. Runs from the PM complete callback, after
 + * amdgpu_device_resume() has cleared in_suspend.
++ *
++ * Queued even when no link is recorded yet: an HPD work item that saw
++ * in_suspend set may still be about to record its link. The workqueue is
++ * ordered, so the replay runs after it and finds the link.
 + */
 +static void dm_complete(struct amdgpu_ip_block *ip_block)
 +{
 +	struct amdgpu_display_manager *dm = &ip_block->adev->dm;
 +
-+	if (dm->delayed_hpd_wq && READ_ONCE(dm->hpd_skipped_in_suspend))
++	if (dm->delayed_hpd_wq)
 +		queue_work(dm->delayed_hpd_wq, &dm->hpd_replay_work);
 +}
 +
  static const struct amd_ip_funcs amdgpu_dm_funcs = {
  	.name = "dm",
  	.early_init = dm_early_init,
-@@ -4051,6 +4125,7 @@ static const struct amd_ip_funcs amdgpu_dm_funcs = {
+@@ -4051,6 +4129,7 @@ static const struct amd_ip_funcs amdgpu_dm_funcs = {
  	.hw_fini = dm_hw_fini,
  	.suspend = dm_suspend,
  	.resume = dm_resume,

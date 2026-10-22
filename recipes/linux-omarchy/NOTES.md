@@ -352,7 +352,9 @@ its link in `dm->hpd_skipped_in_suspend`. A new DM `.complete` callback (it runs
 after `amdgpu_device_resume()` has cleared `in_suspend`) queues
 `dm->hpd_replay_work` on the HPD offload workqueue, which runs
 `handle_hpd_irq_helper()` for each recorded link: the same path the HPD takes
-outside suspend. `dm_suspend()` cancels a replay still pending; its links are
+outside suspend. It is queued on every resume, recorded links or not: an HPD
+work item that saw `in_suspend` set may not have recorded its link yet, and
+the workqueue is ordered, so the replay runs after it. `dm_suspend()` cancels a replay still pending; its links are
 kept for the next resume. A replay logs `Replay DMUB HPD skipped in
 suspend/resume: link_index=N`.
 
