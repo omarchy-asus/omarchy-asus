@@ -18,8 +18,8 @@
 #   k. a filename the other channel already has with other bytes (its local repo, or its
 #      release, read live, with a different or no digest) is refused and names the recipe
 #      to bump; the same bytes, or a name it lacks, publish (#201)
-#   l. the other release can't be read: with no listing of it, refused; with a previous
-#      listing (release-assets.tsv), checked against that
+#   l. the other release can't be read: refused, even for a name nothing local has (a
+#      saved listing could miss an asset a sync uploaded before it stopped)
 # Throwaway gpg keys, stub repo-add/repo-remove (no pacman) and a fake gh whose release
 # <tag> lists $S/release-<tag>.tsv (none: "release not found"; FAKE_GH_DOWN=1: unreadable);
 # no network, no sudo.
@@ -255,13 +255,11 @@ mkpkg bar 1 1
 bar=$S/pkgs/bar-1-1-x86_64.pkg.tar.zst
 bar_sum=$(sha256sum "$bar" | cut -d' ' -f1)
 before=$(listing)
-# only on the rc release (superseded in the rc repo, not pruned yet), no listing kept
-rm -f "$S/data/channel-rc/release-assets.tsv"
+# only on the rc release (superseded in the rc repo, not pruned yet)
 printf 'bar-1-1-x86_64.pkg.tar.zst\t10\tsha256:%064d\n' 0 >"$S/release-rc-x86_64.tsv"
 publish "$bar"; nonzero $? "a name only the rc release serves, with another digest, is refused"
-grep -q "rc channel's release serves a different bar-1-1" "$S/out"; expect $? 0 "says the rc release has it"
+grep -q "rc channel's release (rc-x86_64) serves a different bar-1-1" "$S/out"; expect $? 0 "says the rc release has it"
 unchanged "$before" "the x86_64 repo unchanged"
-grep -q '^bar-1-1' "$S/data/channel-rc/release-assets.tsv"; expect $? 0 "the rc listing is kept"
 printf 'bar-1-1-x86_64.pkg.tar.zst\t10\t\n' >"$S/release-rc-x86_64.tsv"
 publish "$bar"; nonzero $? "a name the rc release serves with no digest is refused"
 grep -q 'digest is unknown' "$S/out"; expect $? 0 "says the digest is unknown"
@@ -273,17 +271,10 @@ publish --channel rc "$S/pkgs/foo-1-1-x86_64.pkg.tar.zst"; expect $? 0 "the same
 
 echo "== l. the other release can't be read"
 mkpkg baz 1 1
-mkpkg qux 1 1
-rm -f "$S/data/channel-rc/release-assets.tsv"
 before=$(listing)
-FAKE_GH_DOWN=1 publish "$S/pkgs/baz-1-1-x86_64.pkg.tar.zst"; nonzero $? "no listing of the rc release: refused"
-grep -q 'cannot read the rc-x86_64 release and have no listing' "$S/out"; expect $? 0 "says why"
+FAKE_GH_DOWN=1 publish "$S/pkgs/baz-1-1-x86_64.pkg.tar.zst"; nonzero $? "the rc release unreadable: refused"
+grep -q 'cannot read the rc-x86_64 release' "$S/out"; expect $? 0 "says why"
 unchanged "$before" "the x86_64 repo unchanged"
-printf 'baz-1-1-x86_64.pkg.tar.zst\t10\tsha256:%064d\n' 0 >"$S/data/channel-rc/release-assets.tsv"
-FAKE_GH_DOWN=1 publish "$S/pkgs/baz-1-1-x86_64.pkg.tar.zst"; nonzero $? "a clash in the last listing: refused"
-grep -q "rc channel's release serves a different baz-1-1" "$S/out"; expect $? 0 "says the rc release has it"
-unchanged "$before" "the x86_64 repo unchanged"
-FAKE_GH_DOWN=1 publish "$S/pkgs/qux-1-1-x86_64.pkg.tar.zst"; expect $? 0 "a name the last listing lacks publishes"
-grep -q 'checking against its last listing' "$S/out"; expect $? 0 "and warns it used the last listing"
+publish "$S/pkgs/baz-1-1-x86_64.pkg.tar.zst"; expect $? 0 "publishes once the release answers"
 ((fail)) && { echo "--- last output:"; cat "$S/out"; }
 exit $fail

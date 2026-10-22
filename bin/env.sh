@@ -36,8 +36,7 @@ channel_stage_dir() {
         *) return 1 ;;
     esac
 }
-# channel_repo_dir / channel_gh_tag / channel_data_dir <channel>: that channel's local repo,
-# release tag and state dir
+# channel_repo_dir / channel_gh_tag <channel>: that channel's local repo and release tag
 # (bin/publish reads the other channel's to keep a filename from naming two different files)
 channel_repo_dir() {
     case $1 in
@@ -53,17 +52,9 @@ channel_gh_tag() {
         *) return 1 ;;
     esac
 }
-channel_data_dir() {
-    case $1 in
-        quattro) echo "$DATA" ;;
-        rc) echo "$DATA/channel-rc" ;;
-        *) return 1 ;;
-    esac
-}
 case $CHANNEL in
     quattro)
-        CHANNEL_DATA=$DATA                        # sync-pending, release-db.sha256, prune-candidates,
-                                                  # release-assets.tsv
+        CHANNEL_DATA=$DATA                        # sync-pending, release-db.sha256, prune-candidates
         REPO_DIR=$DATA/repo/x86_64                # local repo; mirrored to the GitHub release
         CHROOT=${OMARCHY_ASUS_CHROOT:-/var/lib/omarchy-asus/chroot}  # mkarchroot parent dir (btrfs)
         PACMAN_CONF=$WORKSPACE/build/pacman.conf  # chroot package sources

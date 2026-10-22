@@ -5,8 +5,7 @@
 #   b. a db signed by another key is refused, nothing uploaded
 #   c. a stale db signature (made over other bytes) is refused, nothing uploaded
 #   d. the publication lock held elsewhere: exit 75 before any gh call
-#   e. a good repo syncs, then the db sum is recorded and $DATA/sync-pending cleared; the
-#      release's last asset listing is kept in $DATA/release-assets.tsv (for bin/publish)
+#   e. a good repo syncs, then the db sum is recorded and $DATA/sync-pending cleared
 #   f. an asset the db no longer names waits out PRUNE_GRACE_HOURS, then is deleted
 #   g. a db someone else put on the release is refused; SYNC_ADOPT_REMOTE=1 takes over
 #   h. a sync that dies after its db upload, then another publish: the next sync is not
@@ -178,9 +177,6 @@ done
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the release's db is the local db"
 if [[ -e $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 1 "sync-pending is cleared"
 if [[ $(cat "$S/data/release-db.sha256" 2>/dev/null) == "$db_sum" ]]; then r=0; else r=1; fi; expect "$r" 0 "release-db.sha256 records the db"
-pkg_sum=$(sha256sum "$R/foo-1-1-x86_64.pkg.tar.zst" | cut -d' ' -f1)
-grep -qxP "foo-1-1-x86_64\.pkg\.tar\.zst\t\d+\tsha256:$pkg_sum" "$S/data/release-assets.tsv"
-expect $? 0 "release-assets.tsv lists the package with its digest"
 
 echo "== f. superseded assets wait out the grace period"
 printf 'stale\n' >"$S/release/old-1-1-x86_64.pkg.tar.zst"
@@ -259,6 +255,4 @@ if [[ $( (cd "$S/release" && sha256sum -- *) ) == "$rel_before" ]]; then r=0; el
 if [[ $(cat "$S/data/release-db.sha256") == "$rec_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the x86_64 record unchanged"
 if [[ $(cat "$S/data/channel-rc/release-db.sha256" 2>/dev/null) == "$(sha256sum "$RR/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi
 expect "$r" 0 "channel-rc/release-db.sha256 records the rc db"
-grep -q '^foo-1-1-x86_64\.pkg\.tar\.zst'$'\t' "$S/data/channel-rc/release-assets.tsv"
-expect $? 0 "channel-rc/release-assets.tsv lists the rc release's package"
 exit $fail

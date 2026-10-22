@@ -150,7 +150,7 @@ pub_abort() {
 }
 
 # pub_release_assets <tag>: print the release's assets, one "name<TAB>size<TAB>digest" line
-# each (one API call, the listing bin/sync-release reads); 2 when the release does not
+# each (one API call, the same listing bin/sync-release reads); 2 when the release does not
 # exist, 1 when it cannot be read
 pub_release_assets() {
     local err out rc=0
