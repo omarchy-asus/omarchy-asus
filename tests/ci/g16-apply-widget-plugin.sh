@@ -9,8 +9,11 @@
 #      --enable --yes; --check then reports applied
 #   c. the plugin already cloned: applied
 #   d. a hand-made G16 widget (g16ctl) under another id: local, left alone
-#   e. something else at ~/.config/omarchy/plugins/omarchy-asus.g16: local, left alone,
-#      and applying it doesn't touch it
+#   e. something else at the plugin's path: local, left alone, and applying it doesn't
+#      touch it
+#   f. the first plugin under the old id (a clone of omarchy-asus/g16-control at
+#      omarchy-asus.g16): missing; applying removes it with omarchy-plugin-remove and adds
+#      the plugin under its new id
 # Usage: tests/ci/g16-apply-widget-plugin.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -25,7 +28,9 @@ fi
 
 RECIPE=$W/recipes/omarchy-asus-g16-apply
 TOOL=$RECIPE/omarchy-asus-g16-apply
-URL=https://github.com/omarchy-asus/g16-control
+URL=https://github.com/omarchy-asus/omarchy-asus-plugin
+ID=io.github.omarchy-asus.plugin
+OLD=omarchy-asus.g16
 # The package's share and lib dirs, laid out as package() installs them.
 export OMARCHY_ASUS_G16_APPLY_SHARE=$S/share OMARCHY_ASUS_G16_APPLY_LIB=$S/lib
 mkdir -p "$S/share/fork" "$S/share/hypr" "$S/share/system" "$S/lib/bin" "$S/bin"
@@ -43,7 +48,13 @@ printf '#!/bin/bash\nexit 0\n' >"$S/bin/sudo"
 cat >"$S/bin/omarchy-plugin-add" <<'STUB'
 #!/bin/bash
 echo "omarchy-plugin-add $*" >>"$PLUGIN_LOG"
-mkdir -p "$HOME/.config/omarchy/plugins/omarchy-asus.g16/.git"
+mkdir -p "$HOME/.config/omarchy/plugins/io.github.omarchy-asus.plugin/.git"
+STUB
+# omarchy-plugin-remove ID --yes: record the call and remove the plugin's dir.
+cat >"$S/bin/omarchy-plugin-remove" <<'STUB'
+#!/bin/bash
+echo "omarchy-plugin-remove $*" >>"$PLUGIN_LOG"
+rm -rf -- "$HOME/.config/omarchy/plugins/$1"
 STUB
 chmod +x "$S/bin/"*
 export PATH=$S/bin:$PATH
@@ -94,26 +105,26 @@ P() { echo "$H/.config/omarchy/plugins/$1"; }
 
 echo "== a. the old packaged widget is linked"
 setup_case a
-ln -s /usr/share/omarchy/plugins/omarchy-asus.g16 "$(P omarchy-asus.g16)"
+ln -s /usr/share/omarchy/plugins/omarchy-asus.g16 "$(P $OLD)"
 run --check
 check "missing" row_is g16-widget 'missing \(opt-in\)'
-check "says it is a plugin now" row_has g16-widget "plugin now"
+check "says it is the omarchy-asus plugin now" row_has g16-widget "omarchy-asus plugin now"
 run --dry-run g16-widget
-check "dry run removes the link" grep -qF "rm $(P omarchy-asus.g16)" "$OUT"
+check "dry run removes the link" grep -qF "rm $(P $OLD)" "$OUT"
 check "dry run adds the plugin" grep -qF "omarchy-plugin-add $URL --enable --yes" "$OUT"
-check "dry run changes nothing" [ -L "$(P omarchy-asus.g16)" ]
+check "dry run changes nothing" [ -L "$(P $OLD)" ]
 check "dry run calls nothing" [ ! -s "$PLUGIN_LOG" ]
 
 echo "== b. applying it"
 apply g16-widget
-check "the old link is gone" not [ -L "$(P omarchy-asus.g16)" ]
+check "the old link is gone" not [ -L "$(P $OLD)" ]
 check "omarchy-plugin-add ran with the repo" grep -qxF "omarchy-plugin-add $URL --enable --yes" "$PLUGIN_LOG"
 run --check
 check "applied afterwards" row_is g16-widget applied
 
 echo "== c. the plugin already cloned"
 setup_case c
-mkdir -p "$(P omarchy-asus.g16)/.git"
+mkdir -p "$(P $ID)/.git"
 run --check
 check "applied" row_is g16-widget applied
 
@@ -127,13 +138,27 @@ check "names it" row_has g16-widget "my.g16"
 
 echo "== e. something else at the plugin's path"
 setup_case e
-mkdir -p "$(P omarchy-asus.g16)"
-touch "$(P omarchy-asus.g16)/mine"
+mkdir -p "$(P $ID)"
+touch "$(P $ID)/mine"
 run --check
 check "local" row_is g16-widget 'present \(local\)'
 apply g16-widget
-check "left alone" [ -f "$(P omarchy-asus.g16)/mine" ]
+check "left alone" [ -f "$(P $ID)/mine" ]
 check "omarchy-plugin-add not run" [ ! -s "$PLUGIN_LOG" ]
+
+echo "== f. the first plugin, under the old id"
+setup_case f
+mkdir -p "$(P $OLD)/.git"
+printf '[remote "origin"]\n\turl = https://github.com/omarchy-asus/g16-control.git\n' >"$(P $OLD)/.git/config"
+run --check
+check "missing" row_is g16-widget 'missing \(opt-in\)'
+check "names the old id" row_has g16-widget "$OLD"
+apply g16-widget
+check "the old plugin removed" grep -qxF "omarchy-plugin-remove $OLD --yes" "$PLUGIN_LOG"
+check "the new plugin added" grep -qxF "omarchy-plugin-add $URL --enable --yes" "$PLUGIN_LOG"
+check "old dir gone" not [ -e "$(P $OLD)" ]
+run --check
+check "applied afterwards" row_is g16-widget applied
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"

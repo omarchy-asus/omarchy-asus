@@ -1285,9 +1285,9 @@ retire_local_winlock() {
           if ((DRY_RUN)); then
             info "[dry-run] would run: mkdir -p ${p/#$HOME/\~} && cp -p ${a/#$HOME/\~}/mode.conf ${p/#$HOME/\~}/mode.conf"
           elif mkdir -p "$p" && cp -p "$a/mode.conf" "$p/mode.conf"; then
-            info "kept the Win-lock mode set in G16 Control (${p/#$HOME/\~}/mode.conf)"
+            info "kept the Win-lock mode set in the omarchy-asus plugin (${p/#$HOME/\~}/mode.conf)"
           else
-            warn "could not put back ${p/#$HOME/\~}/mode.conf; set the Win-lock mode in G16 Control again"
+            warn "could not put back ${p/#$HOME/\~}/mode.conf; set the Win-lock mode in the omarchy-asus plugin again"
           fi
           how="rm -r ${p/#$HOME/\~} && $how"
         fi

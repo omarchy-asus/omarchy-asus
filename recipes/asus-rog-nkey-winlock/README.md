@@ -6,13 +6,13 @@ ROG N-Key keyboard (USB `0b05:19b6`):
 | package | contents |
 |---|---|
 | `asus-rog-nkey-winlock` | `g16-winlock` (Win-key lock OSD and auto-unlock), its hidraw udev rule and its user unit |
-| `asus-zephyrus-g16-control` | **transitional**: the G16 Control bar widget is an Omarchy plugin now, [omarchy-asus/g16-control](https://github.com/omarchy-asus/g16-control). This package removes the old packaged copy and its install message says how to switch. |
+| `asus-zephyrus-g16-control` | **transitional**: the G16 Control bar widget is the omarchy-asus plugin now, [omarchy-asus/omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin). This package removes the old packaged copy and its install message says how to switch. |
 
-The G16 Control widget (keyboard and Slash LEDs, per-charger settings, charge limit, the
+The omarchy-asus plugin (keyboard and Slash LEDs, per-charger settings, charge limit, the
 Fn+Super switch) installs the Omarchy way:
 
 ```bash
-omarchy-plugin-add https://github.com/omarchy-asus/g16-control --enable
+omarchy-plugin-add https://github.com/omarchy-asus/omarchy-asus-plugin --enable
 ```
 
 `omarchy-plugin-update` keeps it current, and the shell reloads it by itself.
@@ -86,7 +86,7 @@ To change that:
 
 The bar widget is separate and optional: see the top of this file. Its settings
 (per-charger keyboard, refresh rate, backlight and power limits) are documented in
-[its README](https://github.com/omarchy-asus/g16-control#readme).
+[its README](https://github.com/omarchy-asus/omarchy-asus-plugin#readme).
 
 ## Moving from a manual install
 
@@ -100,7 +100,7 @@ nothing until you remove those copies:
   `/usr/lib/systemd/user/`. Drop-ins in `g16-winlock.service.d/` (such as
   `mode.conf`) apply to either one.
 - A widget installed by hand under its old id keeps running from its own
-  directory. The plugin has its own id (`omarchy-asus.g16`), so the two do not
+  directory. The plugin has its own id (`io.github.omarchy-asus.plugin`), so the two do not
   collide, but they show the same panel.
 
 To switch over:
@@ -124,7 +124,7 @@ To switch over:
    systemctl --user disable g16-winlock.service    # drops your own link; the packaged unit stays enabled
    systemctl --user restart g16-winlock.service
    ```
-4. The widget: see [g16-control](https://github.com/omarchy-asus/g16-control#readme),
+4. The widget: see [omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin#readme),
    which also covers moving from `omarchy-power-tune`.
 
 ## No toast? Checklist
