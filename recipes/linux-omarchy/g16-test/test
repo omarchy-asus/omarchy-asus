@@ -759,7 +759,8 @@ do_hibernate() {
   printf 'keep the default Limine entry, unlock. The test carries on by itself.%s\n' "$N"
   ask "Hibernate now?" || return 1
   since=$(date '+%Y-%m-%d %H:%M:%S')
-  systemctl hibernate || die "systemctl hibernate refused"
+  as_root "hibernate (through sudo: logind asks for authentication outside the seat session)" systemctl hibernate ||
+    die "systemctl hibernate refused"
   until journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'PM: hibernation: hibernation exit'; do sleep 1; done
   sleep 3
 }
@@ -769,7 +770,7 @@ do_suspend() {
   ask "Suspend (s2idle) now for about 30 s? The RTC wakes it; unlock the screen after." || return 1
   s0=$(cat /sys/power/suspend_stats/success) f0=$(cat /sys/power/suspend_stats/fail)
   as_root "set an RTC alarm 30 s ahead so the laptop wakes by itself" rtcwake -m no -s 30 >/dev/null || true
-  systemctl suspend || die "systemctl suspend refused"
+  as_root "suspend (through sudo, as for hibernate)" systemctl suspend || die "systemctl suspend refused"
   for ((i = 0; i < 300; i++)); do
     (($(cat /sys/power/suspend_stats/success) > s0 || $(cat /sys/power/suspend_stats/fail) > f0)) && break
     sleep 1
@@ -801,7 +802,7 @@ run_resume() {
   [[ $(profile_of asus-wmi) == quiet && $(profile_of amd-pmf) == balanced ]] ||
     die "the quiet fan table is not active (asus-wmi $(profile_of asus-wmi), amd-pmf $(profile_of amd-pmf)); pick the Balanced power profile on battery, then run again"
   can=$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanHibernate 2>/dev/null | awk '{print $2}' | tr -d '"')
-  [[ $can == yes ]] || die "logind CanHibernate: ${can:-unknown} (no swap/resume set up?)"
+  [[ $can == yes || $can == challenge ]] || die "logind CanHibernate: ${can:-unknown} (no swap/resume set up?)"
   HW_K10=$(hwmon_by_name k10temp || true) HW_AMDGPU=$(hwmon_by_name amdgpu || true) HW_ASUS=$(hwmon_by_name asus || true)
   DGPU=$(dgpu_dir || true)
   [[ -n $HW_K10 && -n $HW_ASUS ]] || die "no k10temp or asus hwmon"
