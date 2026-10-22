@@ -1,17 +1,38 @@
-# Re-run the hidraw rules so the keyboard node gets its uaccess ACL now,
-# without a reboot or a replug. The user unit is enabled by the package
-# itself (graphical-session.target.wants) and starts with the next desktop session.
-_g16_winlock_trigger() {
+# udev starts g16-winlockd@hidrawN for each node of the 0b05:19b6 keyboard as it
+# appears; for a keyboard that is already there, re-run the rules (which also
+# drops the hidraw access that 0.1.0-12 and older granted) and start them now.
+# The user unit is enabled by the package itself (graphical-session.target.wants)
+# and starts with the next desktop session.
+_g16_winlockd_start() {
+  local n
   udevadm control --reload >/dev/null 2>&1 || true
   udevadm trigger --action=change --subsystem-match=hidraw >/dev/null 2>&1 || true
+  udevadm settle --timeout=10 >/dev/null 2>&1 || true
+  for n in /sys/class/hidraw/hidraw*; do
+    grep -qi '^HID_ID=0003:00000B05:000019B6$' "$n/device/uevent" 2>/dev/null || continue
+    # The old rule's group and uaccess ACL stay on the node until it is re-created.
+    chown root:root "/dev/${n##*/}" 2>/dev/null || true
+    chmod 0600 "/dev/${n##*/}" 2>/dev/null || true
+    setfacl -b "/dev/${n##*/}" 2>/dev/null || true
+    systemctl --no-block start "g16-winlockd@${n##*/}.service" >/dev/null 2>&1 || true
+  done
 }
 
 post_install() {
-  _g16_winlock_trigger
+  _g16_winlockd_start
   echo ':: g16-winlock starts at your next login. To start it now:'
   echo '   systemctl --user start g16-winlock.service'
 }
 
 post_upgrade() {
-  _g16_winlock_trigger
+  _g16_winlockd_start
+  # 0.1.0-12 and older: the user unit read the node itself; restart it on D-Bus.
+  if (( $(vercmp "$2" 0.1.0-13) < 0 )); then
+    echo ':: g16-winlock now talks to the g16-winlockd service. Restart it with:'
+    echo '   systemctl --user restart g16-winlock.service'
+  fi
+}
+
+pre_remove() {
+  systemctl stop 'g16-winlockd@*.service' >/dev/null 2>&1 || true
 }

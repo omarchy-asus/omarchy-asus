@@ -5,7 +5,7 @@ ROG N-Key keyboard (USB `0b05:19b6`):
 
 | package | contents |
 |---|---|
-| `asus-rog-nkey-winlock` | `g16-winlock` (Win-key lock OSD and auto-unlock), its hidraw udev rule and its user unit |
+| `asus-rog-nkey-winlock` | `g16-winlockd` (the root service that owns the keyboard's hidraw node) and `g16-winlock` (Win-key lock OSD and auto-unlock, a user unit) |
 | `asus-zephyrus-g16-control` | **transitional**: the G16 Control bar widget is the omarchy-asus plugin now, [omarchy-asus/omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin). This package removes the old packaged copy and its install message says how to switch. |
 
 The omarchy-asus plugin (keyboard and Slash LEDs, per-charger settings, charge limit, the
@@ -22,14 +22,32 @@ widget's link if there is one.
 ## What g16-winlock does
 
 Fn+Super toggles a firmware Win-key lock. While it is on, Super sends nothing,
-and nothing on screen tells you why. `g16-winlock` reads the keyboard's
-Win-lock reports from hidraw and:
+and nothing on screen tells you why.
+
+`g16-winlockd` is a small root service (C, sd-bus) that owns the keyboard's
+hidraw node. udev starts `g16-winlockd@hidrawN.service` for each node of the
+keyboard; the instance whose node declares report ID `0x5d` stays, the others
+exit at once. It waits on the node (no timers, no polling) and turns each
+`5D BF 01 xx` report into the D-Bus signal `LockChanged(b)` on the system bus
+(`io.github.omarchy_asus.WinLock1`). It has two methods and nothing else:
+
+- `Status() -> b`: GetFeature `5D`, or the last reported state.
+- `SetLocked(b)`: SetFeature `5D BF 00 xx` followed by output report `01 01`
+  (the sequence AsusWinKeyActiveGuard uses on Windows). Allowed for root and,
+  through polkit (`io.github.omarchy-asus.winlock.set-locked`, `allow_active`),
+  for the user of the active local session.
+
+Raw reports never leave the service, and the node stays `root:root 0600`.
+The service runs with no capabilities, no network, a read-only filesystem and
+hidraw as its only device.
+
+`g16-winlock` opens no device. It follows `LockChanged` and calls the methods
+(with `gdbus`, from glib2):
 
 - `watch --mode=toast`: shows an Omarchy OSD ("Super locked" / "Super unlocked").
 - `watch --mode=unlock`: shows the OSD and clears the lock straight away
-  (HID SetFeature `5D BF 00 00` followed by output report `01 01`, the same
-  sequence AsusWinKeyActiveGuard uses on Windows).
-- `lock`, `unlock`, `status`, `toggle`: one-shot control over hidraw.
+  (`SetLocked(false)`).
+- `lock`, `unlock`, `status`, `toggle`: one-shot control.
 
 The OSD uses `omarchy-osd`, then `omarchy-shell osd show`, and falls back to
 `omarchy-notification-send` or `notify-send`.
@@ -38,7 +56,7 @@ The OSD uses `omarchy-osd`, then `omarchy-shell osd show`, and falls back to
 
 The stock `hid-asus` driver drops the Win-lock reports (report `0x5d`, opcode
 `0xbf 0x01`) together with the keyboard's AURA echo stream, so `watch` never
-sees them and no toast appears. `watch` needs the `linux-omarchy` build from
+sees them and no toast appears. `g16-winlockd` needs the `linux-omarchy` build from
 this repo (7.2.8-9.1 or later), which carries
 `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`, or any other
 kernel with an equivalent change (for example the older `hid-asus-winlock`
@@ -51,8 +69,12 @@ one-shot commands work with any kernel.
 
 | path | package |
 |---|---|
-| `/usr/bin/g16-winlock` | asus-rog-nkey-winlock (Python 3, standard library only) |
-| `/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules` | asus-rog-nkey-winlock: the keyboard's hidraw nodes get mode 0660, group `input`, and a `uaccess` ACL for the logged-in user |
+| `/usr/lib/g16-winlockd` | asus-rog-nkey-winlock: the service |
+| `/usr/lib/systemd/system/g16-winlockd@.service` | asus-rog-nkey-winlock: one instance per keyboard hidraw node, sandboxed |
+| `/usr/lib/udev/rules.d/60-g16-winlockd.rules` | asus-rog-nkey-winlock: starts the instances; grants no access |
+| `/usr/share/dbus-1/system.d/io.github.omarchy_asus.WinLock1.conf` | asus-rog-nkey-winlock: only root owns the name, anyone may call it |
+| `/usr/share/polkit-1/actions/io.github.omarchy-asus.winlock.policy` | asus-rog-nkey-winlock: `SetLocked` for the active local session |
+| `/usr/bin/g16-winlock` | asus-rog-nkey-winlock (Python 3, standard library and `gdbus`) |
 | `/usr/lib/systemd/user/g16-winlock.service` | asus-rog-nkey-winlock: runs `g16-winlock watch` |
 | `/usr/share/doc/asus-zephyrus-g16-control/README.md` | asus-zephyrus-g16-control (transitional): this file |
 
@@ -60,9 +82,10 @@ one-shot commands work with any kernel.
 
 `asus-rog-nkey-winlock` works on install. Nothing to enable:
 
-- The package re-triggers the hidraw udev rules, so the keyboard node picks up
-  the `uaccess` ACL for whoever is logged in at the seat. No reboot, and no
-  `input` group.
+- The package re-runs the hidraw udev rules and starts `g16-winlockd` for the
+  keyboard that is already there. No reboot, and no `input` group. Coming from
+  0.1.0-12 or older, it also takes back the access the old rule gave the node,
+  and asks you to restart the user unit.
 - `g16-winlock.service` ships enabled for every user
   (`/usr/lib/systemd/user/graphical-session.target.wants/`). It starts with your next
   desktop session (Omarchy's uwsm session activates `graphical-session.target`, so the
@@ -93,9 +116,8 @@ The bar widget is separate and optional: see the top of this file. Its settings
 Local copies win over the packaged files, so installing the packages changes
 nothing until you remove those copies:
 
-- An older `/etc/udev/rules.d/99-g16-winlock-hidraw.rules` keeps applying
-  next to the packaged `70-` rule. The content is identical, so that's
-  harmless, but remove it once the package is in.
+- An older `/etc/udev/rules.d/99-g16-winlock-hidraw.rules` keeps opening the
+  keyboard's raw node to users. Nothing needs it any more: remove it.
 - `~/.config/systemd/user/g16-winlock.service` shadows the packaged unit in
   `/usr/lib/systemd/user/`. Drop-ins in `g16-winlock.service.d/` (such as
   `mode.conf`) apply to either one.
@@ -108,12 +130,9 @@ To switch over:
 1. Install the packages. Nothing changes yet.
 2. Compare the files:
    ```bash
-   diff /etc/udev/rules.d/99-g16-winlock-hidraw.rules /usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules
    diff ~/.config/systemd/user/g16-winlock.service /usr/lib/systemd/user/g16-winlock.service
-   diff /path/to/old/g16-winlock /usr/bin/g16-winlock
    ```
-   The rule and the script should be identical (only the rule's file name
-   changed). The unit should differ only in
+   The unit should differ only in
    `ExecStart=` (`/usr/bin/g16-winlock watch`) and in the default mode, which
    is now `toast` (keep a `mode.conf` drop-in if you want `unlock`).
 3. Remove the local copies:
@@ -139,16 +158,18 @@ ones above it.
    ```
    On a stock kernel with no DKMS build for it, the reports never reach hidraw
    and nothing below can help.
-2. Device and access:
+2. Device and service:
    ```bash
    grep -l 0B05 /sys/class/hidraw/hidraw*/device/uevent | xargs grep -l 19B6
-   ls -l /dev/hidraw*                         # the 19b6 nodes: crw-rw----+ root input (+ = ACL)
-   getfacl /dev/hidrawN                       # a user:<you>:rw- line from uaccess
-   g16-winlock status                         # "Cannot open ..." = rule not applied yet
+   ls -l /dev/hidraw*                         # the 19b6 nodes: crw------- root root, no +
+   systemctl list-units 'g16-winlockd@*'      # one active instance, for the 0x5d node
+   journalctl -u 'g16-winlockd@*' -b          # "watching /dev/hidrawN", then Win-lock on/off
+   g16-winlock status                         # locked=True/False from the service
    ```
-   No ACL line: re-run the rule with
-   `sudo udevadm trigger --action=change --subsystem-match=hidraw`.
-3. Service:
+   No instance: `sudo udevadm trigger --action=add --subsystem-match=hidraw`.
+   `lock`/`unlock` refused with `AccessDenied`: polkit allows them only to the
+   active local session (`loginctl show-session $XDG_SESSION_ID -p Active -p Remote`).
+3. User unit:
    ```bash
    systemctl --user is-enabled g16-winlock.service   # enabled (vendor), or masked
    systemctl --user status g16-winlock.service
@@ -156,21 +177,20 @@ ones above it.
    journalctl --user -u g16-winlock.service -b
    ```
    Every Fn+Super should log `Win-lock on/off` and an `osd rc=0` line.
-4. Live test, with the service stopped:
+4. Live test, with the user unit stopped:
    ```bash
    systemctl --user stop g16-winlock.service
    g16-winlock watch --mode=toast             # press Fn+Super twice
    ```
-   The first line names the node `watch` opened: the 19b6 hidraw node whose
-   report descriptor declares report ID `0x5d` (the first 19b6 node if no
-   descriptor can be read). No `Win-lock` lines means the kernel (step 1).
+   No `Win-lock` lines while `journalctl -u 'g16-winlockd@*'` shows them: the
+   bus (step 2). Neither shows them: the kernel (step 1).
 5. The OSD on its own: `omarchy-osd -m test`.
 
-## Why the rule is `70-`, not `99-`
+## Why a service, and no access rule
 
-`TAG+="uaccess"` only grants the logged-in user access if it's set before
-systemd's `73-seat-late.rules` runs. A `99-` rule sets it too late, so access
-fell back to the `input` group. Omarchy 4.0.5 removes users from `input` on
-purpose, so on a stock install `g16-winlock` couldn't open the keyboard and the
-lock toast never appeared. The packaged rule is `70-` so `uaccess` takes effect.
-The rule's content is unchanged.
+Up to 0.1.0-12, `70-g16-winlock-hidraw.rules` gave the logged-in user the
+keyboard's hidraw nodes (`uaccess`, group `input`): the keyboard's whole raw
+stream, for a helper that needs one bit of state and two commands. From
+0.1.0-13 the nodes stay root-only, `g16-winlockd` reads them, and the user gets
+only `LockChanged`, `Status` and the polkit-gated `SetLocked`. The udev rule
+that is left (`60-g16-winlockd.rules`) only starts the service.

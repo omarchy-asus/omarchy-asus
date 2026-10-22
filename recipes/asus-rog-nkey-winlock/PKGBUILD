@@ -2,15 +2,17 @@
 # Zephyrus G16 GA605. Its switch is in the omarchy-asus plugin, an Omarchy bar
 # widget (https://github.com/omarchy-asus/omarchy-asus-plugin).
 #
-# asus-rog-nkey-winlock: `g16-winlock`, which shows an Omarchy OSD when Fn+Super
-#   toggles the firmware Win-key lock and can clear the lock again (auto-unlock),
-#   plus one-shot lock/unlock/status/toggle over hidraw. Its udev rule and user
-#   unit come with it, and the unit is enabled on install (toast mode).
+# asus-rog-nkey-winlock: `g16-winlockd`, a small root service that owns the
+#   keyboard's hidraw node and forwards its Win-lock reports as a D-Bus signal
+#   (udev starts it; the node stays root-only), and `g16-winlock`, the user unit
+#   that shows an Omarchy OSD when Fn+Super toggles the firmware Win-key lock and
+#   can clear it again (auto-unlock), plus one-shot lock/unlock/status/toggle over
+#   D-Bus. The user unit is enabled on install (toast mode).
 # asus-zephyrus-g16-control: transitional. The widget it shipped is the
 #   omarchy-asus plugin now (#183); this version removes the packaged
 #   copy and says how to switch.
 #
-# `g16-winlock watch` only sees the toggle with a kernel whose hid-asus passes
+# `g16-winlockd` only sees the toggle with a kernel whose hid-asus passes
 # the Win-lock reports through to hidraw: linux-omarchy from this repo (patch
 # 0568, from 7.2.8-9.1). That requirement is an optdepend, not a versioned
 # depend, so these packages survive the fix landing in a stock kernel.
@@ -22,35 +24,69 @@
 pkgbase=asus-rog-nkey-winlock
 pkgname=(asus-rog-nkey-winlock asus-zephyrus-g16-control)
 pkgver=0.1.0
-pkgrel=12
+pkgrel=13
 pkgdesc='Win-key lock helper for the ASUS ROG Zephyrus G16 (GA605)'
-arch=('any')
+arch=('x86_64')
 url='https://github.com/omarchy-asus/omarchy-asus'
 license=('MIT')
 options=('!debug')
+makedepends=('systemd-libs')
+checkdepends=('dbus' 'glib2' 'python')
 source=(
+  'g16-winlockd.c'
+  'g16-winlockd@.service'
+  '60-g16-winlockd.rules'
+  'io.github.omarchy_asus.WinLock1.conf'
+  'io.github.omarchy-asus.winlock.policy'
   'g16-winlock'
-  '70-g16-winlock-hidraw.rules'
   'g16-winlock.service'
   'README.md'
+  'winlockd.test.sh'
+  'fake_hid.c'
+  'fake_polkit.c'
+  'fake_node.py'
 )
-sha256sums=('548676e73486095be2621f7e0f0d096b98c5643e898785a809634837804c64fe'
-            'b4661afab9b9a8fc553bc4c4e6938141f71d8109f412a4754fb01b06e05ede04'
+sha256sums=('b5162b3019b8be1cbdbd3e6e80aaabbb785ce173340ad23e545334bc49051ef9'
+            '92cbe6d3aac2ea0497653b6068d1432b3868ab3404a01672734cb356b13d00da'
+            'c0c868d5f0c98ca9d5b35b4927f2ff0d06b45c40e64f683857e491b9558e5a6e'
+            'c078a9ee5aaea137045c2bfb70b652c3d9e46ba63eda5f8dbcad7a6482560499'
+            '9a8d280dc9bd465f1fa0894a10e0ec70401604922388fcc6de253978219991b1'
+            'd7a3e55c32584593eff076d47a999d0d9b1946e18158dc5da7cce7ab8ffe4edc'
             '85955d0a7eb12911ead8c0cb68cd89d356aae02d67d4668f187136be3e767bfd'
-            '92f948dc0eb532efd16cb4bb7f5762b5147e2dd4081071c3ea4dd5fa254b7df5')
+            '313d4ec8ac46c91b8701f91e3f39720071fe367f2b862baa5796f347cf601d5b'
+            'c71e51e6a924712675b2fa1b0c56a3eb282cc2ada20fa580e1402bb06dfa2d46'
+            'c2e68b3c6f9dab75d0dfd623fb8b60108d6885ba54974cab2997fa892c647b96'
+            '03c0fc8c75f1c2175bc85275bbf90cbf9699a15ef26a2a155747a70eb4619bfe'
+            '4f2a56979230bcbcb64d58b002c5dfc58412c7a6f14467b35b14f6ced34129cb')
+
+build() {
+  # shellcheck disable=SC2086 # CFLAGS/LDFLAGS are word lists
+  cc $CPPFLAGS $CFLAGS -Wall $LDFLAGS -o g16-winlockd g16-winlockd.c $(pkg-config --cflags --libs libsystemd)
+}
+
+check() {
+  # A fake hidraw node (a pty) on a private D-Bus with a fake polkit: reports
+  # become signals, SetLocked is polkit-gated and writes the feature and commit,
+  # and g16-winlock opens no device.
+  bash winlockd.test.sh "$srcdir/g16-winlockd"
+}
 
 package_asus-rog-nkey-winlock() {
   install=asus-rog-nkey-winlock.install
   pkgdesc='Win-key lock OSD and auto-unlock helper (g16-winlock) for the ASUS ROG N-Key keyboard of the Zephyrus G16 GA605'
-  depends=('python')
+  depends=('python' 'glib2' 'systemd-libs' 'polkit')
   optdepends=(
     'linux-omarchy: the omarchy-asus build (7.2.8-9.1 or later, patch 0568) or any kernel whose hid-asus passes Win-lock reports to hidraw, needed for "watch"'
     'omarchy: omarchy-osd / omarchy-shell for the on-screen toast'
     'libnotify: notify-send fallback when no Omarchy OSD is available'
   )
 
+  install -Dm755 g16-winlockd "$pkgdir/usr/lib/g16-winlockd"
+  install -Dm644 g16-winlockd@.service "$pkgdir/usr/lib/systemd/system/g16-winlockd@.service"
+  install -Dm644 60-g16-winlockd.rules "$pkgdir/usr/lib/udev/rules.d/60-g16-winlockd.rules"
+  install -Dm644 io.github.omarchy_asus.WinLock1.conf "$pkgdir/usr/share/dbus-1/system.d/io.github.omarchy_asus.WinLock1.conf"
+  install -Dm644 io.github.omarchy-asus.winlock.policy "$pkgdir/usr/share/polkit-1/actions/io.github.omarchy-asus.winlock.policy"
   install -Dm755 g16-winlock "$pkgdir/usr/bin/g16-winlock"
-  install -Dm644 70-g16-winlock-hidraw.rules "$pkgdir/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules"
   install -Dm644 g16-winlock.service "$pkgdir/usr/lib/systemd/user/g16-winlock.service"
   # Enabled for every user: it does nothing on machines without the 0b05:19b6
   # keyboard. Opt out per user with `systemctl --user mask g16-winlock.service`.
@@ -64,6 +100,7 @@ package_asus-zephyrus-g16-control() {
   # (https://github.com/omarchy-asus/omarchy-asus-plugin, #183). This version removes
   # the packaged copy and its install message says how to switch. Drop this
   # package from the recipe once the G16 has switched.
+  arch=('any')
   pkgdesc='(transitional) G16 Control is the omarchy-asus plugin now: omarchy-asus/omarchy-asus-plugin'
   depends=()
   install=asus-zephyrus-g16-control.install
