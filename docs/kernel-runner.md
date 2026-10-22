@@ -9,12 +9,15 @@ It is off unless the repository variable `KERNEL_RUNNER` is set. With it set:
 
 - runs on this repository's own branches (and maintainer dispatches) use the
   runner it names; a fork's PR always gets `ubuntu-24.04`, so unreviewed code
-  never runs on the build host;
+  never runs on the build host. A fork's PR runs its own copy of the workflow,
+  which could name the runner anyway, so the runner checks this itself before
+  every job (`build/kernel-runner-job-started`, below);
 - the job is the same `docker run ... ci/build-recipe` container as on a hosted
   runner, at a lower CPU weight (`--cpu-shares 256`), so a person at the build
   host comes first;
-- the build tree is the job's own temp dir, and a last step removes it from a
-  container, pass or fail (the container writes it as root);
+- the build tree is the job's own temp dir, and a last step removes the build
+  container (by the name the run gave it, in case a cancelled run left it
+  compiling) and then the tree, pass or fail (the container writes it as root);
 - the packages go only to the run's unsigned artifact, as on a hosted runner.
   Nothing touches the stage dirs, the chroots, the local repo or the releases.
 
@@ -36,6 +39,15 @@ the distcc key at. What keeps the rest of the build host out of reach:
   branch could start a privileged container. That is the cost of building in
   the same container as CI. Don't register the runner on a repository whose
   branches you don't control.
+- The runner's job-started hook, a root-owned copy of
+  `build/kernel-runner-job-started` that no workflow can change, fails any job
+  that isn't build-pr.yml's `kernel` job on this repository, started by a
+  `pull_request` from one of its own branches or a `workflow_dispatch`. This
+  is what keeps a fork's PR off the runner: its copy of the workflow decides
+  `runs-on`, not ours.
+- As a second layer, the repository asks for approval before running any
+  outside contributor's workflow (Settings, Actions, "Require approval for all
+  external contributors").
 - Its distcc key is its own (not the release builds' key), limited on the
   helper the same way, so it can be revoked on its own.
 
@@ -63,8 +75,18 @@ runuser -u <runner> -- /var/lib/<runner>/actions-runner/config.sh --unattended \
     --name <name> --labels omarchy-asus-kernel --no-default-labels --replace
 ```
 
-`--no-default-labels` keeps it off any job that asks for plain `self-hosted`.
-Install the service: `cd /var/lib/<runner>/actions-runner && ./svc.sh install <runner> && ./svc.sh start`.
+`--no-default-labels` keeps it off any job that asks for plain `self-hosted`;
+its only label is `omarchy-asus-kernel`, so that is the one `KERNEL_RUNNER`
+names. Install the job-started hook where the runner can read but not change
+it, and turn on approval for outside contributors' workflows:
+
+```bash
+install -D -o root -g root -m 755 build/kernel-runner-job-started /usr/local/lib/omarchy-asus/kernel-runner-job-started
+echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/omarchy-asus/kernel-runner-job-started" >> /var/lib/<runner>/actions-runner/.env
+gh api -X PUT repos/omarchy-asus/omarchy-asus/actions/permissions/fork-pr-contributor-approval -f approval_policy=all_external_contributors
+```
+
+Re-run the `install` line when the hook changes. Then the service: `cd /var/lib/<runner>/actions-runner && ./svc.sh install <runner> && ./svc.sh start`.
 
 distcc, with a key made for the runner (docs/distcc.md, Setup, has the
 helper's side: the same `restrict,from=...,command="/usr/local/bin/distccd-gate ..."`
@@ -88,10 +110,11 @@ build host's CPUs only. Restart the service after changing `.env`.
 Then turn it on:
 
 ```bash
-gh variable set KERNEL_RUNNER -R omarchy-asus/omarchy-asus --body '["self-hosted","omarchy-asus-kernel"]'
+gh variable set KERNEL_RUNNER -R omarchy-asus/omarchy-asus --body '["omarchy-asus-kernel"]'
 ```
 
 Try it with a dispatch: `gh workflow run build-pr.yml --ref <branch> -f recipes=linux-omarchy -f rebuild=true`.
-The kernel job's log says `distcc: ... mounted read-only` and
+The kernel job's log says `kernel runner: workflow_dispatch on ... accepted`,
+`distcc: ... mounted read-only` and
 `==> distcc: 1 helper(s), <n> slots on top of <m> here`; the helper's
 `journalctl -t distccd` shows the compiles.

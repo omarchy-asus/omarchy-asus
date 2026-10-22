@@ -1,0 +1,34 @@
+#!/bin/bash
+# Job-started hook for the build host's kernel runner (docs/kernel-runner.md):
+# installed root-owned outside the runner's reach and named by
+# ACTIONS_RUNNER_HOOK_JOB_STARTED in the runner's .env, so the runner runs it
+# before every job, ahead of any step from the workflow. The workflow's runs-on
+# keeps forks off this runner only while the workflow is ours: a fork's PR runs
+# the fork's copy of build-pr.yml, which can name this runner itself. This is
+# the check a workflow can't change. A non-zero exit fails the job before it
+# runs anything.
+#
+# It lets through only, on this repository:
+#   - pull_request from a branch of this repository (never a fork),
+#   - workflow_dispatch (needs write access to start),
+# and only the kernel job of build-pr.yml.
+set -euo pipefail
+REPO=${KERNEL_RUNNER_REPO:-omarchy-asus/omarchy-asus}
+refuse() { echo "kernel runner: refused: $*" >&2; exit 1; }
+
+[[ ${GITHUB_REPOSITORY:-} == "$REPO" ]] || refuse "repository '${GITHUB_REPOSITORY:-}' is not $REPO"
+[[ ${GITHUB_JOB:-} == kernel ]] || refuse "job '${GITHUB_JOB:-}' is not build-pr.yml's kernel job"
+case ${GITHUB_WORKFLOW_REF:-} in
+    "$REPO/.github/workflows/build-pr.yml@"*) ;;
+    *) refuse "workflow '${GITHUB_WORKFLOW_REF:-}' is not $REPO's build-pr.yml" ;;
+esac
+case ${GITHUB_EVENT_NAME:-} in
+    workflow_dispatch) ;;
+    pull_request)
+        [[ -r ${GITHUB_EVENT_PATH:-} ]] || refuse "no event payload to check the PR's head repository"
+        head=$(jq -r '.pull_request.head.repo.full_name // empty' "$GITHUB_EVENT_PATH")
+        [[ $head == "$REPO" ]] || refuse "pull request from '${head:-unknown}', not a branch of $REPO"
+        ;;
+    *) refuse "event '${GITHUB_EVENT_NAME:-}' (only pull_request and workflow_dispatch)" ;;
+esac
+echo "kernel runner: ${GITHUB_EVENT_NAME} on $REPO accepted"

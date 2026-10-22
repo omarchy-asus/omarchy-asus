@@ -20,9 +20,11 @@ name: Build changed packages
 # The kernel job can run on a self-hosted runner on the build host instead, where
 # distcc sends compiles to the helper (docs/kernel-runner.md). It is opt-in: the
 # repository variable KERNEL_RUNNER holds the runner's labels as JSON (e.g.
-# ["self-hosted","omarchy-asus-kernel"]); unset, the job runs on ubuntu-24.04.
+# ["omarchy-asus-kernel"]); unset, the job runs on ubuntu-24.04.
 # Only runs on this repository's own branches and maintainer dispatches use it: a
-# fork's PR always gets the hosted runner. Every other job stays hosted.
+# fork's PR always gets the hosted runner. A fork's PR runs its own copy of this
+# file, so the runner enforces that too, before any step
+# (build/kernel-runner-job-started). Every other job stays hosted.
 #
 # No paths filter: `result` reports on every PR (a PR without recipe changes
 # plans an empty matrix and passes in seconds).
@@ -259,11 +261,12 @@ jobs:
           DIR: ${{ steps.disk.outputs.dir }}
           CHANNEL: ${{ needs.changes.outputs.channel }}
           RUNNER_KIND: ${{ runner.environment }}
+          CONTAINER: omarchy-asus-kernel-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           host=()
           if [[ $RUNNER_KIND == self-hosted ]]; then
-            host=(--cpu-shares 256)
+            host=(--cpu-shares 256 --name "$CONTAINER")
             if [[ -n ${OMARCHY_ASUS_CI_DISTCC:-} ]]; then
               host+=(-v "$OMARCHY_ASUS_CI_DISTCC:/mnt/distcc:ro")
               echo "distcc: $OMARCHY_ASUS_CI_DISTCC mounted read-only at /mnt/distcc"
@@ -286,15 +289,18 @@ jobs:
           compression-level: 0
       # The container writes the build tree and packages as root, which the
       # build host's runner can't delete; remove them from a container, pass
-      # or fail, so no run leaves ~30 GB behind. Dangling builder images go too.
+      # or fail, so no run leaves ~30 GB behind. A cancelled run can leave the
+      # build container compiling after the docker client is killed, so it is
+      # removed first, by the name this run gave it.
       - name: Clean up the build tree
         if: always() && runner.environment == 'self-hosted' && steps.disk.outputs.dir != ''
         env:
           DIR: ${{ steps.disk.outputs.dir }}
+          CONTAINER: omarchy-asus-kernel-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
           docker run --rm -v "$DIR:/d" "$BUILDER_IMAGE" rm -rf /d/work /d/out
           rmdir "$DIR" || true
-          docker image prune --force >/dev/null
 
   nvidia-compat:
     needs: [changes, build, kernel]

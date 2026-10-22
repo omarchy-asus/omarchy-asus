@@ -1,11 +1,13 @@
 #!/bin/bash
 # The kernel job may run on the build host's self-hosted runner (docs/kernel-runner.md).
 # That is only safe while: the runner is opt-in (KERNEL_RUNNER unset: ubuntu-24.04), a
-# fork's PR never gets it, it is the only job that can, the hosted-only disk steps (sudo
-# rm -rf, sudo mkdir) never run there, the container gets nothing more than a CPU weight
-# and the read-only distcc key dir, and the root-owned build tree is removed after every
-# run. Offline: grep/awk on the workflow, and ci/build-recipe's distcc block with fake
-# pacman/install so nothing on this machine changes.
+# fork's PR never gets it (the runner's job-started hook refuses it even when the fork's
+# own workflow asks for the runner), it is the only job that can, the hosted-only disk
+# steps (sudo rm -rf, sudo mkdir) never run there, the container gets nothing more than a
+# CPU weight, a name and the read-only distcc key dir, and the build container and its
+# root-owned tree are removed after every run, with no host-wide docker prune. Offline:
+# grep/awk on the workflow, build/kernel-runner-job-started on fake events, and
+# ci/build-recipe's distcc block with fake pacman/install so nothing here changes.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 WF=$W/.github/workflows/build-pr.yml
@@ -48,8 +50,8 @@ expect "b: self-hosted builds in the job's temp dir" \
 # c. the container's extra arguments on the build host
 build=$(step 'Build linux-omarchy')
 expect "c: host=() starts empty" "$(grep -c -E '^[[:space:]]*host=\(\)$' <<<"$build")" 1
-expect "c: host gets a CPU weight and nothing else first" \
-    "$(grep -c -E '^[[:space:]]*host=\(--cpu-shares [0-9]+\)$' <<<"$build")" 1
+expect "c: host gets a CPU weight and the run's container name, nothing else first" \
+    "$(grep -c -E '^[[:space:]]*host=\(--cpu-shares [0-9]+ --name "\$CONTAINER"\)$' <<<"$build")" 1
 expect "c: the only other addition is the key dir, read-only at /mnt/distcc" \
     "$(grep -E 'host\+=' <<<"$build" | grep -c -v -F 'host+=(-v "$OMARCHY_ASUS_CI_DISTCC:/mnt/distcc:ro")')" 0
 expect "c: host is only filled on a self-hosted runner" \
@@ -59,10 +61,47 @@ expect "c: host is only filled on a self-hosted runner" \
 clean=$(step 'Clean up the build tree')
 expect "d: cleanup runs pass or fail, on the self-hosted runner" \
     "$(grep -c "if: always() && runner.environment == 'self-hosted'" <<<"$clean")" 1
+cname='CONTAINER: omarchy-asus-kernel-${{ github.run_id }}-${{ github.run_attempt }}'
+expect "d: build and cleanup name the same container" \
+    "$(grep -c -F "$cname" <<<"$build")$(grep -c -F "$cname" <<<"$clean")" 11
+expect "d: cleanup force-removes the build container before the tree" \
+    "$(awk '/docker rm --force "\$CONTAINER"/ { print "rm"; exit } /rm -rf \/d\/work/ { print "tree"; exit }' <<<"$clean")" rm
+expect "d: docker prune only in the hosted-only Free disk space step" \
+    "$(grep -v -E '^[[:space:]]*#' "$WF" | grep -c 'docker [a-z]* *prune')$(step 'Free disk space' | grep -c 'docker [a-z]* *prune')" 11
 expect "d: cleanup removes only the job's build dir" \
     "$(grep -c 'docker run --rm -v "$DIR:/d" "$BUILDER_IMAGE" rm -rf /d/work /d/out' <<<"$clean")" 1
 expect "d: cleanup is the kernel job's last step" \
     "$(awk '/^  kernel:/ { on = 1; next } /^  [^ ]/ { on = 0 } on && /^      - name: / { last = $0 } END { print last }' "$WF" | grep -c 'Clean up the build tree')" 1
+
+# f. the runner's job-started hook (build/kernel-runner-job-started)
+HOOK=$W/build/kernel-runner-job-started
+R=omarchy-asus/omarchy-asus WREF="omarchy-asus/omarchy-asus/.github/workflows/build-pr.yml@refs/pull/1/merge"
+hev=$(mktemp -d)
+printf '{"pull_request":{"head":{"repo":{"full_name":"%s"}}}}\n' "$R" >"$hev/own.json"
+printf '{"pull_request":{"head":{"repo":{"full_name":"someone/omarchy-asus"}}}}\n' >"$hev/fork.json"
+printf '{"pull_request":{"head":{"repo":null}}}\n' >"$hev/deleted.json"
+hook() {  # hook <event> <payload> [VAR=value...]: prints the exit code
+    local ev=$1 pl=$2; shift 2
+    env -i PATH="$PATH" GITHUB_REPOSITORY="$R" GITHUB_JOB=kernel GITHUB_WORKFLOW_REF="$WREF" \
+        GITHUB_EVENT_NAME="$ev" GITHUB_EVENT_PATH="$pl" "$@" bash "$HOOK" >/dev/null 2>&1
+    echo $?
+}
+expect "f: own branch's PR: accepted" "$(hook pull_request "$hev/own.json")" 0
+expect "f: dispatch: accepted" "$(hook workflow_dispatch /nonexistent)" 0
+expect "f: fork's PR: refused" "$(hook pull_request "$hev/fork.json")" 1
+expect "f: PR whose head repository is gone: refused" "$(hook pull_request "$hev/deleted.json")" 1
+expect "f: PR without a payload: refused" "$(hook pull_request /nonexistent)" 1
+expect "f: pull_request_target: refused" "$(hook pull_request_target "$hev/own.json")" 1
+expect "f: push: refused" "$(hook push "$hev/own.json")" 1
+expect "f: another job: refused" "$(hook pull_request "$hev/own.json" GITHUB_JOB=build)" 1
+expect "f: another repository: refused" "$(hook workflow_dispatch /nonexistent GITHUB_REPOSITORY=someone/omarchy-asus)" 1
+expect "f: another workflow: refused" \
+    "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$R/.github/workflows/lint.yml@refs/heads/main")" 1
+expect "f: the refusal says why" \
+    "$(env -i PATH="$PATH" GITHUB_REPOSITORY="$R" GITHUB_JOB=kernel GITHUB_WORKFLOW_REF="$WREF" \
+        GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$hev/fork.json" bash "$HOOK" 2>&1 |
+        grep -c "refused: pull request from 'someone/omarchy-asus'")" 1
+rm -rf "$hev"
 
 # e. ci/build-recipe's distcc block, run on its own with pacman and install faked
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
