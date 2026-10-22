@@ -24,7 +24,7 @@ name: Build changed packages
 # Only runs on this repository's own branches and maintainer dispatches use it: a
 # fork's PR always gets the hosted runner. A fork's PR runs its own copy of this
 # file, so the runner enforces that too, before any step
-# (build/kernel-runner-job-started). Every other job stays hosted.
+# (build/kernel-runner-job-started.sh). Every other job stays hosted.
 #
 # No paths filter: `result` reports on every PR (a PR without recipe changes
 # plans an empty matrix and passes in seconds).

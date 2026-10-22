@@ -6,7 +6,7 @@
 # steps (sudo rm -rf, sudo mkdir) never run there, the container gets nothing more than a
 # CPU weight, a name and the read-only distcc key dir, and the build container and its
 # root-owned tree are removed after every run, with no host-wide docker prune. Offline:
-# grep/awk on the workflow, build/kernel-runner-job-started on fake events, and
+# grep/awk on the workflow, build/kernel-runner-job-started.sh on fake events, and
 # ci/build-recipe's distcc block with fake pacman/install so nothing here changes.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -73,34 +73,54 @@ expect "d: cleanup removes only the job's build dir" \
 expect "d: cleanup is the kernel job's last step" \
     "$(awk '/^  kernel:/ { on = 1; next } /^  [^ ]/ { on = 0 } on && /^      - name: / { last = $0 } END { print last }' "$WF" | grep -c 'Clean up the build tree')" 1
 
-# f. the runner's job-started hook (build/kernel-runner-job-started)
-HOOK=$W/build/kernel-runner-job-started
+# f. the runner's job-started hook (build/kernel-runner-job-started.sh)
+HOOK=$W/build/kernel-runner-job-started.sh
 R=omarchy-asus/omarchy-asus WREF="omarchy-asus/omarchy-asus/.github/workflows/build-pr.yml@refs/pull/1/merge"
 hev=$(mktemp -d)
 printf '{"pull_request":{"head":{"repo":{"full_name":"%s"}}}}\n' "$R" >"$hev/own.json"
 printf '{"pull_request":{"head":{"repo":{"full_name":"someone/omarchy-asus"}}}}\n' >"$hev/fork.json"
 printf '{"pull_request":{"head":{"repo":null}}}\n' >"$hev/deleted.json"
-hook() {  # hook <event> <payload> [VAR=value...]: prints the exit code
+# The hook runs under a fake Runner.Worker that, like the runner with an
+# `if: always()` step, goes on to its next step whatever the hook returned. A
+# refusal must kill that worker so the next step never runs. Each case runs in
+# its own session (setsid), so the hook's fallback can't reach this test.
+cat >"$hev/Runner.Worker" <<'EOF'
+#!/bin/bash
+bash "$HOOK" 2>"$OUT.err"
+echo "next step ran (hook exit $?)" >"$OUT"
+EOF
+chmod +x "$hev/Runner.Worker"
+hook() {  # hook <event> <payload> [VAR=value...]: accepted | refused | refused-but-ran-on
     local ev=$1 pl=$2; shift 2
-    env -i PATH="$PATH" GITHUB_REPOSITORY="$R" GITHUB_JOB=kernel GITHUB_WORKFLOW_REF="$WREF" \
-        GITHUB_EVENT_NAME="$ev" GITHUB_EVENT_PATH="$pl" "$@" bash "$HOOK" >/dev/null 2>&1
-    echo $?
+    rm -f "$hev/out" "$hev/out.err"
+    (env -i PATH="$PATH" HOOK="$HOOK" OUT="$hev/out" GITHUB_REPOSITORY="$R" GITHUB_JOB=kernel \
+        GITHUB_WORKFLOW_REF="$WREF" GITHUB_EVENT_NAME="$ev" GITHUB_EVENT_PATH="$pl" "$@" \
+        setsid -w "$hev/Runner.Worker"; true) >/dev/null 2>&1
+    if [[ -f $hev/out ]] && grep -q 'hook exit 0' "$hev/out"; then echo accepted
+    elif [[ -f $hev/out ]]; then echo refused-but-ran-on
+    else echo refused; fi
 }
-expect "f: own branch's PR: accepted" "$(hook pull_request "$hev/own.json")" 0
-expect "f: dispatch: accepted" "$(hook workflow_dispatch /nonexistent)" 0
-expect "f: fork's PR: refused" "$(hook pull_request "$hev/fork.json")" 1
-expect "f: PR whose head repository is gone: refused" "$(hook pull_request "$hev/deleted.json")" 1
-expect "f: PR without a payload: refused" "$(hook pull_request /nonexistent)" 1
-expect "f: pull_request_target: refused" "$(hook pull_request_target "$hev/own.json")" 1
-expect "f: push: refused" "$(hook push "$hev/own.json")" 1
-expect "f: another job: refused" "$(hook pull_request "$hev/own.json" GITHUB_JOB=build)" 1
-expect "f: another repository: refused" "$(hook workflow_dispatch /nonexistent GITHUB_REPOSITORY=someone/omarchy-asus)" 1
+expect "f: own branch's PR: accepted" "$(hook pull_request "$hev/own.json")" accepted
+expect "f: dispatch: accepted" "$(hook workflow_dispatch /nonexistent)" accepted
+expect "f: fork's PR: refused, and the job's next step never runs" "$(hook pull_request "$hev/fork.json")" refused
+expect "f: PR whose head repository is gone: refused" "$(hook pull_request "$hev/deleted.json")" refused
+expect "f: PR without a payload: refused" "$(hook pull_request /nonexistent)" refused
+expect "f: pull_request_target: refused" "$(hook pull_request_target "$hev/own.json")" refused
+expect "f: push: refused" "$(hook push "$hev/own.json")" refused
+expect "f: another job: refused" "$(hook pull_request "$hev/own.json" GITHUB_JOB=build)" refused
+expect "f: another repository: refused" "$(hook workflow_dispatch /nonexistent GITHUB_REPOSITORY=someone/omarchy-asus)" refused
 expect "f: another workflow: refused" \
-    "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$R/.github/workflows/lint.yml@refs/heads/main")" 1
-expect "f: the refusal says why" \
-    "$(env -i PATH="$PATH" GITHUB_REPOSITORY="$R" GITHUB_JOB=kernel GITHUB_WORKFLOW_REF="$WREF" \
-        GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$hev/fork.json" bash "$HOOK" 2>&1 |
-        grep -c "refused: pull request from 'someone/omarchy-asus'")" 1
+    "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$R/.github/workflows/lint.yml@refs/heads/main")" refused
+hook pull_request "$hev/fork.json" >/dev/null
+expect "f: the refusal says why and that it ends the job" \
+    "$(grep -c -e "refused: pull request from 'someone/omarchy-asus'" -e 'ending the job (Runner.Worker [0-9]*)' "$hev/out.err")" 2
+# Without a Runner.Worker above it, a refusal still stops what would run next.
+rm -f "$hev/out"
+(env -i PATH="$PATH" GITHUB_REPOSITORY=someone/omarchy-asus setsid -w bash -c \
+    'bash "$1" 2>/dev/null; echo ran >"$2"' _ "$HOOK" "$hev/out"; true) >/dev/null 2>&1
+expect "f: no Runner.Worker: fails closed (its process group is killed)" "$([[ -f $hev/out ]] && echo ran || echo stopped)" stopped
+expect "f: the installed hook's name ends in .sh (the runner picks the interpreter by extension)" \
+    "$(grep -c 'ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/omarchy-asus/kernel-runner-job-started\.sh"' "$W/docs/kernel-runner.md")" 1
 rm -rf "$hev"
 
 # e. ci/build-recipe's distcc block, run on its own with pacman and install faked

@@ -11,7 +11,7 @@ It is off unless the repository variable `KERNEL_RUNNER` is set. With it set:
   runner it names; a fork's PR always gets `ubuntu-24.04`, so unreviewed code
   never runs on the build host. A fork's PR runs its own copy of the workflow,
   which could name the runner anyway, so the runner checks this itself before
-  every job (`build/kernel-runner-job-started`, below);
+  every job (`build/kernel-runner-job-started.sh`, below);
 - the job is the same `docker run ... ci/build-recipe` container as on a hosted
   runner, at a lower CPU weight (`--cpu-shares 256`), so a person at the build
   host comes first;
@@ -40,11 +40,15 @@ the distcc key at. What keeps the rest of the build host out of reach:
   the same container as CI. Don't register the runner on a repository whose
   branches you don't control.
 - The runner's job-started hook, a root-owned copy of
-  `build/kernel-runner-job-started` that no workflow can change, fails any job
+  `build/kernel-runner-job-started.sh` that no workflow can change, ends any job
   that isn't build-pr.yml's `kernel` job on this repository, started by a
   `pull_request` from one of its own branches or a `workflow_dispatch`. This
   is what keeps a fork's PR off the runner: its copy of the workflow decides
-  `runs-on`, not ours.
+  `runs-on`, not ours. Failing the hook would not be enough (the runner still
+  runs a step marked `if: always()`), so a refusal kills the job's
+  `Runner.Worker` and no step of that job runs. The runner reports the job
+  failed and waits for the next. The hook's name must end in `.sh`: the runner
+  picks its interpreter by the extension.
 - As a second layer, the repository asks for approval before running any
   outside contributor's workflow (Settings, Actions, "Require approval for all
   external contributors").
@@ -81,8 +85,8 @@ names. Install the job-started hook where the runner can read but not change
 it, and turn on approval for outside contributors' workflows:
 
 ```bash
-install -D -o root -g root -m 755 build/kernel-runner-job-started /usr/local/lib/omarchy-asus/kernel-runner-job-started
-echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/omarchy-asus/kernel-runner-job-started" >> /var/lib/<runner>/actions-runner/.env
+install -D -o root -g root -m 755 build/kernel-runner-job-started.sh /usr/local/lib/omarchy-asus/kernel-runner-job-started.sh
+echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/omarchy-asus/kernel-runner-job-started.sh" >> /var/lib/<runner>/actions-runner/.env
 gh api -X PUT repos/omarchy-asus/omarchy-asus/actions/permissions/fork-pr-contributor-approval -f approval_policy=all_external_contributors
 ```
 
