@@ -347,10 +347,17 @@ preview_repo() {
 # ones whose installed version is the one in the synced [omarchy-asus] database (pacman -Sl
 # marks them [installed]), an older build of ours (our rebuilds of stock packages carry a
 # .N pkgrel), any installed package of ours no other repo has, and REPO_ONLY_PKGS in case
-# the database isn't synced.
+# the database isn't synced. A build of ours that has been withdrawn from the database is
+# found from the installed package itself: one of STOCK_REBUILD_PKGS with a .N pkgrel, or
+# any package whose packager is ours.
+STOCK_REBUILD_PKGS=(linux-omarchy linux-omarchy-headers nvidia-open-dkms hyprland hyprpm omarchy omarchy-settings)
 ours_installed() {
   local pkg
   {
+    pacman -Qi 2>/dev/null | awk -v rebuilds=" ${STOCK_REBUILD_PKGS[*]} " '
+      /^Name +:/ { n = $3 } /^Version +:/ { v = $3 }
+      /^Packager +:/ { p = $0; sub(/^Packager +: */, "", p)
+        if (p == "omarchy-asus" || (index(rebuilds, " " n " ") && v ~ /-[0-9]+\.[0-9]+$/)) print n }' || true
     pacman -Sl 2>/dev/null | awk -v repo="$REPO" '
       $1 == repo { in_ours[$2] = 1
         if ($4 == "[installed]") mine[$2] = 1
@@ -393,32 +400,34 @@ check_target_has_ours() {
     info "linux-omarchy would become Omarchy's stock kernel, without our patches."
   fi
   if ((FORCE)); then
-    warn "switching anyway because of --force: ${missing[*]} will not be our builds afterwards."
+    warn "switching anyway because of --force: ${missing[*]} will not be our builds afterwards,"
+    warn "so the check after the switch fails and it stays pending until the channel has them."
     return 0
   fi
   die "not switched: the $CHANNEL channel ($GH_TAG) does not have ${missing[*]} yet; nothing was changed.
        Wait until it is published there and run this again, or use --force to switch without it."
 }
 
-# After the switch: every package of ours the target channel has must be its build there
-# (pacman -Sl marks it [installed]), linux-omarchy first. A package --force let through
-# because the channel lacks it is only reported.
+# After the switch: every package of ours must be the target channel's build (pacman -Sl
+# marks it [installed]), linux-omarchy first, or the switch fails and stays pending. That
+# includes one --force let through because the channel lacks it: the switch went ahead, but
+# the machine is not on our builds until the channel has it and a rerun installs it.
 check_still_ours() {
-  local pkg lost=() gone=() sl
+  local pkg lost=() sl
   step "Checking that our packages are still ours"
   sl=$(pacman -Sl "$REPO" 2>/dev/null) || sl=''
   for pkg in "${OURS[@]}"; do
     if ! awk -v n="$pkg" '$1 == n { found = 1 } END { exit !found }' "$TMP/repo.list"; then
-      gone+=("$pkg")
+      lost+=("$pkg")
+      info "$pkg  $(installed_version "$pkg") installed; the $CHANNEL channel has no build of it (switched with --force)"
     elif ! awk -v n="$pkg" '$2 == n && $4 == "[installed]" { found = 1 } END { exit !found }' <<<"$sl"; then
       lost+=("$pkg")
       info "$pkg  $(installed_version "$pkg") installed, not the [$REPO] $CHANNEL build"
     fi
   done
-  ((${#gone[@]} == 0)) || warn "not on the $CHANNEL channel, so no longer our builds: ${gone[*]}"
   if ((${#lost[@]})); then
     die "after the switch, ${lost[*]} not the [$REPO] $CHANNEL builds (see above).
-       Run '$SELF --channel $CHANNEL' again: its pacman -Syyuu installs them."
+       Run '$SELF --channel $CHANNEL' again (once the channel has them): its pacman -Syyuu installs them."
   fi
   ok "all ${#OURS[@]} installed packages of ours are the [$REPO] $CHANNEL builds"
 }

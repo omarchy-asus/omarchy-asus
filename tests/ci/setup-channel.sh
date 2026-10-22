@@ -18,10 +18,12 @@
 #      verified switch clears it
 #   j. a package installed from us is not on the target channel (#201): listed in the dry run
 #      before the confirm, and the switch refuses (nothing changed) without --force
-#   k. the same with --force: switches, and warns that it is no longer our build
+#   k. the same with --force: switches, but the check after it fails and it stays pending
 #   l. after the switch a package of ours is another repo's build (the kernel downgraded to
 #      Omarchy's): the switch fails and stays pending; a rerun still checks it (from the pending
 #      record) and passes once it is ours again
+#   m. our kernel was withdrawn from the database the machine is on: still found as ours (a
+#      .N pkgrel), as is a package whose packager is ours, and the switch refuses
 # Usage: tests/ci/setup-channel.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -30,12 +32,13 @@ S=$(realpath "$(mktemp -d)")
 mkdir -p "$S/bin" "$S/home" "$S/dmi"
 echo GA605KM >"$S/dmi/product_name"
 FPR=$(sed -n 's/^FPR=//p' "$W/bin/omarchy-asus-setup")
-# pacman: -Q NAME from $PKG_Q ("name version" lines; none: nothing installed), -Sl [REPO]
-# from $PKG_SL (pacman -Sl lines)
+# pacman: -Q NAME and -Qi from $PKG_Q ("name version [packager]" lines; none: nothing
+# installed), -Sl [REPO] from $PKG_SL (pacman -Sl lines)
 cat >"$S/bin/pacman" <<'STUB'
 #!/bin/bash
 case ${1:-} in
-    -Q) [[ -f ${PKG_Q:-} ]] && awk -v n="${2:-}" '$1 == n { print; f = 1 } END { exit !f }' "$PKG_Q" ;;
+    -Q) [[ -f ${PKG_Q:-} ]] && awk -v n="${2:-}" '$1 == n { print $1, $2; f = 1 } END { exit !f }' "$PKG_Q" ;;
+    -Qi) [[ -f ${PKG_Q:-} ]] && awk '{ printf "Name            : %s\nVersion         : %s\nPackager        : %s\n\n", $1, $2, ($3 == "" ? "Unknown Packager" : $3) }' "$PKG_Q"; exit 0 ;;
     -Sl) [[ -f ${PKG_SL:-} ]] && awk -v r="${2:-}" 'r == "" || $1 == r' "$PKG_SL"; exit 0 ;;
     *) exit 0 ;;
 esac
@@ -201,10 +204,14 @@ if [[ -e $S/ocs.log ]]; then r=0; else r=1; fi; expect "$r" 1 "omarchy-channel-s
 
 echo "== k. the same with --force"
 printf '%s\n' 'omarchy-asus hyprland 0.51.1-1.1 [installed]' 'omarchy linux-omarchy 7.2.8-9 [installed: 7.2.8-9.4]' >"$S/sl-after"
-PKG_SL_AFTER=$S/sl-after setup --channel rc; expect $? 0 "exits 0"
+printf 'linux-omarchy 7.2.8-9\nhyprland 0.51.1-1.1\n' >"$S/q-after"
+PKG_Q=$S/q-after PKG_SL_AFTER=$S/sl-after setup --channel rc; r=$?; expect "$((r != 0))" 1 "exits non-zero ($r)"
 grep -qF 'switching anyway because of --force: linux-omarchy' "$S/out"; expect $? 0 "warns about linux-omarchy"
-grep -qF 'no longer our builds: linux-omarchy' "$S/out"; expect $? 0 "and says so after the switch"
+grep -qF 'after the switch, linux-omarchy not the [omarchy-asus] rc builds' "$S/out"; expect $? 0 "the check after the switch fails"
+grep -qF 'all 2 installed packages of ours' "$S/out"; expect $? 1 "and does not say they are all ours"
 expect "$(server "$S/pacman.conf")" 'https://pkgs.omarchy.org/rc/$arch' "[omarchy] on Omarchy rc"
+expect "$(head -n1 "$P" 2>/dev/null)" rc "the switch stays pending"
+rm -f "$P"
 
 echo "== l. the switch replaced our kernel: it fails until the kernel is ours again"
 conf stable; snippet ''; installed; target hyprland 0.51.1-1.1 linux-omarchy 7.2.8-9.4
@@ -223,6 +230,19 @@ printf '%s\n' 'omarchy-asus hyprland 0.51.1-1.1 [installed]' 'omarchy-asus linux
 PKG_SL_AFTER=$S/sl-after setup --channel rc; expect $? 0 "a rerun that installs ours passes"
 grep -qF 'all 2 installed packages of ours are the [omarchy-asus] rc builds' "$S/out"; expect $? 0 "says both are ours"
 if [[ -e $P ]]; then r=0; else r=1; fi; expect "$r" 1 "and clears the pending switch"
+
+echo "== m. our kernel was withdrawn from the current channel's database"
+conf stable; snippet ''; installed; target hyprland 0.51.1-1.1
+printf 'linux-omarchy 7.2.8-9.4\nhyprland 0.51.1-1.1\ng16-extra 1.0-1 omarchy-asus\n' >"$S/q"
+printf '%s\n' 'omarchy-asus hyprland 0.51.1-1.1 [installed]' 'omarchy linux-omarchy 7.2.8-9 [installed: 7.2.8-9.4]' \
+    'omarchy hyprland 0.51.1-1' >"$S/sl"
+before=$(sums)
+noforce --channel rc; r=$?; expect "$((r != 0))" 1 "the switch exits non-zero ($r)"
+grep -qE 'linux-omarchy +7\.2\.8-9\.4 installed, not on the rc channel' "$S/out"; expect $? 0 "lists linux-omarchy (.N pkgrel)"
+grep -qE 'g16-extra +1\.0-1 installed, not on the rc channel' "$S/out"; expect $? 0 "lists a package whose packager is ours"
+grep -qE '^ +hyprland .*not on the rc channel' "$S/out"; expect $? 1 "not hyprland, which rc has"
+expect "$(sums)" "$before" "no file changed"
+if [[ -e $S/ocs.log ]]; then r=0; else r=1; fi; expect "$r" 1 "omarchy-channel-set does not run"
 
 ((fail)) && { echo "FAILED"; cat "$S/out"; exit 1; }
 echo "all passed"
