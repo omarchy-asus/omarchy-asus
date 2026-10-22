@@ -34,7 +34,12 @@ as_root() {
   local why=$1; shift
   printf '%s[sudo]%s %s\n' "$Y" "$N" "$why" >&2
   printf '       %s%s%s\n' "$D" "$*" "$N" >&2
-  sudo "$@"
+  if [[ ${G16_ROOT:-} == pkexec ]]; then
+    # Through polkit: from the user manager, the desktop session's agent asks.
+    systemd-run --user --wait -q -P pkexec --disable-internal-agent "$@"
+  else
+    sudo "$@"
+  fi
 }
 # Root reads that must not prompt mid-test (sudo -v was done up front).
 root_read() { sudo -n "$@" 2>/dev/null; }

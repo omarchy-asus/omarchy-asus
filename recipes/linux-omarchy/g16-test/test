@@ -102,6 +102,7 @@ result() { # status check summary [details...]
 }
 
 sudo_up_front() {
+  [[ ${G16_ROOT:-} == pkexec ]] && { note "root steps go through polkit (G16_ROOT=pkexec): one prompt each"; return; }
   say "Some checks need root: $*."
   note "Asking for the sudo password once; nothing is changed except where a check says so."
   sudo -v || note "no sudo: the checks that need root will report SKIP or FAIL with the reason"
