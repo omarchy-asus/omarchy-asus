@@ -149,6 +149,23 @@ the build step mounts that directory read-only at `/mnt/distcc`, and
 distcc on with the hosts in `hosts`. Without `.env` the job builds with the
 build host's CPUs only. Restart the service after changing `.env`.
 
+A compiler cache of the runner's own makes repeat kernel builds fast: a PR
+that changes a few patches recompiles a few objects, not all ~25,000 (the
+release chroot's warm rebuilds take ~10 minutes against ~1 hour cold). It is
+not the release builds' cache: branch code can write to it, so only CI builds
+read it. The container's builder user writes it, so it is world-writable
+inside the runner's private home:
+
+```bash
+runuser -u <runner> -- install -d -m 1777 /var/lib/<runner>/ccache
+echo "OMARCHY_ASUS_CI_CCACHE=/var/lib/<runner>/ccache" >> /var/lib/<runner>/actions-runner/.env
+```
+
+The build step mounts it at `/mnt/ccache` and `ci/build-recipe` puts ccache
+in front of distcc (15 GB limit). Its files belong to the runner's subuids;
+to empty it, remove them from a container:
+`docker run --rm -v /var/lib/<runner>/ccache:/c <image> sh -c 'rm -rf /c/*'`.
+
 Then turn it on:
 
 ```bash
@@ -157,6 +174,6 @@ gh variable set KERNEL_RUNNER -R omarchy-asus/omarchy-asus --body '["omarchy-asu
 
 Try it with a dispatch: `gh workflow run build-pr.yml --ref <branch> -f recipes=linux-omarchy -f rebuild=true`.
 The kernel job's log says `kernel runner: workflow_dispatch on ... accepted`,
-`distcc: ... mounted read-only` and
+`distcc: ... mounted read-only`, `ccache: ... mounted` and
 `==> distcc: 1 helper(s), <n> slots on top of <m> here`; the helper's
 `journalctl -t distccd` shows the compiles.

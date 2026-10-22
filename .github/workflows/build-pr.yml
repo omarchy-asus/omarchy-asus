@@ -251,10 +251,12 @@ jobs:
             echo; echo '```'; ls -l "$DIR/out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       # No -e/--env, no docker socket: the container holds no credentials
       # (ci/build-recipe header, tests/ci/build-recipe-no-secrets.sh).
-      # On the build host's runner, two more arguments: a lower CPU weight, so
-      # the person at the build host comes first, and, when the runner's
-      # environment names one (OMARCHY_ASUS_CI_DISTCC, docs/kernel-runner.md),
-      # its compile-only distcc key dir, read-only at /mnt/distcc.
+      # On the build host's runner, more arguments: a lower CPU weight, so the
+      # person at the build host comes first, and, when the runner's
+      # environment names them (docs/kernel-runner.md), its compile-only distcc
+      # key dir, read-only at /mnt/distcc (OMARCHY_ASUS_CI_DISTCC), and its own
+      # compiler cache at /mnt/ccache (OMARCHY_ASUS_CI_CCACHE), never the
+      # release builds' cache.
       - name: Build linux-omarchy
         if: steps.prev.outputs.run_id == ''
         env:
@@ -270,6 +272,10 @@ jobs:
             if [[ -n ${OMARCHY_ASUS_CI_DISTCC:-} ]]; then
               host+=(-v "$OMARCHY_ASUS_CI_DISTCC:/mnt/distcc:ro")
               echo "distcc: $OMARCHY_ASUS_CI_DISTCC mounted read-only at /mnt/distcc"
+            fi
+            if [[ -n ${OMARCHY_ASUS_CI_CCACHE:-} ]]; then
+              host+=(-v "$OMARCHY_ASUS_CI_CCACHE:/mnt/ccache")
+              echo "ccache: $OMARCHY_ASUS_CI_CCACHE mounted at /mnt/ccache"
             fi
           fi
           docker run --rm -v "$PWD:/repo:ro" -v "$DIR/out:/out" -v "$DIR/work:/build" "${host[@]}" \

@@ -84,6 +84,27 @@ EOF
     echo "==> distcc: ${#helpers[@]} helper(s), $slots slots on top of $(nproc) here"
 fi
 
+# ccache (the build host's kernel runner only): when the workflow mounts the
+# runner's own cache dir at /mnt/ccache, compiles go through ccache, and on a
+# miss through distcc if that is on (makepkg sets CCACHE_PREFIX=distcc). A kernel
+# PR that changes a few patches then rebuilds a few objects, not all ~25,000.
+# The cache is the runner's, shared only by its CI builds; the release builds
+# keep their own. Its files are the container builder's, so the dir must be
+# writable by it (mode 1777 on the host). zz-zccache.conf loads after
+# zz-distcc.conf and keeps its distcc setting.
+if [[ -d /mnt/ccache ]]; then
+    pacman -S --needed --noconfirm --noprogressbar ccache
+    distcc=!distcc
+    [[ -f /etc/makepkg.conf.d/zz-distcc.conf ]] && distcc=distcc
+    cat >/etc/makepkg.conf.d/zz-zccache.conf <<EOF
+BUILDENV=($distcc color ccache check !sign)
+export CCACHE_DIR=/mnt/ccache
+export CCACHE_MAXSIZE=15G
+EOF
+    echo "==> ccache: /mnt/ccache ($(runuser -u builder -- env CCACHE_DIR=/mnt/ccache ccache --print-stats 2>/dev/null |
+        awk -F'\t' '$1 == "files_in_cache" { print $2 " files" }'))"
+fi
+
 work=$WORK/$name
 rm -rf "$work"; mkdir -p "$work" "$OUT"
 cp -a "$src"/. "$work"/

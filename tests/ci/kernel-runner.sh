@@ -52,8 +52,9 @@ build=$(step 'Build linux-omarchy')
 expect "c: host=() starts empty" "$(grep -c -E '^[[:space:]]*host=\(\)$' <<<"$build")" 1
 expect "c: host gets a CPU weight and the run's container name, nothing else first" \
     "$(grep -c -E '^[[:space:]]*host=\(--cpu-shares [0-9]+ --name "\$CONTAINER"\)$' <<<"$build")" 1
-expect "c: the only other addition is the key dir, read-only at /mnt/distcc" \
-    "$(grep -E 'host\+=' <<<"$build" | grep -c -v -F 'host+=(-v "$OMARCHY_ASUS_CI_DISTCC:/mnt/distcc:ro")')" 0
+expect "c: the only other additions are the key dir, read-only at /mnt/distcc, and the runner's cache" \
+    "$(grep -E 'host\+=' <<<"$build" | grep -v -F 'host+=(-v "$OMARCHY_ASUS_CI_DISTCC:/mnt/distcc:ro")' |
+        grep -c -v -F 'host+=(-v "$OMARCHY_ASUS_CI_CCACHE:/mnt/ccache")')" 0
 expect "c: host is only filled on a self-hosted runner" \
     "$(awk '/RUNNER_KIND == self-hosted/ { s = 1 } /host=\(--cpu|host\+=/ && !s { bad++ } END { print bad + 0 }' <<<"$build")" 0
 
@@ -183,4 +184,27 @@ expect "e: the wrapper is this repo's build/distcc-ssh" \
 expect "e: the key is copied for the builder, mode 600" \
     "$(grep -c "install -o builder -g builder -m 600 $t/mnt/distcc/id_ed25519" "$t/calls")" 1
 expect "e: says how many helpers and slots" "$(grep -c '2 helper(s), 10 slots on top of 4 here' <<<"$out")" 1
+
+# g. ci/build-recipe's ccache block, the same way (after the distcc block above ran)
+printf '#!/bin/sh\nexit 0\n' >"$t/bin/runuser"; chmod +x "$t/bin/runuser"
+cblock() {
+    awk '/^if \[\[ -d \/mnt\/ccache \]\]/ { on = 1 } on { print } on && /^fi$/ { exit }' "$W/ci/build-recipe" |
+        sed -e "s#/mnt/ccache#$t/mnt/ccache#g" -e "s#/etc/makepkg.conf.d#$t/etc/makepkg.conf.d#g"
+}
+expect "g: ci/build-recipe has the ccache block" "$(cblock | grep -c '^fi$')" 1
+run_cblock() { env PATH="$t/bin:$PATH" bash -euo pipefail -c "$(cblock)" 2>&1; }
+cconf=$t/etc/makepkg.conf.d/zz-zccache.conf
+run_cblock >/dev/null
+expect "g: no cache dir: no ccache config" "$([[ -e $cconf ]] && echo 1 || echo 0)" 0
+mkdir -p "$t/mnt/ccache"
+out=$(run_cblock)
+expect "g: with distcc: ccache in front of distcc" "$(grep -c '^BUILDENV=(distcc color ccache check !sign)$' "$cconf")" 1
+expect "g: the cache is the mounted dir" "$(grep -c "^export CCACHE_DIR=$t/mnt/ccache$" "$cconf")" 1
+expect "g: the cache has a size limit" "$(grep -c '^export CCACHE_MAXSIZE=' "$cconf")" 1
+expect "g: says it is on" "$(grep -c '==> ccache:' <<<"$out")" 1
+expect "g: its config loads after the distcc one" \
+    "$(printf '%s\n' zz-zccache.conf zz-ci.conf zz-distcc.conf | LC_ALL=C sort | tail -1)" zz-zccache.conf
+rm "$t/etc/makepkg.conf.d/zz-distcc.conf"
+run_cblock >/dev/null
+expect "g: without distcc: ccache alone" "$(grep -c '^BUILDENV=(!distcc color ccache check !sign)$' "$cconf")" 1
 exit $fails
