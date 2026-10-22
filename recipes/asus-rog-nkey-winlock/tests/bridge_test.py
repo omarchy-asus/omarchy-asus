@@ -243,6 +243,12 @@ class Harness:
                 if "set" in c and c["set"][2] == "CurrentValue" and "/asus_armoury/ppt_" in c["set"][0]
                 or "set" in c and c["set"][0].endswith("nv_dynamic_boost")]
 
+    def group_sets(self):
+        return [c["set"][4:] for c in self.calls() if "set" in c and c["set"][2] == "EnablePptGroup"]
+
+    def refused(self):
+        return [c["refused"] for c in self.calls() if "refused" in c]
+
     def fake(self, msg):
         self.fakes.stdin.write(json.dumps(msg) + "\n")
         self.fakes.stdin.flush()
@@ -499,18 +505,24 @@ class BridgeTest(unittest.TestCase):
     def test_usb_c_limits_turn_on_the_cpu_curve_then_write_ppt(self):
         h = self.harness(conf=CONF + 'PPT_USBC="25 30 40"\n', charge_mode=2)
         h.wait(lambda: len(h.ppt_sets()) == 3, what="USB-C limits")
+        self.assertEqual(h.refused(), [], "asusd applied every write (the G16 saw them refused)")
         self.assertEqual(h.curve_calls(), [[0, "CPU", True]])
+        self.assertEqual(h.group_sets(), [[True, "plugged", 0]])
         self.assertEqual(h.ppt_sets(), [("ppt_pl1_spl", 25), ("ppt_pl2_sppt", 30), ("ppt_pl3_fppt", 40)])
-        calls = [c for c in h.calls() if "call" in c or "set" in c and "/asus_armoury/ppt_" in c["set"][0]]
-        self.assertIn("call", calls[0], "the curve goes on before the limits are written")
-        with open(os.path.join(h.state_dir, "g16-ppt-curves")) as f:
-            self.assertEqual(f.read().strip(), "0")
-        h.power(True)                       # unplugged: curve off, DC defaults back
+        order = [("curve" if "call" in c else c["set"][2]) for c in h.calls()
+                 if "call" in c and c["call"][1] == "xyz.ljones.FanCurves" or "set" in c and c["set"][2] in ("EnablePptGroup", "CurrentValue")
+                 and "/xyz/ljones" in c["set"][0] and "panel_overdrive" not in c["set"][0]]
+        self.assertEqual(order[:3], ["curve", "EnablePptGroup", "CurrentValue"], "curve, group, then limits")
+        state = lambda n: open(os.path.join(h.state_dir, n)).read().strip()
+        self.assertEqual((state("g16-ppt-curves"), state("g16-ppt-groups")), ("0", "ac 0"))
+        h.power(True)                       # unplugged: curve off; the AC group can't be reached on DC
         h.wait(lambda: h.curve_calls()[-1:] == [[0, "CPU", False]], what="curve off")
-        h.wait(lambda: h.ppt_sets()[-4:] == [("ppt_pl1_spl", 35), ("ppt_pl2_sppt", 44), ("ppt_pl3_fppt", 65),
-                                             ("nv_dynamic_boost", 0)], what="DC defaults")
-        with open(os.path.join(h.state_dir, "g16-ppt-curves")) as f:
-            self.assertEqual(f.read().strip(), "")
+        self.assertEqual((state("g16-ppt-curves"), state("g16-ppt-groups")), ("", "ac 0"))
+        self.assertEqual(h.group_sets(), [[True, "plugged", 0]])
+        h.set_charge_mode(1)
+        h.power(False)                      # the OEM barrel: the AC group is current again, so it goes off
+        h.wait(lambda: h.group_sets()[-1:] == [[False, "plugged", 0]], what="group off")
+        self.assertEqual(state("g16-ppt-groups"), "")
 
     def test_no_limit_keys_touch_nothing(self):
         h = self.harness(charge_mode=2)
@@ -542,6 +554,18 @@ class BridgeTest(unittest.TestCase):
         h.wait(lambda: h.curve_calls()[1:] == [[0, "CPU", False], [3, "CPU", True]], what="curve moved to 3")
         with open(os.path.join(h.state_dir, "g16-ppt-curves")) as f:
             self.assertEqual(f.read().strip(), "3")
+
+    def test_a_group_the_user_enabled_is_left_alone(self):
+        h = self.harness(conf=CONF + 'PPT_USBC="25 30 40"\n', charge_mode=1)
+        h.wait(lambda: h.state.get("hasAura"), what="started on the barrel")
+        h.fake({"set": ["/xyz/ljones", "xyz.ljones.Platform", "EnablePptGroup", "b", True]})
+        h.set_charge_mode(2)                # the user's own group is on; USB-C uses it
+        h.power(True)
+        h.power(False)
+        h.wait(lambda: len(h.ppt_sets()) == 3, what="USB-C limits")
+        self.assertEqual(h.group_sets(), [], "it was already on: not touched")
+        self.assertEqual(open(os.path.join(h.state_dir, "g16-ppt-groups")).read().strip() if
+                         os.path.exists(os.path.join(h.state_dir, "g16-ppt-groups")) else "", "")
 
     def test_a_curve_left_on_by_a_crash_is_turned_off(self):
         h = self.harness(on_battery=True, state_files={"g16-ppt-curves": "2\n"})

@@ -45,9 +45,15 @@ The PPT limits only take effect while the CPU custom fan curve is on (BIOS
 307 measured: a limit written in auto fan mode is stored but ignored, and
 applies the moment the curve is enabled). So a source with limits enables
 asusd's stored CPU curve for the current profile and writes the limits,
-clamped to the live firmware range; leaving it disables the curve and writes
-each attribute's default back. The profiles it enabled are kept in
-~/.local/state/omarchy/g16-ppt-curves, so a crash can't leave a curve on. UPower reports both chargers as AC; asus-armoury's charge_mode tells
+clamped to the live firmware range. asusd only applies a PPT write while
+its tuning group for the current (power state, profile) is on, so that is
+turned on first (EnablePptGroup); turning it off makes asusd re-apply the
+profile, which resets the limits. Leaving the source turns the curve off and
+the group off where it's still current. A group left on by an unplug (the
+power state has changed) is turned off the next time it's current; until
+then the curve is off, and the firmware ignores stored limits without it.
+The curves and groups it turned on are kept in ~/.local/state/omarchy
+(g16-ppt-curves, g16-ppt-groups), so a crash can't leave either on. UPower reports both chargers as AC; asus-armoury's charge_mode tells
 them apart (bit 0 barrel, bit 1 USB-C).
 A key that is absent is left alone: with no file nothing is enforced. The
 refresh pin (~/.local/state/omarchy/power-tune-hz, an integer) wins over
@@ -134,6 +140,7 @@ WINLOCK_MODE_CONF = os.path.join(WINLOCK_DROPIN, "mode.conf")
 SEEN_SOURCE = os.path.join(STATE_DIR, "power-tune.source")
 SAVED_BRIGHT = os.path.join(STATE_DIR, "power-tune.bright-ac")
 CURVES_STATE = os.path.join(STATE_DIR, "g16-ppt-curves")
+GROUPS_STATE = os.path.join(STATE_DIR, "g16-ppt-groups")
 # Tests point these at a temp tree; on a real system they are the defaults.
 SYSROOT = env("G16_BRIDGE_SYSROOT", "/sys")
 WINLOCK_PATH = env("G16_BRIDGE_WINLOCK", WINLOCK_BIN)
@@ -771,29 +778,65 @@ class Bridge:
                           GLib.Variant(props["CurrentValue"].get_type_string(), value))
             log(f"{name} -> {value}")
 
+    def read_groups(self):
+        out = []
+        for line in read_text(GROUPS_STATE).splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] in ("ac", "dc") and parts[1].isdigit():
+                out.append((parts[0], int(parts[1])))
+        return out
+
+    def write_groups(self, groups):
+        write_text(GROUPS_STATE, "\n".join(f"{p} {n}" for p, n in sorted(set(groups))))
+
+    def power_state(self):
+        # asusd keys its tuning groups on the AC adapter (USB-C counts).
+        return "dc" if self.on_battery else "ac"
+
+    def set_group(self, on):
+        self.set_prop(self.platform, PLATFORM, "EnablePptGroup", GLib.Variant("b", on))
+
+    def release_groups(self, profile):
+        """Turn off every group we turned on that is current now; the rest wait
+        (their curve is off, so their stored limits do nothing meanwhile)."""
+        keep = []
+        for g in self.read_groups():
+            if g == (self.power_state(), profile):
+                self.set_group(False)
+                log(f"PPT tuning group {g[0]}/{g[1]} off")
+            else:
+                keep.append(g)
+        self.write_groups(keep)
+
     def apply_limits(self, why):
         if not self.platform or not self.fancurves or not self.armoury:
             return
         ppt, boost = self.wanted_limits()
         try:
             stale = self.read_curves()
+            profile = int(self.raw_prop(self.platform, PLATFORM, "PlatformProfile").unpack())
             if ppt is None and boost is None:
-                if self.limits_on or stale:
+                if self.limits_on or stale or self.read_groups():
                     for p in stale:
                         self.set_curve(p, False)
-                    for name in PPT_ATTRS + [BOOST_ATTR]:
-                        self.write_attr(name, 0, default=True)
+                    self.release_groups(profile)
+                    if self.limits_on:
+                        log(f"power limits off ({why})")
                     self.limits_on = False
-                    log(f"power limits off ({why})")
                 return
-            profile = int(self.raw_prop(self.platform, PLATFORM, "PlatformProfile").unpack())
-            # Curve first, limits after: enabling a curve makes asusd re-apply
-            # its own tuning group when that's on, and ours must land last.
+            # Curve first, then the tuning group (asusd applies nothing without
+            # it), then our limits, so ours land last.
             for p in stale:
                 if p != profile:
                     self.set_curve(p, False)
             if profile not in stale:
                 self.set_curve(profile, True)
+            if not bool(self.raw_prop(self.platform, PLATFORM, "EnablePptGroup").unpack()):
+                # Recorded only when we turn it on: a group the user enabled
+                # themselves is theirs, and we never turn it off.
+                self.set_group(True)
+                self.write_groups(self.read_groups() + [(self.power_state(), profile)])
+                log(f"PPT tuning group {self.power_state()}/{profile} on")
             for name, v in zip(PPT_ATTRS, ppt or []):
                 self.write_attr(name, v)
             if boost is not None:
