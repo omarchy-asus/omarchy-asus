@@ -8,6 +8,7 @@ GH_REPO=omarchy-asus/omarchy-asus
 PR=${G16_TEST_PR:-$(gh pr view --json number -q .number 2>/dev/null || true)}
 [[ $PR =~ ^[0-9]+$ ]] || PR=8
 TEMPS_ISSUE=42
+RESUME_ISSUE=185
 WORKFLOW=build-pr.yml
 KIT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RECIPE_DIR=$(cd "$KIT_DIR/.." && pwd)

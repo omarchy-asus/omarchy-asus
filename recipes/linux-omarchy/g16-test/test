@@ -3,6 +3,7 @@
 #
 #   recipes/linux-omarchy/g16-test/test [--hibernate] [--no-suspend] [--yes]
 #   recipes/linux-omarchy/g16-test/test --temps [MIN] [--interval S] [--recovery MIN] [--ab]
+#   recipes/linux-omarchy/g16-test/test --resume-profile [--hibernates N]
 #
 # Default mode: one PASS/FAIL/WARN/SKIP line per check, with evidence:
 #   kernel     uname and package versions
@@ -26,14 +27,22 @@
 # fans, power, clocks and the platform profile every --interval seconds (default
 # 5). --ab repeats the run with the balanced fan table for comparison.
 #
-# Both modes write a report without host or user names to
-# ~/omarchy-asus-g16-test-<kernel>-<date>[-temps].md, show it, and offer to post
-# it on PR #8 (default mode) or issue #42 (--temps).
+# --resume-profile (#185): on battery with the quiet fan table, does the EC keep
+# it across hibernate and s2idle, and does writing the profile again restore it?
+# Each step settles 2 min at idle (fans, Tctl: median of the last 30 s), then
+# runs 60 s of all-core load (peak Tctl, APU power), sampling every second:
+# baseline; hibernate (up to N times, default 3, until the table is lost); write
+# `quiet` again; if still lost, write `balanced` then `quiet`; one s2idle suspend,
+# and the same writes if it lost the table too. Hibernate needs a power-button press.
+#
+# All modes write a report without host or user names to
+# ~/omarchy-asus-g16-test-<kernel>-<date>[-temps|-resume].md, show it, and offer to
+# post it on PR #8 (default mode), issue #42 (--temps) or issue #185 (--resume-profile).
 set -uo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
-MODE=checks HIBERNATE=0 SUSPEND=1 YES=0 TEMPS_MIN=10 INTERVAL=5 RECOVERY=3 AB=0
+MODE=checks HIBERNATE=0 SUSPEND=1 YES=0 TEMPS_MIN=10 INTERVAL=5 RECOVERY=3 AB=0 HIBERNATES=3
 while (($#)); do
   case $1 in
     --temps) MODE=temps; if [[ ${2:-} =~ ^[0-9]+$ ]]; then TEMPS_MIN=$2; shift; fi ;;
@@ -41,15 +50,17 @@ while (($#)); do
     --interval) INTERVAL=${2:?}; shift ;;
     --recovery) RECOVERY=${2:?}; shift ;;
     --ab) AB=1 ;;
+    --resume-profile) MODE=resume ;;
+    --hibernates) HIBERNATES=${2:?}; shift ;;
     --hibernate) HIBERNATE=1 ;;
     --no-suspend) SUSPEND=0 ;;
     --yes | -y) YES=1 ;;
-    -h | --help) sed -n '2,31s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,41s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
 done
-for v in TEMPS_MIN INTERVAL RECOVERY; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || die "$v must be a positive number"; done
+for v in TEMPS_MIN INTERVAL RECOVERY HIBERNATES; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || die "$v must be a positive number"; done
 ((EUID != 0)) || die "run it as your normal user; it uses sudo where it must"
 is_g16 || die "this is not a GA605; the kit is for the ROG Zephyrus G16 GA605 only"
 have python3 || die "python3 is missing"
@@ -681,4 +692,168 @@ run_temps() {
   offer_post "$f" issue "$TEMPS_ISSUE"
 }
 
-if [[ $MODE == temps ]]; then run_temps; else run_checks; fi
+# =================================================================== resume
+asus_profile_dir() {
+  local d n
+  for d in /sys/class/platform-profile/platform-profile-*; do
+    n=''
+    read -r n 2>/dev/null <"$d/name" || true
+    [[ $n == asus-wmi ]] && { printf '%s\n' "$d"; return 0; }
+  done
+  return 1
+}
+
+write_profile() { # value
+  local d
+  d=$(asus_profile_dir) || die "no asus-wmi platform-profile handler"
+  printf '%s\n' "$1" | as_root "write $1 to the asus-wmi platform profile" tee "$d/profile" >/dev/null ||
+    die "writing $1 to $d/profile failed"
+}
+
+# One step: 120 s idle, then 60 s load, sampled every second into $RCSV. Adds a
+# report row and sets PROBE to quiet (table in force), lost or unclear.
+RROWS=() PROBE=''
+probe() { # label
+  local label=$1 t=0 phase start=$SECONDS line tc f1 f2 f3 aw
+  say "[$label] 120 s idle, then 60 s load"
+  while ((t < 180)); do
+    if ((t < 120)); then phase=idle; else phase=load; ((${#LOAD_PIDS[@]})) || start_load 60; fi
+    line=$(sample "$t" "$phase")
+    printf '%s,%s\n' "$label" "$line" >>"$RCSV"
+    IFS=, read -r _ _ tc _ _ f1 f2 f3 aw _ <<<"$line"
+    printf '\r    %4ds %-5s Tctl %5sC  fans %s,%s,%s  apu %sW   ' "$t" "$phase" "$tc" "$f1" "$f2" "$f3" "$aw"
+    on_ac && { stop_load; echo; die "charger connected: the run is no longer on battery"; }
+    t=$((t + 1))
+    ((SECONDS < start + t)) && sleep $((start + t - SECONDS))
+  done
+  stop_load
+  echo
+  line=$(python3 -I - "$RCSV" "$label" <<'PY'
+import csv, statistics as st, sys
+rows = [r for r in csv.DictReader(open(sys.argv[1])) if r["step"] == sys.argv[2]]
+f = lambda r, k: float(r[k]) if r.get(k) not in (None, "") else None
+def col(rs, k): return [v for v in (f(r, k) for r in rs) if v is not None]
+def med(xs): return st.median(xs) if xs else float("nan")
+idle = [r for r in rows if r["phase"] == "idle"][-30:]
+load = [r for r in rows if r["phase"] == "load"]
+fans = [med(col(idle, k)) for k in ("fan1_rpm", "fan2_rpm", "fan3_rpm")]
+tail = load[-30:]
+peak = max(col(load, "tctl_c") or [float("nan")])
+w = med(col(tail, "apu_w")); mhz = med(col(tail, "mhz_avg"))
+if any(x > 0 for x in fans) or w >= 37: v = "lost"
+elif w <= 35: v = "quiet"
+else: v = "unclear"
+cells = [rows[-1]["asus_wmi"] + "/" + rows[-1]["amd_pmf"], "/".join(f"{x:.0f}" for x in fans),
+         f"{med(col(idle, 'tctl_c')):.1f}", f"{peak:.1f}", f"{w:.1f}", f"{mhz:.0f}"]
+print(v, " | ".join(cells))
+PY
+)
+  PROBE=${line%% *}
+  RROWS+=("| $label | ${line#* } | **$PROBE** |")
+  note "$label: $PROBE (asus-wmi/amd-pmf | idle fans | idle Tctl | peak Tctl | APU W | MHz: ${line#* })"
+}
+
+do_hibernate() {
+  local since
+  printf '\n%sHibernate: wait until it is fully off (all lights out), press the power button,\n' "$B"
+  printf 'keep the default Limine entry, unlock. The test carries on by itself.%s\n' "$N"
+  ask "Hibernate now?" || return 1
+  since=$(date '+%Y-%m-%d %H:%M:%S')
+  systemctl hibernate || die "systemctl hibernate refused"
+  until journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'PM: hibernation: hibernation exit'; do sleep 1; done
+  sleep 3
+}
+
+do_suspend() {
+  local s0 f0 i
+  ask "Suspend (s2idle) now for about 30 s? The RTC wakes it; unlock the screen after." || return 1
+  s0=$(cat /sys/power/suspend_stats/success) f0=$(cat /sys/power/suspend_stats/fail)
+  as_root "set an RTC alarm 30 s ahead so the laptop wakes by itself" rtcwake -m no -s 30 >/dev/null || true
+  systemctl suspend || die "systemctl suspend refused"
+  for ((i = 0; i < 300; i++)); do
+    (($(cat /sys/power/suspend_stats/success) > s0 || $(cat /sys/power/suspend_stats/fail) > f0)) && break
+    sleep 1
+  done
+  (($(cat /sys/power/suspend_stats/fail) > f0)) && die "the suspend failed"
+  sleep 3
+}
+
+# After a resume that lost the table: write quiet again; if that is not enough,
+# go through balanced. Sets FIX to same, via-balanced or neither.
+FIX=''
+reassert() { # resume kind
+  write_profile quiet
+  probe "$1, quiet written again"
+  [[ $PROBE == quiet ]] && { FIX=same; return; }
+  write_profile balanced
+  sleep 2
+  write_profile quiet
+  probe "$1, balanced then quiet written"
+  if [[ $PROBE == quiet ]]; then FIX=via-balanced; else FIX=neither; fi
+}
+
+run_resume() {
+  local cap can i n=0 hib='' hfix='' sus='' sfix='' since0 table
+  say "Resume and the quiet fan table (#$RESUME_ISSUE), $KREL"
+  on_ac && die "the charger is connected: #$RESUME_ISSUE is about battery. Unplug it and run again."
+  cap=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1)
+  ((${cap:-0} >= 30)) || die "battery at ${cap:-?}%: charge to at least 30% for this run"
+  [[ $(profile_of asus-wmi) == quiet && $(profile_of amd-pmf) == balanced ]] ||
+    die "the quiet fan table is not active (asus-wmi $(profile_of asus-wmi), amd-pmf $(profile_of amd-pmf)); pick the Balanced power profile on battery, then run again"
+  can=$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanHibernate 2>/dev/null | awk '{print $2}' | tr -d '"')
+  [[ $can == yes ]] || die "logind CanHibernate: ${can:-unknown} (no swap/resume set up?)"
+  HW_K10=$(hwmon_by_name k10temp || true) HW_AMDGPU=$(hwmon_by_name amdgpu || true) HW_ASUS=$(hwmon_by_name asus || true)
+  DGPU=$(dgpu_dir || true)
+  [[ -n $HW_K10 && -n $HW_ASUS ]] || die "no k10temp or asus hwmon"
+  INTERVAL=1
+  since0=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -c 'hibernation exit')
+  note "this boot has $since0 hibernate resume(s) so far; the run takes 25-40 min, mostly idle"
+  sudo_up_front "writing the platform profile and setting an RTC alarm"
+  trap 'stop_load' EXIT
+  trap 'stop_load; exit 130' INT TERM
+  RCSV=$STATE_DIR/resume-$STAMP.csv
+  printf 'step,%s\n' "$sample_header" >"$RCSV"
+  table=$(fan_table)
+
+  probe baseline
+  [[ $PROBE == quiet ]] || note "the baseline is already $PROBE: the table may be lost before any resume"
+
+  for ((i = 1; i <= HIBERNATES; i++)); do
+    do_hibernate || break
+    n=$i
+    probe "after hibernate $i"
+    [[ $PROBE == quiet ]] || { hib=$PROBE; break; }
+  done
+  ((n)) || hib=skipped
+  : "${hib:=kept}"
+  [[ $hib == lost || $hib == unclear ]] && { reassert "hibernate $n"; hfix=$FIX; }
+
+  if do_suspend; then
+    probe "after s2idle"
+    sus=$PROBE
+    [[ $sus == quiet ]] && sus=kept
+    [[ $sus == lost || $sus == unclear ]] && { reassert s2idle; sfix=$FIX; }
+  else
+    sus=skipped
+  fi
+  [[ $(profile_of asus-wmi) == quiet ]] || write_profile quiet
+
+  local f=$HOME/omarchy-asus-g16-test-$KREL-$STAMP-resume.md intro
+  intro="$(header_info)"$'\n'"- Load: $LOAD_KIND, 60 s per step after 120 s idle, sampled every second. Idle columns: medians of the last 30 s idle; APU W and MHz: medians of the last 30 s of load"
+  intro+=$'\n'"- Hibernate resumes this boot before the run: $since0"$'\n\n'"### Result"$'\n\n'
+  intro+="- Hibernate: table **$hib** after $n cycle(s)${hfix:+; writing the profile again: **$hfix**}"$'\n'
+  intro+="- s2idle: table **$sus**${sfix:+; writing the profile again: **$sfix**}"$'\n'
+  intro+="- Verdict per step: quiet = idle fans 0 rpm and at most 35 W under load; lost = idle fans spinning or at least 37 W"$'\n\n'
+  intro+="| Step | asus-wmi/amd-pmf | Idle fans rpm | Idle Tctl C | Peak Tctl C | APU W | MHz | Verdict |"$'\n'"|---|---|---|---|---|---|---|---|"$'\n'
+  intro+=$(printf '%s\n' "${RROWS[@]}")
+  intro+=$'\n\n'"Fan curves reported by asus-wmi at the start:"$'\n\n```\n'"$table"$'\n```\n'
+  write_report "$f" "Quiet fan table across hibernate and s2idle (#$RESUME_ISSUE)" "$intro"
+  note "raw samples: ${RCSV/#$HOME/\~}"
+  offer_post "$f" issue "$RESUME_ISSUE"
+}
+
+case $MODE in
+  temps) run_temps ;;
+  resume) run_resume ;;
+  *) run_checks ;;
+esac
