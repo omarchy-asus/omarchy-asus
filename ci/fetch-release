@@ -1,12 +1,15 @@
 #!/bin/bash
-# Download the currently published build of a package from the x86_64 release
-# and verify it with keys/omarchy-asus.asc: first the signed repo database
-# (which names the file), then the package's own detached signature.
-# Usage: ci/fetch-release <pkgname> <dest dir>    prints the package path
+# Download the currently published build of a package from a release channel's
+# release (x86_64 for quattro, the default; rc-x86_64 for --channel rc) and verify
+# it with keys/omarchy-asus.asc: first the signed repo database (which names the
+# file), then the package's own detached signature.
+# Usage: ci/fetch-release [--channel quattro|rc] <pkgname> <dest dir>    prints the package path
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-pkg=${1:?usage: ci/fetch-release <pkgname> <dest dir>} dest=${2:?}
-RELEASE=${RELEASE:-https://github.com/omarchy-asus/omarchy-asus/releases/download/x86_64}
+channel=quattro
+if [[ ${1:-} == --channel ]]; then channel=${2:?--channel needs quattro or rc}; shift 2; fi
+pkg=${1:?usage: ci/fetch-release [--channel quattro|rc] <pkgname> <dest dir>} dest=${2:?}
+RELEASE=${RELEASE:-https://github.com/omarchy-asus/omarchy-asus/releases/download/$("$repo/ci/channel" --tag "$channel")}
 DB=omarchy-asus.db
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT

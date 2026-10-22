@@ -298,7 +298,7 @@ check "unit backup" [ -f "$U/g16-winlock.service.before-omarchy-asus" ]
 check "drop-in backup has override.conf" [ -f "$U/g16-winlock.service.d.before-omarchy-asus/override.conf" ]
 check "override.conf not put back" [ ! -e "$U/g16-winlock.service.d/override.conf" ]
 check "g16ctl's mode.conf put back unchanged" cmp -s "$C/mode.conf" "$U/g16-winlock.service.d/mode.conf"
-check "says the G16 Control mode was kept" grep -qF 'kept the Win-lock mode set in G16 Control' "$OUT"
+check "says the G16 Control mode was kept" grep -qF 'kept the Win-lock mode set in the omarchy-asus plugin' "$OUT"
 
 echo "== 13. a hand-made drop-in older than the unit an older run moved is retired"
 setup_case c13
@@ -329,7 +329,7 @@ check "disable ran before the move" grep -qx 'unit-present-at-disable=yes' "$LOG
 check "drop-in backup has override.conf" [ -f "$U/g16-winlock.service.d.before-omarchy-asus/override.conf" ]
 check "override.conf not put back" [ ! -e "$U/g16-winlock.service.d/override.conf" ]
 check "g16ctl's mode.conf put back unchanged" cmp -s "$C/mode.conf" "$U/g16-winlock.service.d/mode.conf"
-check "says the G16 Control mode was kept" grep -qF 'kept the Win-lock mode set in G16 Control' "$OUT"
+check "says the G16 Control mode was kept" grep -qF 'kept the Win-lock mode set in the omarchy-asus plugin' "$OUT"
 check "undo for the unit names the XDG_CONFIG_HOME path" grep -qF \
     "undo: mv $U/g16-winlock.service.before-omarchy-asus $U/g16-winlock.service" "$OUT"
 check "nothing written under ~/.config/systemd/user" none "$H/.config/systemd/user"/*

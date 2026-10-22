@@ -283,10 +283,14 @@ jobs:
           pattern: pkgs-nvidia-open-dkms-*
           merge-multiple: true
           path: pkgs
+      # Against the channel the PR targets: its package sources, and its release
+      # for the side this run did not build.
       - name: dkms build nvidia against linux-omarchy-headers
+        env:
+          CHANNEL: ${{ needs.changes.outputs.channel }}
         run: |
           mkdir -p pkgs && ls -l pkgs
-          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/pkgs:/pkgs:ro" "$BUILDER_IMAGE" /repo/ci/nvidia-compat /pkgs
+          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/pkgs:/pkgs:ro" "$BUILDER_IMAGE" /repo/ci/nvidia-compat --channel "$CHANNEL" /pkgs
 
   # One stable check name for branch protection, as in omarchy-pkgs.
   result:

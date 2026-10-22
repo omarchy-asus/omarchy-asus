@@ -6,12 +6,20 @@
 # of the channel it will be published to.
 # Usage: ci/channel <branch>          prints quattro|rc
 #        ci/channel --conf <channel>  prints the channel's pacman.conf path (repo-relative)
+#        ci/channel --tag <channel>   prints the channel's release tag (x86_64, rc-x86_64)
 set -euo pipefail
-case ${1:?usage: ci/channel <branch> | --conf <channel>} in
+case ${1:?usage: ci/channel <branch> | --conf <channel> | --tag <channel>} in
     --conf)
         case ${2:?usage: ci/channel --conf <channel>} in
             quattro) echo build/pacman.conf ;;
             rc) echo build/pacman-rc.conf ;;
+            *) echo "ci/channel: unknown channel '$2' (quattro, rc)" >&2; exit 1 ;;
+        esac
+        ;;
+    --tag)
+        case ${2:?usage: ci/channel --tag <channel>} in
+            quattro) echo x86_64 ;;
+            rc) echo rc-x86_64 ;;
             *) echo "ci/channel: unknown channel '$2' (quattro, rc)" >&2; exit 1 ;;
         esac
         ;;

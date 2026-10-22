@@ -1,9 +1,14 @@
 # omarchy-asus auto-update service
 
-A daily systemd timer keeps the omarchy-asus repo current with upstream:
+A daily systemd timer keeps the omarchy-asus repo current with upstream, on both release
+channels (see "Release channels" below):
 
-- Arch packages come through the Omarchy stable mirror.
-- `linux-omarchy` comes from `[omarchy]`.
+- **Quattro**: `main`, built against Omarchy stable, published to the `x86_64` release.
+- **RC**: `next/omarchy-4.5`, built against Omarchy rc in its own chroot, published to the
+  `rc-x86_64` release.
+
+On each channel, Arch packages come through that channel's Omarchy mirror, and `linux-omarchy`
+comes from its `[omarchy]`.
 
 When upstream moves past a package's base version, the service has two outcomes:
 
@@ -33,7 +38,8 @@ Falling back to stock is always better than a stale pin.
 
 ```
 timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
-  └─ auto-update (root, root-owned copy)
+  └─ auto-update (root, root-owned copy): one run per channel in SERVE_CHANNELS, Quattro first
+       (below for Quattro; the RC run is the same on its own branch, state and release)
        ├─ as BUILD_USER: refresh the bot clone ($DATA/auto-update/checkout) of omarchy-asus/omarchy-asus main
        ├─ as BUILD_USER: bin/check-upstream --json
        │     rebuild-needed / not-built / repo-stale / dep-mismatch / local / merged upstream PRs
@@ -61,6 +67,51 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
             attention  listed in the status, no automatic change (e.g. upstream merged one of
                        our patches' PRs: flagged, never dropped automatically)
 ```
+
+### Release channels
+
+The service serves every channel in `SERVE_CHANNELS` (in `auto-update.conf`; default
+`"quattro rc"`), one after the other. Each channel gets its own `bin/auto-update --channel <c>`
+run: its own bot clone, lock, log, status and journals, so a failure on one channel never
+stops or rolls back the other. The unit fails when either run fails.
+
+| | Quattro | RC |
+|---|---|---|
+| base branch, bot clone of | `main` | `next/omarchy-4.5` |
+| upstream dbs (`bin/check-upstream`) | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` |
+| chroot | `/var/lib/omarchy-asus/chroot` (`build/pacman.conf`) | `/var/lib/omarchy-asus/chroot-rc` (`build/pacman-rc.conf`) |
+| stage dir, local repo | `stage`, `repo/x86_64` | `stage-rc`, `repo/rc-x86_64` |
+| release | `x86_64` | `rc-x86_64` |
+| rebase PR branches | `auto-update/<r>` into `main` | `auto-update-rc/<r>` into `next/omarchy-4.5` |
+| state (bot clone, runs, status, lock, journals) | data dir, as before | `channel-rc/` of the data dir |
+| log | `logs/auto-update-<run>.log` | `logs/auto-update-rc-<run>.log` |
+
+The RC run has every gate the Quattro run has, unchanged: holds (`recipes/<r>/HOLD` on
+`next/omarchy-4.5`), so an untested kernel stays staged until it has booted on a G16;
+signing and signature checks; checksums; the personal-information scan of the release and of
+everything pushed or posted; release cohorts; the reverse-dependency checks; and the merge gates
+below, with `bin/ai-review` (Codex) as the review gate of its unattended rebase PRs.
+
+What differs for RC:
+
+- **The pipeline comes from `main`.** Root runs one set of scripts, installed from `main`. The
+  RC run's drift guard compares them with `bin/` and `build/` of `main`, not of
+  `next/omarchy-4.5`, so the RC branch's own copy of `bin/` never stops (or runs) anything.
+- **The RC chroot is the service's to make.** Before the first build (or kernel withdrawal) that
+  needs it, the RC run checks that `/var/lib/omarchy-asus/chroot-rc` exists and uses the servers
+  of the installed `build/pacman-rc.conf`; otherwise it runs `bin/mkchroot --channel rc` (as
+  root, from the root-owned copy). If that fails, the run records a `(chroot)` failure, the
+  RC builds fail and their stale packages are withdrawn, as for any failed build. The Quattro
+  chroot is still made by hand (Install, below).
+- **The first RC publish creates the `rc-x86_64` release** (`bin/sync-release --channel rc`, with
+  `build/release-notes-rc.md`). Until then, every recipe on `next/omarchy-4.5` is "not built"
+  on RC, so the first RC run builds and publishes all of them, kernel included, unless a recipe
+  is held there.
+- `BASE_BRANCH` in the config applies to Quattro only. `SKIP_RECIPES`, `KEEP_PUBLISHED`,
+  `MERGE_MODE`, the ai-review settings and the rest apply to both channels.
+
+`SERVE_CHANNELS=quattro` runs exactly the Quattro-only service, in one process at the paths
+above. `bin/auto-update --channel rc --plan` (or `--dry-run`) tries the RC run as you.
 
 ### Reverse-dependency CI
 
@@ -161,7 +212,7 @@ Rebasing each recipe onto its current base reproduces the committed recipe. The 
 
 `makechrootpkg` needs root. Nothing else does. The design keeps the two apart:
 
-- **The code that runs as root is a root-owned copy.** `bin/install-auto-update --apply` copies the scripts to `/usr/local/lib/omarchy-asus/bin`, owned by root and not writable by group or others. `auto-update` refuses to run as root from anywhere else, so it never runs the user-writable workspace or the bot clone. Changes to `bin/` reach the service only when the user re-runs the installer after review. `bin/install-auto-update --apply` records the source commit and the sha256 of every installed script in `/usr/local/lib/omarchy-asus/installed`. Each run, right after refreshing the bot clone and before any retry, unpublish, publish or sync, compares the installed scripts (and the stamp) with `bin/` of the clone at `BASE_BRANCH`. On any difference (a changed or new script, an installed file changed since install, or no stamp) it records a `(pipeline)` attention entry that names the fix (review the branch, then `sudo bin/install-auto-update --apply`), does nothing else and exits 1. A stale copy once unpublished omarchy because its check-upstream predated release cohorts (#127). The entry clears on the first run after the reinstall.
+- **The code that runs as root is a root-owned copy.** `bin/install-auto-update --apply` copies the scripts to `/usr/local/lib/omarchy-asus/bin`, owned by root and not writable by group or others, and the chroots' `build/pacman.conf` and `build/pacman-rc.conf` to `/usr/local/lib/omarchy-asus/build` (root reads them: `bin/build-pkg` refuses a chroot on other servers, and `bin/mkchroot` makes the RC chroot from them). `auto-update` refuses to run as root from anywhere else, so it never runs the user-writable workspace or the bot clone. Changes to `bin/` reach the service only when the user re-runs the installer after review. `bin/install-auto-update --apply` records the source commit and the sha256 of every installed script and build file in `/usr/local/lib/omarchy-asus/installed`. Each run, right after refreshing the bot clone and before any retry, unpublish, publish or sync, compares the installed scripts and build files (and the stamp) with `bin/` and `build/` of `main` (the Quattro clone at `BASE_BRANCH`; the RC run exports them from `main` into its run dir). On any difference (a changed or new script, an installed file changed since install, or no stamp) it records a `(pipeline)` attention entry that names the fix (review the branch, then `sudo bin/install-auto-update --apply`), does nothing else and exits 1. A stale copy once unpublished omarchy because its check-upstream predated release cohorts (#127). The entry clears on the first run after the reinstall.
 - **The config is root-owned too.** `/etc/omarchy-asus/auto-update.conf` must be `root:root` and not group/world-writable, or the run refuses to start. It names `BUILD_USER` and holds no secrets.
 - **Every step except the chroot build runs as `BUILD_USER`** through `runuser -u BUILD_USER -- env -i ...`, with a fixed environment. That covers git, fetching upstream, rebase (its recipe code runs in the sandbox below), gpg signing, `repo-add`, `gh`, `bin/ai-review` (codex and the verifier, on the user's own logins) and the agent. The signing key, the local repo, the bot clone, logs and status stay in `~BUILD_USER/.local/share/omarchy-asus`, and root never writes there:
   - the log is written by a user-side `tee`
@@ -190,7 +241,7 @@ Throttling is the main external constraint, so every GitHub call is bounded:
 - **Publish and unpublish are staged.** They build the new repo next to the current one and check every signature before they swap it in. If a step fails, the previous repo stays in place as it was.
 - **A journal marks a release that may lag.** `bin/publish` and `bin/unpublish` write `sync-pending` in the data dir before they change the local repo. `bin/sync-release` removes it only after it has checked that the release matches the local repo. While it exists, `auto-update` syncs first on its next run and reports the run as failed, so a crash between publish and sync is retried.
 - **One publisher per release.** `bin/sync-release` records the release db it last uploaded in `release-db.sha256` in the data dir (each db is recorded before its upload, so a sync that dies mid-upload is not taken for another publisher). If the release's db has changed since then (another host or a manual upload), it refuses to sync. After checking the release by hand, `SYNC_ADOPT_REMOTE=1 bin/sync-release` adopts it. `auto-update` never sets this.
-- **Each release channel has its own state.** The data-dir files above (`sync-pending`, `release-db.sha256`, `prune-candidates`) are the Quattro channel's; `--channel rc` keeps its own in `channel-rc/` of the data dir, next to its own local repo (`repo/rc-x86_64`) and stage dir (`stage-rc`). The lock is shared. `auto-update` serves the Quattro channel only and refuses another.
+- **Each release channel has its own state.** The data-dir files above (`sync-pending`, `release-db.sha256`, `prune-candidates`) are the Quattro channel's; `--channel rc` keeps its own in `channel-rc/` of the data dir, next to its own local repo (`repo/rc-x86_64`) and stage dir (`stage-rc`). The publication lock is shared. `auto-update` serves both channels, one run each ("Release channels" above), and the RC run's own status, journals and pending removals are in `channel-rc/` too.
 - **The PII scan fails closed.** An archive that the scan cannot read counts as a hit, and nothing is uploaded.
 - **Superseded assets are kept for a while.** Release assets that the new db no longer lists are deleted only after `PRUNE_GRACE_HOURS` (default 72 h), so a client that still has the previous db can download what it lists.
 - **Upstream recipe fetches:** Arch's GitLab (not GitHub). omarchy-pkgs is a blobless clone with one fetch, run only when the kernel needs a rebase.
@@ -199,7 +250,8 @@ Throttling is the main external constraint, so every GitHub call is bounded:
 
 Prerequisites:
 
-1. The build chroot: `bin/mkchroot` (once, with sudo).
+1. The Quattro build chroot: `bin/mkchroot` (once, with sudo). The RC chroot needs nothing:
+   the service makes it (`bin/mkchroot --channel rc`) before its first RC build.
 2. The signing key in `~/.local/share/omarchy-asus` (as today).
 3. `gh` access for the user (see `GH_TOKEN_FILE`).
 4. `codex` logged in with ChatGPT (`codex login`) for `bin/ai-review`, and `claude` for its verifier and the agent step.
@@ -215,8 +267,14 @@ journalctl -fu omarchy-asus-auto-update
 sudo systemctl enable --now omarchy-asus-auto-update.timer
 ```
 
-Re-run `sudo bin/install-auto-update --apply` after every merge that touches `bin/`. Until
-then the service stops with `(pipeline)` attention and publishes or unpublishes nothing.
+Re-run `sudo bin/install-auto-update --apply` after every merge that touches `bin/` (or the
+installed `build/pacman*.conf`). Until then the service stops with `(pipeline)` attention and
+publishes or unpublishes nothing.
+
+**After merging the RC channel support** (the PR that made the timer serve RC), that is the one
+thing to do: review `main`, then `sudo bin/install-auto-update --apply` from that checkout. The
+config is kept, and its default `SERVE_CHANNELS` serves RC too; the next timer run makes the RC
+chroot, builds `next/omarchy-4.5`, creates the `rc-x86_64` release and publishes to it.
 
 Try it without root first:
 
@@ -225,7 +283,7 @@ Try it without root first:
 
 Both run as you.
 
-Status: `~/.local/share/omarchy-asus/status.md` (human) and `status.json` (machine). Logs are in `logs/auto-update-*.log`. A failed run shows in `systemctl --failed`.
+Status: `~/.local/share/omarchy-asus/status.md` (human) and `status.json` (machine); the RC channel's are in `channel-rc/` of that dir. Logs are in `logs/auto-update-*.log` (`auto-update-rc-*.log` for RC). A failed run shows in `systemctl --failed`.
 
 ## Uninstall
 
@@ -233,7 +291,7 @@ Status: `~/.local/share/omarchy-asus/status.md` (human) and `status.json` (machi
 sudo bin/install-auto-update --uninstall --apply
 ```
 
-This stops and disables the timer, removes the units and `/usr/local/lib/omarchy-asus`. It keeps the config, the chroot and the user's state.
+This stops and disables the timer, removes the units and `/usr/local/lib/omarchy-asus`. It keeps the config, the chroots and the user's state.
 
 ## ai-review
 

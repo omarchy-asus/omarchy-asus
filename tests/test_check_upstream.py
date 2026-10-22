@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Offline tests for bin/check-upstream's db freshness handling and release-cohort
-dependency resolution (no network, no makepkg/vercmp).
+"""Offline tests for bin/check-upstream's db freshness handling, release-cohort
+dependency resolution and release channels (no network, no makepkg/vercmp).
 
   python3 -I tests/test_check_upstream.py
 """
@@ -224,6 +224,58 @@ class ResolveDep(unittest.TestCase):
 
     def test_dep_missing_everywhere_is_none(self):
         self.assertIsNone(mod.resolve_dep("foo", "1-1", "bar", [], [("extra", {})], {}))
+
+
+def conf_servers(path):
+    """[(repo, server)] of [omarchy]/[core]/[extra]/[multilib] in a pacman.conf, with $repo
+    and $arch filled in (the db URL is <server>/<repo>.db)."""
+    out, section = [], None
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("["):
+                section = line.strip("[]")
+            elif section in ("omarchy", "core", "extra", "multilib") and line.startswith("Server"):
+                server = line.split("=", 1)[1].strip().replace("$repo", section).replace("$arch", "x86_64")
+                out.append((section, f"{server}/{section}.db"))
+    return out
+
+
+class Channels(unittest.TestCase):
+    """The upstream dbs of each release channel are its chroot's package sources, and
+    env.sh's channel picks them, with that channel's local repo."""
+
+    def test_dbs_match_the_channel_pacman_conf(self):
+        for channel, conf in (("quattro", "pacman.conf"), ("rc", "pacman-rc.conf")):
+            with self.subTest(channel=channel):
+                dbs, _ = mod.CHANNEL_DBS[channel]
+                self.assertEqual(dbs, conf_servers(os.path.join(HERE, "..", "build", conf)))
+
+    def test_quattro_cache_is_unprefixed(self):
+        # the quattro channel keeps reading and writing the cache files it always had
+        self.assertEqual(mod.CHANNEL_DBS["quattro"], (mod.UPSTREAM_DBS, ""))
+        self.assertNotEqual(mod.CHANNEL_DBS["rc"][1], "")
+
+    def test_env_picks_the_channel(self):
+        old = os.environ.get("OMARCHY_ASUS_CHANNEL"), os.environ.get("OMARCHY_ASUS_DATA")
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["OMARCHY_ASUS_DATA"] = d
+            try:
+                for channel, repo in (("quattro", "x86_64"), ("rc", "rc-x86_64"), (None, "x86_64")):
+                    with self.subTest(channel=channel):
+                        if channel:
+                            os.environ["OMARCHY_ASUS_CHANNEL"] = channel
+                        else:
+                            os.environ.pop("OMARCHY_ASUS_CHANNEL", None)
+                        data, repo_dir, name, got = mod.env_from_sh()
+                        self.assertEqual((data, repo_dir, name, got),
+                                         (d, os.path.join(d, "repo", repo), "omarchy-asus", channel or "quattro"))
+            finally:
+                for k, v in zip(("OMARCHY_ASUS_CHANNEL", "OMARCHY_ASUS_DATA"), old):
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
 
 
 if __name__ == "__main__":
