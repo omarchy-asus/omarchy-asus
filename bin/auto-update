@@ -1042,19 +1042,20 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
 ensure_chroot() {  # ensure_chroot: 0 when this channel's build chroot exists on its package sources
     # (bin/env.sh channel_conf_ok against the installed build/<pacman conf>); otherwise runs
     # bin/mkchroot for the channel (create, or update with the channel's pacman.conf) first.
+    # A chroot without our packager (bin/env.sh chroot_packager_ok) is updated too.
     # Only the RC run calls it: the quattro chroot is made by hand (systemd/README.md, Install).
     local rc=0 log=$RUN/mkchroot.log
-    if [[ -d $CHROOT/root ]] && channel_conf_ok "$CHROOT/root/etc/pacman.conf"; then
+    if [[ -d $CHROOT/root ]] && channel_conf_ok "$CHROOT/root/etc/pacman.conf" && chroot_packager_ok "$CHROOT/root"; then
         as_user "$LIB/auto-update-state" forget "$STATUS" "(chroot)" || true
         return 0
     fi
-    note chroot "the $CHANNEL build chroot $CHROOT is missing or not on ${PACMAN_CONF##*/}: running bin/mkchroot --channel $CHANNEL"
+    note chroot "the $CHANNEL build chroot $CHROOT is missing, not on ${PACMAN_CONF##*/} or has no packager: running bin/mkchroot --channel $CHANNEL"
     if [[ $EUID -eq 0 ]]; then
         "$LIB/mkchroot" --channel "$CHANNEL" 2>&1 | as_user tee "$log" >/dev/null || rc=$?
     else
         as_user "$LIB/mkchroot" --channel "$CHANNEL" 2>&1 | as_user tee "$log" >/dev/null || rc=$?
     fi
-    if ((rc == 0)) && [[ -d $CHROOT/root ]] && channel_conf_ok "$CHROOT/root/etc/pacman.conf"; then
+    if ((rc == 0)) && [[ -d $CHROOT/root ]] && channel_conf_ok "$CHROOT/root/etc/pacman.conf" && chroot_packager_ok "$CHROOT/root"; then
         note chroot "$CHANNEL build chroot ready"
         as_user "$LIB/auto-update-state" forget "$STATUS" "(chroot)" || true
         return 0

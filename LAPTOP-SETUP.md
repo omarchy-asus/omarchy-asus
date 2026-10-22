@@ -188,11 +188,16 @@ bash omarchy-asus-setup --channel rc        # [omarchy] to Omarchy rc, [omarchy-
 bash omarchy-asus-setup --channel quattro   # both back; pacman -Syyuu downgrades to the Quattro versions
 ```
 
-It checks that the target release's signed database exists, takes a snapshot (`--force` goes on
+It checks that the target release's signed database exists and has every package this machine
+has from `[omarchy-asus]`: one it lacks is listed (in `--dry-run` too) and the switch stops before
+it asks, since `pacman -Syyuu` would replace it with another repo's build (linux-omarchy with
+Omarchy's stock kernel). `--force` switches anyway. It then takes a snapshot (`--force` goes on
 without one), rewrites the `[omarchy-asus]` server in `/etc/pacman.d/custom-repos.conf`, then runs
 Omarchy's own `omarchy-channel-set` (it rewrites `/etc/pacman.conf` and the mirrorlist, the hook
 from section 3 puts the Include line back, runs `pacman -Syyuu` and the migrations). `--dry-run`
-prints the steps. If the upgrade or a migration fails, the switch stays marked unfinished
+prints the steps. Afterwards each of those packages, linux-omarchy first, must be the
+`[omarchy-asus]` build of the new channel; if one isn't, the switch fails. If that check, the
+upgrade or a migration fails, the switch stays marked unfinished
 (`~/.local/state/omarchy-asus/channel-switch-pending`): fix the error and run the same command
 again, and it runs the switch again instead of reporting it done.
 
