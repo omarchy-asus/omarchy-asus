@@ -232,6 +232,11 @@ class Harness:
         with open(os.path.join(self.backlight, "brightness")) as f:
             return int(f.read())
 
+    def adapter(self, online):
+        # Only the AC adapter device: a weak adapter dropping out and back.
+        self.fake({"set": ["/org/freedesktop/UPower/devices/line_power_ACAD",
+                           "org.freedesktop.UPower.Device", "Online", "b", online]})
+
     def power(self, on_battery):
         self.fake({"set": ["/org/freedesktop/UPower", "org.freedesktop.UPower", "OnBattery", "b", on_battery]})
 
@@ -405,7 +410,7 @@ class BridgeTest(unittest.TestCase):
         self.assertTrue(h.send("winlock-mode", "unlock")["ok"])
         dropin = os.path.join(h.home, ".config", "systemd", "user", "g16-winlock.service.d", "mode.conf")
         self.assertEqual(open(dropin).read(), "[Service]\nEnvironment=G16_WINLOCK_MODE=unlock\n")
-        methods = [c["call"][2] for c in h.calls() if "call" in c]
+        methods = [c["call"][2] for c in h.calls() if "call" in c and c["call"][1].startswith("org.freedesktop.systemd1")]
         self.assertEqual([m for m in methods if m != "GetUnit"], ["Reload", "EnableUnitFiles", "RestartUnit"])
         self.assertEqual(h.state["winlockMode"], "unlock")
         self.assertFalse(h.send("winlock-mode", "off")["ok"])
@@ -546,6 +551,23 @@ class BridgeTest(unittest.TestCase):
                                         ("nv_dynamic_boost", 5)])
         self.assertEqual(h.curve_calls(), [[0, "CPU", True]])
         self.assertEqual(h.state["kbdBrightness"], 2, "a weak barrel keeps the AC settings")
+
+    def test_a_flapping_adapter_is_weak_while_on_battery_stays_false(self):
+        # The G16's SlimQ: ACAD dropped out 9 times in 46 s, OnBattery never moved.
+        h = self.harness(conf=CONF + 'PPT_WEAK_BARREL="45 55 65"\nBOOST_WEAK_BARREL=5\nBRIGHT_BATTERY=30\n',
+                         charge_mode=1, bright=80)
+        h.wait(lambda: h.state.get("source") == "ac" and h.hypr.hz == 240, what="barrel")
+        evals = len(h.hypr.evals)
+        for _ in range(3):
+            h.adapter(False)
+            h.adapter(True)
+        h.wait(lambda: h.state.get("source") == "weak", what="weak barrel")
+        self.assertFalse(h.state["onBattery"])
+        h.wait(lambda: len(h.ppt_sets()) == 4, what="weak-barrel limits")
+        self.assertEqual(h.ppt_sets(), [("ppt_pl1_spl", 45), ("ppt_pl2_sppt", 55), ("ppt_pl3_fppt", 65),
+                                        ("nv_dynamic_boost", 5)])
+        self.assertEqual(len(h.hypr.evals), evals, "no refresh-rate flips")
+        self.assertEqual(h.brightness(), 80, "a weak barrel keeps the AC settings: not dimmed")
 
     def test_profile_change_moves_the_curve(self):
         h = self.harness(conf=CONF + 'PPT_USBC="25 30 40"\n', charge_mode=2)

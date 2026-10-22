@@ -36,7 +36,8 @@ Per power source (what omarchy-power-tune used to do, folded in here), from
   BOOST_AC / BOOST_USBC / BOOST_WEAK_BARREL
                                         NVIDIA Dynamic Boost (W) for that source
 A USB-C charger counts as battery: barrel = full power, USB-C and battery
-save. A barrel that drops out 3 or more times in 30 s is a weak barrel (a
+save. A barrel that drops out 3 or more times in 30 s (counted on UPower's
+line-power device: a flapping adapter doesn't flip OnBattery) is a weak barrel (a
 third-party adapter that can't carry the load): it keeps the AC settings and
 gets the PPT_WEAK_BARREL limits until it's unplugged for good. Power-source
 changes apply once the source has been stable for 1.5 s.
@@ -91,6 +92,8 @@ ASUSD = "xyz.ljones.Asusd"
 AURA = "xyz.ljones.Aura"
 SLASH = "xyz.ljones.Slash"
 UPOWER = "org.freedesktop.UPower"
+UPOWER_DEVICE = "org.freedesktop.UPower.Device"
+LINE_POWER = 1  # UPower device type
 PROPS = "org.freedesktop.DBus.Properties"
 SYSTEMD = "org.freedesktop.systemd1"
 LEVELS = ["off", "low", "med", "high"]
@@ -395,6 +398,7 @@ class Bridge:
         self.platform = None      # path of xyz.ljones.Platform
         self.fancurves = None     # path of xyz.ljones.FanCurves
         self.limits_on = False
+        self.line_power = []      # UPower line-power device paths
         self.conf = read_conf()
         self.aura = None      # object path
         self.slash = None
@@ -594,8 +598,13 @@ class Bridge:
         if path == "/org/freedesktop/UPower" and iface == UPOWER:
             if "OnBattery" in changed and bool(changed["OnBattery"]) != self.on_battery:
                 self.on_battery = bool(changed["OnBattery"])
-                self.power_edge()
+                # The adapter's own edges are counted where there is one.
+                self.power_edge(count=not self.line_power)
             self.emit()
+            return
+        if iface == UPOWER_DEVICE and path in self.line_power:
+            if "Online" in changed:
+                self.power_edge(count=True)
             return
         if iface == PLATFORM and "PlatformProfile" in changed and self.limits_on:
             # Omarchy switches the profile on a charger change: the curve
@@ -634,12 +643,32 @@ class Bridge:
             return "usbc", True
         return ("weak" if self.weak else "ac"), True
 
-    def power_edge(self):
+    def find_line_power(self):
+        """UPower's line-power (AC adapter) devices. Their Online property
+        toggles each time a weak adapter drops out, while OnBattery may not."""
+        out = []
+        try:
+            paths = self.call(self.system, UPOWER, "/org/freedesktop/UPower", UPOWER,
+                              "EnumerateDevices", None, "(ao)").unpack()[0]
+        except GLib.Error as e:
+            log(f"UPower devices: {e.message}")
+            return out
+        for path in paths:
+            try:
+                t = self.call(self.system, UPOWER, path, PROPS, "Get",
+                              GLib.Variant("(ss)", (UPOWER_DEVICE, "Type")), "(v)").unpack()[0]
+            except GLib.Error:
+                continue
+            if t == LINE_POWER:
+                out.append(path)
+        return out
+
+    def power_edge(self, count=True):
         """A charger went online or offline. Count it toward weak-barrel
         detection, and apply once the source has been stable for 1.5 s, so a
         flapping adapter doesn't re-apply (and modeset) on every edge."""
         now = GLib.get_monotonic_time() / 1e6
-        self.edges = [t for t in self.edges if now - t <= WEAK_WINDOW] + [now]
+        self.edges = [t for t in self.edges if now - t <= WEAK_WINDOW] + ([now] if count else [])
         if not self.on_battery and len(self.edges) >= WEAK_EDGES and not self.weak:
             self.weak = True
             log(f"weak barrel: {len(self.edges)} charger edges in {WEAK_WINDOW:.0f} s")
@@ -852,7 +881,7 @@ class Bridge:
         BRIGHT_BATTERY % if brighter (once, not a cap); back on the barrel
         the saved level returns unless it has since gone brighter. The first
         apply after a start only records the class."""
-        cls = "ac" if self.kind == "ac" else "battery"
+        cls = "ac" if self.kind in ("ac", "weak") else "battery"
         prev = read_text(SEEN_SOURCE)
         if prev == cls:
             return
@@ -1196,6 +1225,11 @@ class Bridge:
                                      Gio.DBusSignalFlags.NONE, self.props_changed)
         self.system.signal_subscribe(UPOWER, PROPS, "PropertiesChanged", "/org/freedesktop/UPower",
                                      None, Gio.DBusSignalFlags.NONE, self.props_changed)
+        # The AC adapter devices one by one: they change only on plug events.
+        self.line_power = self.find_line_power()
+        for path in self.line_power:
+            self.system.signal_subscribe(UPOWER, PROPS, "PropertiesChanged", path, None,
+                                         Gio.DBusSignalFlags.NONE, self.props_changed)
         self.read_on_battery()
         Gio.bus_watch_name_on_connection(self.system, ASUSD, Gio.BusNameWatcherFlags.NONE,
                                          self.asusd_appeared, self.asusd_vanished)
