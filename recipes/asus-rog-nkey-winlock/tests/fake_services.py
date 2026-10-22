@@ -73,9 +73,18 @@ LOGIND_XML = """
 </interface></node>"""
 
 UPOWER_XML = """
-<node><interface name="org.freedesktop.UPower">
-  <property name="OnBattery" type="b" access="read"/>
-</interface></node>"""
+<node>
+  <interface name="org.freedesktop.UPower">
+    <method name="EnumerateDevices"><arg type="ao" direction="out"/></method>
+    <property name="OnBattery" type="b" access="read"/>
+  </interface>
+  <interface name="org.freedesktop.UPower.Device">
+    <property name="Type" type="u" access="read"/>
+    <property name="Online" type="b" access="read"/>
+  </interface>
+</node>"""
+ACAD = "/org/freedesktop/UPower/devices/line_power_ACAD"
+BAT = "/org/freedesktop/UPower/devices/battery_BAT1"
 
 SYSTEMD_XML = """
 <node>
@@ -115,6 +124,10 @@ values = {
         "Name": GLib.Variant("s", "PanelOverdrive"), "CurrentValue": GLib.Variant("i", 0),
         "DefaultValue": GLib.Variant("i", -1), "MinValue": GLib.Variant("i", -1), "MaxValue": GLib.Variant("i", -1)},
     ("/org/freedesktop/UPower", "org.freedesktop.UPower"): {"OnBattery": GLib.Variant("b", False)},
+    ("/org/freedesktop/UPower/devices/line_power_ACAD", "org.freedesktop.UPower.Device"): {
+        "Type": GLib.Variant("u", 1), "Online": GLib.Variant("b", True)},
+    ("/org/freedesktop/UPower/devices/battery_BAT1", "org.freedesktop.UPower.Device"): {
+        "Type": GLib.Variant("u", 2), "Online": GLib.Variant("b", False)},
     ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice", "org.freedesktop.systemd1.Unit"): {
         "ActiveState": GLib.Variant("s", "active")},
 }
@@ -211,7 +224,9 @@ def set_property(conn, sender, path, iface, prop, value):
 
 def method_call(conn, sender, path, iface, method, params, invocation):
     log({"call": [path, iface, method, params.unpack() if params else None]})
-    if method == "GetUnit":
+    if method == "EnumerateDevices":
+        invocation.return_value(GLib.Variant("(ao)", ([ACAD, BAT],)))
+    elif method == "GetUnit":
         invocation.return_value(GLib.Variant("(o)", ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice",)))
     elif method == "EnableUnitFiles":
         invocation.return_value(GLib.Variant("(ba(sss))", (False, [])))
@@ -249,7 +264,9 @@ asusd_objects = [(AURA_PATH, ["xyz.ljones.Aura", "xyz.ljones.Slash"]),
                  ("/xyz/ljones/asus_armoury/panel_overdrive", ["xyz.ljones.AsusArmoury"])] + [
                  (f"/xyz/ljones/asus_armoury/{a}", ["xyz.ljones.AsusArmoury"]) for a in RANGES]
 asusd_ids = register(system, ASUSD_XML, asusd_objects)
-register(upower, UPOWER_XML, [("/org/freedesktop/UPower", ["org.freedesktop.UPower"])])
+register(upower, UPOWER_XML, [("/org/freedesktop/UPower", ["org.freedesktop.UPower"]),
+                              (ACAD, ["org.freedesktop.UPower.Device"]),
+                              (BAT, ["org.freedesktop.UPower.Device"])])
 register(upower, LOGIND_XML, [("/org/freedesktop/login1/session/auto", ["org.freedesktop.login1.Session"])])
 register(session, SYSTEMD_XML, [("/org/freedesktop/systemd1", ["org.freedesktop.systemd1.Manager"]),
                                 ("/org/freedesktop/systemd1/unit/g16_2dwinlock_2eservice",
@@ -311,6 +328,10 @@ def stdin_cb(fd, cond):
                 continue
             if prop == "OnBattery":
                 values[(path, iface)][prop] = GLib.Variant(sig, val)
+                # A real plug or unplug moves the adapter too (a weak
+                # adapter's drop-outs move only the adapter: set Online).
+                values[(ACAD, "org.freedesktop.UPower.Device")]["Online"] = GLib.Variant("b", not val)
+                changed(upower, ACAD, "org.freedesktop.UPower.Device", "Online")
                 set_ranges(bool(val))
                 if not groups.get((plugged(), profile()), False):
                     reset_ppt(system)     # the firmware's limits for the new source
