@@ -50,6 +50,15 @@ as_root() {
 # Root reads that must not prompt mid-test (sudo -v was done up front).
 root_read() { sudo -n "$@" 2>/dev/null; }
 
+# CLOCK_MONOTONIC in whole seconds: it stops while the machine sleeps or hibernates.
+mono_s() { python3 -I -c 'import time; print(int(time.monotonic()))'; }
+# Seconds a machine spent asleep between two (wall, monotonic) readings.
+down_seconds() { # wall0 mono0 wall1 mono1
+  local d=$((($3 - $1) - ($4 - $2)))
+  ((d < 0)) && d=0
+  printf '%s\n' "$d"
+}
+
 dmi() { local v=''; read -r v 2>/dev/null <"/sys/class/dmi/id/$1"; printf '%s' "$v"; }
 is_g16() { [[ $(dmi product_name) == *GA605* || $(dmi board_name) == *GA605* ]]; }
 

@@ -722,7 +722,7 @@ probe() { # label
   while ((t < 180)); do
     if ((t < 120)); then phase=idle; else phase=load; ((${#LOAD_PIDS[@]})) || start_load 60; fi
     line=$(sample "$t" "$phase")
-    printf '%s,%s\n' "$label" "$line" >>"$RCSV"
+    printf '"%s",%s\n' "${label//\"/}" "$line" >>"$RCSV"
     IFS=, read -r _ _ tc _ _ f1 f2 f3 aw _ <<<"$line"
     printf '\r    %4ds %-5s Tctl %5sC  fans %s,%s,%s  apu %sW   ' "$t" "$phase" "$tc" "$f1" "$f2" "$f3" "$aw"
     on_ac && { stop_load; echo; die "charger connected: the run is no longer on battery"; }
@@ -731,26 +731,7 @@ probe() { # label
   done
   stop_load
   echo
-  line=$(python3 -I - "$RCSV" "$label" <<'PY'
-import csv, statistics as st, sys
-rows = [r for r in csv.DictReader(open(sys.argv[1])) if r["step"] == sys.argv[2]]
-f = lambda r, k: float(r[k]) if r.get(k) not in (None, "") else None
-def col(rs, k): return [v for v in (f(r, k) for r in rs) if v is not None]
-def med(xs): return st.median(xs) if xs else float("nan")
-idle = [r for r in rows if r["phase"] == "idle"][-30:]
-load = [r for r in rows if r["phase"] == "load"]
-fans = [med(col(idle, k)) for k in ("fan1_rpm", "fan2_rpm", "fan3_rpm")]
-tail = load[-30:]
-peak = max(col(load, "tctl_c") or [float("nan")])
-w = med(col(tail, "apu_w")); mhz = med(col(tail, "mhz_avg"))
-if any(x > 0 for x in fans) or w >= 37: v = "lost"
-elif w <= 35: v = "quiet"
-else: v = "unclear"
-cells = [rows[-1]["asus_wmi"] + "/" + rows[-1]["amd_pmf"], "/".join(f"{x:.0f}" for x in fans),
-         f"{med(col(idle, 'tctl_c')):.1f}", f"{peak:.1f}", f"{w:.1f}", f"{mhz:.0f}"]
-print(v, " | ".join(cells))
-PY
-)
+  line=$(python3 -I "$KIT_DIR/probe-verdict.py" "$RCSV" "$label")
   PROBE=${line%% *}
   RROWS+=("| $label | ${line#* } | **$PROBE** |")
   note "$label: $PROBE (asus-wmi/amd-pmf | idle fans | idle Tctl | peak Tctl | APU W | MHz: ${line#* })"
@@ -762,9 +743,16 @@ do_hibernate() {
   printf 'keep the default Limine entry, unlock. The test carries on by itself.%s\n' "$N"
   ask "Hibernate now?" || return 1
   since=$(date '+%Y-%m-%d %H:%M:%S')
+  local r0 m0 down
+  r0=$(date +%s) m0=$(mono_s)
   as_root "Hibernate the laptop for the #185 quiet fan table test; it resumes with one power-button press" systemctl hibernate ||
     die "systemctl hibernate refused"
   until journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'PM: hibernation: hibernation exit'; do sleep 1; done
+  # "hibernation exit" is logged on failure paths too. A real cycle powers off:
+  # wall time jumps while CLOCK_MONOTONIC (which stops in S4) barely moves.
+  down=$(down_seconds "$r0" "$m0" "$(date +%s)" "$(mono_s)")
+  ((down >= 10)) || die "the hibernate did not complete (wall and monotonic clocks moved together; down ${down} s): see the kernel log since $since"
+  note "hibernated: powered down about ${down} s"
   sleep 3
 }
 
@@ -802,7 +790,7 @@ run_resume() {
   say "Resume and the quiet fan table (#$RESUME_ISSUE), $KREL"
   on_ac && die "the charger is connected: #$RESUME_ISSUE is about battery. Unplug it and run again."
   cap=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1)
-  ((${cap:-0} >= 30)) || die "battery at ${cap:-?}%: charge to at least 30% for this run"
+  ((${cap:-0} >= 60)) || die "battery at ${cap:-?}%: charge to at least 60% for this run (it uses about 16%; late in a run that went from 41% to 25% the APU was held at 25 W, where the tables look alike)"
   [[ $(profile_of asus-wmi) == quiet && $(profile_of amd-pmf) == balanced ]] ||
     die "the quiet fan table is not active (asus-wmi $(profile_of asus-wmi), amd-pmf $(profile_of amd-pmf)); pick the Balanced power profile on battery, then run again"
   can=$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanHibernate 2>/dev/null | awk '{print $2}' | tr -d '"')
