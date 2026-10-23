@@ -19,7 +19,7 @@ patch 0003-Let-another-power-manager-own-the-profile-on-plug-an.patch prepare om
 patch 0004-Stop-the-idle-fans-on-battery-on-the-ROG-Zephyrus-G1.patch prepare omarchy
 patch 0005-Use-a-software-cursor-while-a-monitor-on-the-NVIDIA-.patch prepare omarchy
 patch 0006-Add-omarchy-hw-igpu-render-node-for-hybrid-NVIDIA-la.patch prepare omarchy
-patch 0007-Decode-video-on-the-iGPU-when-it-is-a-non-VGA-displa.patch prepare omarchy
+patch 0007-Keep-video-decode-and-GLX-on-the-iGPU-when-it-is-a-n.patch prepare omarchy
 patch 0008-Keep-mpv-and-Chromium-video-decode-on-the-iGPU-of-hy.patch prepare omarchy
 patch 0009-Set-the-ASUS-ROG-ALC285-Master-to-full-scale-under-t.patch prepare omarchy
 patch 0010-Install-rtkit-so-PipeWire-gets-realtime-priority.patch prepare omarchy
