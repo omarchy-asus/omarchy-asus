@@ -16,8 +16,10 @@ basenames are ones no Omarchy package or migration uses. If Omarchy later ships
 the same fix at its own path, pacman doesn't report a file conflict: the two
 identical copies both apply until this package is removed.
 
-The package doesn't enable, start, trigger or write anything at install time.
-Its install script only warns when the DMI data doesn't name a GA605KM. It uses
+The package doesn't enable or start anything at install time. Its install
+script warns when the DMI data doesn't name a GA605KM, and the Limine entries
+are rebuilt (`limine-update`) when the kernel command-line drop-in arrives,
+changes or goes, so the next boot matches the package. It uses
 the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 `omarchy-hw-match GA605KM`.
 
@@ -26,6 +28,7 @@ the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 | `omarchy-asus-g16` | `/usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules` | [touchpad wake](#touchpad-doesnt-wake-the-laptop) |
 | `omarchy-asus-g16` | `/usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf` | [hibernate mode](#hibernatemodeshutdown) |
 | `omarchy-asus-g16` | `/usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf` | [nvidia-powerd start limit](#nvidia-powerd-start-limit) |
+| `omarchy-asus-g16` | `/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf`, `/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook` | [`rcu_nocbs=all`](#rcu_nocbsall) |
 
 ## Touchpad doesn't wake the laptop
 
@@ -130,6 +133,40 @@ posted.
 **When to remove:** when asusctl or nvidia-utils handles the start limit, or
 when `omarchy-settings` ships the drop-in in a release.
 
+## `rcu_nocbs=all`
+
+**Fixes:** linux-omarchy is built with `CONFIG_RCU_NOCB_CPU=y` and
+`CONFIG_RCU_LAZY=y` (lazy on by default), but lazy RCU only batches callbacks
+on offloaded CPUs, and without `rcu_nocbs=` none are. While a CPU that isn't
+offloaded has callbacks queued, `rcu_needs_cpu()` keeps its 1000 Hz tick
+running when it goes idle, so every `call_rcu()` (closing files, freeing
+sockets, exiting tasks) costs a few to a few dozen idle ticks on that CPU.
+Offloaded, the callbacks move to the `rcuo` kthreads, idle CPUs stop their tick,
+and non-urgent callbacks wait up to 10 s. ChromeOS measured 0.58 → 0.41 W
+package power on an idle Chromebook with lazy RCU. The G16 boot A/B is in #229.
+
+**This one isn't a fork mirror:** the fork has no equivalent. The file is a
+limine-entry-tool drop-in in the tool's vendor directory, which it reads before
+`/etc/limine-entry-tool.d/` and `/etc/default/limine`, so a local setting still
+wins. It appends ` rcu_nocbs=all` to the default command line. The package's
+alpm hook runs `limine-update` when the drop-in is installed or changed, and
+`post_remove` runs it after removal. The parameter takes effect at the next
+boot.
+
+**Check:** `grep -o 'rcu_nocbs=[^ ]*' /proc/cmdline` prints `rcu_nocbs=all`, and
+`ps -e | grep -c rcuo` counts one or more `rcuo` kthreads.
+
+**Cost:** callback processing moves to kthreads, and `synchronize_rcu()`
+callers that aren't exempted from laziness can wait longer. Android and ChromeOS
+ship this setting.
+
+**Upstream:** not applicable as a kernel bug. Omarchy's kernel could set
+`CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=y` instead; not proposed until the G16 numbers
+are in.
+
+**When to remove:** if linux-omarchy turns on `CONFIG_RCU_NOCB_CPU_DEFAULT_ALL`,
+or if the A/B shows no saving.
+
 ## Not packaged
 
 Not packaged, so stock behaviour stays unchanged. These fixes live in the fork
@@ -159,5 +196,7 @@ leftover copies once the package is in.
 sudo pacman -Rns omarchy-asus-g16
 ```
 
-Removal deletes the files. The touchpad stays disarmed until the next boot. A
+Removal deletes the files and rebuilds the Limine entries without
+`rcu_nocbs=all`, which stays in effect until the next boot. The touchpad stays
+disarmed until the next boot. A
 copy the fork's migration wrote to `/etc` isn't owned by this package and stays.

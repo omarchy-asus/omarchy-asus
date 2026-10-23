@@ -1,8 +1,10 @@
 # Warn, never fail, when this is not the machine the files are for. The check
 # is the same one the omarchy-asus fork gates these fixes on: an ASUS ROG
 # laptop (omarchy-hw-asus-rog) whose DMI product name or family contains
-# GA605KM (omarchy-hw-match "GA605KM"). Nothing is enabled, started, written
-# or triggered here.
+# GA605KM (omarchy-hw-match "GA605KM"). Nothing is enabled or started here.
+# The one thing written is the Limine entries: the package's alpm hook rebuilds
+# them when its kernel command-line drop-in arrives or changes, and post_remove
+# rebuilds them once the drop-in is gone.
 
 _omarchy_asus_g16_is_ga605km() {
   local dmi=/sys/class/dmi/id
@@ -24,4 +26,12 @@ post_install() {
 
 post_upgrade() {
   _omarchy_asus_g16_check
+}
+
+post_remove() {
+  # The drop-in under /usr/share/limine-entry-tool.d is gone: rebuild the boot
+  # entries without it. The hook that does this on install was removed too.
+  if command -v limine-update >/dev/null 2>&1; then
+    limine-update || printf '==> WARNING: limine-update failed; run it by hand so the next boot drops rcu_nocbs=all.\n' >&2
+  fi
 }
