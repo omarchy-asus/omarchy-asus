@@ -9,7 +9,7 @@
 #      row to its own issue and the report to #198, without the home path;
 #   3. it refuses to start on the charger or with the RTX awake, changing nothing;
 #   4. a run killed mid-phase puts everything back;
-#   5. a connected Bluetooth device skips the Bluetooth phase;
+#   5. a connected Bluetooth device skips the Bluetooth phases (bt-off, usb-idle);
 #   6. the root helper refuses unknown tweaks and commands;
 #   7. it never reads the nvidia_0 backlight or anything under the RTX but its
 #      runtime_status (a read-only stand-in makes such a read fail loudly);
@@ -69,7 +69,14 @@ build_fake() {
   echo 100 >"$S/module/nvme_core/parameters/apst_primary_timeout_ms"
   echo 2000 >"$S/module/nvme_core/parameters/apst_secondary_timeout_ms"
   echo 100000 >"$S/class/nvme/nvme0/power/pm_qos_latency_tolerance_us"
-  mkdir -p "$S/bus/usb/devices/3-4/power"
+  # The keyboard and the Bluetooth radio (btusb) on one xHCI controller.
+  pci 0000:67:00.0 0000:00:08.3 0x1022 0x151e 0x0c0330
+  echo D0 >"$S/devices/pci0000:00/0000:00:08.3/0000:67:00.0/power_state"
+  local x=$S/devices/pci0000:00/0000:00:08.3/0000:67:00.0/usb3
+  mkdir -p "$x/3-4/power" "$x/3-3/power" "$x/3-3/3-3:1.0" "$S/bus/usb/drivers/btusb"
+  ln -s "$x/3-4" "$S/bus/usb/devices/3-4"; ln -s "$x/3-3" "$S/bus/usb/devices/3-3"
+  ln -s "$S/bus/usb/drivers/btusb" "$x/3-3/3-3:1.0/driver"
+  echo 0489 >"$x/3-3/idVendor"; echo e11e >"$x/3-3/idProduct"; echo auto >"$x/3-3/power/control"; echo active >"$x/3-3/power/runtime_status"
   echo 0b05 >"$S/bus/usb/devices/3-4/idVendor"; echo 19b6 >"$S/bus/usb/devices/3-4/idProduct"
   echo on >"$S/bus/usb/devices/3-4/power/control"; echo active >"$S/bus/usb/devices/3-4/power/runtime_status"
   mkdir -p "$S/class/net/wlan0/wireless" "$S/class/leds/input12::numlock" "$S/class/rfkill/rfkill7"
@@ -159,7 +166,7 @@ out=$(run --dry-run "${FAST[@]}" 2>&1); rc=$?
 [[ $(orig_state) == "$WANT" ]] && ok "dry run changes nothing" || bad "dry run changed: $(orig_state)"
 grep -qE '^(stop|iw|idle)' "$ST/log" && bad "dry run acted: $(cat "$ST/log")" || ok "dry run stops, sets and toggles nothing"
 ls "$ST"/posted-* >/dev/null 2>&1 && bad "dry run posted" || ok "dry run posts nothing"
-for t in nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype; do
+for t in nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle; do
   grep -q "^| $t |" "$T/home/report.md" && ok "dry run reports $t" || bad "dry run report has no $t row"
 done
 grep -q '^Baseline over the run: battery 9.00 W' "$T/home/report.md" && ok "battery watts from current_now x voltage_now" || bad "battery: $(grep '^Baseline' "$T/home/report.md")"
@@ -176,16 +183,21 @@ out=$(run "${FAST[@]}" 2>&1); rc=$?
 [[ $(grep -c '^iw on' "$ST/log") == 2 ]] && ok "Wi-Fi power save set once per round" || bad "iw: $(grep '^iw' "$ST/log")"
 r=$T/home/report.md
 n=$(grep -cE '^\| [0-9]+ \| [12] \| baseline \|' "$r")
-((n == 18)) && ok "each round brackets every tweak with baselines (18 baselines)" || bad "$n baseline phases"
-for t in nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype; do
+((n == 20)) && ok "each round brackets every tweak with baselines (20 baselines)" || bad "$n baseline phases"
+for t in nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle; do
   grep -qE "^\| $t \| #[0-9]+ \| 2/2 \|" "$r" && ok "$t measured in both rounds" || bad "$t row: $(grep "^| $t |" "$r")"
 done
 grep -q 'nvme-apst ok 30/500 ms' "$r" && ok "APST timeouts 30/500 applied" || bad "APST apply: $(grep nvme-apst "$r")"
+reply=$( { printf 'apply kbd-usb\n'; sleep 0.5; cat "$S/class/leds/input12::numlock/brightness" "$S/bus/usb/devices/3-4/power/control" >"$T/kbd-mid"; } | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n1)
+[[ $reply == "ok auto" && $(paste -sd' ' "$T/kbd-mid") == "0 auto" ]] && ok "kbd-usb sets autosuspend and the Num Lock LED off" || bad "kbd-usb: $reply / $(paste -sd' ' "$T/kbd-mid")"
+[[ $(cat "$S/class/leds/input12::numlock/brightness") == 1 && $(cat "$S/bus/usb/devices/3-4/power/control") == on ]] && ok "kbd-usb reverted on EOF" || bad "kbd-usb left changed"
+grep -q 'usb-idle ok auto, blocked' "$r" && ok "usb-idle sets the keyboard to auto and blocks Bluetooth" || bad "usb-idle apply: $(grep usb-idle "$r")"
+grep -qE '\| bt active; codec|bt active;.*kbd active;.*xhci D0' "$r" && ok "phases log the Bluetooth radio and the xHCI controller" || bad "states: $(grep -m1 '| baseline |' "$r")"
 [[ -e $ST/posted-198 ]] && grep -q '^## G16 idle A/B' "$ST/posted-198" && ok "report posted to #198" || bad "not posted to #198"
 grep -qF "$T/home" "$ST"/posted-* && bad "home path in a post" || ok "posts have no home path"
 nposts=$(ls "$ST"/posted-* | wc -l)
 # Each tweak with an issue number gets its own post, plus #198.
-want_posts=$(( 1 + $("$SCRIPT" --list | awk '$2 != "#0"' | wc -l) ))
+want_posts=$(( 1 + $("$SCRIPT" --list | awk '$2 != "#0" {print $2}' | sort -u | wc -l) ))
 ((nposts == want_posts)) && ok "one post per tweak issue plus #198 ($nposts)" || bad "$nposts posts, want $want_posts"
 for f in "$ST"/posted-*; do
   [[ $f == */posted-198 ]] && continue
@@ -235,6 +247,8 @@ reset
 touch "$ST/bt-connected"
 out=$(run --only bt-off,nmi "${FAST[@]}" --no-post 2>&1)
 grep -q 'skipped: bt-off: a Bluetooth device is connected' <<<"$out" && ok "connected device: Bluetooth phase skipped" || bad "bt: $out"
+out=$(run --only usb-idle,nmi "${FAST[@]}" --no-post 2>&1)
+grep -q 'skipped: usb-idle: a Bluetooth device is connected' <<<"$out" && ok "connected device: usb-idle phase skipped" || bad "usb-idle: $out"
 [[ $(cat "$S/class/rfkill/rfkill7/soft") == 0 ]] && ok "connected device: rfkill untouched" || bad "rfkill changed"
 
 # ------------------------------------------------------- 6. the root helper
@@ -244,6 +258,8 @@ want=$'ready '"$(id -u)"$'\nerr unknown tweak\nerr bad tweak\nerr unknown\nok 0\
 [[ $reply == "$want" ]] && ok "root helper refuses unknown tweaks and commands" || bad "root helper replies: $reply"
 printf 'apply nmi\napply bt-off\n' | "$SCRIPT" --root-helper "$S" "$P" 0 >/dev/null
 [[ $(cat "$P/sys/kernel/nmi_watchdog") == 1 && $(cat "$S/class/rfkill/rfkill7/soft") == 0 ]] && ok "root helper reverts on EOF" || bad "root helper left nmi/bt changed"
+printf 'apply usb-idle\n' | "$SCRIPT" --root-helper "$S" "$P" 0 >/dev/null
+[[ $(cat "$S/bus/usb/devices/3-4/power/control") == on && $(cat "$S/class/rfkill/rfkill7/soft") == 0 && $(cat "$S/class/leds/input12::numlock/brightness") == 1 ]] && ok "root helper reverts usb-idle on EOF" || bad "usb-idle left kbd/bt changed"
 
 # A restore write that fails is an error, stays applied, and EOF retries it.
 if ((EUID != 0)); then
