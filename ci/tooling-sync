@@ -3,8 +3,12 @@
 # copy of main's scripts (bin/install-auto-update), and CI on the RC branch should check
 # its PRs with the same ci/ and workflows. So every tooling file on next/omarchy-4.5 must
 # be main's, byte for byte; only recipes differ between the channels.
-#   ci/tooling-sync check <main-ref>   exit 1 (with a CI error naming each file and the fix)
-#                                      when this checkout's tooling differs from <main-ref>'s
+#   ci/tooling-sync check <main-ref> [--base <ref>]
+#                                      exit 1 (with a CI error naming each file and the fix)
+#                                      when this checkout's tooling differs from <main-ref>'s.
+#                                      With --base (a PR's base), only the files the PR itself
+#                                      changed count: the rest is the branch lagging behind
+#                                      main, a warning (bin/auto-update opens the sync PR)
 #   ci/tooling-sync apply <main-ref>   make this checkout's tooling <main-ref>'s (stages it)
 #   ci/tooling-sync list               print the tooling paths and the exceptions
 # Tooling: bin/ ci/ build/ .github/ systemd/ tests/ docs/distcc.md docs/kernel-runner.md.
@@ -25,18 +29,38 @@ for e in "${EXCEPT[@]}"; do spec+=(":(exclude)$e"); done
 case ${1:-} in
     list) printf 'tooling: %s\n' "${PATHS[@]}"; printf 'except:  %s\n' "${EXCEPT[@]}" ;;
     check)
-        rev=${2:?usage: ci/tooling-sync check <main-ref>}
+        rev=${2:?usage: ci/tooling-sync check <main-ref> [--base <ref>]} base=
+        [[ ${3:-} == --base ]] && base=${4:?--base needs a ref}
         # <rev> against the work tree: content, file mode, files added or removed
         mapfile -t bad < <(git diff --no-renames --name-status "$rev" -- "${spec[@]}" |
             awk -F'\t' '{print $2 ($1 == "A" ? " (not on main)" : $1 == "D" ? " (missing here)" : "")}')
         ((${#bad[@]} == 0)) && { echo "==> tooling matches $rev"; exit 0; }
-        printf '    %s\n' "${bad[@]}"
+        mine=() behind=()
+        if [[ -n $base ]]; then
+            # files this PR changed: its base against the work tree
+            mapfile -t changed < <(git diff --no-renames --name-only "$base" -- "${spec[@]}")
+            for b in "${bad[@]}"; do
+                if printf '%s\n' "${changed[@]}" | grep -qxF -- "${b%% (*}"; then mine+=("$b"); else behind+=("$b"); fi
+            done
+        else
+            mine=("${bad[@]}")
+        fi
+        short=$(git rev-parse --short "$rev")
+        if ((${#behind[@]})); then
+            printf '    behind main: %s\n' "${behind[@]}"
+            msg="This branch's tooling is behind main ($short) in ${#behind[@]} file(s) this PR doesn't touch: ${behind[*]}."
+            msg+=" Not this PR's to fix: bin/auto-update opens a 'Tooling from main' PR against this branch on its next run."
+            msg+=" To sync sooner, run 'ci/tooling-sync apply origin/main' on a branch of its own and open that PR."
+            echo "::warning title=Tooling behind main::$msg"
+        fi
+        ((${#mine[@]} == 0)) && { echo "==> this PR changes no tooling away from $rev"; exit 0; }
+        printf '    changed here: %s\n' "${mine[@]}"
         # One annotation, so the failure reads the same in the log and on the PR.
-        msg="${#bad[@]} tooling file(s) differ from main ($(git rev-parse --short "$rev")): ${bad[*]}."
+        msg="This PR makes ${#mine[@]} tooling file(s) differ from main ($short): ${mine[*]}."
         msg+=" Tooling runs from main on both channels, so it changes only on main."
-        msg+=" If this PR changes tooling, move that change to a PR against main and take it out of this one."
-        msg+=" If main moved since this branch was synced, run 'ci/tooling-sync apply origin/main' here,"
-        msg+=" commit the result as 'Tooling from main <sha>' and push; the check then passes."
+        msg+=" Move the change to a PR against main and take it out of this one; once main has it,"
+        msg+=" bin/auto-update's 'Tooling from main' PR brings it to this branch."
+        msg+=" (A PR that syncs this branch with main passes: run 'ci/tooling-sync apply origin/main', commit, push.)"
         echo "::error title=Tooling differs from main::$msg"
         exit 1
         ;;
