@@ -116,7 +116,7 @@ SANDBOX = os.path.join(os.path.dirname(os.path.realpath(__file__)), "recipe-sand
 
 def env_from_sh():
     """DATA, REPO_DIR, REPO_NAME and CHANNEL as bin/env.sh defines them: the env.sh next to this
-    script (the installed pipeline's under bin/auto-update), with the workspace's build/ and
+    script, with the workspace's build/ and
     recipes/ through OMARCHY_ASUS_WORKSPACE, so a workspace on another branch cannot change
     which channel's repo and upstream dbs are read."""
     out = subprocess.run(

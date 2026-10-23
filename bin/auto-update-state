@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""State and planning helpers for bin/auto-update (runs as the build user).
+"""State and planning helpers for the daily rebase onto upstream (runs as the build user).
 
   plan CHECK_JSON STATUS_JSON        print the run plan, one TSV line per recipe:
                                      recipe action target repo_names all_names note
@@ -193,7 +193,7 @@ def csv_set(text):
 
 
 def revdep_withdraw(conf, withdrawn_csv, repo_csv):
-    """Pairs of build/revdeps.conf (parsed like bin/auto-update's revdep_lines) whose headers
+    """Pairs of build/revdeps.conf (one pair per line) whose headers
     package is withdrawn while the DKMS package stays published: "headers<TAB>dkms"."""
     withdrawn, repo = csv_set(withdrawn_csv), csv_set(repo_csv)
     if not os.path.exists(conf):

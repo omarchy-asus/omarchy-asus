@@ -253,7 +253,7 @@ offsets (checked for 9.3 on 2026-10-18, after the rebase onto the DELTA layout).
 
 ## Rebasing on a new upstream version
 
-`bin/auto-update` does this automatically from `DELTA`. By hand, run
+The daily rebase onto upstream does this from `DELTA`. By hand, run
 `bin/rebase-recipe linux-omarchy --version <omarchy ver> --out <dir> --verify`. It
 reproduces steps 1-5 below, taking the checksums of upstream's files from upstream's
 PKGBUILD and hashing only our own patches. The manual steps:

@@ -73,7 +73,7 @@ printf 'pkgrel=102\n' >"$R/recipes/k/PKGBUILD"
 o=$(pr); rc=$?
 check "a recipe PR passes while main moved" [ "$rc" = 0 ]
 check "with a warning naming the file" grep -q '^::warning title=Tooling behind main::.*bin/new' <<<"$o"
-check "saying auto-update opens the sync" grep -q "auto-update opens a 'Tooling from main' PR" <<<"$o"
+check "saying a sync PR brings it" grep -q "a 'Tooling from main' PR brings it to this branch" <<<"$o"
 printf 'mine\n' >"$R/ci/mine"; g add ci/mine
 o=$(pr); rc=$?
 check "a PR changing tooling fails" [ "$rc" = 1 ]

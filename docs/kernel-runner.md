@@ -29,7 +29,7 @@ variable to send them back to GitHub's runners.
 ## Trust boundary
 
 The job runs workflow code and recipe code from the PR's branch. Branches on
-this repository are pushed by the maintainer and `bin/auto-update`, the same
+this repository are pushed by the maintainer and its own release workflow, the same
 code the release builds run, so this is the trust level docs/distcc.md allows
 the distcc key at. What keeps the rest of the build host out of reach:
 

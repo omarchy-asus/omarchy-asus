@@ -114,7 +114,7 @@ ws=$(mkws ws-same)
 expect "check-recipes on unedited copies: ok" "$(status --workspace "$ws" check-recipes)" 0
 ws=$(mkws ws-pkgrel)
 sed -i 's/^pkgrel=.*/pkgrel=1.9/' "$ws/recipes/omarchy-settings/PKGBUILD"
-# auto-update rebases each member in its own PR, so one may lag the other on main
+# an upstream rebase can update each member in its own PR, so one may lag the other on main
 expect "check-recipes, omarchy-settings at another pkgrel: a warning" "$(status --workspace "$ws" check-recipes)" 0
 expect "check-recipes --strict, omarchy-settings at another pkgrel: refused" \
     "$(status --workspace "$ws" check-recipes --strict)" 1

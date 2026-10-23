@@ -54,8 +54,8 @@ The signed `[omarchy-asus]` repo, served from the
 | `omarchy`, `omarchy-settings` | 4.0.6-1.1 | **Experimental.** Stock Omarchy 4.0.6 plus the fork's fixes in Omarchy's own scripts and migrations: asusd stops overriding the power profile; USB-C chargers get the battery profile and a charger swap re-applies it; another power manager can own the profile; GA605KM fans stop at idle on battery; a software cursor while an NVIDIA-driven monitor is plugged in; video decode stays on the iGPU; ALC285 Master at full scale; rtkit for PipeWire; no NVIDIA early load on hybrids; four perf fixes; a crashed shell gets its lock screen back while dictation is installed. Migrations leave fixes you made by hand alone | Each fix's upstream PR or draft is listed in the [notes](recipes/omarchy/NOTES.md) |
 | `omarchy-asus-g16-apply` | 0.1.0-7 (main: 0.1.0-8) | A command you run yourself. It reports every known G16 fix with `--check` and applies the ones that live in your own config or `/etc` | Local tool ([notes](recipes/omarchy-asus-g16-apply/README.md)) |
 
-Versions are what the release serves now. When main gets ahead, the daily auto-update
-publishes the new build.
+Versions are what the release serves now. When main gets ahead, the daily rebase onto
+upstream publishes the new build.
 
 On a fresh G16, the patched `omarchy` and `omarchy-settings` (#58) apply the G16 fixes that
 live in your own config or `/etc` (iGPU video decode, HDMI cursor, rtkit, asusd) through their
@@ -102,9 +102,12 @@ The repo is listed first in `pacman.conf`, so our build wins even when upstream 
 one. That means we have to keep up. A daily check compares each package with upstream and
 rebuilds it when upstream moves. If a patch stops applying or the build fails, our last build
 stays published and the run flags what needs fixing: on our channels you always get our patched
-version, never the stock one, until upstream folds the fix in and we drop the recipe. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
-pull request, builds it in a clean chroot as CI, and merges and publishes only after
-a verified AI review (`bin/ai-review`) and an agent review pass. The timer runs daily on the build host.
+version, never the stock one, until upstream folds the fix in and we drop the recipe. That check is a daily workflow in
+[Steward](docs/releases.md), once per channel: it rebases our patches onto upstream's new recipe,
+builds it in a clean chroot, opens a pull request that gets an agent check and a second-model
+review, and publishes only after CI passes and the PR merges. There is no systemd timer or
+service for it, and there must not be one: every rebase, build and publish shows up as a run
+there.
 
 ## Release channels
 
@@ -129,8 +132,8 @@ On the build host, the build and publish scripts take `--channel rc` (default `q
 --channel rc` builds in it and stages in its own dir, and `bin/publish`/`bin/sync-release
 --channel rc` sign and upload to the RC repo and release only, with the same signature, checksum
 and personal-information checks. A package staged for one channel is refused by the other's
-`bin/publish`. The daily `bin/auto-update` timer keeps both channels current, one run per
-channel with the same gates (systemd/README.md, "Release channels"): Quattro from `main`, RC
+`bin/publish`. The daily rebase onto upstream keeps both channels current, one run per
+channel with the same gates ([docs/releases.md](docs/releases.md)): Quattro from `main`, RC
 from `next/omarchy-4.5` in the RC chroot, published to `rc-x86_64`.
 
 A package filename names one file on both channels, since pacman caches by filename. The RC
@@ -180,7 +183,7 @@ Where our fixes are headed:
 - `recipes/<pkg>/`: PKGBUILDs, patches and a `NOTES.md` for each package (base, changes,
   upstream status, how to rebase). `DELTA` declares how the recipe differs from upstream;
   `LOCAL_ONLY` marks a package with no upstream build; `HOLD` (its first line is the reason)
-  keeps `bin/auto-update` from building or publishing a recipe.
+  keeps a recipe from being built or published.
   `NO_DISTCC` (its first line is the reason) keeps a recipe's builds off distcc
   (docs/distcc.md).
 - `recipes/omarchy-asus-keyring/`: keyring package (`pacman-key --populate omarchy-asus`),
@@ -198,7 +201,7 @@ Where our fixes are headed:
   omarchy-settings) without its partner at the same version, in the same call or already in
   the db.
 - `bin/unpublish PKG`: drops a package so the stock build flows through (once its recipe is
-  removed: `bin/auto-update` withdraws nothing else); it withdraws the
+  removed); it withdraws the
   whole release cohort (the partners the db holds) with it.
 - `bin/release-cohort members|check-publish|check-recipes`: the release cohorts in
   `build/cohorts.conf`. `members` lists a package's partners, `check-publish` is the gate
@@ -209,7 +212,7 @@ Where our fixes are headed:
 - `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release (`--channel rc`: the
   RC repo to the `rc-x86_64` release). It uploads nothing (exit 3) while the repo lacks our
   build of a package the previous release served and a recipe of the checkout it runs from
-  still ships (RC: the Quattro release counts too; systemd/README.md, "No regression"), so run
+  still ships (RC: the Quattro release counts too; docs/releases.md, "No regression"), so run
   it from a checkout of the channel's branch.
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:
@@ -220,10 +223,9 @@ Where our fixes are headed:
   checks it with `makepkg --nobuild`.
 - `bin/revdep-check`: builds a DKMS package against a kernel headers package in a throwaway
   chroot; `build/revdeps.conf` lists the pairs checked before publishing either one.
-- `bin/auto-update`: the daily pipeline (rebase PR, chroot build, reviews, merge and
-  publish; on failure our last build stays published).
-- `bin/install-auto-update` and `systemd/`: the service and timer units and their installer;
-  [systemd/README.md](systemd/README.md) covers the design and the privilege model.
+- `bin/auto-update-state`: plans what the daily rebase does per recipe (rebase, build,
+  unpublish, attention) from `bin/check-upstream`'s output.
+- [docs/releases.md](docs/releases.md): how the channels are kept current and published.
 - `recipes/omarchy-asus-g16-apply/`: the user-run command for the G16 fixes no package can
   ship (they live in your config or `/etc`); `--check` is read-only.
 - `keys/`: the repo signing key.

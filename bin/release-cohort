@@ -23,9 +23,9 @@ Usage: bin/release-cohort [--cohorts FILE] [--workspace DIR] <command> [args]
       name the partner only as "<partner>=${pkgver}" (the clean chroot and CI
       have only the stock partner, so the exact pin there could not be
       satisfied). Members that differ in _tag, _commit, pkgver, pkgrel,
-      source=() or sha256sums=() are a warning: auto-update rebases each
+      source=() or sha256sums=() are a warning: an upstream rebase can update each
       recipe in its own PR, so one may lag its partner on the base branch
-      (bin/publish and bin/auto-update hold it back until both match).
+      (bin/publish holds it back until both match).
       --strict makes those differences fatal too. PKGBUILDs are read as text,
       never executed.
 

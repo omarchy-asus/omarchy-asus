@@ -10,7 +10,7 @@ carry the **same** patch list, in the same order (their DELTA files must stay in
 patched omarchy cannot install next to stock's omarchy-settings of the same pkgver. The two
 recipes form a release cohort in `build/cohorts.conf`: `bin/publish` refuses to publish one
 member without the other at the same version, `bin/unpublish` withdraws both, and
-`bin/auto-update` holds a built member back until its partner is built at the same version (#83).
+the release keeps the pair it has until both are built at the same version (#83).
 
 **Why we patch stock Omarchy:** the maintainer's rule is to carry every fix in this repo
 today and get each one upstream in parallel. Several fixes edit Omarchy's own scripts
@@ -98,7 +98,7 @@ SC2119/SC2120 notes in the fork's `hybrid-video-decode.sh`. Not yet installed on
 the patches aren't downloaded and `prepare()` fails. Build from a tree that already has
 the fixes with Omarchy's own recipe instead.
 
-**Rebase when Omarchy moves:** `bin/auto-update` does it from `DELTA`
+**Rebase when Omarchy moves:** the daily rebase onto upstream does it from `DELTA`
 (`bin/rebase-recipe omarchy --version <ver> --out <dir> --verify` by hand, then the same for
 `omarchy-settings`). If a patch stops applying, regenerate it from `asus/v4-0-<z>`
 rebased onto the new tag. Drop a patch once a release we build from contains it.

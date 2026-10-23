@@ -25,7 +25,7 @@ which is the same fix. `d8504461` (#15890) also changed un-orphaning onto the fa
 So the next Hyprland release (0.57) should make this patch unnecessary. Verify on hardware before
 dropping it. The patch does not apply to `main`, because `onConnect` no longer does this itself.
 
-**Rebase when Arch moves:** `bin/auto-update` does this automatically from `DELTA`
+**Rebase when Arch moves:** the daily rebase onto upstream does this from `DELTA`
 (`bin/rebase-recipe hyprland --version <arch ver> --out <dir> --verify` by hand). The
 `fixed-upstream` line flags the first release that contains `e9e2f64c`. By hand:
 1. `git -C recipes/.hyprland-arch-checkout pull` (the gitignored Arch packaging checkout), then
