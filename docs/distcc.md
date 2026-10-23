@@ -95,9 +95,11 @@ and create `/etc/makepkg.conf.d/distcc.conf`:
 
 ```bash
 BUILDENV=(distcc color !ccache check !sign)
-DISTCC_HOSTS="<helper-account>@<helper-address>/<helper-threads> localhost/<build-host-threads>"
-MAKEFLAGS="-j<build-host-threads + helper-threads>"
+DISTCC_HOSTS="<helper-account>@<helper-address>/<helper-threads> localhost/<local-slots>"
+MAKEFLAGS="-j<helper-threads + local-slots>"
 export DISTCC_SSH=/distcc/ssh
+# with the key mounted, distcc compiles ccache's preprocessor output as it is
+[[ -d /distcc ]] && export CCACHE_NOCPP2=1
 ```
 
 The helper comes first. distcc fills `DISTCC_HOSTS` from the left, so the
@@ -105,9 +107,24 @@ helper takes the first `<helper-threads>` jobs and the build host the rest, and
 `make -j` covers both. With `localhost/<n>` first, the helper only got the jobs
 the build host's own slots didn't take, and a release build, mostly ccache hits
 by then, rarely runs more than `n` real compiles at once: a whole 7.2.8-9.4
-kernel build sent it 4 jobs out of about 25,500 (#221). Helper first, a cold
-compile of the kernel's `fs/` sent it a third of the jobs and took 202 s
-against 214 s on the build host alone.
+kernel build sent it 4 jobs out of about 25,500 (#221).
+
+The build host still preprocesses every file the helper compiles, so leave it
+CPU for that: `<local-slots>` below its thread count (12 of 16 here). And
+`CCACHE_NOCPP2` stops ccache preprocessing a second time: by default ccache
+runs the preprocessor for its hash and then hands distcc the source, which
+preprocesses it again. distcc already compiles preprocessed source on the
+helper; this does the same for the jobs it keeps. It is set only when the key
+is mounted, so builds without distcc keep ccache's default.
+
+A cold compile of the kernel's `fs/` tree in the RC chroot (1,422 jobs; a
+16-thread build host, an 8-thread helper):
+
+| setup | seconds | on the helper |
+|---|---|---|
+| build host only, `-j24` | 214 | 0 |
+| helper first, `localhost/16`, `-j24` | 202 | 485 |
+| helper first, `localhost/12`, `-j20`, `CCACHE_NOCPP2` | 172 | 511 |
 
 The wrapper shares one SSH connection between jobs (`ControlMaster`, socket in
 the build's own `/tmp`), so a job costs a new session on that connection
