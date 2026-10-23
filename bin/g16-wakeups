@@ -120,14 +120,15 @@ fi
 
 # ------------------------------------------------------------------ options
 SECS=20 LABEL='' ISSUE=239 POST=1 ANALYZE='' CMP_A='' CMP_B=''
+need() { [[ -n ${2:-} && ${2:0:2} != -- ]] || { echo "$1 needs a value (see --help)" >&2; exit 2; }; }
 while (($#)); do
   case $1 in
-    --seconds) SECS=${2:-}; shift ;;
-    --label) LABEL=${2:-}; shift ;;
-    --issue) ISSUE=${2:-}; shift ;;
+    --seconds) need "$1" "${2:-}"; SECS=$2; shift ;;
+    --label) need "$1" "${2:-}"; LABEL=$2; shift ;;
+    --issue) need "$1" "${2:-}"; ISSUE=$2; shift ;;
     --no-post) POST=0 ;;
-    --analyze) ANALYZE=${2:-}; shift ;;
-    --compare) CMP_A=${2:-}; CMP_B=${3:-}; shift 2 ;;
+    --analyze) need "$1" "${2:-}"; ANALYZE=$2; shift ;;
+    --compare) need "$1" "${2:-}"; need "$1" "${3:-}"; CMP_A=$2; CMP_B=$3; shift 2 ;;
     -h | --help) sed -n '2,49s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -333,7 +334,7 @@ for line in rd("trace").splitlines():
         else:
             mask = int(kv.get("cpumask", "0").replace(",", ""), 16)
             dsts = [i for i in range(mask.bit_length()) if mask >> i & 1]
-        wakee = last_waking.get(cpu, "") if site.startswith("ttwu_queue_wakelist") else ""
+        wakee = last_waking.get(cpu, "") if "ttwu_queue_wakelist" in site else ""
         # A reschedule IPI carries no callback; call-function IPIs do.
         kind = "resched IPI" if kv.get("callback", "0x0") in ("0x0", "0", "(nil)") else "IPI"
         for d in dsts:

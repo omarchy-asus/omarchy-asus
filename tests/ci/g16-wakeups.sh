@@ -85,7 +85,7 @@ cat >"$T/fixture.trace" <<'EOF'
           <idle>-0       [003] d..1. 100.000300: cpu_idle: state=2 cpu_id=3
           <idle>-0       [000] d..1. 100.000310: tick_stop: success=0 dependency=RCU
           chrome-4242    [001] d..2. 100.001000: sched_waking: comm=herdr pid=777 prio=120 target_cpu=002
-          chrome-4242    [001] d..2. 100.001010: ipi_send_cpu: cpu=2 callsite=ttwu_queue_wakelist+0x123/0x240 callback=generic_smp_call_function_single_interrupt+0x0/0x20
+          chrome-4242    [001] d..2. 100.001010: ipi_send_cpu: cpu=2 callsite=__ttwu_queue_wakelist+0x123/0x240 callback=generic_smp_call_function_single_interrupt+0x0/0x20
           <idle>-0       [002] d..1. 100.001020: cpu_idle: state=4294967295 cpu_id=2
           <idle>-0       [002] d.h1. 100.001030: call_function_single_entry: vector=251
           <idle>-0       [000] d..1. 100.002000: cpu_idle: state=4294967295 cpu_id=0
@@ -167,7 +167,7 @@ R=$T/body.239
 [[ -s $R ]] || { bad "nothing posted to #239"; R=/dev/null; }
 chk() { grep -qF -- "$2" "$R" && ok "$1" || bad "$1: no '$2' in the report"; }
 chk "exit total" "Idle exits by cause: 4/s"
-chk "IPI with call site, sender, wakee" "| IPI ttwu_queue_wakelist from chrome waking herdr | 0.5 | 12 % | 0.0 | 0.5 |"
+chk "IPI with call site, sender, wakee (either spelling of the wakelist call site)" "| IPI __ttwu_queue_wakelist from chrome waking herdr | 0.5 | 12 % | 0.0 | 0.5 |"
 chk "tick exit on Zen 5" "| timer: tick | 0.5 | 12 % | 0.5 | 0.0 |"
 chk "task timer with its owner, ahead of the tick that rode along" "| timer: hrtimer_wakeup armed by Hyprland | 0.5 | 12 % | 0.0 | 0.5 |"
 chk "device IRQ" "| IRQ mt7925e | 0.5 |"
@@ -209,6 +209,12 @@ grep -qF "| idle exits | 4 | 4 | +0 |" <<<"$out" && grep -qF "| LOC | 800 | 800 
 run --seconds 0 >/dev/null 2>&1; [[ $? == 2 ]] && ok "--seconds 0 is bad usage" || bad "--seconds 0 accepted"
 run --label 'a b' >/dev/null 2>&1; [[ $? == 2 ]] && ok "a label with a space is bad usage" || bad "label with a space accepted"
 run --bogus >/dev/null 2>&1; [[ $? == 2 ]] && ok "unknown option is bad usage" || bad "unknown option accepted"
+rm -f "$T/posts"
+for args in "--analyze" "--compare" "--compare stock" "--label" "--analyze --no-post"; do
+  # shellcheck disable=SC2086 # split on purpose
+  out=$(PATH="$B:$PATH" run $args 2>&1); rc=$?
+  [[ $rc == 2 && $out != *tracing* && ! -e $T/posts ]] && ok "bare '$args' is bad usage, no capture" || bad "bare '$args': rc=$rc $out"
+done
 rm -rf "$TRB"
 out=$(run --seconds 1 --label broken --no-post 2>&1); rc=$?
 [[ $rc == 1 && ! -e $H/state/broken ]] && ok "no tracefs: fails and keeps no bundle" || bad "no tracefs: rc=$rc, $(ls "$H/state" 2>&1)"
