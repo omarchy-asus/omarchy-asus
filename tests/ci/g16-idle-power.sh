@@ -8,7 +8,9 @@
 #      sets and clears stay-awake, measures the CACP levels and puts the original
 #      level back, and posts to #198 and the CACP table to #172;
 #   3. a run killed mid-phase, or during a unit's stop, puts everything back too;
-#   4. posting goes through bin/issue: a denylist hit, or no denylist, posts nothing.
+#   4. posting goes through bin/issue: a denylist hit, or no denylist, posts nothing;
+#   7. the RTX's nvidia_0 backlight, its device runtime-suspended, is never read
+#      (reading actual_brightness resumes the RTX, #216); awake, it is.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -43,6 +45,11 @@ echo connected >"$S/class/drm/card1-eDP-1/status"
 echo 2 >"$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings"
 echo 200000 >"$S/class/backlight/amdgpu_bl1/actual_brightness"
 echo 400000 >"$S/class/backlight/amdgpu_bl1/max_brightness"
+# The RTX's backlight, parented on the (asleep) dGPU like on the G16 in hybrid mode.
+mkdir -p "$S/devices/pci-dgpu/power" "$S/class/backlight/nvidia_0"
+echo suspended >"$S/devices/pci-dgpu/power/runtime_status"
+ln -s ../../../devices/pci-dgpu "$S/class/backlight/nvidia_0/device"
+echo 100 >"$S/class/backlight/nvidia_0/max_brightness"
 
 # ------------------------------------------------------------------ stubs
 B=$T/bin ST=$T/state
@@ -208,6 +215,33 @@ echo performance >"$ST/profile"
 run "${FAST[@]}" --no-cacp --no-post >/dev/null 2>&1
 wait
 grep -q '^- power profile: power-saver' "$T/home/report.md" && ok "context read after unplugging" || bad "context: $(grep '^- power profile' "$T/home/report.md")"
+
+# ------------------- 7. a backlight on an asleep device is never read (#216)
+# nvidia_0/actual_brightness is a FIFO: the writer behind it only finishes, and
+# leaves a mark, when something opens it for reading.
+nv=$S/class/backlight/nvidia_0/actual_brightness
+bl_watch() {
+  rm -f "$nv" "$T/nv-read"; mkfifo "$nv"
+  ( echo 50 >"$nv" && touch "$T/nv-read" ) &
+  NVW=$!
+}
+bl_unwatch() { kill "$NVW" 2>/dev/null; wait "$NVW" 2>/dev/null; rm -f "$nv"; echo 50 >"$nv"; }
+reset
+bl_watch
+out=$(timeout 60 env -u OMARCHY_PATH HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT=none G16_IDLE_SYS="$S" \
+  G16_IDLE_REPORT="$T/home/report.md" "$W/bin/g16-idle-power" "${FAST[@]}" --no-cacp --no-post 2>&1); rc=$?
+((rc == 0)) && ok "dGPU asleep: run exits 0" || bad "dGPU asleep: exit $rc: $out"
+[[ -e $T/nv-read ]] && bad "dGPU asleep: nvidia_0 actual_brightness was read" || ok "dGPU asleep: nvidia_0 never read"
+bl_unwatch
+grep -q '^- brightness: amdgpu_bl1 50% nvidia_0 (device asleep, not read)' "$T/home/report.md" &&
+  ok "dGPU asleep: context names nvidia_0 unread" || bad "dGPU asleep: context: $(grep '^- brightness' "$T/home/report.md")"
+grep -q '^| baseline |' "$T/home/report.md" && ok "dGPU asleep: phases still reported" || bad "dGPU asleep: no baseline row"
+reset
+echo active >"$S/devices/pci-dgpu/power/runtime_status"
+run "${FAST[@]}" --no-cacp --no-post >/dev/null 2>&1
+grep -q '^- brightness: amdgpu_bl1 50% nvidia_0 50%' "$T/home/report.md" &&
+  ok "dGPU awake: nvidia_0 read" || bad "dGPU awake: context: $(grep '^- brightness' "$T/home/report.md")"
+echo suspended >"$S/devices/pci-dgpu/power/runtime_status"
 
 # Root helper: only its commands, only levels 0-4.
 reply=$(printf 'cacp 9\nfoo\nrapl\n' | "$W/bin/g16-idle-power" --root-helper "$S" 1)
