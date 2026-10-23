@@ -98,8 +98,9 @@ BUILDENV=(distcc color !ccache check !sign)
 DISTCC_HOSTS="<helper-account>@<helper-address>/<helper-threads> localhost/<local-slots>"
 MAKEFLAGS="-j<helper-threads + local-slots>"
 export DISTCC_SSH=/distcc/ssh
-# with the key mounted, distcc compiles ccache's preprocessor output as it is
-[[ -d /distcc ]] && export CCACHE_NOCPP2=1
+# with the key mounted, distcc compiles ccache's preprocessor output as it is;
+# an if, not &&: a file that ends in a false test fails makepkg's source check
+if [[ -d /distcc ]]; then export CCACHE_NOCPP2=1; fi
 ```
 
 The helper comes first. distcc fills `DISTCC_HOSTS` from the left, so the
