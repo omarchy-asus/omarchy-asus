@@ -1,29 +1,52 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
-Date: Sun, 18 Oct 2026 03:27:05 -0400
-Subject: [PATCH 07/24] Decode video on the iGPU when it is a non-VGA display
- controller
+Date: Fri, 23 Oct 2026 13:15:17 -0400
+Subject: [PATCH 07/24] Keep video decode and GLX on the iGPU when it is a non-VGA
+ display controller
 
 AMD Krackan (Zephyrus G16 GA605) presents its iGPU as a non-VGA display
 controller without boot_vga, so omarchy-hw-nvidia-display still answers
-NVIDIA and Hyprland forced LIBVA_DRIVER_NAME=nvidia on the iGPU session:
-every video woke the runtime-suspended RTX. Skip that override when
-omarchy-hw-igpu-render-node finds the iGPU. __GLX_VENDOR_LIBRARY_NAME
-stays nvidia, so OpenGL games keep running on the dGPU with no setup.
+NVIDIA and Hyprland forced LIBVA_DRIVER_NAME=nvidia and
+__GLX_VENDOR_LIBRARY_NAME=nvidia on the iGPU session: every video woke the
+runtime-suspended RTX, and every GLX app kept it awake while it ran (the
+Steam client held about 200 MiB on it with no game open). Skip both
+overrides when omarchy-hw-igpu-render-node finds the iGPU, and ask for a
+reboot while a session still carries either old value. DXVK picks the
+discrete GPU itself; native OpenGL games need PRIME render offload.
 
-Co-Authored-By: Claude Opus 5.5
 Backport-of: 322012fd1e47bfc73f5d79cd4449ac31ced565eb
+Backport to v4.5.0-rc1: fork commits f3a22115, 9a29f0a7 and 22b7dfe3 on
+asus/v4-5-0-rc1, squashed (9a29f0a7 drops the GLX override, which
+322012fd kept, and adds migration 1792775464).
 
-(cherry picked from commit 322012fd1e47bfc73f5d79cd4449ac31ced565eb)
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- default/hypr/nvidia.lua        |  9 ++++++++-
- migrations/1792143709.sh       | 10 ++++++++++
- test/shell.d/hw-nvidia-test.sh | 35 +++++++++++++++++++++++++++++++---
- 3 files changed, 50 insertions(+), 4 deletions(-)
+ bin/omarchy-hw-igpu-render-node |  4 +--
+ default/hypr/nvidia.lua         |  9 +++++-
+ migrations/1792143709.sh        | 10 +++++++
+ migrations/1792775464.sh        | 12 ++++++++
+ test/shell.d/hw-nvidia-test.sh  | 52 +++++++++++++++++++++++++++++++--
+ 5 files changed, 81 insertions(+), 6 deletions(-)
  create mode 100644 migrations/1792143709.sh
+ create mode 100644 migrations/1792775464.sh
 
+diff --git a/bin/omarchy-hw-igpu-render-node b/bin/omarchy-hw-igpu-render-node
+index 8d02dc01..3a5b2024 100755
+--- a/bin/omarchy-hw-igpu-render-node
++++ b/bin/omarchy-hw-igpu-render-node
+@@ -15,8 +15,8 @@
+ # Zephyrus G16 GA605) present their iGPU as a non-VGA display controller (class
+ # 0x0380), which has no boot_vga at all; when the NVIDIA GPU next to it reports
+ # boot_vga=0, the firmware did not boot on NVIDIA, so that iGPU drives the
+-# panel. omarchy-hw-nvidia-display does not read that case as a hybrid, which
+-# keeps NVIDIA's GLX for OpenGL games there; only video decode moves.
++# panel. omarchy-hw-nvidia-display does not read that case as a hybrid, so
++# Hyprland asks this script before forcing NVIDIA's VA-API and GLX there.
+ #
+ # Read the cached sysfs IDs rather than lspci, which reads PCI config space and
+ # resumes runtime-suspended GPUs.
 diff --git a/default/hypr/nvidia.lua b/default/hypr/nvidia.lua
-index 10abeeeb..b2199a82 100644
+index 10abeeeb..44e29eca 100644
 --- a/default/hypr/nvidia.lua
 +++ b/default/hypr/nvidia.lua
 @@ -4,6 +4,7 @@ local nvidia = paths.omarchy_path .. "/bin/omarchy-hw-nvidia"
@@ -34,21 +57,21 @@ index 10abeeeb..b2199a82 100644
  
  -- These detectors read cached sysfs IDs rather than shelling out to lspci.
  -- lspci reads PCI config space, which resumes a runtime-suspended GPU, and on a
-@@ -16,7 +17,13 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+@@ -15,7 +16,13 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+   local nvidia_is_display = o.shell_succeeds(o.shell_quote(nvidia_display))
    if o.shell_succeeds(o.shell_quote(nvidia_gsp)) then
      hl.env("NVD_BACKEND", "direct")
-     if nvidia_is_display then
--      hl.env("LIBVA_DRIVER_NAME", "nvidia")
-+      -- An iGPU that is a non-VGA display controller (AMD Krackan) has no
-+      -- boot_vga, so the display check still answers NVIDIA and GLX stays on
-+      -- it for OpenGL games. Video decode belongs on that iGPU, though: forcing
-+      -- NVIDIA's VA-API there wakes the dGPU for every video.
-+      if not o.shell_succeeds(o.shell_quote(igpu_render_node)) then
-+        hl.env("LIBVA_DRIVER_NAME", "nvidia")
-+      end
+-    if nvidia_is_display then
++    -- An iGPU that is a non-VGA display controller (AMD Krackan) has no
++    -- boot_vga, so the display check still answers NVIDIA there. That iGPU
++    -- drives the panel, though: forcing NVIDIA's VA-API or GLX on the session
++    -- wakes the dGPU for every video and keeps it awake for any GLX app (the
++    -- Steam client). Games ask for the dGPU themselves: DXVK picks it, and
++    -- native OpenGL games run with PRIME render offload (prime-run).
++    if nvidia_is_display and not o.shell_succeeds(o.shell_quote(igpu_render_node)) then
+       hl.env("LIBVA_DRIVER_NAME", "nvidia")
        hl.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
      end
-   elseif o.shell_succeeds(o.shell_quote(nvidia_without_gsp)) then
 diff --git a/migrations/1792143709.sh b/migrations/1792143709.sh
 new file mode 100644
 index 00000000..4099e0fc
@@ -65,8 +88,26 @@ index 00000000..4099e0fc
 +  omarchy-state set reboot-required
 +  echo "Reboot to decode video on the integrated GPU instead of NVIDIA."
 +fi
+diff --git a/migrations/1792775464.sh b/migrations/1792775464.sh
+new file mode 100644
+index 00000000..3cddba43
+--- /dev/null
++++ b/migrations/1792775464.sh
+@@ -0,0 +1,12 @@
++echo "Stop forcing NVIDIA GLX on hybrids whose iGPU is not VGA class"
++
++# On a hybrid whose iGPU is a non-VGA display controller (AMD Krackan), Hyprland
++# no longer sets __GLX_VENDOR_LIBRARY_NAME=nvidia, so plain GLX apps stay on the
++# iGPU; native OpenGL games run on NVIDIA with PRIME render offload. Hyprland
++# applies env at startup, so a session that still carries the old override needs
++# a reboot to drop it.
++if [[ ${__GLX_VENDOR_LIBRARY_NAME:-} == "nvidia" ]] && omarchy-hw-igpu-render-node >/dev/null; then
++  omarchy-state set reboot-required
++  echo "Reboot to keep apps off NVIDIA. Native OpenGL games now need"
++  echo "__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia %command% in their launch options."
++fi
 diff --git a/test/shell.d/hw-nvidia-test.sh b/test/shell.d/hw-nvidia-test.sh
-index f0ec8e20..bb52b9ee 100755
+index f0ec8e20..9eec25bb 100755
 --- a/test/shell.d/hw-nvidia-test.sh
 +++ b/test/shell.d/hw-nvidia-test.sh
 @@ -7,12 +7,12 @@ require_command lua
@@ -93,11 +134,11 @@ index f0ec8e20..bb52b9ee 100755
      if [[ -n $boot_vga ]]; then
        printf '%s\n' "$boot_vga" >"$device_dir/boot_vga"
      fi
-@@ -57,4 +58,32 @@ AMD display with Ampere offload|0|0|1|1|direct - -|0x1002:0x15bf:0x030000:1 0x10
+@@ -57,4 +58,49 @@ AMD display with Ampere offload|0|0|1|1|direct - -|0x1002:0x15bf:0x030000:1 0x10
  Intel display with Maxwell offload|0|1|0|1|egl - -|0x8086:0x46a6:0x030000:1 0x10de:0x1340:0x030000:0
  NVIDIA display with inactive iGPU|0|0|1|0|direct nvidia nvidia|0x1002:0x15bf:0x030000:0 0x10de:0x2c02:0x030000:1
  Hybrid without boot_vga|0|0|1|0|direct nvidia nvidia|0x1002:0x15e7:0x030000 0x10de:0x2560:0x030200
-+Non-VGA AMD display with Blackwell VGA offload|0|0|1|0|direct - nvidia|0x1002:0x1114:0x038000 0x10de:0x2d59:0x030000:0
++Non-VGA AMD display with Blackwell VGA offload|0|0|1|0|direct - -|0x1002:0x1114:0x038000 0x10de:0x2d59:0x030000:0
 +Non-VGA AMD display with Ampere 3D offload|0|0|1|0|direct nvidia nvidia|0x1002:0x1114:0x038000 0x10de:0x25ac:0x030200
  CASES
 +
@@ -126,3 +167,20 @@ index f0ec8e20..bb52b9ee 100755
 +  fi
 +done
 +pass "the migration asks for a reboot only while the old NVIDIA override is live"
++
++# The same for __GLX_VENDOR_LIBRARY_NAME=nvidia, which Hyprland stopped setting
++# there later.
++migration=$(grep -l 'Stop forcing NVIDIA GLX on hybrids whose iGPU' "$ROOT"/migrations/*.sh)
++for glx in nvidia ""; do
++  rm -rf "$tmp_dir/home"
++  mkdir -p "$tmp_dir/home"
++  HOME="$tmp_dir/home" __GLX_VENDOR_LIBRARY_NAME=$glx bash -euo pipefail "$migration" >/dev/null
++  if [[ $glx == "nvidia" ]]; then
++    [[ -f $tmp_dir/home/.local/state/omarchy/reboot-required ]] ||
++      fail "the migration asks for a reboot while the session still forces NVIDIA GLX"
++  else
++    [[ ! -e $tmp_dir/home/.local/state/omarchy/reboot-required ]] ||
++      fail "the migration leaves a session without the NVIDIA GLX override alone"
++  fi
++done
++pass "the migration asks for a reboot only while the old NVIDIA GLX override is live"

@@ -13,7 +13,7 @@ pkgname='omarchy-settings'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.102
+pkgrel=1.103
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -141,7 +141,7 @@ else
         0004-Stop-the-idle-fans-on-battery-on-the-ROG-Zephyrus-G1.patch
         0005-Use-a-software-cursor-while-a-monitor-on-the-NVIDIA-.patch
         0006-Add-omarchy-hw-igpu-render-node-for-hybrid-NVIDIA-la.patch
-        0007-Decode-video-on-the-iGPU-when-it-is-a-non-VGA-displa.patch
+        0007-Keep-video-decode-and-GLX-on-the-iGPU-when-it-is-a-n.patch
         0008-Keep-mpv-and-Chromium-video-decode-on-the-iGPU-of-hy.patch
         0009-Set-the-ASUS-ROG-ALC285-Master-to-full-scale-under-t.patch
         0010-Install-rtkit-so-PipeWire-gets-realtime-priority.patch
@@ -166,7 +166,7 @@ else
               '5383d200ea3a24d342ae0042e9900d6370ad0405b2d7e07f6a5e6fdf75a016b6'
               'bb2b08741850535f2ea03a7b4ec84e96c1c60ad97c53ec5d218bbb49db5c202b'
               '862067554f69867a558114da5d1b22dffffe29ba039fd463460bb07981358692'
-              '96389d48dc7f43a4ea2cb524bf18ec5ba03463c7d48f6ae9fdf4e7a3d9c64c37'
+              'aeee5d57219a6bbca261cbbc75d4e3412299dd5274c569187ab236d26e85035c'
               'f2b9a13f26bd460a52044d59e5d355f8388a8e82f6afa1782c0175d8215c4fed'
               '50931d24c256636ce67a8d63380c3be48d0662e398d604ed073140228763231f'
               'fb79d29885d0087779e53da2ab7b168ad4cac1f4d6180f63d4c87258a88a75e6'
@@ -198,7 +198,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0004-Stop-the-idle-fans-on-battery-on-the-ROG-Zephyrus-G1.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0005-Use-a-software-cursor-while-a-monitor-on-the-NVIDIA-.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0006-Add-omarchy-hw-igpu-render-node-for-hybrid-NVIDIA-la.patch"
-  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0007-Decode-video-on-the-iGPU-when-it-is-a-non-VGA-displa.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0007-Keep-video-decode-and-GLX-on-the-iGPU-when-it-is-a-n.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0008-Keep-mpv-and-Chromium-video-decode-on-the-iGPU-of-hy.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0009-Set-the-ASUS-ROG-ALC285-Master-to-full-scale-under-t.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0010-Install-rtkit-so-PipeWire-gets-realtime-priority.patch"
