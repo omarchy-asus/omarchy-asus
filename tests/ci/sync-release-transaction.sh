@@ -15,14 +15,14 @@
 #   j. --channel rc: repo/rc-x86_64 goes to the rc-x86_64 release only (created on first
 #      sync), with its own record in channel-rc; the x86_64 release and its record are
 #      untouched (#167)
-#   k. whole channel or nothing (#201), on a fresh rc release, with recipes read through a
-#      stub sandbox: a first publish that lacks a recipe's package is withheld (no release
-#      made, nothing uploaded, the gap in channel-rc/release-withheld); a complete set (a held
-#      recipe does not count) goes up; a db that adds a build while another recipe is behind
-#      is withheld; a db that adds nothing to the release's goes up; a recipe whose makepkg
-#      --printsrcinfo fails is a gap, unless it is held; a db that drops a package whose recipe
-#      still exists is withheld like any other gap, and goes up once the recipe is removed;
-#      no recipes/ at all refuses (exit 1)
+#   k. no regression (#201), on a fresh rc release whose previous release is a Quattro one
+#      serving foo, bar and baz, with recipes read through a stub sandbox: a first publish
+#      without our bar is withheld (no release made, nothing uploaded, bar in
+#      channel-rc/release-withheld), while a net-new recipe not built yet holds nothing; a
+#      held recipe's package counts too; a ready foo goes up while bar, behind, keeps our
+#      last build; a db missing bar is withheld while recipes/bar exists, also when it is
+#      unreadable, and goes up once the recipe is removed; an unreadable Quattro release
+#      refuses (exit 1); no recipes/ at all refuses (exit 1)
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -264,7 +264,7 @@ if [[ $(cat "$S/data/release-db.sha256") == "$rec_before" ]]; then r=0; else r=1
 if [[ $(cat "$S/data/channel-rc/release-db.sha256" 2>/dev/null) == "$(sha256sum "$RR/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi
 expect "$r" 0 "channel-rc/release-db.sha256 records the rc db"
 
-echo "== k. whole channel or nothing"
+echo "== k. no regression"
 # bin/ with a stub sandbox (runs the command in --chdir) and a makepkg that prints the
 # recipe's SRCINFO file (or fails when the recipe has a FAIL file)
 L=$S/lib
@@ -318,64 +318,58 @@ rm -rf "$KR" "$KD"; mkdir -p "$KD"
 run_k() { "$L/sync-release" --channel rc "$@" 2>&1; }
 exists() { if [[ -e $1 ]]; then echo 0; else echo 1; fi; }
 
-recipe foo 1-1 foo; recipe bar 1-1 bar bar-extra
+# The Quattro release (x86_64) serves foo, bar, bar-extra and baz: RC's previous release.
+mkdb "$S/qrepo" foo-1-1 bar-1-1 bar-extra-1-1 baz-1-1
+mkdir -p "$S/release"; rm -f "$S/release/omarchy-asus.db"; cp -L "$S/qrepo/omarchy-asus.db" "$S/release/"
+recipe foo 1-1 foo; recipe bar 1-1 bar bar-extra; recipe new 1-1 newpkg
 mkdb "$RR" foo-1-1
 touch "$KD/sync-pending"; rm -f "$S/calls"
-out=$(run_k); expect $? 3 "a first publish without recipes/bar's packages is withheld"
+out=$(run_k); expect $? 3 "a first RC publish without our bar, which Quattro serves, is withheld (a regression)"
 expect "$(exists "$KR")" 1 "no rc release is made"
 uploaded; expect $? 1 "nothing uploaded"
-grep -qx 'not-built bar 1-1 (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names bar"
-grep -qx 'not-built bar-extra 1-1 (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "and its split package"
-grep -q 'not-built bar 1-1' <<<"$out"; expect $? 0 "the output names the gap"
+grep -qx 'regression bar (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names bar"
+grep -qx 'regression bar-extra (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "and its split package"
+grep -q 'newpkg' "$KD/release-withheld" 2>/dev/null; expect $? 1 "the net-new newpkg is no regression"
+grep -q 'regression bar ' <<<"$out"; expect $? 0 "the output names it"
 expect "$(exists "$KD/sync-pending")" 0 "sync-pending is kept"
 out=$(run_k --dry-run); expect $? 3 "a dry run says withheld too"
 
 recipe baz 1-1 baz; printf 'waits for a G16 boot\n' >"$S/ws/recipes/baz/HOLD"
-mkdb "$RR" foo-1-1 bar-1-1 bar-extra-1-1
-out=$(run_k); expect $? 0 "a complete set goes up (the held recipes/baz does not count)"
+mkdb "$RR" foo-1-1 bar-1-1 bar-extra-1-1 baz-1-1
+out=$(run_k); expect $? 0 "our foo, bar and the held baz go up; the net-new newpkg, not built yet, does not hold them"
+grep -q 'missing newpkg' <<<"$out"; expect $? 0 "says newpkg goes up once built"
 cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves it"
 expect "$(exists "$KD/release-withheld")" 1 "release-withheld is removed"
 expect "$(exists "$KD/sync-pending")" 1 "sync-pending is cleared"
 
-rm "$S/ws/recipes/baz/HOLD"
-out=$(run_k); expect $? 0 "the release's own set re-syncs while baz is unheld and unbuilt"
-grep -q 'adds nothing' <<<"$out"; expect $? 0 "says it adds nothing"
-printf 'waits for a G16 boot\n' >"$S/ws/recipes/baz/HOLD"
+mkdb "$RR" foo-1-1 bar-1-1 bar-extra-1-1
+out=$(run_k); expect $? 3 "dropping the held baz, which the release serves, is a regression"
+grep -qx 'regression baz (recipes/baz)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names baz"
 
-synced=$(sha256sum "$KR/omarchy-asus.db" | cut -d' ' -f1)
 recipe foo 1-2 foo; recipe bar 1-2 bar bar-extra
-mkdb "$RR" foo-1-2 bar-1-1 bar-extra-1-1
+mkdb "$RR" foo-1-2 bar-1-1 bar-extra-1-1 baz-1-1
+out=$(run_k); expect $? 0 "foo 1-2 is ready and goes up; bar, not ready at 1-2, keeps our 1-1"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves foo 1-2 next to our bar 1-1"
+
+mkdb "$RR" foo-1-2 baz-1-1
 rm -f "$S/calls"
-out=$(run_k); expect $? 3 "foo 1-2 while recipes/bar is behind is withheld"
+out=$(run_k); expect $? 3 "a db without our bar while recipes/bar exists is withheld, never stock in its place"
 uploaded; expect $? 1 "nothing uploaded"
-expect "$(exists "$KR/foo-1-2-x86_64.pkg.tar.zst")" 1 "not even foo 1-2's package"
-if [[ $(sha256sum "$KR/omarchy-asus.db" | cut -d' ' -f1) == "$synced" ]]; then r=0; else r=1; fi
-expect "$r" 0 "the release keeps its set"
-grep -qx 'repo-stale bar 1-1, recipe 1-2 (recipes/bar)' "$KD/release-withheld" 2>/dev/null
-expect $? 0 "release-withheld names bar as behind"
-
-mkdb "$RR" foo-1-1
-out=$(run_k); expect $? 0 "back to foo 1-1 alone (nothing the release lacks) goes up"
-cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves the withdrawal"
-
-mkdb "$RR" foo-1-2 bar-1-2 bar-extra-1-2
 touch "$S/ws/recipes/bar/FAIL"
-out=$(run_k); expect $? 3 "a recipe whose makepkg --printsrcinfo fails is a gap"
-grep -qx 'inventory-error recipes/bar' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names it"
+out=$(run_k); expect $? 3 "with recipes/bar unreadable, a missing bar the release served is still withheld"
+grep -qx 'unknown bar (recipes/bar unreadable)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld says it cannot tell"
+mkdb "$RR" foo-1-2 bar-1-1 bar-extra-1-1 baz-1-1
+out=$(run_k); expect $? 0 "an unreadable recipe whose packages are all in the db holds nothing"
 rm "$S/ws/recipes/bar/FAIL"
-touch "$S/ws/recipes/baz/FAIL"
-out=$(run_k); expect $? 0 "foo and bar at their recipe versions go up together (a held recipe's failing makepkg is no gap)"
-rm "$S/ws/recipes/baz/FAIL"
-cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves them"
 
-recipe foo 1-3 foo
-mkdb "$RR" foo-1-3
-rm -f "$S/calls"
-out=$(run_k); expect $? 3 "a db that drops bar while recipes/bar exists is withheld, foo 1-3 with it"
-uploaded; expect $? 1 "nothing uploaded"
-grep -qx 'not-built bar 1-2 (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names bar"
+mv "$S/release" "$S/release.away"
+mkdb "$RR" foo-1-2 baz-1-1
+out=$(run_k); expect $? 1 "a Quattro release that cannot be read refuses"
+grep -q 'cannot read the Quattro release' <<<"$out"; expect $? 0 "says so"
+mv "$S/release.away" "$S/release"
+
 rm -rf "$S/ws/recipes/bar"
-out=$(run_k); expect $? 0 "once recipes/bar is removed (upstream replaced it), foo 1-3 without bar goes up"
+out=$(run_k); expect $? 0 "once recipes/bar is removed (upstream replaced our patch), the db without bar goes up"
 cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves it"
 
 mv "$S/ws/recipes" "$S/ws/recipes.away"

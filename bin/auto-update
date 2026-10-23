@@ -43,10 +43,11 @@
 #   While the journal $DATA/sync-pending exists (written by bin/publish and bin/unpublish
 #   before the local repo changes, removed by bin/sync-release once the release is verified)
 #   the release may lag: the next run syncs before planning, and the run fails until it clears.
-#   Whole channel or nothing (#201): bin/sync-release withholds a db that leaves a recipe of the
-#   channel unpublished or behind (unless it adds nothing to the release's db), exit 3; the run then records
-#   "(release)" attention with the gaps instead of failing, and a later sync of the run puts the
-#   whole set up once the last recipe (the kernel, built last) is published.
+#   No regression (#201): a ready package goes up, one that is not ready keeps our last build.
+#   bin/sync-release withholds (exit 3) only a db that lacks our build of a package the previous
+#   release served (RC: also the Quattro release's); the run then records "(release)" attention
+#   with those packages instead of failing, and a later sync puts the db up once they are built
+#   (on the first RC publish: once the kernel, built last, is done).
 #   Before the first push or GitHub write, every commit (messages, author/committer, paths,
 #   patch text) and the PR title/body pass the PII scan and a local-path check; a hit
 #   pushes nothing and records class=pii.
@@ -250,10 +251,10 @@ record() { as_user "$LIB/auto-update-state" record "$STATUS" "$run_id" "$@"; }
 # local repo, and bin/sync-release removes it only once the release matches the local repo:
 # while it exists the release may lag, and every run syncs first. $AU/sync-pending is the
 # marker older versions of this script wrote; it is still honoured and removed on success.
-# Exit 3 is a release withheld on purpose (bin/sync-release: the channel is not complete and
-# its db adds to the release's; it wrote the gaps to $CHANNEL_DATA/release-withheld): not a
-# failure. The journal stays, so the next sync of this run (or of the next run) puts the whole
-# set up once the last recipe is published. Any other failed sync drops release-withheld, so
+# Exit 3 is a release withheld on purpose (bin/sync-release: the db would be a regression, it
+# lacks our build of a package the previous release served; it wrote them to
+# $CHANNEL_DATA/release-withheld): not a failure. The journal stays, so the next sync of this
+# run (or of the next run) puts the db up once they are built. Any other failed sync drops release-withheld, so
 # the end of the run reports a failure, not a withheld release.
 sync_now() {
     [[ $mode == full ]] || { note dry "would run bin/sync-release"; return 0; }
@@ -261,7 +262,7 @@ sync_now() {
     as_user "$LIB/sync-release" || rc=$?
     if ((rc == 0)); then as_user rm -f "$AU/sync-pending"
     elif ((rc == 3)); then
-        note sync "release withheld until every recipe of the $CHANNEL channel is published at its version"
+        note sync "release withheld: it would lack our build of a package the previous release served (a regression)"
     else
         as_user rm -f "$CHANNEL_DATA/release-withheld"
         as_user touch "$CHANNEL_DATA/sync-pending"
@@ -1073,7 +1074,7 @@ sync_state_check() {  # sync_state_check: at the end of the run, before the summ
     local gaps msg
     if as_user test -e "$CHANNEL_DATA/sync-pending" && as_user test -e "$CHANNEL_DATA/release-withheld"; then
         gaps=$(as_user cat "$CHANNEL_DATA/release-withheld" | paste -sd';' -) || gaps=
-        msg="release $GH_TAG withheld: the $CHANNEL channel is not complete, so the release keeps its last set (${gaps:-see the log}); the whole set goes up once every recipe is published"
+        msg="release $GH_TAG withheld: it would lack our build of a package the previous release served, so it keeps its last set (${gaps:-see the log}); it goes up once they are built"
         note ATTENTION "$msg"
         record "(release)" attention none message="$msg" || true
         attention=1

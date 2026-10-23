@@ -1,6 +1,6 @@
 #!/bin/bash
 # shellcheck disable=SC2034  # the globals are read by the bin/auto-update functions eval'd below
-# A release that bin/sync-release withholds (exit 3: the channel is not complete, #201) is
+# A release that bin/sync-release withholds (exit 3: the db would be a regression, #201) is
 # attention, not a failed run. The real sync_now and sync_state_check run against a stub
 # bin/sync-release:
 #   1. withheld: the run is not failed, sync-pending stays, and the end of the run records
@@ -46,7 +46,7 @@ cat >"$LIB/sync-release" <<EOF
 #!/bin/bash
 case \${STUB_SYNC_RC:-0} in
     0) rm -f "$CHANNEL_DATA/sync-pending" "$CHANNEL_DATA/release-withheld" ;;
-    3) echo 'not-built linux-omarchy 7.2.8-9.4 (recipes/linux-omarchy)' >"$CHANNEL_DATA/release-withheld" ;;
+    3) echo 'regression linux-omarchy (recipes/linux-omarchy)' >"$CHANNEL_DATA/release-withheld" ;;
 esac
 exit "\${STUB_SYNC_RC:-0}"
 EOF
@@ -65,9 +65,9 @@ expect "1. end of run: not failed" "$failed" 0
 expect "1. end of run: attention" "$attention" 1
 expect "1. end of run: \"(release)\" attention recorded" "$(entry "(release)")" attention
 expect "1. end of run: the entry names the gap" \
-    "$(jq -r '.recipes["(release)"].last.message' "$STATUS" | grep -c 'not-built linux-omarchy')" 1
+    "$(jq -r '.recipes["(release)"].last.message' "$STATUS" | grep -c 'regression linux-omarchy')" 1
 
-# 2. the whole set goes up
+# 2. the db goes up
 attention=0
 STUB_SYNC_RC=0 sync_now >"$T/out" 2>&1
 sync_state_check >"$T/out" 2>&1

@@ -2,7 +2,7 @@
 """Compare every package we carry with the version upstream currently ships.
 
 Usage: bin/check-upstream [--json] [--refresh] [--no-prs] [--recipe DIR]... [--recipe-path PATH]...
-       bin/check-upstream --complete DB
+       bin/check-upstream --complete DB [--previous DB]...
 
 Our packages: every recipes/<dir>/PKGBUILD (via `makepkg --printsrcinfo`, run in
 bin/recipe-sandbox without network or credentials; one entry per split package)
@@ -66,13 +66,17 @@ download with no cached copy at all is still an error (exit 1).
 
 Exit: 0 all current, 10 something needs action (including a stale db), 1 error.
 
---complete DB (offline; bin/sync-release runs it before a db goes on the release): does the
-pacman db DB serve every package of every recipe in recipes/ that is not held (HOLD) at the
-recipe's version? One line per gap: "not-built NAME VERSION (recipes/DIR)", "repo-stale NAME
-DB_VERSION, recipe VERSION (recipes/DIR)" or "inventory-error recipes/DIR" (its
-`makepkg --printsrcinfo` failed: what it ships is unknown, so it counts as a gap, unless
-the recipe is held).
-Packages in DB with no recipe are not gaps. Exit: 0 complete, 10 a gap, 1 error.
+--complete DB [--previous PREV]... (offline; bin/sync-release runs it before a db goes on the
+release): would DB be a regression? A ready package ships on the train and one that is not
+ready keeps our last build, so a recipe whose package DB holds at any version is fine, and so
+is a package with no recipe (removed: upstream replaced our patch). Without --previous, one line
+per package a recipe (held or not) ships that DB lacks: "missing NAME (recipes/DIR)", and
+"inventory-error recipes/DIR" for a recipe whose `makepkg --printsrcinfo` failed (what it
+ships is unknown). With --previous (the dbs of the previous release: this channel's own, and
+for RC the Quattro release's), only a package one of them serves counts: "regression NAME
+(recipes/DIR)" when DB lacks it, or "unknown NAME (recipes/DIR unreadable)" when DB lacks it, no
+readable recipe ships it and a recipe could not be read. A net-new recipe is no regression.
+Exit: 0 none, 10 at least one line, 1 error.
 """
 import argparse
 import io
@@ -266,23 +270,29 @@ def hold_reason(recipe):
         return next((l.strip() for l in f if l.strip() and not l.startswith("#")), "held")
 
 
-def completeness(db_path):
-    """--complete DB: print each gap between DB and the recipes that are not held; 0 or 10."""
+def completeness(db_path, previous=()):
+    """--complete DB [--previous PREV]...: print what would make DB a regression; 0 or 10."""
     with open(db_path, "rb") as f:
         served = parse_db(f.read())
     recipes, errors = recipe_packages()
-    gaps = [f"inventory-error recipes/{d}" for d in errors if hold_reason(d) is None]
-    for recipe, name, ver, _ in recipes:
-        if hold_reason(recipe) is not None:
-            continue
-        have = served.get(name)
-        if have is None:
-            gaps.append(f"not-built {name} {ver} (recipes/{recipe})")
-        elif have != ver:
-            gaps.append(f"repo-stale {name} {have}, recipe {ver} (recipes/{recipe})")
-    for g in gaps:
-        print(g)
-    return 10 if gaps else 0
+    ours = {name: recipe for recipe, name, _, _ in recipes}
+    if not previous:
+        lines = [f"inventory-error recipes/{d}" for d in errors]
+        lines += [f"missing {n} (recipes/{r})" for n, r in sorted(ours.items()) if n not in served]
+    else:
+        before = set()
+        for p in previous:
+            with open(p, "rb") as f:
+                before |= set(parse_db(f.read()))
+        lines = []
+        for n in sorted(before - set(served)):
+            if n in ours:
+                lines.append(f"regression {n} (recipes/{ours[n]})")
+            elif errors:
+                lines.append(f"unknown {n} (recipes/{', recipes/'.join(errors)} unreadable)")
+    for line in lines:
+        print(line)
+    return 10 if lines else 0
 
 
 def vercmp(a, b):
@@ -378,10 +388,12 @@ def main():
     ap.add_argument("--recipe-path", action="append", default=[],
                     help="check this recipe directory instead of recipes/ (repeatable)")
     ap.add_argument("--complete", metavar="DB",
-                    help="offline: list the recipes' packages DB does not serve at the recipe version")
+                    help="offline: list what would make DB a regression (see --previous)")
+    ap.add_argument("--previous", metavar="DB", action="append", default=[],
+                    help="with --complete: a db of the previous release (repeatable)")
     args = ap.parse_args()
     if args.complete:
-        return completeness(args.complete)
+        return completeness(args.complete, args.previous)
 
     data_dir, repo_dir, repo_name, channel = env_from_sh()
     if channel not in CHANNEL_DBS:
