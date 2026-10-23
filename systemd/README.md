@@ -98,6 +98,14 @@ What differs for RC:
 - **The pipeline comes from `main`.** Root runs one set of scripts, installed from `main`. The
   RC run's drift guard compares them with `bin/` and `build/` of `main`, not of
   `next/omarchy-4.5`, so the RC branch's own copy of `bin/` never stops (or runs) anything.
+- **The RC branch's tooling follows `main`.** `bin/`, `ci/`, `build/`, `.github/`, `systemd/`,
+  `tests/` and the build docs on `next/omarchy-4.5` must be `main`'s (`ci/tooling-sync list`;
+  the G16 kit's test and `bin/g16-check` stay per channel). When they aren't, the RC run opens
+  or refreshes the PR "Tooling from main <sha>" (`auto-update-rc/tooling-from-main`, made with
+  `ci/tooling-sync apply origin/main`, through the personal-information scan), and a later run
+  merges it once all its checks pass; failing checks are a `(tooling)` attention. On
+  RC PRs, the lint fails only tooling the PR itself changes away from `main`, and warns while
+  the branch lags behind it.
 - **The RC chroot is the service's to make.** Before the first build (or kernel withdrawal) that
   needs it, the RC run checks that `/var/lib/omarchy-asus/chroot-rc` exists and uses the servers
   of the installed `build/pacman-rc.conf` and carries our packager (`PACKAGER="omarchy-asus"`
