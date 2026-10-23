@@ -1,0 +1,2 @@
+Local-only package: no upstream build to track; plain pkgrel (see bin/check-upstream, status "local").
+The pin follows the Proton Experimental build Steam ships (README.md, "Updating to a new Proton Experimental").
