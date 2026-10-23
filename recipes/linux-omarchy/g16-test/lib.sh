@@ -50,6 +50,20 @@ as_root() {
 # Root reads that must not prompt mid-test (sudo -v was done up front).
 root_read() { sudo -n "$@" 2>/dev/null; }
 
+# #185: the EC's fan-table byte (FTBL, EC RAM 0x06) by name.
+ftbl_name() { # raw byte as read by od, spaces allowed
+  local v=${1//[[:space:]]/}
+  case $v in 0) echo balanced ;; 1) echo turbo ;; 2) echo silent ;; '') echo '?' ;; *) echo "raw:$v" ;; esac
+}
+# A step's verdict, given what the EC really runs: an EC that runs another
+# table than the asus-wmi profile's has lost it, whatever the load showed.
+# An unreadable EC (?) leaves the load verdict as it is.
+ec_verdict() { # load-verdict ftbl-name asus-wmi-profile
+  local want
+  case $3 in quiet) want=silent ;; balanced) want=balanced ;; performance) want=turbo ;; *) want='' ;; esac
+  if [[ $2 == '?' || -z $want || $2 == "$want" ]]; then echo "$1"; else echo lost; fi
+}
+
 # CLOCK_MONOTONIC in whole seconds: it stops while the machine sleeps or hibernates.
 mono_s() { python3 -I -c 'import time; print(int(time.monotonic()))'; }
 # Seconds a machine spent asleep between two (wall, monotonic) readings.
