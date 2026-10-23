@@ -262,6 +262,14 @@ reply=$( { printf 'apply sd-off\n'; sleep 0.5; rm "$S/bus/pci/devices/0000:62:00
 [[ $(cat "$S/devices/pci0000:00/0000:00:02.2/rescan") == 1 && $(cat "$S/devices/pci0000:00/0000:00:02.2/power/control") == auto ]] &&
   ok "SD rescan below its port, port control put back" || bad "SD port: rescan=$(cat "$S/devices/pci0000:00/0000:00:02.2/rescan") control=$(cat "$S/devices/pci0000:00/0000:00:02.2/power/control")"
 if ((EUID != 0)); then
+  # The port can't be set back: an error, still applied, and fixed on retry.
+  reset
+  pc=$S/devices/pci0000:00/0000:00:02.2/power/control
+  reply=$( { printf 'apply sd-off\n'; sleep 0.5; rm "$S/bus/pci/devices/0000:62:00.0"
+    ( sleep 1; chmod 444 "$pc"; ln -s "$S/devices/pci0000:00/0000:00:02.2/0000:62:00.0" "$S/bus/pci/devices/0000:62:00.0" ) &
+    printf 'revert sd-off\n'; sleep 7; chmod 644 "$pc"; printf 'revert sd-off\n'; } | "$SCRIPT" --root-helper "$S" "$P" 0 2>&1)
+  grep -q "^err the SD reader's port could not be set back" <<<"$reply" && [[ $(tail -n1 <<<"$reply") == "ok reverted" && $(cat "$pc") == auto ]] &&
+    ok "SD port left forced on is an error and is fixed on retry" || bad "SD port restore: $reply / $(cat "$pc")"
   reset
   chmod 444 "$S/class/leds/input12::numlock/brightness"
   reply=$(printf 'apply numlock\n' | "$SCRIPT" --root-helper "$S" "$P" 0 2>&1)

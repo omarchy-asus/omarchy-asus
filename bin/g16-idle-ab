@@ -106,7 +106,7 @@ if [[ ${1:-} == --root-helper ]]; then
           echo "ok $(rd "$NV/apst_primary_timeout_ms")/$(rd "$NV/apst_secondary_timeout_ms") ms" || echo "err write refused" ;;
       sd-off)
         [[ -n $SD && -e $SD/remove ]] || { echo "err absent"; return; }
-        ORIG[$t]=present; APPLIED[$t]=1
+        ORIG[$t]=$(rd "$SD_PARENT/power/control"); APPLIED[$t]=1
         wr "$SD/remove" 1 && echo "ok removed" || echo "err remove refused" ;;
       kbd-usb)
         f=$(usb_by_id 0b05 19b6) || { echo "err absent"; return; }
@@ -146,13 +146,14 @@ if [[ ${1:-} == --root-helper ]]; then
       sd-off)
         # Rescan below the reader's own port only, with the port held awake so
         # its bus can be read; then the port goes back to its own setting.
-        if [[ -n $SD_PARENT && ! -e $SD ]] || ((dry)); then
-          v=$(rd "$SD_PARENT/power/control")
+        # The port's own setting was recorded at apply; it is written back on
+        # every attempt, so a retry also fixes a port left forced on.
+        if [[ -n $SD_PARENT && ! -e $sys/bus/pci/devices/$SD_NAME ]] || ((dry)); then
           wr "$SD_PARENT/power/control" on
           if [[ -e $SD_PARENT/rescan ]]; then wr "$SD_PARENT/rescan" 1; else wr "$sys/bus/pci/rescan" 1; fi
           for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -e $sys/bus/pci/devices/$SD_NAME ]] && break; sleep 0.5; done
-          [[ -n $v ]] && wr "$SD_PARENT/power/control" "$v"
         fi
+        [[ -z $o ]] || wr "$SD_PARENT/power/control" "$o" || { echo "err the SD reader's port could not be set back to $o"; return; }
         # Still applied when it didn't come back: the exit handler rescans again.
         [[ -e $sys/bus/pci/devices/$SD_NAME ]] || { echo "err the SD reader did not come back (it returns at the next boot)"; return; } ;;
       kbd-usb) read -r f v <<<"$o"; wr "$f/power/control" "$v" || rc=1 ;;
