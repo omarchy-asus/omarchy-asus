@@ -23,8 +23,10 @@ die() { echo "g16-test: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
 
 valve_dir() {
-    local lib name
-    for lib in "$STEAM" $(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"/\1/p' "$STEAM/steamapps/libraryfolders.vdf" 2>/dev/null); do
+    local lib name libs=("$STEAM")
+    # one library path per line: paths with spaces stay whole
+    mapfile -t -O 1 libs < <(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"/\1/p' "$STEAM/steamapps/libraryfolders.vdf" 2>/dev/null)
+    for lib in "${libs[@]}"; do
         name=$(sed -n 's/^[[:space:]]*"installdir"[[:space:]]*"\(.*\)"/\1/p' "$lib/steamapps/appmanifest_1493710.acf" 2>/dev/null)
         [[ -n $name && -f "$lib/steamapps/common/$name/proton" ]] && { echo "$lib/steamapps/common/$name"; return; }
     done

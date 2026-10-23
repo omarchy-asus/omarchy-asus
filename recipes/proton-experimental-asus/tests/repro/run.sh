@@ -6,7 +6,8 @@
 # Starts a private headless sway (two outputs, sway.conf) on its own socket, with its own
 # HOME and a throwaway Wine prefix, focuses an output, runs fsrepro.exe under that Proton's
 # wine, then moves a virtual pointer (vptr) to three spots on the focused output and clicks.
-# Needs sway, grim, python3, and fsrepro.exe + vptr built next to this script (README.md).
+# Needs sway, grim, python3, and fsrepro.exe + vptr built next to this script (README.md,
+# "Reproducer": mingw-w64-gcc and wlr-protocols for the build).
 # Prints the run directory: repro.log (what Win32 saw), tree.log (where sway put the
 # window), wine.log, shot.png. Nothing outside it is touched; delete it when done.
 set -u

@@ -138,6 +138,25 @@ class Launcher(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(rec["dir"], self.copy_dir())
 
+    def test_concurrent_first_launches(self):
+        # several games starting at once on a fresh install: each runs the finished copy
+        env = {"PATH": os.environ["PATH"], "HOME": self.tmp, "XDG_DATA_HOME": self.data,
+               "STEAM_COMPAT_CLIENT_INSTALL_PATH": self.steam}
+        procs = []
+        for i in range(6):
+            e = dict(env, RECORD=os.path.join(self.tmp, f"record{i}.json"))
+            procs.append(subprocess.Popen([sys.executable, os.path.join(self.tool, "proton"), "run", f"{i}.exe"],
+                                          env=e, stderr=subprocess.PIPE, text=True))
+        for i, p in enumerate(procs):
+            _, err = p.communicate()
+            self.assertEqual(p.returncode, 0, err)
+            rec = json.loads(self.read(os.path.join(self.tmp, f"record{i}.json")))
+            self.assertEqual(rec, {"dir": self.copy_dir(), "args": ["run", f"{i}.exe"]})
+        self.assertEqual(self.read(os.path.join(self.copy_dir(), "files/lib/wine/x86_64-unix/winex11.so")),
+                         "ours x86_64")
+        leftovers = [n for n in os.listdir(os.path.dirname(self.copy_dir())) if ".tmp-" in n]
+        self.assertEqual(leftovers, [])
+
     def test_not_installed(self):
         shutil.rmtree(self.valve)
         p, rec = self.run_tool("run", "a.exe")

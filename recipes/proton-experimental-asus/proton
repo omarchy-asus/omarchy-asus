@@ -17,6 +17,7 @@ from the Proton Experimental that Steam installed:
 
 OMARCHY_ASUS_PROTON_DIR (a Proton Experimental directory) overrides step 1, for tests.
 """
+import fcntl
 import os
 import re
 import shutil
@@ -154,9 +155,14 @@ def main(argv):
         data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
         dest = os.path.join(data, "omarchy-asus", "proton-experimental-asus", build)
         try:
-            if not copy_is_current(dest, build):
-                log(f"preparing {build} with the winex11 fix in {dest}")
-                make_copy(valve_dir, dest, build)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # one launch at a time checks and (re)makes the copy: another game starting
+            # at the same moment must not see it half made or have it deleted under it
+            with open(os.path.join(os.path.dirname(dest), ".lock"), "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if not copy_is_current(dest, build):
+                    log(f"preparing {build} with the winex11 fix in {dest}")
+                    make_copy(valve_dir, dest, build)
             target = dest
         except OSError as e:
             log(f"could not prepare the fixed copy ({e}): running Proton Experimental unchanged")

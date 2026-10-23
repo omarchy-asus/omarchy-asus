@@ -89,10 +89,11 @@ there (sway keeps it on HDMI). `vptr` moves a virtual Wayland pointer to known s
 and clicks.
 
 ```sh
+# needs mingw-w64-gcc, wayland, wlr-protocols (the virtual pointer protocol), sway, grim
 cd tests/repro    # or a copy of it
 x86_64-w64-mingw32-gcc -O2 -mconsole -o fsrepro.exe fsrepro.c -lgdi32 -luser32
-wayland-scanner client-header <wlr-virtual-pointer-unstable-v1.xml> vp.h
-wayland-scanner private-code <wlr-virtual-pointer-unstable-v1.xml> vp.c
+wayland-scanner client-header /usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml vp.h
+wayland-scanner private-code /usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml vp.c
 gcc -O2 -o vptr vptr.c vp.c -lwayland-client
 ./run.sh HEADLESS-2 <Proton files dir> -- 0 2560 1440 8 bc
 ```
