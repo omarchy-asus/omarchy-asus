@@ -869,8 +869,7 @@ ec_ftbl() { # prints balanced|turbo|silent|raw value, or ? when unreadable
   else
     v=$(root_read od -An -tu1 -j6 -N1 "$EC_IO")
   fi
-  v=${v//[[:space:]]/}
-  case $v in 0) echo balanced ;; 1) echo turbo ;; 2) echo silent ;; '') echo '?' ;; *) echo "raw:$v" ;; esac
+  ftbl_name "$v"
 }
 
 run_ectable() {
@@ -888,15 +887,17 @@ run_ectable() {
     note "sample $i: asus-wmi $a, amd-pmf $m, EC $e, fans ${f1:-?}/${f2:-?}/${f3:-?}"
     ((i < 3)) && sleep 5
   done
-  case $a:$e in
-    quiet:silent | balanced:balanced | performance:turbo) agree="agree" ;;
-    *:\?) agree="unknown (EC unreadable)" ;;
-    *) agree="**disagree**: the EC runs $e while asus-wmi reports $a" ;;
-  esac
+  if [[ $e == '?' ]]; then
+    agree="unknown (EC unreadable)"
+  elif [[ $(ec_verdict quiet "$e" "$a") == quiet ]]; then
+    agree="agree"
+  else
+    agree="**disagree**: the EC runs $e while asus-wmi reports $a"
+  fi
   local hib f intro
   hib=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -c 'hibernation exit')
   f=$HOME/omarchy-asus-g16-test-$KREL-$STAMP-ectable.md
-  intro="$(header_info)"$'\n'"- Hibernate resumes this boot: $hib"$'\n'"- On AC: $(on_ac && echo yes || echo no)"$'\n\n'
+  intro="$(header_info)"$'\n'"- Hibernate resumes this boot: $hib"$'\n\n'
   intro+="Profile and EC fan table: $agree"$'\n\n'"| Sample | asus-wmi | amd-pmf | EC FTBL | Fans rpm | Tctl C |"$'\n'"|---|---|---|---|---|---|"$'\n'"$rows"
   write_report "$f" "EC fan table vs asus-wmi profile (#$RESUME_ISSUE)" "$intro"
   offer_post "$f" issue "$RESUME_ISSUE"
@@ -921,7 +922,7 @@ probe() { # label
   stop_load
   echo
   line=$(python3 -I "$KIT_DIR/probe-verdict.py" "$RCSV" "$label")
-  PROBE=${line%% *}
+  PROBE=$(ec_verdict "${line%% *}" "$ec" "$(profile_of asus-wmi)")
   RROWS+=("| $label | ${line#* } | $ec | **$PROBE** |")
   note "$label: $PROBE, EC table $ec (asus-wmi/amd-pmf | idle fans | idle Tctl | peak Tctl | APU W | MHz: ${line#* })"
 }
@@ -1036,7 +1037,7 @@ run_resume() {
   intro+=$'\n'"- Hibernate resumes this boot before the run: $since0"$'\n\n'"### Result"$'\n\n'
   intro+="- Hibernate: table **$hib** after $n cycle(s)${hfix:+; writing the profile again: **$hfix**}"$'\n'
   intro+="- s2idle: table **$sus**${sfix:+; writing the profile again: **$sfix**}"$'\n'
-  intro+="- Verdict per step (probe-verdict.py): quiet = at most 35 W (and at least 30 W) with peak Tctl below 90 C; lost = at least 37 W, peak Tctl 90 C or more, or fans spinning on an idle below 50 C; else unclear"$'\n\n'
+  intro+="- Verdict per step (probe-verdict.py): quiet = at most 35 W (and at least 30 W) with peak Tctl below 90 C; lost = at least 37 W, peak Tctl 90 C or more, fans spinning on an idle below 50 C, or an EC table other than the profile's (silent for quiet); else unclear"$'\n\n'
   intro+="| Step | asus-wmi/amd-pmf | Idle fans rpm | Idle Tctl C | Peak Tctl C | APU W | MHz | EC table | Verdict |"$'\n'"|---|---|---|---|---|---|---|---|---|"$'\n'
   intro+=$(printf '%s\n' "${RROWS[@]}")
   intro+=$'\n\n'"Fan curves reported by asus-wmi at the start:"$'\n\n```\n'"$table"$'\n```\n'
