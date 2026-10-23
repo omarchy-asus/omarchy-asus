@@ -3,9 +3,10 @@
 # by their checksums, at the same index in source=(), b2sums=() and sha256sums=().
 #   1. every local patch's b2sum and sha256sum sit at its own index (an entry
 #      one slot off still has the right count, and makepkg then blames the wrong file);
-#   2. 0808 (#185): asus_hotk_restore() writes the thermal policy back, and the
-#      patch applies at fuzz 0 to asus-wmi.c as 0800 and 0803 leave it. That part
-#      fetches v7.2.8's asus-wmi.c and is skipped when the network is not there.
+#   2. 0808 (#185): the patch applies at fuzz 0 to asus-wmi.c's hibernate/resume
+#      callbacks as 0800 and 0803 leave them (tests/ci/fixtures), and
+#      asus_hotk_restore() then writes the thermal policy and fan curves back.
+#      Online, it also checks the fixture against v7.2.8's real file.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 R=$W/recipes/linux-omarchy
@@ -39,15 +40,11 @@ grep -q '^patch 0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernat
 
 # ------------------------------------------------------------- 2. 0808 applies
 P=$R/0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernation.patch
+FX=$W/tests/ci/fixtures/asus-wmi-7.2.8-pm-callbacks.c
 F=drivers/platform/x86/asus-wmi.c
-mkdir -p "$T/k/${F%/*}"
-if curl -sfL --max-time 30 -o "$T/k/$F" "https://raw.githubusercontent.com/gregkh/linux/v7.2.8/$F"; then
+check_0808() { # tree: applies 0808 to $tree/$F and checks the result
   (
-    cd "$T/k" || exit 1
-    git init -q . || exit 1
-    for p in 0800-platform-updates 0803-acpi-battery-hook-api-acpi-prefix; do
-      git apply --include="$F" "$R/$p.patch" || { echo "FAIL: $p does not apply to v7.2.8's $F"; exit 1; }
-    done
+    cd "$1" || exit 1
     patch -p1 -N --fuzz=0 --no-backup-if-mismatch <"$P" >/dev/null || { echo "FAIL: 0808 does not apply at fuzz 0"; exit 1; }
     body=$(awk '/^static int asus_hotk_restore\(/,/^}/' "$F")
     grep -q 'asus_wmi_restore_thermal_state(asus);' <<<"$body" || { echo "FAIL: asus_hotk_restore does not call the restore"; exit 1; }
@@ -59,10 +56,30 @@ if curl -sfL --max-time 30 -o "$T/k/$F" "https://raw.githubusercontent.com/gregk
       awk "/^static int $cb\\(/,/^}/" "$F" | grep -q restore_thermal && { echo "FAIL: $cb calls the restore"; exit 1; }
     done
     exit 0
-  ) && ok "0808 applies at fuzz 0 after 0800/0803; restore writes the policy and fan curves back, thaw and resume untouched" ||
-    bad "0808 against v7.2.8's asus-wmi.c"
+  )
+}
+# Offline: the hibernate/resume callbacks of asus-wmi.c as 0800 and 0803 leave them.
+mkdir -p "$T/fx/${F%/*}"
+grep -v '^// ' "$FX" >"$T/fx/$F"
+check_0808 "$T/fx" && ok "0808 applies at fuzz 0 to the fixture; restore writes the policy and fan curves back, thaw and resume untouched" ||
+  bad "0808 against the fixture"
+# Online: the same against the real file, and the fixture still matches it.
+mkdir -p "$T/k/${F%/*}"
+if curl -sfL --max-time 30 -o "$T/k/$F" "https://raw.githubusercontent.com/gregkh/linux/v7.2.8/$F"; then
+  (
+    cd "$T/k" || exit 1
+    git init -q . || exit 1
+    for p in 0800-platform-updates 0803-acpi-battery-hook-api-acpi-prefix; do
+      git apply --include="$F" "$R/$p.patch" || { echo "FAIL: $p does not apply to v7.2.8's $F"; exit 1; }
+    done
+  ) || bad "0800/0803 against v7.2.8's $F"
+  s=$(grep -n '^/\* Platform driver - hibernate/resume callbacks' "$T/k/$F" | cut -d: -f1)
+  e=$(grep -n '^static const struct dev_pm_ops asus_pm_ops' "$T/k/$F" | cut -d: -f1)
+  cmp -s <(sed -n "$((s - 1)),$((e + 5))p" "$T/k/$F") <(grep -v '^// ' "$FX") &&
+    ok "the fixture matches v7.2.8 + 0800/0803" || bad "the fixture no longer matches v7.2.8 + 0800/0803"
+  check_0808 "$T/k" && ok "0808 applies at fuzz 0 to the full file too" || bad "0808 against v7.2.8's $F"
 else
-  echo "skip: no network for v7.2.8's $F"
+  echo "skip: no network: the fixture was not compared with v7.2.8's $F"
 fi
 
 ((fails == 0)) && echo "all passed" || { echo "$fails failed"; exit 1; }
