@@ -65,7 +65,6 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libarchive-tools
       # Offline tests: tests/test_*.py (python unittest, e.g. bin/issue's) and
       # tests/ci/*.sh (hermetic shell tests opt in by living there).
-      # tests/auto-update-simulate.sh (PR #6) needs network and local repo state.
       - name: Offline tests
         run: |
           shopt -s nullglob

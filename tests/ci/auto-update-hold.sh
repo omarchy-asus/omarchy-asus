@@ -1,5 +1,5 @@
 #!/bin/bash
-# A recipe with recipes/<r>/HOLD is never built or published by bin/auto-update:
+# A recipe with recipes/<r>/HOLD is never built or published by the daily rebase:
 # bin/auto-update-state plans "attention" for it, and keeps a published copy even when it
 # is behind upstream (never stock over our patch, #201). Offline: a hand-made check-upstream JSON.
 #

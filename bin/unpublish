@@ -1,6 +1,6 @@
 #!/bin/bash
 # Drop packages from the repo db so the stock build flows through again.
-# Usage: bin/unpublish [--channel quattro|rc] pkgname ...   (record the reason; bin/auto-update writes it to $DATA/status.json)
+# Usage: bin/unpublish [--channel quattro|rc] pkgname ...
 # Same locked, verified transaction as bin/publish (bin/publish-lib.sh; exit 75 when
 # $DATA/publish.lock stays busy): any failure leaves the live repo as it was.
 # Release cohort partners (build/cohorts.conf, e.g. omarchy + omarchy-settings) that the db

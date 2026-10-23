@@ -62,8 +62,8 @@
 # an archive that cannot be listed or read to the end (truncated, not an archive) or
 # any other failed scan step aborts too, never reads as clean (PII_SCAN=off skips the
 # scan, for a machine without one).
-# --pii-scan-text scans files as plain text, never as archives (bin/auto-update scans
-# its PR comments and replies with it; build/pii-allow-packages does not apply).
+# --pii-scan-text scans files as plain text, never as archives (for PR comments and
+# other posted text; build/pii-allow-packages does not apply).
 set -euo pipefail
 # --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
 if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi

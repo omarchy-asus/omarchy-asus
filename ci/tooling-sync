@@ -1,6 +1,6 @@
 #!/bin/bash
 # The tooling runs from main on both channels: the publishing pipeline is one installed
-# copy of main's scripts (bin/install-auto-update), and CI on the RC branch should check
+# copy of main's scripts, and CI on the RC branch should check
 # its PRs with the same ci/ and workflows. So every tooling file on next/omarchy-4.5 must
 # be main's, byte for byte; only recipes differ between the channels.
 #   ci/tooling-sync check <main-ref> [--base <ref>]
@@ -8,10 +8,10 @@
 #                                      when this checkout's tooling differs from <main-ref>'s.
 #                                      With --base (a PR's base), only the files the PR itself
 #                                      changed count: the rest is the branch lagging behind
-#                                      main, a warning (bin/auto-update opens the sync PR)
+#                                      main, a warning (a 'Tooling from main' PR syncs it)
 #   ci/tooling-sync apply <main-ref>   make this checkout's tooling <main-ref>'s (stages it)
 #   ci/tooling-sync list               print the tooling paths and the exceptions
-# Tooling: bin/ ci/ build/ .github/ systemd/ tests/ docs/distcc.md docs/kernel-runner.md.
+# Tooling: bin/ ci/ build/ .github/ tests/ docs/distcc.md docs/kernel-runner.md.
 # Exceptions, per channel like the recipes they go with:
 #   tests/test_g16_resume_probe.py tests the G16 kit inside the kernel recipe
 #   (recipes/linux-omarchy/g16-test/);
@@ -19,7 +19,7 @@
 #   expects asus-rog-nkey-winlock 0.1.0-13's g16-winlockd, Quattro's 0.1.0-12).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PATHS=(bin ci build .github systemd tests docs/distcc.md docs/kernel-runner.md)
+PATHS=(bin ci build .github tests docs/distcc.md docs/kernel-runner.md)
 EXCEPT=(tests/test_g16_resume_probe.py bin/g16-check)
 
 # pathspec: the tooling paths minus the exceptions
@@ -49,8 +49,8 @@ case ${1:-} in
         if ((${#behind[@]})); then
             printf '    behind main: %s\n' "${behind[@]}"
             msg="This branch's tooling is behind main ($short) in ${#behind[@]} file(s) this PR doesn't touch: ${behind[*]}."
-            msg+=" Not this PR's to fix: bin/auto-update opens a 'Tooling from main' PR against this branch on its next run."
-            msg+=" To sync sooner, run 'ci/tooling-sync apply origin/main' on a branch of its own and open that PR."
+            msg+=" Not this PR's to fix: a 'Tooling from main' PR brings it to this branch"
+            msg+=" ('ci/tooling-sync apply origin/main' on a branch of its own, then open that PR)."
             echo "::warning title=Tooling behind main::$msg"
         fi
         ((${#mine[@]} == 0)) && { echo "==> this PR changes no tooling away from $rev"; exit 0; }
@@ -59,7 +59,7 @@ case ${1:-} in
         msg="This PR makes ${#mine[@]} tooling file(s) differ from main ($short): ${mine[*]}."
         msg+=" Tooling runs from main on both channels, so it changes only on main."
         msg+=" Move the change to a PR against main and take it out of this one; once main has it,"
-        msg+=" bin/auto-update's 'Tooling from main' PR brings it to this branch."
+        msg+=" a 'Tooling from main' PR brings it to this branch."
         msg+=" (A PR that syncs this branch with main passes: run 'ci/tooling-sync apply origin/main', commit, push.)"
         echo "::error title=Tooling differs from main::$msg"
         exit 1

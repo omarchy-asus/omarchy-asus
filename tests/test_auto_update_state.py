@@ -178,7 +178,7 @@ class RevdepWithdrawTest(unittest.TestCase):
                          "linux-g16-headers\tnvidia-open-dkms\n")
 
     def test_unreadable_conf(self):
-        # Present but unreadable: exit 1, so bin/auto-update withdraws nothing (#89)
+        # Present but unreadable: exit 1, so nothing is withdrawn (#89)
         os.remove(self.conf)
         os.mkdir(self.conf)
         p = run("revdep-withdraw", self.conf, "linux-omarchy-headers", "nvidia-open-dkms")

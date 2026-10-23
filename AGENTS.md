@@ -54,23 +54,22 @@ On top of clud's caps, these hold across all stages:
 - **A recipe change bumps `pkgrel`.** If the package content changes, the version changes:
   the release refuses a filename it already has with different bytes, and pacman caches by
   filename.
-- **A merge that changes the pipeline is followed by a reinstall.** When a PR touches what
-  `bin/install-auto-update` installs (its `scripts` and `build_files`, or `systemd/`), the build
-  host re-runs `sudo bin/install-auto-update --apply` from an up-to-date `main` right after the
-  merge. Until then the timer publishes nothing on either channel (#217); the reinstall starts
-  the held-back run itself.
+- **Publishing goes through Steward only.** The daily rebase onto upstream, its builds and its
+  publishes are Steward's Rebase onto upstream workflow, scheduled once per channel, so every run
+  shows on its page (docs/releases.md). No systemd timer, service or cron job builds or
+  publishes: never add, install or start one. A one-off build or publish by hand
+  (`bin/build-pkg`, `bin/publish`, `bin/sync-release`) is still fine.
 - **Held recipes** (`recipes/<r>/HOLD`, first line the reason) are merged but not built or
-  published, by hand or by `bin/auto-update`, until the hold is removed in its own PR.
+  published, by hand or by the daily rebase, until the hold is removed in its own PR.
 - **One channel per branch.** `main` is the Quattro channel (the `x86_64` release, Omarchy
   stable); `next/omarchy-4.5` is the RC channel (the `rc-x86_64` release, Omarchy rc). Stage 6
   for an RC change passes `--channel rc` to `bin/mkchroot`, `bin/build-pkg`, `bin/publish` and
-  `bin/sync-release`; the default is Quattro. The `bin/auto-update` timer publishes both
-  channels, from scripts installed from `main` (systemd/README.md, "Release channels").
+  `bin/sync-release`; the default is Quattro. The daily rebase onto upstream publishes both
+  channels (docs/releases.md).
   README.md "Release channels" has the pairing.
-- **`main` drives the release channels.** Release tooling (the `bin/auto-update` pipeline, the
-  publish and release gates, `bin/env.sh`'s channel-to-branch map, `systemd/`) serves both
-  channels from `main`, so a change to it targets `main` (that is not a backport) and takes
-  effect once the pipeline is reinstalled. Omarchy software, recipes and patches go forward
+- **`main` drives the release channels.** Release tooling (the publish and release gates,
+  `bin/env.sh`'s channel-to-branch map, `bin/check-upstream`, `bin/auto-update-state`) serves both
+  channels from `main`, so a change to it targets `main` (that is not a backport). Omarchy software, recipes and patches go forward
   first, on the newest channel's branch, and are backported to Quattro only when asked or
   needed.
 - **Findings outside the task** (a flaky test, an unrelated bug) are filed with `bin/issue`,
@@ -90,9 +89,8 @@ admin: once the required CI checks are green, the lander merges with `--admin`.
   fill it).
 - `bin/ai-review` (#50) is no longer a gate and the `ai-review` status is not required on any
   omarchy-asus repo. It stays available as an optional second opinion, and for outside
-  contributors' PRs (Code Review Rules below). The exception is `bin/auto-update`: it is still
-  the review gate of its unattended rebase PRs, where no clud reviewer runs (#77,
-  systemd/README.md "Merge gates"). If codex is unavailable, those PRs wait for a human.
+  contributors' PRs (Code Review Rules below). The daily rebase's PRs get their review in its
+  Steward workflow (a second model reviews every one before it merges).
 - Pull requests from external contributors are reviewed by us, against these rules, and need
   the maintainer's approving review.
 
