@@ -141,8 +141,9 @@ entry is merged.
 `drivers/platform/x86/amd/pmf/hwmon.c`: a read-only hwmon device `amd_pmf`
 with `power1_input` (APU), `power2_input` (dGPU) and `power3_input` (socket),
 each with a label, in microwatts. The values are PMFW's metrics table fields
-`apu_power`, `dgpu_power` and `socket_power` (on Rembrandt and Phoenix, which
-have no socket field, socket is APU + dGPU). Registered only on the SoCs whose
+`apu_power`, `dgpu_power` and `socket_power` (on Rembrandt and Phoenix, whose
+v1 table names it `current_socketpower`; socket is never APU + dGPU, which
+would count the dGPU's draw as the SoC's). Registered only on the SoCs whose
 table layout the driver knows (Rembrandt, Phoenix, family 1Ah models 20h and
 60h; the G16's Krackan Point is 1Ah 60h).
 

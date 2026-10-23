@@ -5,7 +5,9 @@
 #      150 MB download);
 #   2. the patch keeps its default-safe shape: read-only attributes, the
 #      hwmon_support switch defaults on and can turn it off, and an unknown
-#      SoC registers nothing;
+#      SoC registers nothing; on both metrics table layouts (v1: Rembrandt,
+#      Phoenix; v2: family 1Ah 20h/60h) each channel reads that table's own
+#      field, socket included;
 #   3. if the kernel tarball and a 7.2.8 linux-omarchy headers tree are on this
 #      machine (the build host), amd_pmf with upstream's 0800-0802 and our 0809
 #      applies at fuzz 0 and compiles as a module with W=1 and no warnings.
@@ -40,6 +42,24 @@ grep -E '^\+.*(0644|0200|0600|S_IW|_store|\.write)' "$P" | grep -v 'Copyright' >
   bad "patch adds something writable" || ok "nothing writable added"
 grep -q '^+	if (IS_ERR(hwdev)) {' "$P" && ! grep -q '^+.*return PTR_ERR(hwdev)' "$P" &&
   ok "a failed registration doesn't fail probe" || bad "hwmon failure handling"
+
+# Both table layouts: each channel comes from that table's own field. The v2
+# table (family 1Ah models 20h/60h) has socket_power, the v1 table (Rembrandt,
+# Phoenix) current_socketpower; neither is APU + dGPU, which would put the
+# dGPU's draw under the socket label.
+# The table switch in amd_pmf_hwmon_update(): its v2 case, then its default.
+sw=$(awk '/^\+static int amd_pmf_hwmon_update\(/ {on = 1} on {print} on && /^\+}$/ {exit}' "$P")
+v2=$(awk '/case PCI_DEVICE_ID_AMD_1AH_M20H_ROOT:/ {on = 1} on {print} on && /break;/ {exit}' <<<"$sw")
+v1=$(awk '/^\+\tdefault:/ {on = 1} on {print} on && /break;/ {exit}' <<<"$sw")
+for want in 'hwmon_mw[AMD_PMF_HWMON_APU] = v2.apu_power;' 'hwmon_mw[AMD_PMF_HWMON_DGPU] = v2.dgpu_power;' \
+  'hwmon_mw[AMD_PMF_HWMON_SOCKET] = v2.socket_power;'; do
+  grep -qF "$want" <<<"$v2" && ok "v2 table: $want" || bad "v2 table lacks: $want"
+done
+for want in 'hwmon_mw[AMD_PMF_HWMON_APU] = v1.apu_power;' 'hwmon_mw[AMD_PMF_HWMON_DGPU] = v1.dgpu_power;' \
+  'hwmon_mw[AMD_PMF_HWMON_SOCKET] = v1.current_socketpower;'; do
+  grep -qF "$want" <<<"$v1" && ok "v1 table: $want" || bad "v1 table lacks: $want"
+done
+grep -qE '^\+.*apu_power *\+ *[a-z0-9_.]*dgpu_power' "$P" && bad "socket is computed as APU + dGPU somewhere" || ok "no APU + dGPU sum reported as socket"
 
 # ------------------------------------------------------------ 3. build
 tar=''
