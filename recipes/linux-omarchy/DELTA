@@ -4,7 +4,7 @@
 # in source=() is the whole edit.
 upstream omarchy-pkgs pkgbuilds/linux-omarchy
 mode overlay
-keep NOTES.md g16-test/deploy g16-test/test g16-test/lib.sh
+keep NOTES.md g16-test/deploy g16-test/test g16-test/lib.sh g16-test/probe-verdict.py
 patch 0481-drm-amd-display-power-backports.patch after 0480-*
 patch 0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch after 0481-*
 patch 0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch after 0567-*
