@@ -28,7 +28,7 @@ patch 0012-Stop-early-loading-the-NVIDIA-driver-on-hybrid-GPU-m.patch prepare om
 patch 0013-Restore-the-drop-in-when-the-initramfs-rebuild-fails.patch prepare omarchy
 patch 0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch prepare omarchy
 patch 0015-Read-every-udev-record-before-asking-the-webcams.patch prepare omarchy
-patch 0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch prepare omarchy
+patch 0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch prepare omarchy
 patch 0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch prepare omarchy
 patch 0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch prepare omarchy
 patch 0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch prepare omarchy
