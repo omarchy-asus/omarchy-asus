@@ -162,8 +162,13 @@ echo "OMARCHY_ASUS_CI_CCACHE=/var/lib/<runner>/ccache" >> /var/lib/<runner>/acti
 ```
 
 The build step mounts it at `/mnt/ccache` and `ci/build-recipe` puts ccache
-in front of distcc (15 GB limit). Its files belong to the runner's subuids;
-to empty it, remove them from a container:
+in front of distcc (15 GB limit), with the release builds' hash settings
+(docs/distcc.md, "Persistent ccache"): `CCACHE_BASEDIR` is the build tree
+(`$WORK`, default `/build`), `CCACHE_NOHASHDIR=1`, and `CCACHE_SLOPPINESS`
+ignores the header mtimes and ctimes that every fresh tarball extraction
+changes. After makepkg the log has this build's
+`==> ccache: <n> hits, <n> misses, <n>% hit rate`. Its files belong to the
+runner's subuids; to empty it, remove them from a container:
 `docker run --rm -v /var/lib/<runner>/ccache:/c <image> sh -c 'rm -rf /c/*'`.
 
 Then turn it on:
@@ -175,5 +180,5 @@ gh variable set KERNEL_RUNNER -R omarchy-asus/omarchy-asus --body '["omarchy-asu
 Try it with a dispatch: `gh workflow run build-pr.yml --ref <branch> -f recipes=linux-omarchy -f rebuild=true`.
 The kernel job's log says `kernel runner: workflow_dispatch on ... accepted`,
 `distcc: ... mounted read-only`, `ccache: ... mounted` and
-`==> distcc: 1 helper(s), <n> slots on top of <m> here`; the helper's
-`journalctl -t distccd` shows the compiles.
+`==> distcc: 1 helper(s), <n> slots on top of <m> here`, and after the build
+the ccache hit rate; the helper's `journalctl -t distccd` shows the compiles.
