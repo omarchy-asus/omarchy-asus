@@ -8,12 +8,15 @@
 #   ci/tooling-sync apply <main-ref>   make this checkout's tooling <main-ref>'s (stages it)
 #   ci/tooling-sync list               print the tooling paths and the exceptions
 # Tooling: bin/ ci/ build/ .github/ systemd/ tests/ docs/distcc.md docs/kernel-runner.md.
-# Exception: tests/test_g16_resume_probe.py tests the G16 kit inside the kernel recipe
-# (recipes/linux-omarchy/g16-test/), which is per channel like the rest of the recipe.
+# Exceptions, per channel like the recipes they go with:
+#   tests/test_g16_resume_probe.py tests the G16 kit inside the kernel recipe
+#   (recipes/linux-omarchy/g16-test/);
+#   bin/g16-check checks a laptop against its channel's packages (the RC branch's
+#   expects asus-rog-nkey-winlock 0.1.0-13's g16-winlockd, Quattro's 0.1.0-12).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PATHS=(bin ci build .github systemd tests docs/distcc.md docs/kernel-runner.md)
-EXCEPT=(tests/test_g16_resume_probe.py)
+EXCEPT=(tests/test_g16_resume_probe.py bin/g16-check)
 
 # pathspec: the tooling paths minus the exceptions
 spec=("${PATHS[@]}")

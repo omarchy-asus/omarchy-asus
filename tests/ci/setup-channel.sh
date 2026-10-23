@@ -1,157 +1,167 @@
 #!/bin/bash
-# bin/omarchy-asus-setup --channel quattro|rc (#167), offline: pacman, gpg, curl and
-# omarchy-channel-set are stubs, HOME, pacman.conf and custom-repos.conf are temp files.
-# The stub omarchy-channel-set rewrites the [omarchy] server the way Omarchy's does and puts
-# the Include line back above it (the pre-refresh hook's job).
+# Channel switching is Omarchy's own omarchy-channel-set (#167, #201), offline. Our part is
+# the pre-refresh hook bin/omarchy-asus-setup installs: Omarchy runs it after it copies a
+# channel's pacman.conf into place and before pacman -Syyuu. The hook under test is the one
+# install_hook writes, with its /etc paths pointed at temp files; sudo is a stub that logs.
 #   a. a first setup picks our channel from Omarchy's: rc with Omarchy rc, quattro with stable
-#   b. --dry-run --channel rc: previews the rc-x86_64 database, prints the rc repo section
-#      and 'omarchy-channel-set rc', changes no file
-#   c. --channel rc: custom-repos.conf points at rc-x86_64, omarchy-channel-set rc runs,
-#      both are on rc afterwards
-#   d. --channel rc again: already there, omarchy-channel-set does not run
-#   e. --channel quattro: back to the x86_64 release and omarchy-channel-set stable
-#   f. the target channel's database can't be downloaded: stops, nothing changed
-#   g. the repo is not set up: stops, nothing changed
-#   h. an unknown channel: usage error
-#   i. omarchy-channel-set rewrites the configs, then its upgrade fails: the switch stays
-#      pending, a rerun runs omarchy-channel-set again (not "already on"), and only a
-#      verified switch clears it
+#   b. Omarchy switched to rc: [omarchy-asus] moves to rc-x86_64, the Include line goes back
+#      above [omarchy], the other repos in custom-repos.conf stay, one sudo call
+#   c. the hook again: nothing to do, no sudo
+#   d. back to Omarchy stable: [omarchy-asus] moves to the x86_64 release
+#   e. Omarchy edge: [omarchy-asus] stays where it is, with a warning; the Include line still goes in
+#   f. a Server of your own (not our release) is left alone
+#   g. no custom-repos.conf: the hook does nothing
+#   h. LAPTOP-SETUP.md section 3 shows the same hook
+#   i. --channel is retired: exits 2, points at omarchy-channel-set, changes nothing, and says
+#      an older hook needs a rerun of the setup first
+#   j. indented sections and Server lines, tabs around "=": still read and moved
+#   k. through a refresh like omarchy-refresh-pacman's (its hook runner goes on after a failed
+#      hook): the upgrade runs after a good hook; when sudo fails, the hook stops the refresh
+#      before pacman -Syyuu, with or without the TERM trap Omarchy 4.5's refresh sets
 # Usage: tests/ci/setup-channel.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 S=$(realpath "$(mktemp -d)")
 [[ ${1:-} == keep ]] && echo "state: $S" || trap 'rm -rf "$S"' EXIT
 mkdir -p "$S/bin" "$S/home"
-FPR=$(sed -n 's/^FPR=//p' "$W/bin/omarchy-asus-setup")
-cat >"$S/bin/pacman" <<'STUB'
+cat >"$S/bin/sudo" <<'STUB'
 #!/bin/bash
-case ${1:-} in -Q) exit 1 ;; esac
-exit 0
+echo "sudo $1" >>"$SUDO_LOG"
+[[ -z ${SUDO_FAIL:-} ]] || { echo "sudo: 3 incorrect password attempts" >&2; exit 1; }
+exec "$@"
 STUB
-cat >"$S/bin/gpg" <<STUB
-#!/bin/bash
-# --show-keys: the expected key; --dearmor -o FILE: an empty keyring
-if [[ " \$* " == *" --show-keys "* ]]; then printf 'pub:-:255:22:X:1::::\nfpr:::::::::%s:\n' "$FPR"; fi
-while ((\$#)); do [[ \$1 == -o ]] && : >"\$2"; shift; done
-exit 0
-STUB
-# curl -o FILE URL: logs the URL; fails for URLs matching \$CURL_FAIL
-cat >"$S/bin/curl" <<'STUB'
-#!/bin/bash
-out='' url=''
-while (($#)); do
-    case $1 in -o) out=$2; shift ;; -*) ;; *) url=$1 ;; esac
-    shift
-done
-echo "$url" >>"$CURL_LOG"
-[[ -n ${CURL_FAIL:-} && $url == *$CURL_FAIL* ]] && exit 22
-[[ -n $out ]] && echo stub >"$out"
-exit 0
-STUB
-cat >"$S/bin/omarchy-channel-set" <<'STUB'
-#!/bin/bash
-echo "omarchy-channel-set $*" >>"$OCS_LOG"
-printf '[options]\n\nInclude = %s\n\n[omarchy]\nServer = https://pkgs.omarchy.org/%s/$arch\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' \
-    "$OMARCHY_ASUS_CUSTOM_REPOS" "$1" >"$OMARCHY_ASUS_PACMAN_CONF"
-# OCS_FAIL=1: the configs are rewritten, then the -Syyuu / migrations fail
-[[ -z ${OCS_FAIL:-} ]]
-STUB
-for c in pacman-key gpgv bsdtar vercmp; do printf '#!/bin/bash\nexit 0\n' >"$S/bin/$c"; done
-printf '#!/bin/bash\nexec "$@"\n' >"$S/bin/sudo"
-chmod +x "$S"/bin/*
-printf 'y\n' >"$S/tty"
-export PATH=$S/bin:$PATH HOME=$S/home CURL_LOG=$S/curl.log OCS_LOG=$S/ocs.log
-unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME CURL_FAIL OCS_FAIL
-export OMARCHY_ASUS_PACMAN_CONF=$S/pacman.conf OMARCHY_ASUS_CUSTOM_REPOS=$S/custom-repos.conf \
-    OMARCHY_ASUS_SETUP_TTY=$S/tty OMARCHY_ASUS_SNAPPER_CONFIG=$S/no-snapper
+chmod +x "$S/bin/sudo"
+export PATH=$S/bin:$PATH HOME=$S/home SUDO_LOG=$S/sudo.log
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
+export OMARCHY_ASUS_PACMAN_CONF=$S/pacman.conf OMARCHY_ASUS_CUSTOM_REPOS=$S/custom-repos.conf
 fail=0
 expect() { if [[ $1 == "$2" ]]; then echo "ok: $3"; else printf 'FAIL: %s\n  got:  %s\n  want: %s\n' "$3" "$1" "$2"; fail=1; fi; }
-conf() {  # conf <stable|rc>: pacman.conf on that Omarchy channel, our Include line above it
-    printf '[options]\n\nInclude = %s\n\n[omarchy]\nServer = https://pkgs.omarchy.org/%s/$arch\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' \
-        "$OMARCHY_ASUS_CUSTOM_REPOS" "$1" >"$S/pacman.conf"
+REL=https://github.com/omarchy-asus/omarchy-asus/releases/download
+template() {  # template <stable|rc|edge>: pacman.conf as omarchy-refresh-pacman copies it, no Include line
+    printf '[options]\nHoldPkg = pacman glibc\n\n[omarchy]\nSigLevel = Optional TrustAll\nServer = https://pkgs.omarchy.org/%s/$arch\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n' \
+        "$1" >"$S/pacman.conf"
 }
-snippet() {  # snippet <prefix>: custom-repos.conf with our section on .../download/<prefix>$arch
-    printf '[omarchy-asus]\nSigLevel = Required\nServer = https://github.com/omarchy-asus/omarchy-asus/releases/download/%s$arch\n' \
-        "$1" >"$S/custom-repos.conf"
+snippet() {  # snippet <server>: custom-repos.conf with another repo of yours, then ours
+    printf '[mine]\nServer = https://example.invalid/$arch\n\n[omarchy-asus]\nSigLevel = Required\nServer = %s\n' "$1" >"$S/custom-repos.conf"
 }
-setup() { rm -f "$S/curl.log" "$S/ocs.log"; "$W/bin/omarchy-asus-setup" --force "$@" >"$S/out" 2>&1; }
-server() { sed -n 's/^Server = //p' "$1"; }
-sums() { sha256sum "$S/pacman.conf" "$S/custom-repos.conf" 2>/dev/null; }
+server() { sed -n "/^\[$1\]\$/,/^\[/s/^Server = //p" "$2"; }
+first_section() { grep -m1 -nE '^(Include = '"$S"'/custom-repos.conf|\[omarchy\]|\[core\])$' "$S/pacman.conf" | cut -d: -f2-; }
+hook() { rm -f "$SUDO_LOG"; bash "$S/hook" >"$S/out" 2>&1; }
+sudos() { if [[ -f $SUDO_LOG ]]; then wc -l <"$SUDO_LOG"; else echo 0; fi; }
+
+# The hook install_hook writes, its /etc paths pointed at the temp files.
+OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 bash -c 'f=$1; shift; source "$f" && install_hook' _ "$W/bin/omarchy-asus-setup" >/dev/null 2>&1
+H=$HOME/.config/omarchy/hooks/pre-refresh-pacman.d/add-omarchy-asus-repo
+[[ -x $H ]] || { echo "FAIL: install_hook wrote no executable $H"; exit 1; }
+sed -e "s|^CONF=.*|CONF=$S/pacman.conf|" -e "s|^SNIPPET=.*|SNIPPET=$S/custom-repos.conf|" "$H" >"$S/hook"
+expect "$(grep -c "^CONF=$S/\|^SNIPPET=$S/" "$S/hook")" 2 "the hook's paths point at the temp files"
 
 echo "== a. a first setup follows Omarchy's channel"
 for pair in rc:rc stable:quattro; do
-    conf "${pair%%:*}"
+    template "${pair%%:*}"
     got=$(OMARCHY_ASUS_SETUP_SOURCE_ONLY=1 bash -c 'f=$1; shift; source "$f" && set_channel && echo "$CHANNEL $GH_TAG $DB_URL"' _ \
         "$W/bin/omarchy-asus-setup" 2>/dev/null)
     tag=x86_64; [[ ${pair#*:} == rc ]] && tag=rc-x86_64
-    expect "$got" "${pair#*:} $tag https://github.com/omarchy-asus/omarchy-asus/releases/download/$tag/omarchy-asus.db" \
-        "Omarchy ${pair%%:*}: our ${pair#*:} channel"
+    expect "$got" "${pair#*:} $tag $REL/$tag/omarchy-asus.db" "Omarchy ${pair%%:*}: our ${pair#*:} channel"
 done
 
-echo "== b. dry run to rc"
-conf stable; snippet ''
-before=$(sums)
-setup --dry-run --channel rc; expect $? 0 "exits 0"
-grep -qx 'https://github.com/omarchy-asus/omarchy-asus/releases/download/rc-x86_64/omarchy-asus.db' "$S/curl.log"
-expect $? 0 "previews the rc-x86_64 database"
-grep -qF 'Server = https://github.com/omarchy-asus/omarchy-asus/releases/download/rc-$arch' "$S/out"
-expect $? 0 "prints the rc repo section"
-grep -qF '[dry-run] omarchy-channel-set rc' "$S/out"; expect $? 0 "prints omarchy-channel-set rc"
-if [[ -e $S/ocs.log ]]; then r=0; else r=1; fi; expect "$r" 1 "omarchy-channel-set does not run"
-expect "$(sums)" "$before" "no file changed"
+echo "== b. omarchy-channel-set rc"
+template rc; snippet "$REL/\$arch"
+hook; expect $? 0 "exits 0"
+expect "$(server omarchy-asus "$S/custom-repos.conf")" "$REL/rc-\$arch" "[omarchy-asus] on the rc-x86_64 release"
+expect "$(server mine "$S/custom-repos.conf")" 'https://example.invalid/$arch' "your other repo is untouched"
+expect "$(first_section)" "Include = $S/custom-repos.conf" "the Include line is above [omarchy]"
+expect "$(grep -c '^\[omarchy-asus\]$' "$S/custom-repos.conf")" 1 "one [omarchy-asus] section"
+expect "$(sudos)" 1 "one sudo call for both edits"
 
-echo "== c. switch to rc"
-setup --channel rc; expect $? 0 "exits 0"
-expect "$(server "$S/custom-repos.conf")" 'https://github.com/omarchy-asus/omarchy-asus/releases/download/rc-$arch' \
-    "[omarchy-asus] on the rc-x86_64 release"
-expect "$(cat "$S/ocs.log" 2>/dev/null)" "omarchy-channel-set rc" "omarchy-channel-set rc ran"
-expect "$(server "$S/pacman.conf")" 'https://pkgs.omarchy.org/rc/$arch' "[omarchy] on Omarchy rc"
-grep -qF 'on Omarchy rc, [omarchy-asus] on rc' "$S/out"; expect $? 0 "says both are on rc"
+echo "== c. the hook again"
+before=$(sha256sum "$S/pacman.conf" "$S/custom-repos.conf")
+hook; expect $? 0 "exits 0"
+expect "$(sha256sum "$S/pacman.conf" "$S/custom-repos.conf")" "$before" "no file changed"
+expect "$(sudos)" 0 "no sudo"
 
-echo "== d. already on rc"
-setup --channel rc; expect $? 0 "exits 0"
-grep -qF 'already on the rc channel' "$S/out"; expect $? 0 "says so"
-if [[ -e $S/ocs.log ]]; then r=0; else r=1; fi; expect "$r" 1 "omarchy-channel-set does not run"
+echo "== d. omarchy-channel-set stable"
+template stable
+hook; expect $? 0 "exits 0"
+expect "$(server omarchy-asus "$S/custom-repos.conf")" "$REL/\$arch" "[omarchy-asus] on the x86_64 release"
+expect "$(first_section)" "Include = $S/custom-repos.conf" "the Include line is above [omarchy]"
 
-echo "== e. back to quattro"
-setup --channel quattro; expect $? 0 "exits 0"
-expect "$(server "$S/custom-repos.conf")" 'https://github.com/omarchy-asus/omarchy-asus/releases/download/$arch' \
-    "[omarchy-asus] on the x86_64 release"
-expect "$(cat "$S/ocs.log" 2>/dev/null)" "omarchy-channel-set stable" "omarchy-channel-set stable ran"
-grep -qF 'downgraded to the Quattro versions' "$S/out"; expect $? 0 "says it downgrades"
-expect "$(server "$S/pacman.conf")" 'https://pkgs.omarchy.org/stable/$arch' "[omarchy] on Omarchy stable"
-if [[ -e $S/home/.local/state/omarchy-asus/channel-switch-pending ]]; then r=0; else r=1; fi
-expect "$r" 1 "no switch left pending"
+echo "== e. Omarchy edge"
+template edge; snippet "$REL/rc-\$arch"
+hook; expect $? 0 "exits 0"
+expect "$(server omarchy-asus "$S/custom-repos.conf")" "$REL/rc-\$arch" "[omarchy-asus] stays on rc-x86_64"
+grep -qF 'neither Omarchy stable nor rc' "$S/out"; expect $? 0 "warns"
+expect "$(first_section)" "Include = $S/custom-repos.conf" "the Include line is still added"
 
-echo "== f. the rc database is missing"
-before=$(sums)
-CURL_FAIL=rc-x86_64 setup --channel rc; r=$?; expect "$((r != 0))" 1 "exits non-zero ($r)"
-grep -qF 'nothing was changed' "$S/out"; expect $? 0 "says nothing was changed"
-expect "$(sums)" "$before" "no file changed"
-if [[ -e $S/ocs.log ]]; then r=0; else r=1; fi; expect "$r" 1 "omarchy-channel-set does not run"
+echo "== f. a Server of your own"
+template rc; snippet 'https://mirror.invalid/omarchy-asus/$arch'
+hook; expect $? 0 "exits 0"
+expect "$(server omarchy-asus "$S/custom-repos.conf")" 'https://mirror.invalid/omarchy-asus/$arch' "left alone"
 
-echo "== g. the repo is not set up"
-rm -f "$S/custom-repos.conf"
-before=$(sums)
-setup --channel rc; r=$?; expect "$((r != 0))" 1 "exits non-zero ($r)"
-grep -qF 'not set up' "$S/out"; expect $? 0 "says so"
-expect "$(sums)" "$before" "no file changed"
+echo "== g. no custom-repos.conf"
+template rc; rm -f "$S/custom-repos.conf"
+before=$(sha256sum "$S/pacman.conf")
+hook; expect $? 0 "exits 0"
+expect "$(sha256sum "$S/pacman.conf")" "$before" "pacman.conf unchanged"
+expect "$(sudos)" 0 "no sudo"
 
-echo "== h. an unknown channel"
-setup --channel edge; expect $? 2 "exits 2"
+echo "== h. LAPTOP-SETUP.md section 3 shows the same hook"
+doc=$(awk '/^## 3\. Hook/ { on = 1; next } on && /^```bash$/ { grab = 1; next } grab && /^```$/ { exit } grab' "$W/LAPTOP-SETUP.md")
+if [[ $doc == "$(<"$H")" ]]; then r=0; else r=1; diff <(echo "$doc") "$H"; fi
+expect "$r" 0 "the documented hook is the installed one"
 
-echo "== i. a switch whose upgrade fails is finished by a rerun"
-P=$S/home/.local/state/omarchy-asus/channel-switch-pending
-conf stable; snippet ''
-OCS_FAIL=1 setup --channel rc; r=$?; expect "$((r != 0))" 1 "the failed switch exits non-zero ($r)"
-expect "$(server "$S/pacman.conf")" 'https://pkgs.omarchy.org/rc/$arch' "the configs are already on rc"
-expect "$(cat "$P" 2>/dev/null)" rc "the rc switch is pending"
-setup --channel rc; expect $? 0 "the rerun exits 0"
-grep -qF 'already on the rc channel' "$S/out"; expect $? 1 "the rerun does not stop at 'already on'"
-expect "$(cat "$S/ocs.log" 2>/dev/null)" "omarchy-channel-set rc" "the rerun runs omarchy-channel-set rc again"
-if [[ -e $P ]]; then r=0; else r=1; fi; expect "$r" 1 "the verified switch clears it"
-setup --channel rc; expect $? 0 "a third run exits 0"
-grep -qF 'already on the rc channel' "$S/out"; expect $? 0 "and says it is already on rc"
+echo "== i. --channel is retired"
+template stable; snippet "$REL/\$arch"
+before=$(sha256sum "$S/pacman.conf" "$S/custom-repos.conf")
+"$W/bin/omarchy-asus-setup" --channel rc >"$S/out" 2>&1; expect $? 2 "exits 2"
+grep -qF "omarchy-channel-set rc" "$S/out"; expect $? 0 "points at omarchy-channel-set rc"
+"$W/bin/omarchy-asus-setup" --channel quattro >"$S/out" 2>&1; expect $? 2 "--channel quattro exits 2"
+grep -qF "omarchy-channel-set stable" "$S/out"; expect $? 0 "points at omarchy-channel-set stable"
+grep -qF "older copy" "$S/out"; expect $? 1 "a current hook needs no rerun"
+expect "$(sha256sum "$S/pacman.conf" "$S/custom-repos.conf")" "$before" "no file changed"
+printf '#!/bin/bash\n# an older hook\n' >"$H"
+"$W/bin/omarchy-asus-setup" --channel rc >"$S/out" 2>&1
+grep -qF "older copy" "$S/out"; expect $? 0 "an older hook: says to rerun the setup first"
+
+echo "== j. blanks around sections, Server and ="
+template rc
+printf '[mine]\nServer = https://example.invalid/$arch\n\n  [omarchy-asus]  \n  SigLevel = Required\n\tServer\t=\t%s  \n' "$REL/\$arch" >"$S/custom-repos.conf"
+sed -i 's/^\[omarchy\]$/ [omarchy]/; s|^Server = https://pkgs|  Server\t= https://pkgs|' "$S/pacman.conf"
+hook; expect $? 0 "exits 0"
+expect "$(grep -c "^Server = $REL/rc-\\\$arch\$" "$S/custom-repos.conf")" 1 "[omarchy-asus] on the rc-x86_64 release"
+expect "$(grep -c "\\\$arch  \$\|$REL/\\\$arch" "$S/custom-repos.conf")" 0 "the old Server line is gone"
+grep -qxF "Include = $S/custom-repos.conf" "$S/pacman.conf"; expect $? 0 "the Include line is in"
+hook; expect "$(sudos)" 0 "a second run reads it back: no sudo"
+
+echo "== k. through a refresh"
+# Omarchy's hook runner: a failed hook is reported, and the refresh goes on.
+cat >"$S/bin/omarchy-hook" <<'STUB'
+#!/bin/bash
+bash "$HOOK_UNDER_TEST" || echo "Hook failed: $HOOK_UNDER_TEST"
+STUB
+cat >"$S/bin/omarchy-refresh-pacman" <<'STUB'
+#!/bin/bash
+[[ -n ${REFRESH_TRAP:-} ]] && trap 'exit 143' TERM
+cp "$TEMPLATE" "$OMARCHY_ASUS_PACMAN_CONF"
+omarchy-hook pre-refresh-pacman
+echo "pacman -Syyuu" >>"$PACMAN_LOG"
+STUB
+chmod +x "$S/bin/omarchy-hook" "$S/bin/omarchy-refresh-pacman"
+export HOOK_UNDER_TEST=$S/hook TEMPLATE=$S/template PACMAN_LOG=$S/pacman.log
+refresh() { rm -f "$PACMAN_LOG" "$SUDO_LOG"; { omarchy-refresh-pacman >"$S/out" 2>&1; } 2>/dev/null; }
+template rc; cp "$S/pacman.conf" "$S/template"
+snippet "$REL/\$arch"
+refresh; expect $? 0 "a good hook: the refresh exits 0"
+expect "$(cat "$PACMAN_LOG" 2>/dev/null)" "pacman -Syyuu" "and upgrades"
+expect "$(server omarchy-asus "$S/custom-repos.conf")" "$REL/rc-\$arch" "on the rc-x86_64 release"
+for trap in '' 1; do
+    snippet "$REL/\$arch"
+    SUDO_FAIL=1 REFRESH_TRAP=$trap refresh; r=$?
+    expect "$((r != 0))" 1 "sudo fails${trap:+ (TERM trap)}: the refresh exits non-zero ($r)"
+    if [[ -e $PACMAN_LOG ]]; then u=1; else u=0; fi
+    expect "$u" 0 "no pacman -Syyuu"
+    grep -qF 'stopping the refresh' "$S/out"; expect $? 0 "says it stopped the refresh"
+done
 
 ((fail)) && { echo "FAILED"; cat "$S/out"; exit 1; }
 echo "all passed"
