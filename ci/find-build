@@ -7,7 +7,7 @@
 # The label here hashes everything the build depends on:
 #   - the recipe directory's files (PKGBUILD, patches, keys, config...),
 #     except the ones makepkg never reads: NOTES.md, README.md, DELTA, HOLD,
-#     LOCAL_ONLY and the g16-test/ and tests/ directories, unless the PKGBUILD
+#     LOCAL_ONLY, NO_DISTCC and the g16-test/ and tests/ directories, unless the PKGBUILD
 #     names them (a package can install its README). Editing those docs, the
 #     hold or the G16 test kit then reuses the earlier build instead of
 #     building linux-omarchy again for 2.5 hours.
@@ -38,7 +38,7 @@ recipe=${1:?usage: ci/find-build <recipe> [rev]} rev=${2:-HEAD}
 SCHEME=2
 
 # Recipe files that never reach the build, unless the PKGBUILD names them.
-SKIP_FILES=(NOTES.md README.md DELTA HOLD LOCAL_ONLY)
+SKIP_FILES=(NOTES.md README.md DELTA HOLD LOCAL_ONLY NO_DISTCC)
 SKIP_DIRS=(g16-test tests)
 
 # One "<mode> <type> <object> <path>" line per file the build can read.

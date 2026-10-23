@@ -100,7 +100,8 @@ What differs for RC:
   `next/omarchy-4.5`, so the RC branch's own copy of `bin/` never stops (or runs) anything.
 - **The RC chroot is the service's to make.** Before the first build (or kernel withdrawal) that
   needs it, the RC run checks that `/var/lib/omarchy-asus/chroot-rc` exists and uses the servers
-  of the installed `build/pacman-rc.conf`; otherwise it runs `bin/mkchroot --channel rc` (as
+  of the installed `build/pacman-rc.conf` and carries our packager (`PACKAGER="omarchy-asus"`
+  in `/etc/makepkg.conf.d/packager.conf`); otherwise it runs `bin/mkchroot --channel rc` (as
   root, from the root-owned copy). If that fails, the run records a `(chroot)` failure, the
   RC builds fail and our last builds stay published, as for any failed build. The Quattro
   chroot is still made by hand (Install, below).
@@ -216,7 +217,7 @@ Rebasing each recipe onto its current base reproduces the committed recipe. The 
 
 `makechrootpkg` needs root. Nothing else does. The design keeps the two apart:
 
-- **The code that runs as root is a root-owned copy.** `bin/install-auto-update --apply` copies the scripts to `/usr/local/lib/omarchy-asus/bin`, owned by root and not writable by group or others, and the chroots' `build/pacman.conf` and `build/pacman-rc.conf` to `/usr/local/lib/omarchy-asus/build` (root reads them: `bin/build-pkg` refuses a chroot on other servers, and `bin/mkchroot` makes the RC chroot from them). `auto-update` refuses to run as root from anywhere else, so it never runs the user-writable workspace or the bot clone. Changes to `bin/` reach the service only when the user re-runs the installer after review. `bin/install-auto-update --apply` records the source commit and the sha256 of every installed script and build file in `/usr/local/lib/omarchy-asus/installed`. Each run, right after refreshing the bot clone and before any retry, unpublish, publish or sync, compares the installed scripts and build files (and the stamp) with `bin/` and `build/` of `main` (the Quattro clone at `BASE_BRANCH`; the RC run exports them from `main` into its run dir). On any difference (a changed or new script, an installed file changed since install, or no stamp) it records a `(pipeline)` attention entry that names the fix (review the branch, then `sudo bin/install-auto-update --apply`), does nothing else and exits 1. A stale copy once unpublished omarchy because its check-upstream predated release cohorts (#127). The entry clears on the first run after the reinstall.
+- **The code that runs as root is a root-owned copy.** `bin/install-auto-update --apply` copies the scripts to `/usr/local/lib/omarchy-asus/bin`, owned by root and not writable by group or others, the chroots' `build/pacman.conf` and `build/pacman-rc.conf` to `/usr/local/lib/omarchy-asus/build` (root reads them: `bin/build-pkg` refuses a chroot on other servers, and `bin/mkchroot` makes the RC chroot from them), and `build/distcc-ssh` there too (`bin/build-pkg` mounts the distcc key dir only when its `ssh` wrapper is this file, docs/distcc.md). `auto-update` refuses to run as root from anywhere else, so it never runs the user-writable workspace or the bot clone. Changes to `bin/` reach the service only when the user re-runs the installer after review. `bin/install-auto-update --apply` records the source commit and the sha256 of every installed script and build file in `/usr/local/lib/omarchy-asus/installed`. Each run, right after refreshing the bot clone and before any retry, unpublish, publish or sync, compares the installed scripts and build files (and the stamp) with `bin/` and `build/` of `main` (the Quattro clone at `BASE_BRANCH`; the RC run exports them from `main` into its run dir). On any difference (a changed or new script, an installed file changed since install, or no stamp) it records a `(pipeline)` attention entry that names the fix (review the branch, then `sudo bin/install-auto-update --apply`), does nothing else and exits 1. A stale copy once unpublished omarchy because its check-upstream predated release cohorts (#127). The entry clears on the first run after the reinstall.
 - **The config is root-owned too.** `/etc/omarchy-asus/auto-update.conf` must be `root:root` and not group/world-writable, or the run refuses to start. It names `BUILD_USER` and holds no secrets.
 - **Every step except the chroot build runs as `BUILD_USER`** through `runuser -u BUILD_USER -- env -i ...`, with a fixed environment. That covers git, fetching upstream, rebase (its recipe code runs in the sandbox below), gpg signing, `repo-add`, `gh`, `bin/ai-review` (codex and the verifier, on the user's own logins) and the agent. The signing key, the local repo, the bot clone, logs and status stay in `~BUILD_USER/.local/share/omarchy-asus`, and root never writes there:
   - the log is written by a user-side `tee`
@@ -255,7 +256,8 @@ Throttling is the main external constraint, so every GitHub call is bounded:
 
 Prerequisites:
 
-1. The Quattro build chroot: `bin/mkchroot` (once, with sudo). The RC chroot needs nothing:
+1. The Quattro build chroot: `bin/mkchroot` (once, with sudo; it writes the packager into
+   each chroot it makes or updates, so rerun it on an older one). The RC chroot needs nothing:
    the service makes it (`bin/mkchroot --channel rc`) before its first RC build.
 2. The signing key in `~/.local/share/omarchy-asus` (as today).
 3. `gh` access for the user (see `GH_TOKEN_FILE`).
@@ -272,9 +274,13 @@ journalctl -fu omarchy-asus-auto-update
 sudo systemctl enable --now omarchy-asus-auto-update.timer
 ```
 
-Re-run `sudo bin/install-auto-update --apply` after every merge that touches `bin/` (or the
-installed `build/pacman*.conf`). Until then the service stops with `(pipeline)` attention and
-publishes or unpublishes nothing.
+Re-run `sudo bin/install-auto-update --apply` from an up-to-date `main` right after every merge
+that touches `bin/` (or the installed `build/pacman*.conf` or `build/distcc-ssh`, or `systemd/`).
+Until then the service stops with `(pipeline)` attention and publishes or unpublishes nothing, on
+either channel. On 2026-10-22 two such merges went without it, and the RC channel's G16 packages
+waited about eight hours, across a G16 update (#217). With the timer already enabled, the
+reinstall then starts one run (`systemctl start --no-block`), so what the stale copy held back
+publishes at once instead of at the next timer slot; `--no-run` skips it.
 
 **After merging the RC channel support** (the PR that made the timer serve RC), that is the one
 thing to do: review `main`, then `sudo bin/install-auto-update --apply` from that checkout. The

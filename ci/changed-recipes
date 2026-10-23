@@ -6,7 +6,8 @@
 #   - recipes/<r>/ changes when any file under it changes; only directories
 #     with a PKGBUILD in the checked-out tree are buildable (deleted or
 #     reference-only recipes are skipped)
-#     (exception: *.md files under recipes/linux-omarchy don't trigger the kernel)
+#     (exception: *.md files and the g16-test/ and tests/ directories under
+#     recipes/linux-omarchy don't trigger the kernel; the PKGBUILD reads none of them)
 #   - a change to the shared build inputs (build/pacman.conf, build/pacman-rc.conf, bin/build-pkg)
 #     rebuilds every recipe except the kernel, which builds only when
 #     recipes/linux-omarchy itself changes (or is listed explicitly)
@@ -35,9 +36,11 @@ else
     files=$(git diff --name-only "$base...$head")
     echo "==> files changed by the PR:" >&2
     sed 's/^/    /' <<<"$files" >&2
-    # Documentation-only changes to the kernel recipe (NOTES.md) don't cost a
-    # multi-hour kernel build; every other recipe builds on any change.
-    mapfile -t names < <(awk -F/ -v k="$KERNEL" '$1=="recipes" && NF>2 && !($2==k && $NF ~ /\.md$/) {print $2}' <<<"$files" | sort -u)
+    # Docs (NOTES.md), the G16 test kit (g16-test/) and tests (tests/) in the
+    # kernel recipe don't cost a multi-hour kernel build; every other recipe
+    # builds on any change.
+    mapfile -t names < <(awk -F/ -v k="$KERNEL" '$1=="recipes" && NF>2 &&
+        !($2==k && ($NF ~ /\.md$/ || (NF>3 && ($3=="g16-test" || $3=="tests")))) {print $2}' <<<"$files" | sort -u)
     for f in "${SHARED_INPUTS[@]}"; do
         if grep -qxF "$f" <<<"$files"; then
             echo "==> $f changed: rebuilding every recipe except $KERNEL" >&2
