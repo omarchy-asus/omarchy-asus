@@ -105,8 +105,8 @@ stays published and the run flags what needs fixing: on our channels you always 
 version, never the stock one, until upstream folds the fix in and we drop the recipe. That check is a daily workflow in
 [Steward](docs/releases.md), once per channel: it rebases our patches onto upstream's new recipe,
 builds it in a clean chroot, opens a pull request that gets an agent check and a second-model
-review, and publishes only after CI passes and the PR merges. There is no systemd timer or
-service for it, and there must not be one: every rebase, build and publish shows up as a run
+review, and publishes only after CI passes and the PR merges. There is no systemd timer,
+service or cron job that builds or publishes, and there must not be one: every rebase, build and publish shows up as a run
 there.
 
 ## Release channels

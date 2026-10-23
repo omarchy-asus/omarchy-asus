@@ -56,8 +56,8 @@ On top of clud's caps, these hold across all stages:
   filename.
 - **Publishing goes through Steward only.** The daily rebase onto upstream, its builds and its
   publishes are Steward's Rebase onto upstream workflow, scheduled once per channel, so every run
-  shows on its page (docs/releases.md). There is no systemd timer or service for it: never add,
-  install or start one, and never publish from a cron job. A one-off build or publish by hand
+  shows on its page (docs/releases.md). No systemd timer, service or cron job builds or
+  publishes: never add, install or start one. A one-off build or publish by hand
   (`bin/build-pkg`, `bin/publish`, `bin/sync-release`) is still fine.
 - **Held recipes** (`recipes/<r>/HOLD`, first line the reason) are merged but not built or
   published, by hand or by the daily rebase, until the hold is removed in its own PR.
