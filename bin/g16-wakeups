@@ -1,0 +1,573 @@
+#!/bin/bash
+# g16-wakeups: where the G16's idle wakeups come from (#239). EXPERIMENTAL.
+#
+#   g16-wakeups                  20 s trace, then a report posted to #239
+#   g16-wakeups --seconds N      trace N seconds (1-60)
+#   g16-wakeups --label L        keep the summary under L (for --compare), e.g. the
+#                                boot's name in a boot A/B (#229: stock, nocb)
+#   g16-wakeups --issue N        post to issue N instead of #239
+#   g16-wakeups --no-post        write the report, don't post it
+#   g16-wakeups --analyze DIR    report on a bundle kept by an earlier run (no root)
+#   g16-wakeups --compare A B    compare two --label runs (B against A), post to --issue
+#
+# One root step (pkexec, through the desktop's polkit agent) records tracefs events
+# for the window, into a tracefs instance of its own, which it removes at the end.
+# Nothing is installed: no perf, no bpftrace. Events: power:cpu_idle, the IRQ-vector
+# entries (local timer, call-function, reschedule, irq_work), irq_handler_entry,
+# ipi_send_cpu/_cpumask, sched_waking, hrtimer_start/_expire_entry,
+# timer_expire_entry, tick_stop, tasklet_entry and the workqueue events. The ring
+# buffer is read only after tracing stops, so reading it adds no wakeups to the
+# window.
+#
+# The report (user and host names, $HOME, MAC and IP addresses scrubbed):
+#   1. idle exits per second by cause, per core type: timer (the hrtimer function,
+#      and for task timers the task that armed it), IPI (call site, sender, woken
+#      task), device IRQ, irq_work, or none (a polling exit);
+#   2. idle ticks: the scheduler tick firing on an idle CPU, per CPU, and the
+#      reasons tick_stop gave for keeping the tick;
+#   3. IPIs by call site, waker -> wakee pairs, the share crossing L3 domains and
+#      the share that hit an idle CPU;
+#   4. hrtimer and timer-wheel expiries by function and arming task, and each task's
+#      timer slack;
+#   5. tasklet and workqueue functions, with the workqueue and the queuing task;
+#   6. the /proc/interrupts and /proc/softirqs rates over the same window.
+#
+# It changes no setting, wakes no device (it never reads the RTX, nvidia_0,
+# `sensors` or nvidia-smi, #216), plays no sound and opens no window. Best run on
+# battery, idle, with the RTX asleep; the report records the power source.
+#
+# Files: the bundle (raw trace and /proc snapshots) in
+# ~/.local/state/omarchy-asus/wakeups/<label or date>/, the report in
+# ~/omarchy-asus-g16-wakeups-<label or date>.md, posted through bin/issue next to
+# this script (its denylist scan refuses a hit; without bin/issue nothing is posted).
+#
+# Root: G16_ROOT=pkexec (default, via systemd-run --user), sudo, or none (tests).
+# G16_POLKIT_REASON=<wrapper> runs `<wrapper> run REASON -- pkexec ...`.
+# Exit status: 0 done, 1 a problem, 2 bad usage.
+set -uo pipefail
+
+SYS=${G16_WK_SYS:-/sys}     # the overrides are for tests only
+PROC=${G16_WK_PROC:-/proc}
+EVENTS=(
+  power/cpu_idle
+  irq_vectors/local_timer_entry irq_vectors/call_function_entry irq_vectors/call_function_single_entry
+  irq_vectors/reschedule_entry irq_vectors/irq_work_entry
+  irq/irq_handler_entry
+  ipi/ipi_send_cpu ipi/ipi_send_cpumask
+  sched/sched_waking
+  timer/hrtimer_start timer/hrtimer_expire_entry timer/timer_expire_entry timer/tick_stop
+  tasklet/tasklet_entry
+  workqueue/workqueue_queue_work workqueue/workqueue_execute_start
+)
+
+# ------------------------------------------------------------- root capture
+# --capture PROC SYS SECONDS OUTDIR UID: record, write the bundle, hand it to
+# UID, and remove the tracefs instance whatever happens.
+if [[ ${1:-} == --capture ]]; then
+  proc=${2:?} sys=${3:?} secs=${4:?} out=${5:?} uid=${6:?}
+  base=$sys/kernel/tracing
+  [[ -d $base/instances ]] || base=$sys/kernel/debug/tracing
+  [[ $secs =~ ^[0-9]+$ ]] && ((secs >= 1 && secs <= 60)) || { echo "capture: bad seconds" >&2; exit 2; }
+  [[ $uid =~ ^[0-9]+$ ]] || { echo "capture: bad uid" >&2; exit 2; }
+  [[ -d $out && ! -L $out ]] || { echo "capture: no output directory" >&2; exit 1; }
+  [[ -d $base/instances ]] || { echo "capture: no tracefs at $base" >&2; exit 1; }
+  TR=$base/instances/g16-wakeups
+  mkdir "$TR" 2>/dev/null || [[ -d $TR ]] || { echo "capture: cannot create a tracefs instance" >&2; exit 1; }
+  w() { printf '%s\n' "$2" 2>/dev/null >"$1"; }
+  cleanup() {
+    w "$TR/tracing_on" 0
+    for e in "${EVENTS[@]}"; do [[ -e $TR/events/$e/enable ]] && w "$TR/events/$e/enable" 0; done
+    rmdir "$TR" 2>/dev/null
+  }
+  trap cleanup EXIT
+  trap 'exit 1' HUP INT TERM PIPE
+  w "$TR/tracing_on" 0
+  : 2>/dev/null >"$TR/trace"
+  w "$TR/buffer_size_kb" 16384
+  on=()
+  for e in "${EVENTS[@]}"; do [[ -e $TR/events/$e/enable ]] && w "$TR/events/$e/enable" 1 && on+=("$e"); done
+  ((${#on[@]})) || { echo "capture: none of the events exist" >&2; exit 1; }
+  {
+    echo "seconds=$secs"
+    echo "events=${on[*]}"
+    echo "kernel=$(cat "$proc/sys/kernel/osrelease" 2>/dev/null)"
+    echo "extra=$(tr ' ' '\n' <"$proc/cmdline" 2>/dev/null | grep -E '^(nmi_watchdog|rcu_nocbs|rcutree|nohz|nohz_full|irqaffinity|isolcpus|workqueue|skew_tick|idle|processor\.|cpuidle|amd_pstate)' | paste -sd' ' -)"
+    echo "governor=$(cat "$sys/devices/system/cpu/cpuidle/current_governor" 2>/dev/null)"
+    echo "nmi_watchdog=$(cat "$proc/sys/kernel/nmi_watchdog" 2>/dev/null)"
+    echo "rcu_lazy=$(cat "$sys/module/rcutree/parameters/enable_rcu_lazy" 2>/dev/null)"
+    for s in "$sys"/class/power_supply/*; do
+      [[ $(cat "$s/type" 2>/dev/null) == Battery && $(cat "$s/scope" 2>/dev/null) != Device ]] && { echo "power=$(cat "$s/status" 2>/dev/null)"; break; }
+    done
+  } >"$out/meta"
+  for c in "$sys"/devices/system/cpu/cpu[0-9]*; do
+    n=${c##*cpu}
+    printf 'cpu=%s l3=%s maxf=%s rank=%s\n' "$n" "$(cat "$c/cache/index3/shared_cpu_list" 2>/dev/null || echo -)" \
+      "$(cat "$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo -)" "$(cat "$c/cpufreq/amd_pstate_prefcore_ranking" 2>/dev/null || echo -)"
+  done >"$out/topology"
+  cat "$proc/interrupts" >"$out/interrupts.0" 2>/dev/null; cat "$proc/softirqs" >"$out/softirqs.0" 2>/dev/null
+  w "$TR/tracing_on" 1
+  sleep "$secs"
+  w "$TR/tracing_on" 0
+  cat "$proc/interrupts" >"$out/interrupts.1" 2>/dev/null; cat "$proc/softirqs" >"$out/softirqs.1" 2>/dev/null
+  cat "$TR/trace" >"$out/trace" 2>/dev/null
+  for c in "$TR"/per_cpu/cpu*; do
+    [[ -r $c/stats ]] && printf '%s %s\n' "${c##*/}" "$(awk '/^overrun:/ {print $2}' "$c/stats")"
+  done >"$out/overrun"
+  chown -R "$uid" "$out" 2>/dev/null
+  exit 0
+fi
+
+# ------------------------------------------------------------------ options
+SECS=20 LABEL='' ISSUE=239 POST=1 ANALYZE='' CMP_A='' CMP_B=''
+while (($#)); do
+  case $1 in
+    --seconds) SECS=${2:-}; shift ;;
+    --label) LABEL=${2:-}; shift ;;
+    --issue) ISSUE=${2:-}; shift ;;
+    --no-post) POST=0 ;;
+    --analyze) ANALYZE=${2:-}; shift ;;
+    --compare) CMP_A=${2:-}; CMP_B=${3:-}; shift 2 ;;
+    -h | --help) sed -n '2,49s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+[[ $SECS =~ ^[0-9]+$ ]] && ((SECS >= 1 && SECS <= 60)) || { echo "--seconds needs 1 to 60" >&2; exit 2; }
+[[ -z $LABEL || $LABEL =~ ^[A-Za-z0-9._-]{1,40}$ ]] || { echo "--label needs a short name (letters, digits, . _ -)" >&2; exit 2; }
+[[ $ISSUE =~ ^[0-9]+$ ]] || { echo "--issue needs a number" >&2; exit 2; }
+
+if [[ -t 1 ]]; then B=$'\e[1m' R=$'\e[31m' N=$'\e[0m'; else B='' R='' N=''; fi
+say() { printf '%s==>%s %s\n' "$B" "$N" "$*"; }
+note() { printf '    %s\n' "$*"; }
+die() { printf '%sERROR:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
+
+((EUID != 0)) || die "run it as your normal user; it asks for root once"
+command -v python3 >/dev/null 2>&1 || die "python3 is missing"
+SELF=$(readlink -f "$0")
+ISSUE_HELPER=${G16_WK_ISSUE:-$(dirname "$SELF")/issue}
+STATE_DIR=${G16_WK_STATE:-$HOME/.local/state/omarchy-asus/wakeups}
+STAMP=$(date +%Y%m%d-%H%M%S)
+REV=$(git -C "$(dirname "$SELF")" rev-parse --short HEAD 2>/dev/null || sha256sum "$SELF" | cut -c1-12)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/g16-wakeups.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+scrub() { # in out: user and host names, $HOME, MAC/IP addresses, UUIDs, control characters
+  python3 -I -c '
+import re, sys
+home, me, host = sys.argv[1:4]
+t = sys.stdin.read()
+if home and home != "/": t = t.replace(home, "~")
+for word, mark in ((host, "<host>"), (me, "<user>")):
+    if len(word) >= 2: t = re.sub(r"(?<![A-Za-z0-9_.-])" + re.escape(word) + r"(?![A-Za-z0-9_-])", mark, t)
+t = re.sub(r"\b[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}\b", "<mac>", t)
+t = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "<uuid>", t)
+t = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<ip>", t)
+t = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", t)
+sys.stdout.write(t)
+' "$HOME" "$(id -un)" "$(cat /proc/sys/kernel/hostname 2>/dev/null)" <"$1" >"$2"
+}
+post() { # file what
+  ((POST)) || return 0
+  if [[ ! -x $ISSUE_HELPER ]]; then
+    note "${R}not posted${N}: no bin/issue next to this script; from a checkout: bin/issue comment $ISSUE --body-file ${1/#$HOME/\~}"
+  elif "$ISSUE_HELPER" comment "$ISSUE" --agent g16-wakeups --body-file "$1" >/dev/null; then
+    say "posted $2 to #$ISSUE"
+  else
+    note "${R}not posted${N} to #$ISSUE (bin/issue refused it, see above); the text is in ${1/#$HOME/\~}"
+  fi
+}
+
+# ------------------------------------------------------------------ analyzer
+# analyze BUNDLE LABEL OUT_MD OUT_JSON
+cat >"$WORK/analyze.py" <<'PY'
+import collections as C, json, os, re, statistics as st, sys
+
+bundle, label, rev, out_md, out_json = sys.argv[1:6]
+
+def rd(name):
+    try:
+        with open(os.path.join(bundle, name), errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+meta = dict(l.split("=", 1) for l in rd("meta").splitlines() if "=" in l)
+secs = float(meta.get("seconds") or 20)
+
+topo = {}
+for l in rd("topology").splitlines():
+    d = dict(x.split("=", 1) for x in l.split() if "=" in x)
+    if d.get("cpu", "").isdigit():
+        topo[int(d["cpu"])] = d
+maxfs = {c: int(d["maxf"]) for c, d in topo.items() if d.get("maxf", "").isdigit()}
+top_f = max(maxfs.values()) if maxfs else 0
+two_types = len(set(maxfs.values())) > 1
+def ctype(c):
+    if not two_types or c not in maxfs:
+        return "all"
+    return "Zen 5" if maxfs[c] == top_f else "Zen 5c"
+def l3(c):
+    return topo.get(c, {}).get("l3", "-")
+types = sorted({ctype(c) for c in topo} or {"all"})
+
+def fn(s):
+    return re.sub(r"\+0x[0-9a-f]+/0x[0-9a-f]+$", "", s or "?")
+
+LINE = re.compile(r"^\s*(.*?)-(\d+)\s+(?:\(\s*[-\d]+\)\s+)?\[(\d+)\]\s+\S+\s+([\d.]+):\s+(\w+):\s?(.*)$")
+WAKING = re.compile(r"comm=(.*) pid=(\d+) prio=-?\d+ target_cpu=(\d+)")
+KV = re.compile(r"(\w+)=(\S+)")
+TICK_FNS = {"tick_nohz_handler", "tick_sched_timer", "tick_nohz_highres_handler"}
+TASK_TIMER_FNS = {"hrtimer_wakeup", "it_real_fn", "posix_timer_fn", "timerfd_tmrproc", "alarmtimer_fired"}
+
+idle = C.defaultdict(bool)
+pending = {}            # cpu -> True while an idle exit waits for its cause
+ptimer = {}             # cpu -> True after a timer interrupt woke it, until the hrtimer is known
+last_ipi = {}           # dst cpu -> (callsite, sender, wakee)
+last_waking = {}        # src cpu -> wakee comm
+hrt_owner = {}          # hrtimer pointer -> arming task
+
+exits = C.Counter()                 # (type, cause)
+exits_cpu = C.Counter()
+idle_ticks = C.Counter()
+tick_dep = C.Counter()
+ipi_site = C.Counter()
+ipi_pair = C.Counter()
+ipi_cross = ipi_total = ipi_to_idle = 0
+hrt_fn = C.Counter()
+hrt_task = C.Counter()              # (fn, arming task)
+slack = C.defaultdict(list)         # arming task -> slack in us
+wheel = C.Counter()
+tasklets = C.Counter()
+wq_exec = C.Counter()
+wq_queue = C.Counter()
+nlines = 0
+t_first = t_last = None
+
+def resolve(cpu, cause):
+    exits[(ctype(cpu), cause)] += 1
+    pending.pop(cpu, None)
+
+def ipi_cause(cpu, kind):
+    site, sender, wakee = last_ipi.get(cpu, ("?", "?", ""))
+    s = f"{kind} {site} from {sender}"
+    if wakee:
+        s += f" waking {wakee}"
+    return s
+
+for line in rd("trace").splitlines():
+    if line.startswith("#"):
+        continue
+    m = LINE.match(line)
+    if not m:
+        continue
+    comm, _pid, cpu, ts, ev, rest = m.groups()
+    cpu = int(cpu)
+    nlines += 1
+    tsf = float(ts)
+    t_first = tsf if t_first is None else t_first
+    t_last = tsf
+    who = "irq context" if comm == "<idle>" else comm
+    if ev == "cpu_idle":
+        kv = dict(KV.findall(rest))
+        st_ = int(kv.get("state", "0"))
+        c = int(kv.get("cpu_id", cpu))
+        if st_ == 4294967295:
+            if idle[c]:
+                idle[c] = False
+                pending[c] = True
+                exits_cpu[c] += 1
+        else:
+            if pending.get(c):
+                resolve(c, "none (polling exit, no interrupt)")
+            if ptimer.pop(c, None):
+                resolve(c, "timer ?")
+            idle[c] = True
+        continue
+    if ev == "sched_waking":
+        w = WAKING.match(rest)
+        if w:
+            last_waking[cpu] = w.group(1)
+        continue
+    if ev in ("ipi_send_cpu", "ipi_send_cpumask"):
+        kv = dict(KV.findall(rest))
+        site = fn(kv.get("callsite"))
+        if ev == "ipi_send_cpu":
+            dsts = [int(kv.get("cpu", "-1"))]
+        else:
+            mask = int(kv.get("cpumask", "0").replace(",", ""), 16)
+            dsts = [i for i in range(mask.bit_length()) if mask >> i & 1]
+        wakee = last_waking.get(cpu, "") if site.startswith("ttwu_queue_wakelist") else ""
+        for d in dsts:
+            ipi_total += 1
+            ipi_site[site] += 1
+            if wakee:
+                ipi_pair[(who, wakee)] += 1
+            if l3(cpu) != l3(d):
+                ipi_cross += 1
+            if idle[d]:
+                ipi_to_idle += 1
+            last_ipi[d] = (site, who, wakee)
+        continue
+    if ev == "hrtimer_start":
+        kv = dict(KV.findall(rest))
+        f = fn(kv.get("function"))
+        hrt_owner[kv.get("hrtimer")] = who
+        try:
+            sl = (int(kv["expires"]) - int(kv["softexpires"])) / 1000
+            if f in TASK_TIMER_FNS:
+                slack[who].append(sl)
+        except (KeyError, ValueError):
+            pass
+        continue
+    if ev == "hrtimer_expire_entry":
+        kv = dict(KV.findall(rest))
+        f = fn(kv.get("function"))
+        hrt_fn[f] += 1
+        owner = hrt_owner.get(kv.get("hrtimer"), "?") if f in TASK_TIMER_FNS else ""
+        if owner:
+            hrt_task[(f, owner)] += 1
+        if ptimer.pop(cpu, None):
+            if f in TICK_FNS:
+                idle_ticks[cpu] += 1
+                resolve(cpu, "timer: tick")
+            else:
+                resolve(cpu, f"timer: {f}" + (f" armed by {owner}" if owner else ""))
+        continue
+    if ev == "timer_expire_entry":
+        kv = dict(KV.findall(rest))
+        wheel[fn(kv.get("function"))] += 1
+        continue
+    if ev == "tick_stop":
+        kv = dict(KV.findall(rest))
+        if kv.get("success") == "0":
+            tick_dep[kv.get("dependency", "?")] += 1
+        continue
+    if ev == "tasklet_entry":
+        kv = dict(KV.findall(rest))
+        tasklets[fn(kv.get("function") or kv.get("func"))] += 1
+        continue
+    if ev == "workqueue_execute_start":
+        f = re.search(r"function (\S+)", rest)
+        wq_exec[fn(f.group(1) if f else "?")] += 1
+        continue
+    if ev == "workqueue_queue_work":
+        kv = dict(KV.findall(rest))
+        wq_queue[(kv.get("workqueue", "?"), fn(kv.get("function")), who)] += 1
+        continue
+    # the cause of a pending idle exit
+    if ptimer.get(cpu) and ev != "local_timer_entry":
+        ptimer.pop(cpu)
+        resolve(cpu, "timer ?")
+    if not pending.get(cpu):
+        continue
+    if ev == "local_timer_entry":
+        pending.pop(cpu)
+        ptimer[cpu] = True
+    elif ev in ("call_function_single_entry", "call_function_entry"):
+        resolve(cpu, ipi_cause(cpu, "IPI"))
+    elif ev == "reschedule_entry":
+        resolve(cpu, ipi_cause(cpu, "resched IPI"))
+    elif ev == "irq_handler_entry":
+        kv = dict(KV.findall(rest))
+        resolve(cpu, f"IRQ {kv.get('name', '?')}")
+    elif ev == "irq_work_entry":
+        resolve(cpu, "irq_work")
+
+span = secs
+if t_first is not None and t_last is not None and t_last > t_first:
+    span = max(secs, t_last - t_first)
+def ps(n):
+    return n / span
+
+# /proc rates over the same window
+def proc_rows(a, b, keys):
+    def parse(txt):
+        rows = {}
+        for l in txt.splitlines():
+            p = l.split()
+            if p and p[0].endswith(":"):
+                rows[p[0][:-1]] = [int(x) for x in p[1:] if x.isdigit()]
+        return rows
+    ra, rb = parse(rd(a)), parse(rd(b))
+    out = []
+    for k in keys:
+        if k in ra and k in rb:
+            d = [(y - x) / secs for x, y in zip(ra[k], rb[k])]
+            per = C.Counter()
+            for i, v in enumerate(d):
+                per[ctype(i)] += v
+            out.append((k, sum(d), per))
+    return out
+irq_rows = proc_rows("interrupts.0", "interrupts.1", ["LOC", "CAL", "RES", "TLB", "IWI", "NMI", "PMI"])
+sirq_rows = proc_rows("softirqs.0", "softirqs.1", ["TIMER", "HRTIMER", "RCU", "SCHED", "TASKLET", "HI", "NET_RX", "NET_TX", "BLOCK"])
+
+overruns = sum(int(p[1]) for p in (l.split() for l in rd("overrun").splitlines()) if len(p) == 2 and p[1].isdigit())
+
+o = [f"## G16 wakeup attribution{': ' + label if label else ''}\n"]
+o.append(f"- kernel {meta.get('kernel', '?')}, cmdline extras `{meta.get('extra') or '-'}`, cpuidle `{meta.get('governor', '?')}`, "
+         f"nmi_watchdog {meta.get('nmi_watchdog', '?')}, rcu lazy {meta.get('rcu_lazy', '?')}, power {meta.get('power', '?')}")
+o.append(f"- window {secs:.0f} s, {nlines} trace events, ring-buffer overruns {overruns}"
+         + (" (**events were lost: shorten --seconds**)" if overruns else ""))
+missing = [e for e in ("power/cpu_idle", "ipi/ipi_send_cpu", "timer/hrtimer_expire_entry", "irq_vectors/local_timer_entry")
+           if e not in meta.get("events", "")]
+if missing:
+    o.append(f"- missing events: {', '.join(missing)} (those sections are incomplete)")
+if "tasklet/tasklet_entry" not in meta.get("events", ""):
+    o.append("- no tasklet events in this kernel: BH workqueue items (run in the TASKLET softirq since 6.9) still show under workqueues")
+o.append("")
+
+if irq_rows or sirq_rows:
+    o.append("### Interrupt and softirq rates (/proc, same window)\n")
+    o.append("| row | total /s | " + " | ".join(f"{t} /s" for t in types) + " |")
+    o.append("|---|---|" + "---|" * len(types))
+    for k, tot, per in irq_rows + sirq_rows:
+        o.append(f"| {k} | {tot:.0f} | " + " | ".join(f"{per[t]:.0f}" for t in types) + " |")
+    o.append("")
+
+tot_exits = sum(exits.values())
+o.append(f"### Idle exits by cause: {ps(tot_exits):.0f}/s\n")
+causes = C.Counter()
+for (t, c), n in exits.items():
+    causes[c] += n
+o.append("| cause | /s | share | " + " | ".join(f"{t} /s" for t in types) + " |")
+o.append("|---|---|---|" + "---|" * len(types))
+for c, n in causes.most_common(30):
+    o.append(f"| {c} | {ps(n):.1f} | {100 * n / max(tot_exits, 1):.0f} % | " + " | ".join(f"{ps(exits[(t, c)]):.1f}" for t in types) + " |")
+o.append("")
+if exits_cpu:
+    o.append("Idle exits per CPU (/s): " + ", ".join(f"{c}: {ps(exits_cpu[c]):.0f}" for c in sorted(topo or exits_cpu)))
+    o.append("")
+
+o.append(f"### Idle ticks: {ps(sum(idle_ticks.values())):.0f}/s\n")
+o.append("The scheduler tick waking an idle CPU (RCU callbacks pending, a timer due within a tick, or the governor keeping the tick).\n")
+if idle_ticks:
+    o.append("Per CPU (/s): " + ", ".join(f"{c}: {ps(idle_ticks[c]):.0f}" for c in sorted(topo or idle_ticks)))
+if tick_dep:
+    o.append("\n`tick_stop` refusals: " + ", ".join(f"{d} {ps(n):.1f}/s" for d, n in tick_dep.most_common()))
+o.append("")
+
+o.append(f"### IPIs: {ps(ipi_total):.0f}/s, {100 * ipi_cross / max(ipi_total, 1):.0f} % across L3 domains, {100 * ipi_to_idle / max(ipi_total, 1):.0f} % to an idle CPU\n")
+o.append("| call site | /s |\n|---|---|")
+for s, n in ipi_site.most_common(10):
+    o.append(f"| {s} | {ps(n):.1f} |")
+if ipi_pair:
+    o.append("\n| wakeup IPI: waker → wakee | /s |\n|---|---|")
+    for (a, b), n in ipi_pair.most_common(20):
+        o.append(f"| {a} → {b} | {ps(n):.1f} |")
+o.append("")
+
+o.append(f"### Timers: {ps(sum(hrt_fn.values())):.0f} hrtimer and {ps(sum(wheel.values())):.0f} timer-wheel expiries/s\n")
+o.append("| hrtimer function | /s |\n|---|---|")
+for f, n in hrt_fn.most_common(12):
+    o.append(f"| {f} | {ps(n):.1f} |")
+if hrt_task:
+    o.append("\n| task timer (function, armed by) | /s | median slack µs |\n|---|---|---|")
+    for (f, t), n in hrt_task.most_common(20):
+        sl = slack.get(t)
+        o.append(f"| {f}, {t} | {ps(n):.1f} | {st.median(sl):.0f} |" if sl else f"| {f}, {t} | {ps(n):.1f} | - |")
+if wheel:
+    o.append("\n| timer-wheel function | /s |\n|---|---|")
+    for f, n in wheel.most_common(10):
+        o.append(f"| {f} | {ps(n):.1f} |")
+o.append("")
+
+o.append("### Softirq work\n")
+if tasklets:
+    o.append("| tasklet function | /s |\n|---|---|")
+    for f, n in tasklets.most_common(8):
+        o.append(f"| {f} | {ps(n):.1f} |")
+    o.append("")
+if wq_exec:
+    o.append("| workqueue function run | /s |\n|---|---|")
+    for f, n in wq_exec.most_common(12):
+        o.append(f"| {f} | {ps(n):.1f} |")
+    o.append("")
+if wq_queue:
+    o.append("| queued: workqueue, function, by | /s |\n|---|---|")
+    for (q, f, t), n in wq_queue.most_common(12):
+        o.append(f"| {q}, {f}, {t} | {ps(n):.1f} |")
+    o.append("")
+o.append(f"<sub>bin/g16-wakeups {rev}</sub>")
+with open(out_md, "w") as f:
+    f.write("\n".join(o) + "\n")
+summary = {
+    "label": label, "kernel": meta.get("kernel"), "extra": meta.get("extra"), "power": meta.get("power"),
+    "seconds": span, "exits": ps(tot_exits), "idle_ticks": ps(sum(idle_ticks.values())), "ipis": ps(ipi_total),
+    "causes": {c: ps(n) for c, n in causes.most_common(40)},
+    "rates": {k: tot for k, tot, _ in irq_rows + sirq_rows},
+}
+with open(out_json, "w") as f:
+    json.dump(summary, f, indent=1)
+PY
+
+# ------------------------------------------------- --compare: two labelled runs
+if [[ -n $CMP_A || -n $CMP_B ]]; then
+  [[ $CMP_A =~ ^[A-Za-z0-9._-]+$ && $CMP_B =~ ^[A-Za-z0-9._-]+$ ]] || die "--compare needs two --label names"
+  for l in "$CMP_A" "$CMP_B"; do [[ -r $STATE_DIR/$l/summary.json ]] || die "no run labelled $l in ${STATE_DIR/#$HOME/\~}"; done
+  python3 -I - "$STATE_DIR/$CMP_A/summary.json" "$STATE_DIR/$CMP_B/summary.json" "$REV" >"$WORK/cmp.md" <<'PY' || die "comparison failed"
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+o = ["## G16 wakeups, A/B\n",
+     f"- A `{a['label']}`: kernel {a['kernel']}, cmdline extras `{a.get('extra') or '-'}`, power {a.get('power')}",
+     f"- B `{b['label']}`: kernel {b['kernel']}, cmdline extras `{b.get('extra') or '-'}`, power {b.get('power')}",
+     "- one trace window each: a difference under about 20 % is within what two idle windows differ by.\n",
+     "| | A /s | B /s | B − A |", "|---|---|---|---|"]
+for k, name in (("exits", "idle exits"), ("idle_ticks", "idle ticks"), ("ipis", "IPIs")):
+    o.append(f"| {name} | {a[k]:.0f} | {b[k]:.0f} | {b[k] - a[k]:+.0f} |")
+for k in sorted(set(a["rates"]) | set(b["rates"])):
+    x, y = a["rates"].get(k), b["rates"].get(k)
+    if x is not None and y is not None:
+        o.append(f"| {k} | {x:.0f} | {y:.0f} | {y - x:+.0f} |")
+o.append("\n| idle-exit cause | A /s | B /s |\n|---|---|---|")
+keys = sorted(set(a["causes"]) | set(b["causes"]), key=lambda c: -(a["causes"].get(c, 0) + b["causes"].get(c, 0)))
+for c in keys[:20]:
+    o.append(f"| {c} | {a['causes'].get(c, 0):.1f} | {b['causes'].get(c, 0):.1f} |")
+o.append(f"\n<sub>bin/g16-wakeups {sys.argv[3]}</sub>")
+print("\n".join(o))
+PY
+  OUT=$HOME/omarchy-asus-g16-wakeups-$CMP_A-vs-$CMP_B.md
+  scrub "$WORK/cmp.md" "$OUT"
+  cat "$OUT"
+  post "$OUT" "the comparison"
+  exit 0
+fi
+
+# ------------------------------------------------------- capture, then report
+NAME=${LABEL:-$STAMP}
+if [[ -n $ANALYZE ]]; then
+  [[ -r $ANALYZE/trace && -r $ANALYZE/meta ]] || die "$ANALYZE is not a g16-wakeups bundle (no trace or meta)"
+  BUNDLE=$(readlink -f "$ANALYZE")
+else
+  dmi() { local v=''; read -r v 2>/dev/null <"$SYS/class/dmi/id/$1"; printf '%s' "$v"; }
+  [[ $(dmi product_name) == *GA605* || $(dmi board_name) == *GA605* ]] || note "not a GA605 ($(dmi product_name)): the report's core-type names assume the G16"
+  BUNDLE=$STATE_DIR/$NAME
+  [[ -e $BUNDLE ]] && die "${BUNDLE/#$HOME/\~} exists already; pick another --label"
+  mkdir -p "$BUNDLE" || die "cannot create ${BUNDLE/#$HOME/\~}"
+  ROOT=${G16_ROOT:-pkexec}
+  WHY="Record $SECS s of kernel wakeup events (tracefs, read-only) for the G16 idle-power trace (#239); nothing is changed"
+  CAP=("$SELF" --capture "$PROC" "$SYS" "$SECS" "$BUNDLE" "$(id -u)")
+  case $ROOT in
+    pkexec)
+      if [[ -n ${G16_POLKIT_REASON:-} ]]; then
+        CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "${CAP[@]}")
+      else
+        CMD=(systemd-run --user --wait -q -P pkexec --disable-internal-agent "${CAP[@]}")
+      fi ;;
+    sudo) CMD=(sudo ${SUDO_ASKPASS:+-A} "${CAP[@]}") ;;
+    none) CMD=("${CAP[@]}") ;;
+    *) die "G16_ROOT must be pkexec, sudo or none" ;;
+  esac
+  say "tracing $SECS s (leave the laptop alone)"
+  "${CMD[@]}" || { rm -rf "$BUNDLE"; die "the trace did not run (root refused, or no tracefs)"; }
+  [[ -s $BUNDLE/meta ]] || { rm -rf "$BUNDLE"; die "the trace left no bundle"; }
+fi
+
+python3 -I "$WORK/analyze.py" "$BUNDLE" "$LABEL" "$REV" "$WORK/report.md" "$WORK/summary.json" || die "the analysis failed"
+if [[ -z $ANALYZE ]]; then cp "$WORK/summary.json" "$BUNDLE/summary.json"; fi
+if [[ -n $LABEL && -n $ANALYZE ]]; then mkdir -p "$STATE_DIR/$LABEL" && cp "$WORK/summary.json" "$STATE_DIR/$LABEL/summary.json"; fi
+REPORT=${G16_WK_REPORT:-$HOME/omarchy-asus-g16-wakeups-$NAME.md}
+scrub "$WORK/report.md" "$REPORT"
+cat "$REPORT"
+say "report: ${REPORT/#$HOME/\~}; bundle: ${BUNDLE/#$HOME/\~}"
+post "$REPORT" "the report"
+exit 0
