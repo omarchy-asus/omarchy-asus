@@ -181,20 +181,24 @@ Our repo has two channels, each pinned to one of Omarchy's (README.md, "Release 
 Quattro (the `x86_64` release) goes with Omarchy stable, RC (the `rc-x86_64` release, Omarchy 4.5
 release candidates) with Omarchy rc. Never mix them: Omarchy's migrations may install packages only
 its matching repo has, and one failed migration holds back every later one. The first setup picks
-the channel that matches your `[omarchy]` server. To switch later, move both together:
+the channel that matches your `[omarchy]` server. To switch later, use Omarchy's own command:
 
 ```bash
-bash omarchy-asus-setup --channel rc        # [omarchy] to Omarchy rc, [omarchy-asus] to rc-x86_64
-bash omarchy-asus-setup --channel quattro   # both back; pacman -Syyuu downgrades to the Quattro versions
+omarchy-channel-set rc       # Omarchy rc; [omarchy-asus] follows to rc-x86_64
+omarchy-channel-set stable   # both back; pacman -Syyuu downgrades to the Quattro versions
 ```
 
-It checks that the target release's signed database exists, takes a snapshot (`--force` goes on
-without one), rewrites the `[omarchy-asus]` server in `/etc/pacman.d/custom-repos.conf`, then runs
-Omarchy's own `omarchy-channel-set` (it rewrites `/etc/pacman.conf` and the mirrorlist, the hook
-from section 3 puts the Include line back, runs `pacman -Syyuu` and the migrations). `--dry-run`
-prints the steps. If the upgrade or a migration fails, the switch stays marked unfinished
-(`~/.local/state/omarchy-asus/channel-switch-pending`): fix the error and run the same command
-again, and it runs the switch again instead of reporting it done.
+`omarchy-channel-set` rewrites `/etc/pacman.conf` and the mirrorlist, runs the pre-refresh hooks,
+then `pacman -Syyuu` and `omarchy update` for the migrations. Our hook (section 3) puts the
+`Include` line back and moves the `[omarchy-asus]` server to the matching release before the
+upgrade, so `omarchy update` and `omarchy-channel-set` need nothing else from us. If a switch
+fails partway, `omarchy-channel-set` says so; run it again.
+
+> [!NOTE]
+> Installs set up before this hook moved the server have an older copy that only adds the
+> `Include` line. Run `omarchy-asus-setup` once more to update it (it leaves the steps that are
+> already done alone), then switch. `omarchy-asus-setup --channel` is retired: it now only points
+> at `omarchy-channel-set`.
 
 ## Switching an existing install
 
@@ -314,26 +318,59 @@ repo above `[omarchy]`; earlier versions inserted it above `[core]`, which is be
 linux-omarchy). The hook therefore inserts above whichever of `[omarchy]` and `[core]` comes first,
 on any version. Make it executable (`chmod +x`).
 
+It also keeps `[omarchy-asus]` on the channel that matches `[omarchy]` (see
+[Release channels](#release-channels)): when `[omarchy]` is on Omarchy stable it points the
+`Server` in `custom-repos.conf` at `.../releases/download/$arch`, on Omarchy rc at
+`.../rc-$arch`. A `Server` that isn't our release is left alone, and so is ours while
+`[omarchy]` is on any other channel (edge). Both edits go through one `sudo` call.
+
 Don't enable a second hook that inserts the same `Include` line, such as an older copy of the
 sample. Hooks run in name order, and the first one to add the line decides where it goes.
 
 ```bash
 #!/bin/bash
 # Put the omarchy-asus repo ahead of every other repo so its patched builds win
-# over the stock ones. See LAPTOP-SETUP.md in
+# over the stock ones, on the channel that matches Omarchy's: Omarchy stable gets
+# the x86_64 release, Omarchy rc the rc-x86_64 one. See LAPTOP-SETUP.md in
 # https://github.com/omarchy-asus/omarchy-asus.
 CONF=/etc/pacman.conf
 SNIPPET=/etc/pacman.d/custom-repos.conf
 MARKER="Include = $SNIPPET"
+RELEASES=https://github.com/omarchy-asus/omarchy-asus/releases/download/
 
 [[ -r $SNIPPET ]] || exit 0
-grep -qxF "$MARKER" "$CONF" && exit 0
 
-sudo sed -i -E "0,/^\[(omarchy|core)\]$/s||$MARKER\n\n&|" "$CONF"
+server() { sed -n "/^\[$1\]\$/,/^\[/s/^Server *= *//p" "$2" | head -n1; }
+case $(server omarchy "$CONF") in
+  */stable/*) want=${RELEASES}\$arch ;;
+  */rc/*) want=${RELEASES}rc-\$arch ;;
+  *) want='' ;;
+esac
+have=$(server omarchy-asus "$SNIPPET")
+new_server=''
+if [[ $have == "$RELEASES"* ]]; then
+  if [[ -z $want ]]; then
+    echo "omarchy-asus: [omarchy] is on neither Omarchy stable nor rc; [omarchy-asus] stays on $have" >&2
+  elif [[ $have != "$want" ]]; then
+    new_server=$want
+  fi
+fi
+new_include=''
+grep -qxF "$MARKER" "$CONF" || new_include=$MARKER
+[[ -n $new_server || -n $new_include ]] || exit 0
+
+# One sudo for both: Omarchy 4.5 runs hooks with sudo -N, which asks every time.
+sudo bash -c '
+  if [[ -n $3 ]]; then
+    sed -i "/^\[omarchy-asus\]\$/,/^\[/s|^Server *= *https://github.com/omarchy-asus/omarchy-asus/releases/download/.*|Server = $3|" "$2" || exit 1
+  fi
+  if [[ -n $4 ]]; then
+    sed -i -E "0,/^\[(omarchy|core)\]\$/s||$4\n\n&|" "$1" || exit 1
+  fi' _ "$CONF" "$SNIPPET" "$new_server" "$new_include"
 ```
 
 Apply it now with `omarchy refresh pacman`, or by running the hook directly. After that it runs on every
-refresh.
+refresh, including the one `omarchy-channel-set` does.
 
 ## 4. Verify
 

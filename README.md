@@ -118,9 +118,12 @@ Each of our channels is pinned to one of Omarchy's, and a machine switches both 
 
 Mixing them breaks upgrades: Omarchy 4.5's migrations install packages that may only exist in
 Omarchy's rc repo, and one failed migration holds back every later one, ours included. On a G16,
-`omarchy-asus-setup --channel rc` moves `[omarchy]` and `[omarchy-asus]` to RC, and
-`omarchy-asus-setup --channel quattro` moves both back, downgrading to the Quattro versions. A
-first setup picks the channel that matches the machine's Omarchy channel.
+switching is Omarchy's own `omarchy-channel-set rc` (or `stable`, which downgrades to the Quattro
+versions): the pre-refresh hook `omarchy-asus-setup` installs moves the `[omarchy-asus]` server to
+the release that matches `[omarchy]` before the upgrade runs, so `omarchy update` and
+`omarchy-channel-set` need nothing of ours. A first setup picks the channel that matches the
+machine's Omarchy channel. An install set up before the hook did this gets it by running
+`omarchy-asus-setup` again (LAPTOP-SETUP.md, "Release channels").
 
 On the build host, the build and publish scripts take `--channel rc` (default `quattro`):
 `bin/mkchroot --channel rc` makes the RC chroot from `build/pacman-rc.conf`, `bin/build-pkg
@@ -138,7 +141,7 @@ up on RC (1 to 99 on Quattro). `bin/rebase-recipe --channel rc` starts at `.101`
 (`ci/check-pkgrel`) checks the range of the channel a PR targets, and `bin/publish` refuses a
 filename the other channel's repo or release already has with different bytes. RC sorts above
 Quattro for the same upstream release, so a switch back to Quattro is a downgrade, which
-`omarchy-asus-setup --channel quattro` already does.
+`omarchy-channel-set stable` already does (its refresh runs `pacman -Syyuu`).
 
 ## Supported hardware
 
