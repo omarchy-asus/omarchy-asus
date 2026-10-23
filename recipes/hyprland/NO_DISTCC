@@ -1,0 +1,3 @@
+Hyprland builds with precompiled headers, which distcc can't share with the helper (#163).
+bin/build-pkg leaves the distcc key out of this recipe's builds, so every compile runs on
+the build host (ccache still applies).
