@@ -95,18 +95,24 @@ and create `/etc/makepkg.conf.d/distcc.conf`:
 
 ```bash
 BUILDENV=(distcc color !ccache check !sign)
-DISTCC_HOSTS="localhost/<build-host-threads> <helper-account>@<helper-address>/<helper-threads>"
+DISTCC_HOSTS="<helper-account>@<helper-address>/<helper-threads> localhost/<build-host-threads>"
 MAKEFLAGS="-j<build-host-threads + helper-threads>"
 export DISTCC_SSH=/distcc/ssh
 ```
 
-The helper only gets the jobs the build host's own slots don't take. distcc
-fills `DISTCC_HOSTS` from the left, so `localhost/<n>` first keeps `n` jobs
-local and sends the rest to the helper, and `make -j` has to be larger than `n`
-for there to be a rest. With `-j` at or below the local slots (or a recipe that
-sets its own `-j`), the helper sits idle: the 7.2.8-9.4 kernel build sent it
-nothing with 16 local slots. Give the helper its slots on top of the local
-ones, as above.
+The helper comes first. distcc fills `DISTCC_HOSTS` from the left, so the
+helper takes the first `<helper-threads>` jobs and the build host the rest, and
+`make -j` covers both. With `localhost/<n>` first, the helper only got the jobs
+the build host's own slots didn't take, and a release build, mostly ccache hits
+by then, rarely runs more than `n` real compiles at once: a whole 7.2.8-9.4
+kernel build sent it 4 jobs out of about 25,500 (#221). Helper first, a cold
+compile of the kernel's `fs/` sent it a third of the jobs and took 202 s
+against 214 s on the build host alone.
+
+The wrapper shares one SSH connection between jobs (`ControlMaster`, socket in
+the build's own `/tmp`), so a job costs a new session on that connection
+rather than a new SSH handshake. Each session still runs the helper's forced
+command, so every job is still checked against the toolchain (below).
 
 `DISTCC_SSH` names the wrapper and nothing else: `man distcc` says the value
 is not split into words or run through a shell. distcc 3.4 does split it on
