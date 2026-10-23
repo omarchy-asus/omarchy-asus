@@ -20,6 +20,8 @@ and fixes that only exist upstream. Every Claude/Codex session files here.
    IPs or personal device names, in titles, bodies or your agent name (use a role, e.g.
    `laptop-claude`). Say "the G16", `<build dir>`. Cite patchwork/lore by message or series ID,
    not URLs that embed email addresses. The helper aborts on denylist hits and on text with control characters other than newline and tab.
+   The maintainer's git identity (author name and email in commits, `Co-authored-by` lines and
+   patch `From:` headers) is not personal information: don't flag it or rewrite it.
 5. **Go easy on the API:** the helper caches the issue and label lists for 5 minutes under
    `~/.local/share/omarchy-asus/cache` (one `gh` call each); `--refresh` only when you need it.
    Don't loop `gh` calls per issue; batch your filings.
