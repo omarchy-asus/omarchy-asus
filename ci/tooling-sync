@@ -13,6 +13,8 @@
 #   ci/tooling-sync list               print the tooling paths and the exceptions
 # Tooling: bin/ ci/ build/ .github/ tests/ docs/distcc.md docs/kernel-runner.md.
 # Exceptions, per channel like the recipes they go with:
+#   tests/channel/ holds offline tests of a channel's own recipe content (a patch, a drop-in
+#   only that branch's recipe has); Lint runs tests/channel/*.sh beside tests/ci/*.sh;
 #   tests/test_g16_resume_probe.py tests the G16 kit inside the kernel recipe
 #   (recipes/linux-omarchy/g16-test/);
 #   bin/g16-check checks a laptop against its channel's packages (the RC branch's
@@ -20,7 +22,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PATHS=(bin ci build .github tests docs/distcc.md docs/kernel-runner.md)
-EXCEPT=(tests/test_g16_resume_probe.py bin/g16-check)
+EXCEPT=(tests/channel tests/test_g16_resume_probe.py bin/g16-check)
 
 # pathspec: the tooling paths minus the exceptions
 spec=("${PATHS[@]}")
