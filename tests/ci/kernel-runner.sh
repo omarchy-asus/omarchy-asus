@@ -185,27 +185,53 @@ expect "e: the key is copied for the builder, mode 600" \
     "$(grep -c "install -o builder -g builder -m 600 $t/mnt/distcc/id_ed25519" "$t/calls")" 1
 expect "e: says how many helpers and slots" "$(grep -c '2 helper(s), 10 slots on top of 4 here' <<<"$out")" 1
 
-# g. ci/build-recipe's ccache block, the same way (after the distcc block above ran)
-printf '#!/bin/sh\nexit 0\n' >"$t/bin/runuser"; chmod +x "$t/bin/runuser"
+# g. ci/build-recipe's ccache block and its summary after makepkg, the same way (after the
+# distcc block above ran); runuser stands in for `ccache --print-stats` with $t/stats
+printf '#!/bin/sh\ncat "%s/stats"\n' "$t" >"$t/bin/runuser"; chmod +x "$t/bin/runuser"
+stats() { printf 'cache_miss\t%s\ndirect_cache_hit\t%s\nfiles_in_cache\t%s\npreprocessed_cache_hit\t%s\n' "$@"; }
 cblock() {
     awk '/^if \[\[ -d \/mnt\/ccache \]\]/ { on = 1 } on { print } on && /^fi$/ { exit }' "$W/ci/build-recipe" |
         sed -e "s#/mnt/ccache#$t/mnt/ccache#g" -e "s#/etc/makepkg.conf.d#$t/etc/makepkg.conf.d#g"
 }
+sblock() { awk '/^if declare -F ccache_stats/ { on = 1 } on { print } on && /^fi$/ { exit }' "$W/ci/build-recipe"; }
 expect "g: ci/build-recipe has the ccache block" "$(cblock | grep -c '^fi$')" 1
-run_cblock() { env PATH="$t/bin:$PATH" bash -euo pipefail -c "$(cblock)" 2>&1; }
+expect "g: ci/build-recipe has the summary after makepkg" \
+    "$(sed -n '/^as_builder makepkg /,$p' "$W/ci/build-recipe" | grep -c '^if declare -F ccache_stats')" 1
+# the block, then makepkg (the stats become $t/stats.after, if there is one), then the summary
+run_cblock() {
+    env PATH="$t/bin:$PATH" WORK=/build bash -euo pipefail -c \
+        "$(cblock); [[ -f $t/stats.after ]] && mv $t/stats.after $t/stats; $(sblock)" 2>&1
+}
 cconf=$t/etc/makepkg.conf.d/zz-zccache.conf
-run_cblock >/dev/null
-expect "g: no cache dir: no ccache config" "$([[ -e $cconf ]] && echo 1 || echo 0)" 0
-mkdir -p "$t/mnt/ccache"
 out=$(run_cblock)
+expect "g: no cache dir: no ccache config" "$([[ -e $cconf ]] && echo 1 || echo 0)" 0
+expect "g: no cache dir: no summary" "$(grep -c '==> ccache' <<<"$out")" 0
+mkdir -p "$t/mnt/ccache"
+stats 20 10 100 5 >"$t/stats"; stats 30 110 300 15 >"$t/stats.after"
+out=$(run_cblock); rc=$?
 expect "g: with distcc: ccache in front of distcc" "$(grep -c '^BUILDENV=(distcc color ccache check !sign)$' "$cconf")" 1
 expect "g: PATH without /usr/sbin, so ccache hands distcc /usr/bin/gcc (#202)" \
     "$(grep -c '^export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin$' "$cconf")" 1
 expect "g: the cache is the mounted dir" "$(grep -c "^export CCACHE_DIR=$t/mnt/ccache$" "$cconf")" 1
 expect "g: the cache has a size limit" "$(grep -c '^export CCACHE_MAXSIZE=' "$cconf")" 1
-expect "g: says it is on" "$(grep -c '==> ccache:' <<<"$out")" 1
+expect "g: paths are hashed relative to the build tree, \$WORK" "$(grep -c '^export CCACHE_BASEDIR=/build$' "$cconf")" 1
+expect "g: the working dir is not hashed" "$(grep -c '^export CCACHE_NOHASHDIR=1$' "$cconf")" 1
+expect "g: the release builds' sloppiness (fresh tarballs: new mtimes and ctimes)" \
+    "$(grep -c '^export CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,locale$' "$cconf")" 1
+expect "g: says it is on, with the files in the cache" "$(grep -c '^==> ccache: .* (100 files)$' <<<"$out")" 1
+expect "g: logs this build's hits, misses and hit rate" \
+    "$(grep -c '^==> ccache: 110 hits, 10 misses, 91.7% hit rate$' <<<"$out")" 1
+expect "g: the summary exits 0" "$rc" 0
 expect "g: its config loads after the distcc one" \
     "$(printf '%s\n' zz-zccache.conf zz-ci.conf zz-distcc.conf | LC_ALL=C sort | tail -1)" zz-zccache.conf
+stats 0 0 0 0 >"$t/stats"; stats 0 0 0 0 >"$t/stats.after"
+out=$(run_cblock)
+expect "g: no compiles: a 0% hit rate, not a division by zero" \
+    "$(grep -c '^==> ccache: 0 hits, 0 misses, 0.0% hit rate$' <<<"$out")" 1
+rm "$t/stats"
+out=$(run_cblock); rc=$?
+expect "g: no stats: says so" "$(grep -c '^==> ccache: no stats$' <<<"$out")" 1
+expect "g: no stats: the build still passes" "$rc" 0
 rm "$t/etc/makepkg.conf.d/zz-distcc.conf"
 run_cblock >/dev/null
 expect "g: without distcc: ccache alone" "$(grep -c '^BUILDENV=(!distcc color ccache check !sign)$' "$cconf")" 1

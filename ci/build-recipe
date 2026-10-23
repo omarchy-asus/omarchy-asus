@@ -99,6 +99,22 @@ fi
 # every compiler path it doesn't know ("compiler name </usr/sbin/gcc> cannot
 # be an absolute path"), and the build compiles locally while distcc backs
 # the helper off. /usr/sbin is a link to /usr/bin on Arch, so nothing is lost.
+#
+# The hash settings are the release builds' (docs/distcc.md, "Persistent
+# ccache"), so warm CI rebuilds hit as often as theirs:
+#   - CCACHE_BASEDIR=$WORK: paths under the build tree are hashed relative to
+#     it, so a build tree elsewhere (another $WORK) still hits.
+#   - CCACHE_NOHASHDIR=1: the compile's working dir isn't hashed into objects
+#     built with -g, for the same reason.
+#   - CCACHE_SLOPPINESS: every source tarball is extracted fresh, so every
+#     header's ctime (and a generated one's mtime) is from this run, and without
+#     include_file_mtime and include_file_ctime ccache won't cache a compile
+#     that includes a header changed that recently.
+#     time_macros: __DATE__/__TIME__ don't make every such file a miss (the
+#     kernel pins its build timestamp anyway); locale: the builder's LANG and
+#     LC_* aren't hashed.
+# ccache_stats prints the cache's hits, misses and files; after makepkg the
+# log gets this build's hits, misses and hit rate.
 if [[ -d /mnt/ccache ]]; then
     pacman -S --needed --noconfirm --noprogressbar ccache
     distcc=!distcc
@@ -108,9 +124,17 @@ BUILDENV=($distcc color ccache check !sign)
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin
 export CCACHE_DIR=/mnt/ccache
 export CCACHE_MAXSIZE=15G
+export CCACHE_BASEDIR=$WORK
+export CCACHE_NOHASHDIR=1
+export CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,locale
 EOF
-    echo "==> ccache: /mnt/ccache ($(runuser -u builder -- env CCACHE_DIR=/mnt/ccache ccache --print-stats 2>/dev/null |
-        awk -F'\t' '$1 == "files_in_cache" { print $2 " files" }'))"
+    ccache_stats() {
+        runuser -u builder -- env CCACHE_DIR=/mnt/ccache ccache --print-stats 2>/dev/null |
+            awk -F'\t' '$1 ~ /^(direct|preprocessed)_cache_hit$/ { h += $2 } $1 == "cache_miss" { m += $2 }
+                $1 == "files_in_cache" { f = $2 } END { print h + 0, m + 0, f + 0 }'
+    }
+    ccache_before=$(ccache_stats) || ccache_before=
+    echo "==> ccache: /mnt/ccache (${ccache_before##* } files)"
 fi
 
 work=$WORK/$name
@@ -131,6 +155,19 @@ fi
 echo "==> makepkg -s ($name, MAKEFLAGS from /etc/makepkg.conf.d/zz-ci.conf, $(nproc) CPUs)"
 df -h "$work" | tail -1
 as_builder makepkg -s --noconfirm --noprogressbar
+
+# This build's ccache hits and misses (the counters are the cache's, so take
+# the ones from before makepkg off). Only for the log: it never fails the build.
+if declare -F ccache_stats >/dev/null; then
+    if [[ -n $ccache_before ]] && ccache_after=$(ccache_stats); then
+        printf '%s %s\n' "$ccache_before" "$ccache_after" | awk '
+            { h = $4 - $1; m = $5 - $2
+              printf "==> ccache: %d hits, %d misses, %.1f%% hit rate\n", h, m, h + m ? 100 * h / (h + m) : 0 }' ||
+            true
+    else
+        echo "==> ccache: no stats"
+    fi
+fi
 
 shopt -s nullglob
 pkgs=("$work"/*.pkg.tar.zst)
