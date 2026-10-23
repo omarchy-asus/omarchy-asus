@@ -89,8 +89,7 @@ stops or rolls back the other. The unit fails when either run fails.
 | log | `logs/auto-update-<run>.log` | `logs/auto-update-rc-<run>.log` |
 
 The RC run has every gate the Quattro run has, unchanged: holds (`recipes/<r>/HOLD` on
-`next/omarchy-4.5`), so an untested kernel stays staged until it has booted on a G16;
-signing and signature checks; checksums; the personal-information scan of the release and of
+`next/omarchy-4.5`); signing and signature checks; checksums; the personal-information scan of the release and of
 everything pushed or posted; release cohorts; the reverse-dependency checks; and the merge gates
 below, with `bin/ai-review` (Codex) as the review gate of its unattended rebase PRs.
 
