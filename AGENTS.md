@@ -56,7 +56,6 @@ On top of clud's caps, these hold across all stages:
   filename.
 - **Held recipes** (`recipes/<r>/HOLD`, first line the reason) are merged but not built or
   published, by hand or by `bin/auto-update`, until the hold is removed in its own PR.
-- **Untested kernels** stay staged, not published, until they have booted on a G16.
 - **One channel per branch.** `main` is the Quattro channel (the `x86_64` release, Omarchy
   stable); `next/omarchy-4.5` is the RC channel (the `rc-x86_64` release, Omarchy rc). Stage 6
   for an RC change passes `--channel rc` to `bin/mkchroot`, `bin/build-pkg`, `bin/publish` and

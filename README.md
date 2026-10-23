@@ -38,7 +38,7 @@ The signed `[omarchy-asus]` repo, served from the
 
 | Package | Version | What it fixes | Upstream |
 |---|---|---|---|
-| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.3 (main: 7.2.8-9.4, held until it boots on a G16) | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
+| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.4 | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
 | | | The touchpad's I2C controller interrupts once per batch, not once per byte (backport) | linux-next `e7d5d642c089`, not in mainline yet |
 | | | `asus-armoury` knows the GA605KM's power-limit ranges (nothing is written at boot) | Not submitted yet |
 | | | Three amdgpu display backports: no self-refresh on tearing flips, s0i3 pipe teardown, OLED CACP control (off by default) | Mainline v7.3-rc1 / stable |
