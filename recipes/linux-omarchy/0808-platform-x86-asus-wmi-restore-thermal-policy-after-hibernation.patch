@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+From: omarchy-asus <omarchy-asus@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 -0400
 Subject: [PATCH] platform/x86: asus-wmi: restore thermal policy and fan curves
  after hibernation
