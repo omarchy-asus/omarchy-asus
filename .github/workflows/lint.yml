@@ -29,11 +29,19 @@ jobs:
       - name: Tooling matches main (RC branch only)
         env:
           BRANCH: ${{ github.base_ref || github.ref_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if [[ $(ci/channel "$BRANCH") != rc ]]; then echo "$BRANCH is not the RC branch: nothing to compare"; exit 0; fi
           git fetch --no-tags --depth=1 origin main
-          ci/tooling-sync check FETCH_HEAD
+          main=$(git rev-parse FETCH_HEAD)
+          # a PR fails only on tooling it changes; the branch lagging behind main is a warning
+          if [[ -n $BASE_SHA ]]; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            ci/tooling-sync check "$main" --base "$BASE_SHA"
+          else
+            ci/tooling-sync check "$main"
+          fi
       - name: shellcheck, bash -n, py_compile
         run: |
           shellcheck --version | sed -n 2p
