@@ -3,7 +3,7 @@
 #   1. --plan and --dry-run against the current state
 #   2. simulated Arch rebuild hyprland 0.56.2-5: rebase + makepkg --nobuild must pass
 #   3. simulated 0.56.2-6 whose prepare() rewrites the lines our patch touches: the patch
-#      must fail, the run must plan an unpublish of hyprland+hyprpm and exit 1
+#      must fail, the run must keep our hyprland+hyprpm published and exit 1
 #   4. full-mode runs (PR, merge, publish) against stubs only: a local bare repo as the hub,
 #      a fake gh, build, publish, unpublish, rebase-recipe, check-upstream and agent; no
 #      network, nothing real is pushed, merged or published:
@@ -71,7 +71,7 @@ out=$(OMARCHY_ASUS_UPSTREAM_OVERRIDE=hyprland=0.56.2-6,hyprpm=0.56.2-6 \
 rc=$?
 echo "$out" | grep -E '^\[|^\| hyprland|auto-update:'
 expect $rc 1 "failed rebase fails the run"
-grep -q 'would unpublish hyprland hyprpm' <<<"$out"; expect $? 0 "failed rebase unpublishes hyprland hyprpm"
+grep -q 'would unpublish' <<<"$out"; expect $? 1 "a failed rebase withdraws nothing (never stock over our patch)"
 unset OMARCHY_ASUS_ARCH_GIT_URL
 fi
 
@@ -219,7 +219,7 @@ expect $rc 1 "a merged tree that was not built fails the run"
 grep -q '^publish ' "$T/calls"; expect $? 1 "merged tree differs from the built one: nothing published"
 grep -q '^gh pr merge ' "$T/calls"; expect $? 0 "the PR was merged"
 expect "$(last class)" merge-mismatch "status records the mismatch"
-grep -q '^unpublish fake' "$T/calls"; expect $? 0 "the stale package is unpublished (stock flows through)"
+grep -q '^unpublish fake' "$T/calls"; expect $? 1 "our last build stays published (never stock over our patch)"
 stat -- "$T/data/stage/.built-fake" >/dev/null 2>&1; expect $? 1 "no built-tree marker: the next run rebuilds from main"
 
 echo "== 4b. the merged tree is the built one"
@@ -274,7 +274,7 @@ expect $rc 1 "a rebase commit that fails the PII scan fails the run"
 git -C "$T/hub.git" rev-parse --verify -q refs/heads/auto-update/fake >/dev/null; expect $? 1 "nothing is pushed"
 grep -q '^gh pr create' "$T/calls"; expect $? 1 "no PR is opened"
 expect "$(last class)" pii "status records class=pii"
-grep -q '^unpublish fake' "$T/calls"; expect $? 0 "the stale package is unpublished (stock flows through)"
+grep -q '^unpublish fake' "$T/calls"; expect $? 1 "our last build stays published (never stock over our patch)"
 grep -q '^\[pii\] ' "$T/out"; expect $? 0 "the scan hit is logged"
 
 echo "== 4h. the fixer's edit carries a denylisted word"

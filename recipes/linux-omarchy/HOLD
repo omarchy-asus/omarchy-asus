@@ -1,2 +1,0 @@
-# bin/auto-update never builds or publishes a recipe with this file (see bin/auto-update-state).
-Not published until 7.2.8-9.101 (0482, amdgpu replays DMUB HPDs skipped during resume, #205) boots on a G16: run recipes/linux-omarchy/g16-test (deploy, then test --dock) and post the report on the PR. Delete this file in its own PR to release it.

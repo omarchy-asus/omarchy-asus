@@ -27,27 +27,28 @@ Plan actions:
   rebase     upstream moved past our base: rebase the recipe onto TARGET (= upstream)
   build      recipe on the base branch is not in the repo db, or the db holds another
              version (not-built / repo-stale): build and publish it as is
-  unpublish  stale and nothing to rebuild from (dep-mismatch), or a db entry with no
-             recipe whatever its status (the recipe was removed): drop it so the stock
-             build flows through
+  unpublish  a db entry with no recipe (the recipe was removed: upstream has replaced our
+             patch): drop it so the stock build flows through. The only withdrawal.
   attention  needs a human (upstream merged/closed one of our PRs, upstream older than
-             our base, bad pkgrel, not in any upstream repo); no automatic change
+             our base, bad pkgrel, not in any upstream repo, an exact-version dependency
+             upstream moved); no automatic change
+Never stock over our patch (#201): a package we built stays published until its recipe is
+removed. Whatever else goes wrong (a dependency pin upstream moved, a held recipe behind
+upstream, an upstream db past its grace period), the plan keeps our last build and says so
+(attention), and the fix is a recipe change, not a withdrawal.
 An upstream db that check-upstream could not fetch past its grace period ("expired" in its
-JSON) withdraws every overriding package (unpublish; attention when not in the repo), so the
-stock build flows through instead of a pin planned on stale data; local-only recipes are not
-affected. A db that is merely stale ("degraded") only adds a note to non-current lines.
+JSON) builds and rebases nothing that overrides upstream (attention); local-only recipes are
+not affected. A db that is merely stale ("degraded") only adds a note to non-current lines.
 Config via env: SKIP_RECIPES (space separated), BUILD_NOT_BUILT (yes/no),
 KEEP_PUBLISHED (space separated package names kept despite having no recipe).
 While check-upstream reports inventory_errors (or the check JSON has no inventory_errors
-key), a db entry with no recipe is unpublished only when it is stale (rebuild-needed,
-dep-mismatch, upstream-older), as before #82.
+key), a db entry with no recipe is kept (attention): the recipe may only be unreadable.
 A recipe with a HOLD file (first non-comment line: the reason) is never built or published;
-a stale published copy of it is unpublished.
+its published copy stays.
 """
 import hashlib
 import json
 import os
-import re
 import sys
 import time
 
@@ -115,35 +116,24 @@ def plan(check_path, status_path):
         hold = next((r.get("hold") for r in rows if r.get("hold")), None)
         if recipe in skip:
             action, notes = "attention", notes + [f"skipped by SKIP_RECIPES ({', '.join(sorted(statuses))})"]
-        elif (expired and not all(r.get("local_only") for r in rows) and any(r["upstream"] for r in rows)
-              and not (not rows[0]["recipe"] and any(n in keep for n in names))):
-            # Planned on a db copy past its grace: withdraw the override rather than keep or build it
-            # (not a package with no stock build to fall back to, nor one KEEP_PUBLISHED retains).
-            if in_repo:
-                action = "unpublish"
-                notes.append(f"{expired_note}: withdrawn so the stock build flows through")
-            else:
-                action = "attention"
-                notes.append(f"{expired_note}: not built or rebased on stale data")
-        elif hold and in_repo and (statuses & {"rebuild-needed", "dep-mismatch"} or any(
-                r["repo"] and r["upstream"] and VerKey(re.sub(r"\.\d+$", "", r["repo"])) < VerKey(r["upstream"])
-                for r in rows)):
-            # Held recipes never get (re)published; a copy behind upstream still goes, so stock flows.
-            action = "unpublish"
-            notes.append(f"held ({hold}); stale copy unpublished instead of rebased")
-        elif hold:
+        elif (expired and rows[0]["recipe"] and not all(r.get("local_only") for r in rows)
+              and any(r["upstream"] for r in rows)):
+            # Planned on a db copy past its grace: build or rebase nothing on stale data, and keep
+            # what is published (never stock over our patch).
             action = "attention"
-            notes.append(f"held, not built or published: {hold} ({', '.join(sorted(statuses))})")
+            notes.append(f"{expired_note}: not built or rebased on stale data"
+                         + ("; our last build stays published" if in_repo else ""))
+        elif hold:
+            # Held recipes never get (re)published; a published copy stays, even behind upstream.
+            action = "attention"
+            notes.append(f"held, not built or published: {hold} ({', '.join(sorted(statuses))})"
+                         + ("; our last build stays published" if in_repo else ""))
         elif not rows[0]["recipe"]:
             # The recipe was removed: withdraw what is still published, whatever its status,
             # unless KEEP_PUBLISHED names it or the recipe inventory may be missing recipes.
             if any(n in keep for n in names):
                 action = "attention"
                 notes.append("in the repo db without a recipe; kept by KEEP_PUBLISHED")
-            elif inv_errors != [] and statuses & {"rebuild-needed", "dep-mismatch", "upstream-older"}:
-                # Stale whatever the inventory says: a lagging pin blocks stock updates.
-                action = "unpublish"
-                notes.append("in the repo db without a recipe and no longer current")
             elif inv_errors != []:
                 action = "attention"
                 why = ", ".join(map(str, inv_errors)) if inv_errors else "no inventory_errors in check"
@@ -154,7 +144,11 @@ def plan(check_path, status_path):
         elif "rebuild-needed" in statuses:
             action = "rebase"
         elif "dep-mismatch" in statuses:
-            action = "unpublish" if in_repo else "attention"
+            # An exact-version dependency upstream moved: the recipe needs a fix; our last build
+            # stays published meanwhile (never stock over our patch).
+            action = "attention"
+            if in_repo:
+                notes.append("our last build stays published until the recipe is fixed")
         elif statuses & {"bad-pkgrel", "not-upstream", "upstream-older"}:
             action = "attention"
             notes.append("status: " + ", ".join(sorted(statuses)))

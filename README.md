@@ -38,12 +38,12 @@ The signed `[omarchy-asus]` repo, served from the
 
 | Package | Version | What it fixes | Upstream |
 |---|---|---|---|
-| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.3 (main: 7.2.8-9.4, held until it boots on a G16) | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
+| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.4 | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
 | | | The touchpad's I2C controller interrupts once per batch, not once per byte (backport) | linux-next `e7d5d642c089`, not in mainline yet |
 | | | `asus-armoury` knows the GA605KM's power-limit ranges (nothing is written at boot) | Not submitted yet |
 | | | Three amdgpu display backports: no self-refresh on tearing flips, s0i3 pipe teardown, OLED CACP control (off by default) | Mainline v7.3-rc1 / stable |
 | | | *9.4:* the GA605KM no longer wakes from s2idle at once while an HDMI monitor is connected (GPIO 16 wakeups ignored) | Not submitted yet (linux-gpio) |
-| | | *9.5 (RC, held until it boots on a G16):* a USB4 dock's monitors come back when the dock was replugged during suspend (amdgpu replays the hotplugs it skipped while resuming, #205) | Not submitted yet (amd-gfx) |
+| | | *9.5 (RC):* a USB4 dock's monitors come back when the dock was replugged during suspend (amdgpu replays the hotplugs it skipped while resuming, #205) | Not submitted yet (amd-gfx) |
 | | | *Plus an **experimental, default-off** scheduler series (Zen 5c-first soft park) for GA605KM battery testing. Compile-tested only. Nothing enables it. Not meant for upstream.* | Local carry ([notes](recipes/linux-omarchy/NOTES.md)) |
 | `nvidia-open-dkms` | 615.78.08-1.2 | No hang at power-off after hibernate | [NVIDIA/open-gpu-kernel-modules#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412), open |
 | | | The dGPU no longer wakes from D3cold on every battery change | [NVIDIA/open-gpu-kernel-modules#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299), open |
@@ -101,9 +101,9 @@ Signing key: [`keys/omarchy-asus.asc`](keys/omarchy-asus.asc), fingerprint
 
 The repo is listed first in `pacman.conf`, so our build wins even when upstream ships a newer
 one. That means we have to keep up. A daily check compares each package with upstream and
-rebuilds it when upstream moves. If a patch stops applying or the build fails, our package is
-withdrawn from the repo and the stock build flows through again. You never get stuck on a
-stale pin. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
+rebuilds it when upstream moves. If a patch stops applying or the build fails, our last build
+stays published and the run flags what needs fixing: on our channels you always get our patched
+version, never the stock one, until upstream folds the fix in and we drop the recipe. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
 pull request, builds it in a clean chroot as CI, and merges and publishes only after
 a verified AI review (`bin/ai-review`) and an agent review pass. The timer runs daily on the build host.
 
@@ -193,7 +193,8 @@ Where our fixes are headed:
   refuses to publish a release cohort member from `build/cohorts.conf` (e.g. omarchy and
   omarchy-settings) without its partner at the same version, in the same call or already in
   the db.
-- `bin/unpublish PKG`: drops a package so the stock build flows through; it withdraws the
+- `bin/unpublish PKG`: drops a package so the stock build flows through (once its recipe is
+  removed: `bin/auto-update` withdraws nothing else); it withdraws the
   whole release cohort (the partners the db holds) with it.
 - `bin/release-cohort members|check-publish|check-recipes`: the release cohorts in
   `build/cohorts.conf`. `members` lists a package's partners, `check-publish` is the gate
@@ -202,7 +203,10 @@ Where our fixes are headed:
   partner), and warns when the members' `_tag`, `_commit`, `pkgver`, `pkgrel`, sources or
   checksums differ (`--strict`: refuses; offline test: `tests/ci/release-cohort.sh`).
 - `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release (`--channel rc`: the
-  RC repo to the `rc-x86_64` release).
+  RC repo to the `rc-x86_64` release). It uploads nothing (exit 3) while the repo lacks our
+  build of a package the previous release served and a recipe of the checkout it runs from
+  still ships (RC: the Quattro release counts too; systemd/README.md, "No regression"), so run
+  it from a checkout of the channel's branch.
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:
   `python3 -I tests/test_issue.py`.
@@ -213,7 +217,7 @@ Where our fixes are headed:
 - `bin/revdep-check`: builds a DKMS package against a kernel headers package in a throwaway
   chroot; `build/revdeps.conf` lists the pairs checked before publishing either one.
 - `bin/auto-update`: the daily pipeline (rebase PR, chroot build, reviews, merge and
-  publish, or unpublish on failure).
+  publish; on failure our last build stays published).
 - `bin/install-auto-update` and `systemd/`: the service and timer units and their installer;
   [systemd/README.md](systemd/README.md) covers the design and the privilege model.
 - `recipes/omarchy-asus-g16-apply/`: the user-run command for the G16 fixes no package can
