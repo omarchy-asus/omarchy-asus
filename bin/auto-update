@@ -27,26 +27,32 @@
 #                 build ok, patches applied at fuzz 0, ai-review not blocking (and the
 #                 fixer's verdict approves, with REQUIRE_AGENT_APPROVAL=yes), recipe bump
 #                 only (our patches/DELTA untouched), no flags, MERGE_MODE=auto
-#              otherwise the PR stays open and the stale package is unpublished.
+#              otherwise the PR stays open and our last build stays published.
 #   build:     recipe on the base branch not in the repo db: build, publish, sync
-#   unpublish: stale with nothing to rebuild from (exact-version dependency moved, ...), or
-#              a repo-db package that no recipe ships any more (recipe removed;
-#              KEEP_PUBLISHED exempts names)
+#   unpublish: a repo-db package that no recipe ships any more (the recipe was removed because
+#              upstream replaced our patch; KEEP_PUBLISHED exempts names). The only withdrawal.
 #   cohorts:   release cohorts (build/cohorts.conf) are published in one bin/publish call once
 #              every member is built at the same version or already published at it, and are
 #              withdrawn together.
-#   On a failed rebase/build the affected packages are unpublished and the release
-#   synced at once (stock flows through: a stale pin blocks or breaks updates, because
-#   pacman takes the first repo that has the name), and the reason goes to
-#   $DATA/status.json and $DATA/status.md. Failures make the run exit 1 (systemctl --failed).
+#   Never stock over our patch (#201): on a failed rebase/build/publish, a rebase awaiting
+#   review, a cohort partner not built yet or an exact-version dependency upstream moved,
+#   our last build stays published (pacman takes the first repo that has the name, so users
+#   keep our patched version, one upstream bump behind at most) and the fix is a recipe
+#   change. The reason goes to $DATA/status.json and $DATA/status.md. Failures make the run
+#   exit 1 (systemctl --failed).
 #   While the journal $DATA/sync-pending exists (written by bin/publish and bin/unpublish
 #   before the local repo changes, removed by bin/sync-release once the release is verified)
 #   the release may lag: the next run syncs before planning, and the run fails until it clears.
+#   No regression (#201): a ready package goes up, one that is not ready keeps our last build.
+#   bin/sync-release withholds (exit 3) only a db that lacks our build of a package the previous
+#   release served (RC: also the Quattro release's); the run then records "(release)" attention
+#   with those packages instead of failing, and a later sync puts the db up once they are built
+#   (on the first RC publish: once the kernel, built last, is done).
 #   Before the first push or GitHub write, every commit (messages, author/committer, paths,
 #   patch text) and the PR title/body pass the PII scan and a local-path check; a hit
 #   pushes nothing and records class=pii.
 #   Upstream dbs: a cached copy is used for at most DB_MAX_STALE seconds after a failed fetch
-#   (attention); past it every package overriding upstream is withdrawn (stock flows).
+#   (attention); past it nothing overriding upstream is built or rebased (our builds stay).
 #   Withdrawing a kernel first compiles our retained DKMS package against the stock headers
 #   and withdraws it too if that fails; cached builds are re-checked when that counterpart moved.
 #   An unreadable build/revdeps.conf withdraws nothing (attention); retried removals get the check too.
@@ -78,7 +84,7 @@ while (($#)); do
         --recipe) recipes+=("$2"); shift ;;
         --workspace) workspace_arg=$(realpath "$2"); shift ;;
         --config) config=$2; shift ;;
-        -h|--help) sed -n '2,69p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
     shift
@@ -101,7 +107,7 @@ else
     config=${config:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-asus/auto-update.conf}
 fi
 BUILD_USER='' GIT_URL='' BASE_BRANCH='' MERGE_MODE=auto REVIEW_TIMEOUT=1200
-SKIP_RECIPES='' BUILD_NOT_BUILT=yes KEEP_PUBLISHED='' FETCH_FAIL_UNPUBLISH_AFTER=2 EXTRA_PATH='' GH_TOKEN_FILE=''
+SKIP_RECIPES='' BUILD_NOT_BUILT=yes KEEP_PUBLISHED='' EXTRA_PATH='' GH_TOKEN_FILE=''
 FAIL_ON_ATTENTION=no AI_REVIEW=required AI_REVIEW_TIMEOUT=1800 AI_REVIEW_EFFORT='' VERIFIER='' OPENROUTER_API_KEY_FILE=''
 MAX_FIX_ROUNDS=2 REPLY_LIMIT=10 DB_MAX_STALE=86400
 SERVE_CHANNELS='quattro rc'   # the release channels a run without --channel serves, in order
@@ -245,12 +251,20 @@ record() { as_user "$LIB/auto-update-state" record "$STATUS" "$run_id" "$@"; }
 # local repo, and bin/sync-release removes it only once the release matches the local repo:
 # while it exists the release may lag, and every run syncs first. $AU/sync-pending is the
 # marker older versions of this script wrote; it is still honoured and removed on success.
+# Exit 3 is a release withheld on purpose (bin/sync-release: the db would be a regression, it
+# lacks our build of a package the previous release served; it wrote them to
+# $CHANNEL_DATA/release-withheld): not a failure. The journal stays, so the next sync of this
+# run (or of the next run) puts the db up once they are built. Any other failed sync drops release-withheld, so
+# the end of the run reports a failure, not a withheld release.
 sync_now() {
     [[ $mode == full ]] || { note dry "would run bin/sync-release"; return 0; }
     local rc=0
     as_user "$LIB/sync-release" || rc=$?
     if ((rc == 0)); then as_user rm -f "$AU/sync-pending"
+    elif ((rc == 3)); then
+        note sync "release withheld: it would lack our build of a package the previous release served (a regression)"
     else
+        as_user rm -f "$CHANNEL_DATA/release-withheld"
         as_user touch "$CHANNEL_DATA/sync-pending"
         note sync "sync-release failed (exit $rc); retried next run"; failed=1
     fi
@@ -332,6 +346,11 @@ retry_unpublish() {  # retry the removals a previous run could not do (names sti
     if ! unpublish_now "$(IFS=,; echo "${want[*]}")" "retry of a removal that failed in an earlier run"; then
         note unpublish "removal of ${want[*]} FAILED again"; failed=1
     fi
+}
+keep_ours() {  # keep_ours <comma names|-> <reason>: never stock over our patch (#201): a failure
+    # withdraws nothing; our last build of these names stays published until a fix lands
+    [[ $1 != - ]] || return 0
+    note keep "${1//,/ }: our last build stays published ($2)"
 }
 srcinfo() {  # srcinfo <recipe dir>: makepkg --printsrcinfo in bin/recipe-sandbox (no network)
     # makepkg needs a writable BUILDDIR/PKGDEST/SRCDEST (default: the read-only recipe dir)
@@ -719,15 +738,7 @@ handle_rebase() {  # handle_rebase <recipe> <target> <repo names> <note>
     msg=$(run_rel "$msg")
     flags=$(as_user jq -r '.flags | join("; ")' "$report" 2>/dev/null || true)
     if ((rc != 0)); then
-        if [[ $cls == fetch ]]; then
-            local n; n=$(as_user "$LIB/auto-update-state" get "$STATUS" "$r" consecutive_fetch_failures)
-            n=$(( ${n:-0} + 1 ))
-            if (( n >= FETCH_FAIL_UNPUBLISH_AFTER )); then
-                unpublish_now "$in_repo" "upstream recipe unreachable $n runs in a row" || true
-            fi
-        else
-            unpublish_now "$in_repo" "rebase onto $target failed ($cls)" || true
-        fi
+        keep_ours "$in_repo" "rebase onto $target failed ($cls)"
         record "$r" failed rebase class="${cls:-other}" version="$target" message="$msg"
         failed=1; return 0
     fi
@@ -764,7 +775,7 @@ $body"
     # Nothing leaves the host before the commit and the PR text pass the scan.
     if ! outgoing_ok "$r" "origin/$BASE_BRANCH" "the rebase commit" "$title" "$prbody"; then
         ugit checkout --quiet --force "$BASE_BRANCH"
-        unpublish_now "$in_repo" "rebased $new_ver withheld: failed the PII scan before push" || true
+        keep_ours "$in_repo" "rebased $new_ver withheld: failed the PII scan before push"
         record "$r" failed rebase class=pii version="$new_ver" \
             message="not pushed: the rebase commit or PR text failed the PII scan (run $run_id: $r.outgoing.txt)"
         failed=1; return 0
@@ -907,9 +918,9 @@ query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$n
     if ((${#reasons[@]} == 0)); then
         outcome="all gates passed: merging, publishing $new_ver and syncing the release"
     elif [[ $build_ok != yes ]]; then
-        outcome="build failed: unpublished ${in_repo//,/ } so the stock build flows through; PR left open"
+        outcome="build failed: PR left open; our last build stays published"
     else
-        outcome="left open (${#reasons[@]} gate(s) not met; the next run resumes it); stale ${in_repo//,/ } unpublished meanwhile"
+        outcome="left open (${#reasons[@]} gate(s) not met; the next run resumes it); our last build stays published meanwhile"
     fi
     as_user tee "$comment" >/dev/null <<EOF
 ### auto-update run \`$run_id\` on \`${head:0:12}\`
@@ -941,43 +952,33 @@ EOF
         elif ((prc == 3)); then
             # Merged and built, but its release-cohort partner is not built or published at
             # $new_ver yet: nothing was published. No .built-<r>, so the next run's build step retries
-            # the publish (from the .staged-<r> build); the stale pair must not shadow stock meanwhile.
+            # the publish (from the .staged-<r> build); the published pair stays meanwhile.
             as_user rm -f "$AU/state/$r.report.json" "$AU/state/$r.flags"
-            if unpublish_now "$in_repo" "merged $new_ver; held back until its release-cohort partner is built or published at $new_ver"; then
-                record "$r" attention rebase version="$new_ver" pr="$pr" \
-                    message="merged; publishes together with its release-cohort partner once that is built or published at $new_ver"
-                attention=1
-            else
-                record "$r" failed rebase class=unpublish version="$new_ver" pr="$pr" \
-                    message="merged, held back for its release-cohort partner; stale ${in_repo//,/ } could not be unpublished (retried next run)"
-                failed=1
-            fi
+            keep_ours "$in_repo" "merged $new_ver; held back until its release-cohort partner is built or published at $new_ver"
+            record "$r" attention rebase version="$new_ver" pr="$pr" \
+                message="merged; publishes together with its release-cohort partner once that is built or published at $new_ver"
+            attention=1
         elif [[ $merge_mismatch == yes ]]; then
             # Merged, but not what was built: publish nothing. Without a built-tree marker the
             # next run sees the base branch's recipe unbuilt, and builds and publishes it.
             as_user rm -f "$STAGE_DIR/.built-$r" "$AU/state/$r.report.json" "$AU/state/$r.flags"
-            unpublish_now "$in_repo" "merged $new_ver is not the recipe that was built" || true
+            keep_ours "$in_repo" "merged $new_ver is not the recipe that was built"
             record "$r" failed rebase class=merge-mismatch version="$new_ver" pr="$pr" \
                 message="merged, not published: the merged recipe differs from the built head; the next run rebuilds from $BASE_BRANCH"
             failed=1
         else
-            unpublish_now "$in_repo" "merge or publish of $new_ver failed" || true
+            keep_ours "$in_repo" "merge or publish of $new_ver failed"
             record "$r" failed rebase class=publish version="$new_ver" pr="$pr" message="merge/publish failed"
             failed=1
         fi
     elif [[ $build_ok != yes ]]; then
-        unpublish_now "$in_repo" "build of $new_ver failed" || true
+        keep_ours "$in_repo" "build of $new_ver failed"
         record "$r" failed rebase class=build version="$new_ver" pr="$pr" message="chroot build failed: see run $run_id: ${build_log##*/}"
         failed=1
     else
-        if unpublish_now "$in_repo" "upstream is at $target; rebased $new_ver awaits review"; then
-            record "$r" attention rebase version="$new_ver" pr="$pr" message="$(printf '%s; ' "${reasons[@]}")"
-            attention=1
-        else
-            record "$r" failed rebase class=unpublish version="$new_ver" pr="$pr" \
-                message="stale ${in_repo//,/ } could not be unpublished (retried next run); $(printf '%s; ' "${reasons[@]}")"
-            failed=1
-        fi
+        keep_ours "$in_repo" "upstream is at $target; rebased $new_ver awaits review"
+        record "$r" attention rebase version="$new_ver" pr="$pr" message="$(printf '%s; ' "${reasons[@]}")"
+        attention=1
     fi
     ugit checkout --quiet "$BASE_BRANCH"
 }
@@ -1002,7 +1003,7 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
             note "$r" "the reverse-dependency counterpart changed since $ver was built: re-running the checks"
             build_log=$RUN/$r.build.log
             if ! revdep_checks "$r" "$ver"; then
-                unpublish_now "$in_repo" "reverse-dependency check of $ver failed" || true
+                keep_ours "$in_repo" "reverse-dependency check of $ver failed"
                 record "$r" failed build class=revdep version="$ver" \
                     message="reverse-dependency check failed: see run $run_id: ${build_log##*/}"
                 failed=1
@@ -1015,7 +1016,7 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
     else
         note "$r" "building $ver"
         if ! build_recipe "$r"; then
-            unpublish_now "$in_repo" "build of $ver failed" || true
+            keep_ours "$in_repo" "build of $ver failed"
             record "$r" failed build class=build version="$ver" message="chroot build failed: see run $run_id: ${build_log##*/}"
             failed=1
             return 0
@@ -1027,13 +1028,13 @@ handle_build() {  # handle_build <recipe> <repo names> <note>: build the base br
         record "$r" ok build version="$ver" message="$how"
     elif ((prc == 3)); then
         # Built, but its release-cohort partner is not built or published at $ver yet: nothing published.
-        unpublish_now "$in_repo" "built $ver; held back until its release-cohort partner is built or published at $ver" || true
+        keep_ours "$in_repo" "built $ver; held back until its release-cohort partner is built or published at $ver"
         record "$r" attention build version="$ver" message="built; publishes together with its release-cohort partner once that is built or published at $ver"
         attention=1
     else
         # Rebuild next run rather than retrying a staged build that may be gone or bad.
         as_user rm -f "$STAGE_DIR/.staged-$r"
-        unpublish_now "$in_repo" "publish of $ver failed" || true
+        keep_ours "$in_repo" "publish of $ver failed"
         record "$r" failed build class=publish version="$ver" message="publish of $ver failed; see logs/${LOG##*/}"
         failed=1
     fi
@@ -1066,9 +1067,28 @@ ensure_chroot() {  # ensure_chroot: 0 when this channel's build chroot exists on
     return 1
 }
 
+sync_state_check() {  # sync_state_check: at the end of the run, before the summary. A sync still
+    # pending fails the run, unless the release was withheld on purpose (sync_now): then it is
+    # attention, recorded as "(release)" with the gaps. A synced release drops that entry.
+    [[ $mode == full ]] || return 0
+    local gaps msg
+    if as_user test -e "$CHANNEL_DATA/sync-pending" && as_user test -e "$CHANNEL_DATA/release-withheld"; then
+        gaps=$(as_user cat "$CHANNEL_DATA/release-withheld" | paste -sd';' -) || gaps=
+        msg="release $GH_TAG withheld: it would lack our build of a package the previous release served, so it keeps its last set (${gaps:-see the log}); it goes up once they are built"
+        note ATTENTION "$msg"
+        record "(release)" attention none message="$msg" || true
+        attention=1
+        return 0
+    fi
+    as_user "$LIB/auto-update-state" forget "$STATUS" "(release)" || true
+    if as_user test -e "$CHANNEL_DATA/sync-pending"; then
+        note sync "sync pending: the release may lag the local repo; retried next run"; failed=1
+    fi
+}
+
 upstream_dbs_check() { # upstream_dbs_check <check.json>
     # An upstream db that could not be fetched was used from cache: say so (attention). Past
-    # DB_MAX_STALE it is "expired", and the plan withdraws what overrides upstream. Once
+    # DB_MAX_STALE it is "expired", and the plan builds and rebases nothing that overrides upstream. Once
     # check-upstream reports the dbs fresh again, the "(upstream dbs)" entry is dropped, so
     # status.md does not keep showing it as an earlier run (an unreadable check keeps it).
     local degraded dbmsg
@@ -1247,14 +1267,14 @@ while IFS=$'\t' read -r r action _; do
 done <<<"$plan"
 [[ $mode == plan ]] && exit 0
 # The RC chroot is the timer's to keep: made before the first build or kernel withdrawal that
-# needs it. When that fails, the builds fail (bin/build-pkg refuses) and their stale packages
-# are withdrawn, as for any failed build.
+# needs it. When that fails, the builds fail (bin/build-pkg refuses) and our last builds stay
+# published, as for any failed build.
 if [[ $mode == full && $CHANNEL != quattro ]] && cut -f2 <<<"$plan" | grep -qxE 'rebase|build|unpublish'; then
     ensure_chroot || true
 fi
 
 # Each recipe runs in a subshell with errexit on: an unexpected error (git, gh, network)
-# ends only that recipe, and the safety net below still unpublishes what is stale.
+# ends only that recipe; what it had published stays.
 # Results travel through status.json (record) and the summary's exit code.
 while IFS=$'\t' read -r r action target in_repo names pnote; do
     [[ -n $r ]] || continue
@@ -1282,21 +1302,18 @@ while IFS=$'\t' read -r r action target in_repo names pnote; do
     set -e
     if ((rc != 0)); then
         note "$r" "unexpected error (exit $rc) during $action; see $LOG"
-        [[ $action == rebase ]] && { unpublish_now "$in_repo" "auto-update error while rebasing onto $target" || true; }
         ugit checkout --quiet --force "$BASE_BRANCH" 2>/dev/null || true
         record "${r#(db) }" failed "$action" class=internal message="unexpected error (exit $rc); see logs/${LOG##*/}" || true
         failed=1
     fi
 done <<<"$plan"
 
+sync_state_check
 src=0
 as_user "$LIB/auto-update-state" summary "$STATUS" "$run_id" "$SUMMARY" || src=$?
 as_user find "$AU/runs" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 ((src == 1)) && failed=1
 ((src == 2)) && attention=1
-if [[ $mode == full ]] && as_user test -e "$CHANNEL_DATA/sync-pending"; then
-    note sync "sync pending: the release may lag the local repo; retried next run"; failed=1
-fi
 [[ $mode == full && -n $(as_user cat "$PENDING_UNPUB" 2>/dev/null) ]] &&
     { note unpublish "still published, removal pending: $(as_user cat "$PENDING_UNPUB" | paste -sd' ')"; failed=1; }
 if ((failed)); then echo "auto-update: FAILED (see $SUMMARY)"; exit 1; fi

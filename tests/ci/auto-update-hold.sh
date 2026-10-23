@@ -1,7 +1,7 @@
 #!/bin/bash
 # A recipe with recipes/<r>/HOLD is never built or published by bin/auto-update:
-# bin/auto-update-state plans "attention" for it, and "unpublish" when a stale copy
-# of it is in the repo db. Offline: a hand-made check-upstream JSON.
+# bin/auto-update-state plans "attention" for it, and keeps a published copy even when it
+# is behind upstream (never stock over our patch, #201). Offline: a hand-made check-upstream JSON.
 #
 # CI runs this with plain bash on ubuntu-24.04, which has no vercmp. The hold branch of
 # bin/auto-update-state compares the repo copy with upstream (VerKey.__lt__ runs vercmp),
@@ -39,10 +39,10 @@ expect() {
 }
 expect "not built, no hold: build" "$(plan_action "$(row a not-built null)")" build
 expect "not built, held: attention" "$(plan_action "$(row a not-built null 'waiting for the laptop')")" attention
-expect "repo stale and behind upstream, held: unpublish" "$(plan_action "$(row a repo-stale '"0.9-1.1"' 'waiting')")" unpublish
+expect "repo stale and behind upstream, held: attention (our copy stays)" "$(plan_action "$(row a repo-stale '"0.9-1.1"' 'waiting')")" attention
 expect "upstream moved, held, not in repo: attention" "$(plan_action "$(row a rebuild-needed null 'waiting')")" attention
-expect "upstream moved, held, in repo: unpublish" "$(plan_action "$(row a rebuild-needed '"1.0-1.1"' 'waiting')")" unpublish
-expect "recipe current, held, older copy in repo: unpublish" "$(plan_action "$(row a repo-stale '"1.0-1.1"' 'waiting' 2.0-1.1 2.0-1)")" unpublish
+expect "upstream moved, held, in repo: attention (our copy stays)" "$(plan_action "$(row a rebuild-needed '"1.0-1.1"' 'waiting')")" attention
+expect "recipe current, held, older copy in repo: attention (our copy stays)" "$(plan_action "$(row a repo-stale '"1.0-1.1"' 'waiting' 2.0-1.1 2.0-1)")" attention
 expect "held, newer unpublished copy than upstream: attention" "$(plan_action "$(row a repo-stale '"2.0-1.2"' 'waiting' 2.0-1.1 2.0-1)")" attention
 expect "upstream moved, no hold: rebase" "$(plan_action "$(row a rebuild-needed '"1.0-1.1"')")" rebase
 exit $fails
