@@ -6,6 +6,9 @@
 # The helper's forced command (build/distccd-gate) runs distccd only when its own
 # versions are the same, so a helper on another compiler is refused and distcc compiles
 # locally instead (#163). If the versions can't be read, it doesn't connect at all.
+# Jobs share one SSH connection (ControlMaster; the socket is in the build's own /tmp,
+# and the master outlives the job by ControlPersist), so a job is a new session rather
+# than a new handshake (#221). Each session still runs the helper's forced command.
 tc=$(pacman -Q gcc binutils 2>/dev/null | tr ' ' '-' | paste -sd, -)
 case $tc in
     gcc-*,binutils-*) ;;
@@ -13,4 +16,5 @@ case $tc in
 esac
 exec ssh -F none -i /distcc/id_ed25519 -o IdentitiesOnly=yes \
     -o UserKnownHostsFile=/distcc/known_hosts -o StrictHostKeyChecking=yes \
-    -o BatchMode=yes -o ConnectTimeout=5 "$@" "omarchy-asus-toolchain=$tc"
+    -o BatchMode=yes -o ConnectTimeout=5 \
+    -o ControlMaster=auto -o ControlPath=/tmp/distcc-ssh-%C -o ControlPersist=120 "$@" "omarchy-asus-toolchain=$tc"

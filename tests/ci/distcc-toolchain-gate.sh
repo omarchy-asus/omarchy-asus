@@ -90,6 +90,7 @@ expect "$(tail -7 "$S/ssh-args" | paste -sd' ')" \
     "-l builder helper distccd --inetd --enable-tcp-insecure omarchy-asus-toolchain=gcc-$GCC,binutils-$BINUTILS" \
     "distcc's arguments, then the versions"
 grep -qx StrictHostKeyChecking=yes "$S/ssh-args"; expect $? 0 "host key checked"
+grep -qx ControlMaster=auto "$S/ssh-args"; expect $? 0 "jobs share one connection (#221)"
 
 echo "== 8. a real distcc compile"
 if command -v distcc >/dev/null && command -v distccd >/dev/null && [[ -d /usr/lib/distcc ]] && command -v gcc >/dev/null; then

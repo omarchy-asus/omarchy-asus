@@ -88,24 +88,48 @@ restrict,from="<build-host-addresses>",command="/usr/local/bin/distccd-gate --ni
 The key can only compile, as that account. Compiler options can still make
 gcc run other programs, so give the account nothing it would matter to lose.
 
-In the **build chroot** (`/var/lib/omarchy-asus/chroot/root`), install
-`distcc openssh` with `arch-nspawn ... pacman -S`, and create
-`/etc/makepkg.conf.d/distcc.conf`:
+In **each build chroot** (`/var/lib/omarchy-asus/chroot/root`, and the RC
+channel's `/var/lib/omarchy-asus/chroot-rc/root` once `bin/mkchroot --channel rc`
+has made it), install `distcc openssh` with `arch-nspawn <chroot>/root pacman -S`,
+and create `/etc/makepkg.conf.d/distcc.conf`:
 
 ```bash
 BUILDENV=(distcc color !ccache check !sign)
-DISTCC_HOSTS="localhost/<build-host-threads> <helper-account>@<helper-address>/<helper-threads>"
-MAKEFLAGS="-j<build-host-threads + helper-threads>"
+DISTCC_HOSTS="<helper-account>@<helper-address>/<helper-threads> localhost/<local-slots>"
+MAKEFLAGS="-j<helper-threads + local-slots>"
 export DISTCC_SSH=/distcc/ssh
+# with the key mounted, distcc compiles ccache's preprocessor output as it is
+[[ -d /distcc ]] && export CCACHE_NOCPP2=1
 ```
 
-The helper only gets the jobs the build host's own slots don't take. distcc
-fills `DISTCC_HOSTS` from the left, so `localhost/<n>` first keeps `n` jobs
-local and sends the rest to the helper, and `make -j` has to be larger than `n`
-for there to be a rest. With `-j` at or below the local slots (or a recipe that
-sets its own `-j`), the helper sits idle: the 7.2.8-9.4 kernel build sent it
-nothing with 16 local slots. Give the helper its slots on top of the local
-ones, as above.
+The helper comes first. distcc fills `DISTCC_HOSTS` from the left, so the
+helper takes the first `<helper-threads>` jobs and the build host the rest, and
+`make -j` covers both. With `localhost/<n>` first, the helper only got the jobs
+the build host's own slots didn't take, and a release build, mostly ccache hits
+by then, rarely runs more than `n` real compiles at once: a whole 7.2.8-9.4
+kernel build sent it 4 jobs out of about 25,500 (#221).
+
+The build host still preprocesses every file the helper compiles, so leave it
+CPU for that: `<local-slots>` below its thread count (12 of 16 here). And
+`CCACHE_NOCPP2` stops ccache preprocessing a second time: by default ccache
+runs the preprocessor for its hash and then hands distcc the source, which
+preprocesses it again. distcc already compiles preprocessed source on the
+helper; this does the same for the jobs it keeps. It is set only when the key
+is mounted, so builds without distcc keep ccache's default.
+
+A cold compile of the kernel's `fs/` tree in the RC chroot (1,422 jobs; a
+16-thread build host, an 8-thread helper):
+
+| setup | seconds | on the helper |
+|---|---|---|
+| build host only, `-j24` | 214 | 0 |
+| helper first, `localhost/16`, `-j24` | 202 | 485 |
+| helper first, `localhost/12`, `-j20`, `CCACHE_NOCPP2` | 172 | 511 |
+
+The wrapper shares one SSH connection between jobs (`ControlMaster`, socket in
+the build's own `/tmp`), so a job costs a new session on that connection
+rather than a new SSH handshake. Each session still runs the helper's forced
+command, so every job is still checked against the toolchain (below).
 
 `DISTCC_SSH` names the wrapper and nothing else: `man distcc` says the value
 is not split into words or run through a shell. distcc 3.4 does split it on
@@ -114,7 +138,10 @@ word, so options there are fragile. Put them in the wrapper.
 `<helper-address>` must be the name `known_hosts` was made for.
 
 `bin/build-pkg` mounts `~/.local/share/omarchy-asus/distcc` read-only at
-`/distcc` when `id_ed25519` is there (see `DISTCC_KEY_DIR` above). If the
+`/distcc` when `id_ed25519` is there (see `DISTCC_KEY_DIR` above). Without
+`openssh` in the chroot the wrapper can't connect and every job would compile
+on the build host, so `bin/build-pkg` leaves the key out and says
+`distcc: off: the <channel> chroot has no /usr/bin/ssh` (#221). If the
 helper is off, busy or refuses, distcc compiles locally. Linking, Rust and
 packaging always run on the build host.
 

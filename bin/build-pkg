@@ -87,6 +87,8 @@ makepkg_args=()
 #   - when the key dir's ssh wrapper is not this repo's build/distcc-ssh, which
 #     sends the chroot's gcc and binutils versions for the helper's
 #     build/distccd-gate to compare (an older wrapper sends none).
+#   - when the chroot has no ssh for that wrapper to run (openssh not installed in
+#     it): distcc would fail every connection and compile everything here (#221).
 distcc_dir=${DISTCC_KEY_DIR-$DATA/distcc}
 distcc_bind=()
 if [[ -n $distcc_dir && -f $distcc_dir/id_ed25519 ]]; then
@@ -95,6 +97,8 @@ if [[ -n $distcc_dir && -f $distcc_dir/id_ed25519 ]]; then
         echo "==> distcc: off for $name (recipes/$name/NO_DISTCC)"
     elif ! cmp -s "$lib/../build/distcc-ssh" "$distcc_dir/ssh"; then
         echo "==> distcc: off: $distcc_dir/ssh is not build/distcc-ssh (install it: docs/distcc.md)"
+    elif [[ ! -x $CHROOT/root/usr/bin/ssh ]]; then
+        echo "==> distcc: off: the $CHANNEL chroot has no /usr/bin/ssh (install openssh in $CHROOT/root: docs/distcc.md)"
     else
         distcc_bind=(-D "$distcc_dir:/distcc")
         echo "==> distcc: key dir mounted read-only at /distcc"
