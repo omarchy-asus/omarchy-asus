@@ -57,10 +57,11 @@ TWEAKS=(
   "nmi|225|kernel.nmi_watchdog 1 -> 0 (the perf-counter hard-lockup detector)"
   "nvme-apst|232|NVMe APST idle timeouts 100/2000 ms -> 30/500 ms (nvme_core apst_*_timeout_ms, re-applied)"
   "sd-off|226|GL9767 SD reader removed from the PCI bus (rescanned after)"
-  "kbd-usb|233|N-Key keyboard (USB 0b05:19b6) autosuspend: power/control on -> auto"
+  "kbd-usb|233|N-Key keyboard (USB 0b05:19b6) autosuspend: power/control on -> auto, Num Lock LED off (usbhid won't suspend with an LED lit)"
   "wifi-ps|227|MT7925 Wi-Fi power save off -> on (iw)"
   "numlock|228|Num Lock LED on -> off (LED only, not the key state)"
   "bt-off|234|Bluetooth rfkill soft block (measurement: skipped while a device is connected)"
+  "usb-idle|233|kbd-usb and bt-off together, so their shared xHCI controller can suspend (upper bound; skipped while a device is connected)"
   "voxtype|231|voxtype.service stopped (user unit; the ALC285 codec's runtime state is logged)"
 )
 NVME_PRIMARY_MS=30 NVME_SECONDARY_MS=500
@@ -91,6 +92,9 @@ if [[ ${1:-} == --root-helper ]]; then
   SD=$(pci_by_id 0x17a0 0x9767) SD_PARENT=''
   [[ -n $SD ]] && SD_PARENT=$(readlink -f "$SD/..")
   SD_NAME=${SD##*/}
+  leds_get() { local f v=''; for f in "$sys"/class/leds/*::numlock; do [[ -e $f/brightness ]] && v+="$f=$(rd "$f/brightness") "; done; printf '%s' "$v"; }
+  leds_off() { local f r=0; for f in "$sys"/class/leds/*::numlock; do [[ -e $f/brightness ]] && { wr "$f/brightness" 0 || r=1; }; done; return $r; }
+  leds_set() { local p r=0; for p in $1; do wr "${p%=*}/brightness" "${p##*=}" || r=1; done; return $r; }
   apply() { # tweak -> ok/err line; records the original first
     local t=$1 f v
     [[ -n ${APPLIED[$t]:-} ]] && { echo "err already applied"; return; }
@@ -109,9 +113,10 @@ if [[ ${1:-} == --root-helper ]]; then
         ORIG[$t]=$(rd "$SD_PARENT/power/control"); APPLIED[$t]=1
         wr "$SD/remove" 1 && echo "ok removed" || echo "err remove refused" ;;
       kbd-usb)
+        # usbhid refuses to autosuspend while an LED is lit, so Num Lock's goes off too.
         f=$(usb_by_id 0b05 19b6) || { echo "err absent"; return; }
-        ORIG[$t]="$f $(rd "$f/power/control")"; APPLIED[$t]=1
-        wr "$f/power/control" auto && echo "ok $(rd "$f/power/control")" || echo "err write refused" ;;
+        ORIG[$t]="$f $(rd "$f/power/control") $(leds_get)"; APPLIED[$t]=1
+        wr "$f/power/control" auto && leds_off && echo "ok $(rd "$f/power/control")" || echo "err write refused" ;;
       wifi-ps)
         f=$(wlan) || { echo "err absent"; return; }
         command -v iw >/dev/null 2>&1 || { echo "err no iw"; return; }
@@ -131,6 +136,12 @@ if [[ ${1:-} == --root-helper ]]; then
         f=$(rfkill_bt) || { echo "err absent"; return; }
         ORIG[$t]="$f $(rd "$f/soft")"; APPLIED[$t]=1
         wr "$f/soft" 1 && echo "ok blocked" || echo "err write refused" ;;
+      usb-idle)
+        # The keyboard and the Bluetooth radio share one xHCI controller, which
+        # can only suspend when both are idle (#233, #234).
+        f=$(usb_by_id 0b05 19b6) && v=$(rfkill_bt) || { echo "err absent"; return; }
+        ORIG[$t]="$f $(rd "$f/power/control") $v $(rd "$v/soft") $(leds_get)"; APPLIED[$t]=1
+        wr "$f/power/control" auto && leds_off && wr "$v/soft" 1 && echo "ok $(rd "$f/power/control"), blocked" || echo "err write refused" ;;
       *) echo "err unknown tweak" ;;
     esac
   }
@@ -156,10 +167,11 @@ if [[ ${1:-} == --root-helper ]]; then
         [[ -z $o ]] || wr "$SD_PARENT/power/control" "$o" || { echo "err the SD reader's port could not be set back to $o"; return; }
         # Still applied when it didn't come back: the exit handler rescans again.
         [[ -e $sys/bus/pci/devices/$SD_NAME ]] || { echo "err the SD reader did not come back (it returns at the next boot)"; return; } ;;
-      kbd-usb) read -r f v <<<"$o"; wr "$f/power/control" "$v" || rc=1 ;;
+      kbd-usb) read -r f v p <<<"$o"; wr "$f/power/control" "$v" || rc=1; leds_set "$p" || rc=1 ;;
       wifi-ps) read -r f v <<<"$o"; ((dry)) || iw dev "$f" set power_save "$v" 2>/dev/null || rc=1 ;;
       numlock) for p in $o; do wr "${p%=*}/brightness" "${p##*=}" || rc=1; done ;;
       bt-off) read -r f v <<<"$o"; wr "$f/soft" "$v" || rc=1 ;;
+      usb-idle) read -r f v p n o <<<"$o"; wr "$p/soft" "$n" || rc=1; wr "$f/power/control" "$v" || rc=1; leds_set "$o" || rc=1 ;;
     esac
     ((rc == 0)) || { echo "err restore write refused"; return; }
     unset "APPLIED[$t]"
@@ -374,7 +386,7 @@ for b in "$SYS"/class/backlight/amdgpu_bl*; do [[ -r $b/actual_brightness ]] && 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/g16-idle-ab.XXXXXX")
 REPORT=${G16_AB_REPORT:-$HOME/omarchy-asus-g16-idle-ab-$STAMP.md}
 ROOT=${G16_ROOT:-pkexec}
-WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth) for the G16 battery A/B (#$SUMMARY_ISSUE); everything is put back when it ends"
+WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together) for the G16 battery A/B (#$SUMMARY_ISSUE); everything is put back when it ends"
 case $ROOT in
   pkexec)
     if [[ -n ${G16_POLKIT_REASON:-} ]]; then
@@ -488,7 +500,14 @@ def devstate():
         v, dv = rd(d + "/vendor"), rd(d + "/device")
         if (v, dv) == ("0x17a0", "0x9767"): s["sd"] = (rd(d + "/power/runtime_status") or "?")
     for d in glob.glob(sysfs + "/bus/usb/devices/*"):
-        if (rd(d + "/idVendor"), rd(d + "/idProduct")) == ("0b05", "19b6"): s["kbd"] = rd(d + "/power/runtime_status") or "?"
+        if (rd(d + "/idVendor"), rd(d + "/idProduct")) == ("0b05", "19b6"):
+            s["kbd"] = rd(d + "/power/runtime_status") or "?"
+            # The keyboard's xHCI controller: the first PCI device above it.
+            up = os.path.dirname(os.path.realpath(d))
+            while len(up) > len(sysfs) and not os.path.exists(up + "/power_state"): up = os.path.dirname(up)
+            if os.path.exists(up + "/power_state"): s["xhci"] = rd(up + "/power_state") or "?"
+        elif any(os.path.basename(os.path.realpath(i + "/driver")) == "btusb" for i in glob.glob(d + "/*:1.0")):
+            s["bt"] = rd(d + "/power/runtime_status") or "?"
     for d in glob.glob(sysfs + "/bus/hdaudio/devices/*"):
         # Not the RTX's HDMI codec: nothing under the RTX is read but its runtime_status.
         if dgpu and os.path.basename(dgpu) in os.path.realpath(d): continue
@@ -570,7 +589,7 @@ RUN=() SKIP=()
 for t in "${SEL[@]}"; do
   case $t in
     voxtype) systemctl --user is-active -q voxtype.service 2>/dev/null && RUN+=("$t") || SKIP+=("$t: voxtype.service not running") ;;
-    bt-off)
+    bt-off | usb-idle)
       if have bluetoothctl && (( $(bluetoothctl devices Connected 2>/dev/null | grep -c '^Device') > 0 )); then SKIP+=("$t: a Bluetooth device is connected")
       else RUN+=("$t"); fi ;;
     *) RUN+=("$t") ;;
@@ -593,7 +612,7 @@ apply_t() { # tweak -> 0 when applied
   if [[ $1 == nvme-apst ]]; then r=$(ask_root "apply $1 $NVME_PRIMARY_MS $NVME_SECONDARY_MS"); else r=$(ask_root "apply $1"); fi
   printf '%s %s\n' "$1" "$r" >>"$WORK/applied"
   [[ $r == ok* ]] || { note "${R}$1 not applied: $r${N}"; return 1; }
-  [[ $1 == bt-off ]] && ((DRY == 0)) && BT_CHECK=1
+  [[ $1 == bt-off || $1 == usb-idle ]] && ((DRY == 0)) && BT_CHECK=1
   return 0
 }
 revert_t() { # tweak; a revert that fails stops the run
@@ -605,7 +624,7 @@ revert_t() { # tweak; a revert that fails stops the run
   fi
   r=$(ask_root "revert $1")
   [[ $r == ok* ]] || die "$1 could not be put back ($r); stopping the run"
-  if [[ $1 == bt-off ]] && ((BT_POWERED && DRY == 0)) && have bluetoothctl; then
+  if [[ $1 == bt-off || $1 == usb-idle ]] && ((BT_POWERED && DRY == 0)) && have bluetoothctl; then
     sleep 2; bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' || bluetoothctl power on >/dev/null 2>&1
   fi
 }
