@@ -124,8 +124,9 @@ if [[ ${1:-} == --root-helper ]]; then
         for f in "$sys"/class/leds/*::numlock; do [[ -e $f/brightness ]] && v+="$f=$(rd "$f/brightness") "; done
         [[ -n $v ]] || { echo "err absent"; return; }
         ORIG[$t]=$v; APPLIED[$t]=1
-        for f in "$sys"/class/leds/*::numlock; do wr "$f/brightness" 0; done
-        echo "ok 0" ;;
+        v=0
+        for f in "$sys"/class/leds/*::numlock; do [[ -e $f/brightness ]] && { wr "$f/brightness" 0 || v=1; }; done
+        ((v == 0)) && echo "ok 0" || echo "err write refused" ;;
       bt-off)
         f=$(rfkill_bt) || { echo "err absent"; return; }
         ORIG[$t]="$f $(rd "$f/soft")"; APPLIED[$t]=1
@@ -152,7 +153,8 @@ if [[ ${1:-} == --root-helper ]]; then
           for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -e $sys/bus/pci/devices/$SD_NAME ]] && break; sleep 0.5; done
           [[ -n $v ]] && wr "$SD_PARENT/power/control" "$v"
         fi
-        [[ -e $sys/bus/pci/devices/$SD_NAME ]] || { echo "err the SD reader did not come back (it returns at the next boot)"; unset "APPLIED[$t]"; return; } ;;
+        # Still applied when it didn't come back: the exit handler rescans again.
+        [[ -e $sys/bus/pci/devices/$SD_NAME ]] || { echo "err the SD reader did not come back (it returns at the next boot)"; return; } ;;
       kbd-usb) read -r f v <<<"$o"; wr "$f/power/control" "$v" || rc=1 ;;
       wifi-ps) read -r f v <<<"$o"; ((dry)) || iw dev "$f" set power_save "$v" 2>/dev/null || rc=1 ;;
       numlock) for p in $o; do wr "${p%=*}/brightness" "${p##*=}" || rc=1; done ;;

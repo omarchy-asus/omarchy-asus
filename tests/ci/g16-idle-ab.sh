@@ -253,6 +253,22 @@ if ((EUID != 0)); then
   [[ $(cat "$P/sys/kernel/nmi_watchdog") == 1 ]] && ok "root helper retries a failed restore on EOF" || bad "nmi left at $(cat "$P/sys/kernel/nmi_watchdog")"
 fi
 
+# A reader that doesn't come back stays applied (EOF rescans again); once it is
+# back, the revert succeeds.
+reset
+reply=$( { printf 'apply sd-off\n'; sleep 0.5; rm "$S/bus/pci/devices/0000:62:00.0"; printf 'revert sd-off\nrevert sd-off\n'; sleep 12; ln -s "$S/devices/pci0000:00/0000:00:02.2/0000:62:00.0" "$S/bus/pci/devices/0000:62:00.0"; printf 'revert sd-off\n'; } | "$SCRIPT" --root-helper "$S" "$P" 0 2>&1)
+[[ $(grep -c '^err the SD reader did not come back' <<<"$reply") == 2 && $(tail -n1 <<<"$reply") == "ok reverted" ]] &&
+  ok "SD reader restore stays pending until it is back" || bad "SD restore replies: $reply"
+[[ $(cat "$S/devices/pci0000:00/0000:00:02.2/rescan") == 1 && $(cat "$S/devices/pci0000:00/0000:00:02.2/power/control") == auto ]] &&
+  ok "SD rescan below its port, port control put back" || bad "SD port: rescan=$(cat "$S/devices/pci0000:00/0000:00:02.2/rescan") control=$(cat "$S/devices/pci0000:00/0000:00:02.2/power/control")"
+if ((EUID != 0)); then
+  reset
+  chmod 444 "$S/class/leds/input12::numlock/brightness"
+  reply=$(printf 'apply numlock\n' | "$SCRIPT" --root-helper "$S" "$P" 0 2>&1)
+  chmod 644 "$S/class/leds/input12::numlock/brightness"
+  grep -q '^err write refused' <<<"$reply" && ok "a refused Num Lock write is an error" || bad "numlock replies: $reply"
+fi
+
 # --------------------------- 6b. voxtype that won't stop is not measured
 reset
 touch "$ST/fail-stop"
