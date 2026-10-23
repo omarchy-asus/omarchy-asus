@@ -12,6 +12,8 @@
 #   0807       asus-armoury GA605KM limits present and correct; PPT writes refused
 #              without a custom fan curve (writes the current value back, no change)
 #   0481       panel_power_savings exists, reads 0, nothing enables CACP
+#   0810       a panel_power_savings write reaches the display firmware at once
+#              (kprobe on dmub_cacp_set_level; level 1 for 3 s, then back to 0)
 #   0773       gpiolib-acpi ignores GPIO 16 wakeups (the quirk, not a command-line option)
 #   0482       amdgpu replays DMUB HPDs skipped during resume (#205): the module has it,
 #              and no USB4 DP tunnel was torn down as "not active" this boot. With --dock
@@ -50,7 +52,7 @@ while (($#)); do
     --no-suspend) SUSPEND=0 ;;
     --dock) DOCK=1 ;;
     --yes | -y) YES=1 ;;
-    -h | --help) sed -n '2,36s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,38s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -321,6 +323,42 @@ check_panel() {
   result "$st" 0481 "panel_power_savings exists and reads $v; nothing in the config enables CACP" "${det[@]}"
 }
 
+# 0810: the level must reach DMUB when it is written, not at the next modeset.
+# A kprobe on dmub_cacp_set_level (0481) records the level sent; level 1 is held
+# for 3 s (a slight contrast change), then 0 is written back. A check that cannot
+# run is a FAIL, not a SKIP: the PR's gate is this check passing.
+check_cacp_apply() {
+  local p out st det=()
+  p=$(panel_power_path)
+  [[ -n $p ]] || { result FAIL 0810 "could not run: no panel_power_savings (see 0481)"; return; }
+  [[ $(cat "$p" 2>/dev/null) == 0 ]] || { result FAIL 0810 "could not run: panel_power_savings is not 0; write 0 to it and run the test again"; return; }
+  printf '%s[sudo]%s panel_power_savings 1 for 3 s, then 0, watching dmub_cacp_set_level\n' "$Y" "$N"
+  out=$(sudo -n bash -s "$p" 2>&1 <<'ROOT'
+p=$1 T=/sys/kernel/tracing
+[[ -d $T/instances ]] || T=/sys/kernel/debug/tracing
+I=$T/instances/g16cacp
+cleanup() { echo 0 >"$p" 2>/dev/null; [[ -d $I ]] && { echo 0 >"$I/events/g16cacp/enable" 2>/dev/null; rmdir "$I" 2>/dev/null; }; echo '-:g16cacp/set' >>"$T/kprobe_events" 2>/dev/null; }
+trap cleanup EXIT
+echo 'p:g16cacp/set dmub_cacp_set_level level=%si:u32' >>"$T/kprobe_events" 2>/dev/null || { echo "kprobe: dmub_cacp_set_level not probeable"; exit 3; }
+mkdir "$I" 2>/dev/null || { echo "kprobe: no trace instance"; exit 3; }
+echo 1 >"$I/events/g16cacp/set/enable"
+echo 1 >"$p"; sleep 3
+echo "after write 1: $(grep -c 'level=1' "$I/trace")"
+echo 0 >"$p"; sleep 1
+echo "after write 0: $(grep -o 'level=[0-9]*' "$I/trace" | sort | uniq -c | tr -s ' ' | paste -sd, -)"
+ROOT
+)
+  case $? in
+    0) ;;
+    3) result FAIL 0810 "could not run: ${out:-kprobe unavailable}" "the 0810 gate needs this check to PASS"; return ;;
+    *) result FAIL 0810 "could not run (no sudo, or the probe failed): ${out:-?}" "the 0810 gate needs this check to PASS"; return ;;
+  esac
+  det+=("$out" "panel_power_savings now: $(cat "$p" 2>&1)")
+  if [[ $out =~ after\ write\ 1:\ ([0-9]+) ]] && ((BASH_REMATCH[1] > 0)); then st=PASS
+  else st=FAIL; det+=("level 1 never reached dmub_cacp_set_level: the write waits for the next modeset (the bug 0810 fixes)"); fi
+  result "$st" 0810 "panel_power_savings write $([[ $st == PASS ]] && echo 'reached the firmware at once' || echo 'did not reach the firmware')" "${det[@]}"
+}
+
 # 0773: the DMI quirk logs this at boot. The G16 carried the same as a kernel
 # command-line option before (#151); with that still set the check proves nothing.
 check_gpio16() {
@@ -529,7 +567,7 @@ check_hibernate() {
 run_checks() {
   say "G16 test: $EXPECT_KREL (PR #$PR), running $KREL"
   [[ -f $BASE ]] || note "no baseline from deploy: comparisons are skipped"
-  sudo_up_front "dmesg fallback, amd_pmc counters, reading the touchpad device, the asus-armoury write check, the RTC alarm"
+  sudo_up_front "dmesg fallback, amd_pmc counters, reading the touchpad device, the asus-armoury write check, the CACP kprobe, the RTC alarm"
   echo
   local booted=1
   check_kernel || booted=0
@@ -539,6 +577,7 @@ run_checks() {
     check_touchpad
     check_armoury
     check_panel
+    check_cacp_apply
     check_gpio16
     check_dock
     check_hfi
