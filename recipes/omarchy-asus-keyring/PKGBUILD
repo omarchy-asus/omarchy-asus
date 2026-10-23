@@ -4,7 +4,7 @@
 
 pkgname=omarchy-asus-keyring
 pkgver=20261018
-pkgrel=1
+pkgrel=101
 pkgdesc="omarchy-asus keyring (EXPERIMENTAL repo, ASUS ROG Zephyrus G16 GA605 only)"
 arch=(any)
 url="https://github.com/omarchy-asus/omarchy-asus"

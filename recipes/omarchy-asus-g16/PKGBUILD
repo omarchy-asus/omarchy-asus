@@ -10,7 +10,7 @@
 pkgbase=omarchy-asus-g16
 pkgname=omarchy-asus-g16
 pkgver=1.0.0
-pkgrel=1
+pkgrel=101
 pkgdesc='System fixes for the ASUS ROG Zephyrus G16 GA605KM on Omarchy (EXPERIMENTAL)'
 arch=('x86_64')
 url='https://github.com/omarchy-asus/omarchy-asus'

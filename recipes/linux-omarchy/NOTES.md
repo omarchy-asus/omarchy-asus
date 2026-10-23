@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.5**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.101**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,9 +14,10 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.5` (kernel release string becomes `7.2.8-9.5-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.101` (kernel release string becomes `7.2.8-9.101-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
-   9.4 added 0773; 9.5 added 0482.
+   9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
+   range (.101 and up, so no file shares a name with Quattro's; #201).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the

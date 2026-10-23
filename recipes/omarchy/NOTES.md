@@ -1,4 +1,4 @@
-# omarchy + omarchy-settings 4.5.0rc1-1.2 (EXPERIMENTAL, release candidate)
+# omarchy + omarchy-settings 4.5.0rc1-1.101 (EXPERIMENTAL, release candidate)
 
 **Base:** Omarchy's `omarchy` and `omarchy-settings` 4.5.0rc1-1 recipes (omacom/omarchy-pkgs
 `bed2ea5` "Release omarchy 4.5.0rc1" on its `rc` branch, source omacom/omarchy `v4.5.0-rc1` =
