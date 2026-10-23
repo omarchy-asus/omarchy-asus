@@ -496,7 +496,7 @@ pmf_watts() { # hwmon dir -> "APU x W, dGPU y W, socket z W"
 }
 
 check_pmf_hwmon() {
-  local h d rs0 rs1 st=PASS det=() i v w smi pm nm sp
+  local h d rs0 rs1 st=PASS det=() i v w smi pm nm sp at0 at1
   pmf_fail() { st=FAIL; det+=("$1"); }
   h=$(pmf_hwmon_dir) || { result FAIL 0809 "no amd_pmf hwmon device (is amd_pmf loaded? amd_pmf.hwmon_support=0 on the command line?)"; return; }
   d=$(dgpu_dir) || { result FAIL 0809 "no NVIDIA GPU on the PCI bus"; return; }
@@ -507,6 +507,9 @@ check_pmf_hwmon() {
     sleep 1
   done
   det+=("hwmon: ${h##*/}" "RTX runtime_status before reading: $rs0 (waited ${i}s)")
+  # runtime_active_time only grows while the RTX is awake, so a wake that is
+  # already over by the second status read still shows here.
+  at0=$(cat "$d/power/runtime_active_time" 2>/dev/null)
   for i in 1 2 3; do
     v=$(cat "$h/power${i}_input" 2>/dev/null)
     [[ $v =~ ^[0-9]+$ ]] || pmf_fail "power${i}_input ($(cat "$h/power${i}_label" 2>/dev/null)) did not read as a number: '${v}'"
@@ -515,9 +518,12 @@ check_pmf_hwmon() {
   v=$(cat "$h/power2_input" 2>/dev/null)
   sleep 2
   rs1=$(cat "$d/power/runtime_status" 2>/dev/null)
-  det+=("asleep read: $w" "RTX runtime_status 2 s after reading: $rs1")
+  at1=$(cat "$d/power/runtime_active_time" 2>/dev/null)
+  det+=("asleep read: $w" "RTX runtime_status 2 s after reading: $rs1, runtime_active_time ${at0:-?} -> ${at1:-?} ms")
   if [[ $rs0 == suspended ]]; then
     [[ $rs1 == suspended ]] || pmf_fail "reading amd_pmf's hwmon woke the RTX"
+    [[ $at0 =~ ^[0-9]+$ && $at1 =~ ^[0-9]+$ ]] || pmf_fail "runtime_active_time unreadable, so a short wake can't be ruled out"
+    [[ $at0 =~ ^[0-9]+$ && $at1 =~ ^[0-9]+$ ]] && ((at1 > at0)) && pmf_fail "the RTX was awake for $((at1 - at0)) ms during the reads"
     [[ $v =~ ^[0-9]+$ ]] && ((v > 500000)) && pmf_fail "dGPU reads over 0.5 W while the RTX is in D3cold"
   else
     pmf_fail "the RTX never runtime-suspended in 60 s, so the asleep reading is untested"
