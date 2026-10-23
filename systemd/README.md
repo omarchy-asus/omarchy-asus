@@ -103,7 +103,7 @@ What differs for RC:
   the G16 kit's test and `bin/g16-check` stay per channel). When they aren't, the RC run opens
   or refreshes the PR "Tooling from main <sha>" (`auto-update-rc/tooling-from-main`, made with
   `ci/tooling-sync apply origin/main`, through the personal-information scan), and a later run
-  merges it once every required check passes; failing checks are a `(tooling)` attention. On
+  merges it once all its checks pass; failing checks are a `(tooling)` attention. On
   RC PRs, the lint fails only tooling the PR itself changes away from `main`, and warns while
   the branch lags behind it.
 - **The RC chroot is the service's to make.** Before the first build (or kernel withdrawal) that
