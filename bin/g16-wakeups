@@ -14,7 +14,7 @@
 # for the window, into a tracefs instance of its own, which it removes at the end.
 # Nothing is installed: no perf, no bpftrace. Events: power:cpu_idle, the IRQ-vector
 # entries (local timer, call-function, reschedule, irq_work), irq_handler_entry,
-# ipi_send_cpu/_cpumask, sched_waking, hrtimer_start/_expire_entry,
+# ipi_send_cpu/_cpumask, sched_waking/_switch, hrtimer_start/_expire_entry,
 # timer_start/_expire_entry, tick_stop, tasklet_entry and the workqueue events. The ring
 # buffer is read only after tracing stops, so reading it adds no wakeups to the
 # window.
@@ -54,7 +54,7 @@ EVENTS=(
   irq_vectors/reschedule_entry irq_vectors/irq_work_entry
   irq/irq_handler_entry
   ipi/ipi_send_cpu ipi/ipi_send_cpumask
-  sched/sched_waking
+  sched/sched_waking sched/sched_switch
   timer/hrtimer_start timer/hrtimer_expire_entry timer/timer_start timer/timer_expire_entry timer/tick_stop
   irq/tasklet_entry
   workqueue/workqueue_queue_work workqueue/workqueue_execute_start
@@ -225,7 +225,7 @@ counted = C.defaultdict(bool)   # cpu -> this idle period's exit is counted (the
 istate = {}                     # cpu -> the idle state it entered
 pending = {}            # cpu -> True while an idle exit waits for its cause
 ptimer = {}             # cpu -> hrtimers expired by the timer interrupt that woke it
-last_ipi = {}           # dst cpu -> (callsite, sender, wakee)
+last_ipi = {}           # (dst cpu, "IPI" or "resched IPI") -> (callsite, sender, wakee)
 last_waking = {}        # src cpu -> wakee comm
 hrt_owner = {}          # hrtimer pointer -> arming task
 wheel_owner = {}        # timer-wheel timer pointer -> arming task
@@ -269,7 +269,7 @@ def resolve_timer(cpu):
         resolve(cpu, "timer: nothing expired (early or re-programmed event)")
 
 def ipi_cause(cpu, kind):
-    site, sender, wakee = last_ipi.get(cpu, ("?", "?", ""))
+    site, sender, wakee = last_ipi.pop((cpu, kind), ("?", "?", ""))
     s = f"{kind} {site} from {sender}"
     if wakee:
         s += f" waking {wakee}"
@@ -314,6 +314,12 @@ for line in rd("trace").splitlines():
             istate[c] = st_
             counted[c] = False
         continue
+    if ev == "sched_switch":
+        # Idle hands the CPU to a task before any interrupt: the exit had none
+        # (a polling wakeup, or need_resched set without an IPI).
+        if pending.get(cpu) and "prev_pid=0 " in rest and cpu not in ptimer:
+            resolve(cpu, f"no interrupt (left idle state {istate.get(cpu, '?')} on its own: polling or need_resched)")
+        continue
     if ev == "sched_waking":
         w = WAKING.match(rest)
         if w:
@@ -328,6 +334,8 @@ for line in rd("trace").splitlines():
             mask = int(kv.get("cpumask", "0").replace(",", ""), 16)
             dsts = [i for i in range(mask.bit_length()) if mask >> i & 1]
         wakee = last_waking.get(cpu, "") if site.startswith("ttwu_queue_wakelist") else ""
+        # A reschedule IPI carries no callback; call-function IPIs do.
+        kind = "resched IPI" if kv.get("callback", "0x0") in ("0x0", "0", "(nil)") else "IPI"
         for d in dsts:
             ipi_total += 1
             ipi_site[site] += 1
@@ -337,7 +345,7 @@ for line in rd("trace").splitlines():
                 ipi_cross += 1
             if idle[d]:
                 ipi_to_idle += 1
-            last_ipi[d] = (site, who, wakee)
+            last_ipi[(d, kind)] = (site, who, wakee)
         continue
     if ev == "hrtimer_start":
         kv = dict(KV.findall(rest))

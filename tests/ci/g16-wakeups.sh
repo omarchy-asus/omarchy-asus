@@ -55,7 +55,7 @@ EOF
 TRB=$S/kernel/tracing
 mkdir -p "$TRB/instances" "$T/tmpl/per_cpu/cpu0"
 for e in power/cpu_idle irq_vectors/local_timer_entry irq_vectors/call_function_single_entry irq_vectors/reschedule_entry \
-         irq/irq_handler_entry irq/tasklet_entry ipi/ipi_send_cpu ipi/ipi_send_cpumask sched/sched_waking timer/hrtimer_start \
+         irq/irq_handler_entry irq/tasklet_entry ipi/ipi_send_cpu ipi/ipi_send_cpumask sched/sched_waking sched/sched_switch timer/hrtimer_start \
          timer/hrtimer_expire_entry timer/timer_start timer/timer_expire_entry timer/tick_stop \
          workqueue/workqueue_queue_work workqueue/workqueue_execute_start; do
   mkdir -p "$T/tmpl/events/$e"; echo 0 >"$T/tmpl/events/$e/enable"
@@ -75,8 +75,8 @@ chmod +x "$B/mkdir"
 "$REAL_MKDIR" -p "$TRB/instances/g16-wakeups-1"
 cp -r "$T/tmpl/." "$TRB/instances/g16-wakeups-1/"
 echo 1 >"$TRB/instances/g16-wakeups-1/tracing_on"; echo "other run" >"$TRB/instances/g16-wakeups-1/trace"
-# Two seconds of events: six idle exits, one of each cause (the last one's IRQ
-# comes before cpuidle's exit event, as with a halting idle state).
+# Two seconds of events: eight idle exits (one IRQ comes before cpuidle's exit
+# event, as with a halting idle state; one exit runs a task before any IRQ).
 cat >"$T/fixture.trace" <<'EOF'
 # tracer: nop
 #           TASK-PID     CPU#  |||||  TIMESTAMP  FUNCTION
@@ -117,6 +117,15 @@ cat >"$T/fixture.trace" <<'EOF'
           chrome-4242    [001] d.h1. 100.011010: hrtimer_start: hrtimer=00000000efef0000 function=hrtimer_wakeup expires=3000000 softexpires=3000000 mode=ABS was_armed=0
         Hyprland-900     [001] d.h1. 100.012000: hrtimer_expire_entry: hrtimer=00000000cdcd0000 function=timerfd_tmrproc now=2000001
           <idle>-0       [002] d.h1. 100.012500: hrtimer_expire_entry: hrtimer=00000000efef0000 function=hrtimer_wakeup now=3000001
+          <idle>-0       [002] d..1. 100.013000: cpu_idle: state=2 cpu_id=2
+          <idle>-0       [002] d..1. 100.013100: cpu_idle: state=4294967295 cpu_id=2
+          <idle>-0       [002] d..2. 100.013110: sched_switch: prev_comm=swapper/2 prev_pid=0 prev_prio=120 prev_state=R ==> next_comm=herdr next_pid=777 next_prio=120
+           herdr-777     [002] d.h1. 100.013500: irq_handler_entry: irq=99 name=unrelated_dev
+        Hyprland-900     [001] d..2. 100.014000: ipi_send_cpu: cpu=3 callsite=wakeup_preempt+0x53/0xa0 callback=0x0
+          chrome-4242    [000] d..2. 100.014010: ipi_send_cpu: cpu=3 callsite=generic_exec_single+0x31/0x120 callback=generic_smp_call_function_single_interrupt+0x0/0x20
+          <idle>-0       [003] d..1. 100.014100: cpu_idle: state=2 cpu_id=3
+          <idle>-0       [003] d..1. 100.014200: cpu_idle: state=4294967295 cpu_id=3
+          <idle>-0       [003] dNh1. 100.014210: reschedule_entry: vector=253
        HeapUser-31       [000] ...1. 100.009000: ipi_send_cpumask: cpumask=00000000,0000000c callsite=flush_tlb_mm_range+0x1f6/0x740 callback=generic_smp_call_function_single_interrupt+0x0/0x20
 EOF
 # bin/issue stub: records "N agent" per post and keeps the body.
@@ -157,19 +166,21 @@ grep -q 'events=.*power/cpu_idle.*timer/timer_start.*irq/tasklet_entry' "$K/meta
 R=$T/body.239
 [[ -s $R ]] || { bad "nothing posted to #239"; R=/dev/null; }
 chk() { grep -qF -- "$2" "$R" && ok "$1" || bad "$1: no '$2' in the report"; }
-chk "exit total" "Idle exits by cause: 3/s"
-chk "IPI with call site, sender, wakee" "| IPI ttwu_queue_wakelist from chrome waking herdr | 0.5 | 17 % | 0.0 | 0.5 |"
-chk "tick exit on Zen 5" "| timer: tick | 0.5 | 17 % | 0.5 | 0.0 |"
-chk "task timer with its owner, ahead of the tick that rode along" "| timer: hrtimer_wakeup armed by Hyprland | 0.5 | 17 % | 0.0 | 0.5 |"
+chk "exit total" "Idle exits by cause: 4/s"
+chk "IPI with call site, sender, wakee" "| IPI ttwu_queue_wakelist from chrome waking herdr | 0.5 | 12 % | 0.0 | 0.5 |"
+chk "tick exit on Zen 5" "| timer: tick | 0.5 | 12 % | 0.5 | 0.0 |"
+chk "task timer with its owner, ahead of the tick that rode along" "| timer: hrtimer_wakeup armed by Hyprland | 0.5 | 12 % | 0.0 | 0.5 |"
 chk "device IRQ" "| IRQ mt7925e | 0.5 |"
-chk "polling exit, with the state it left" "| no interrupt (left idle state 2 on its own: polling or need_resched) | 0.5 |"
-chk "an IRQ ahead of cpuidle's exit event is the cause" "| IRQ xhci_hcd | 0.5 | 17 % | 0.0 | 0.5 |"
+chk "polling exits, with the state they left, even when an IRQ comes once a task runs" "| no interrupt (left idle state 2 on its own: polling or need_resched) | 1.0 | 25 % |"
+grep -qF "IRQ unrelated_dev" "$R" && bad "an IRQ during a task was blamed for the idle exit" || ok "an IRQ during a task is not an idle exit's cause"
+chk "a reschedule IPI is matched to its own sender, not a call-function IPI in flight" "| resched IPI wakeup_preempt from Hyprland | 0.5 |"
+chk "an IRQ ahead of cpuidle's exit event is the cause" "| IRQ xhci_hcd | 0.5 | 12 % | 0.0 | 0.5 |"
 chk "work queued from an interrupt is not the interrupted task's" "| events, amdgpu_dm_irq_work, irq context | 0.5 |"
 chk "a timer armed from an interrupt is not the interrupted task's" "| hrtimer_wakeup, irq context | 0.5 | 0 |"
 chk "slack per function: timerfd at 0 next to the same task's 50 us" "| timerfd_tmrproc, Hyprland | 0.5 | 0 |"
 chk "idle ticks: a tick first or second in the waking interrupt both count" "### Idle ticks: 1/s"
 chk "tick_stop refusal" "\`tick_stop\` refusals: RCU 0.5/s"
-chk "IPI totals, cross-L3 and to-idle shares" "### IPIs: 2/s, 100 % across L3 domains, 33 % to an idle CPU"
+chk "IPI totals, cross-L3 and to-idle shares" "### IPIs: 2/s, 100 % across L3 domains, 20 % to an idle CPU"
 chk "waker to wakee pair" "| chrome → herdr | 0.5 |"
 chk "TLB shootdown call site" "| flush_tlb_mm_range | 1.0 |"
 chk "slack of a task timer" "| hrtimer_wakeup, Hyprland | 0.5 | 50 |"
@@ -190,7 +201,7 @@ out=$(run --analyze "$K" --label nocb --issue 229 2>&1) && [[ $(cat "$T/posts") 
 [[ -s $H/state/nocb/summary.json ]] && ok "--analyze --label keeps a summary" || bad "no nocb summary"
 rm -f "$T/posts"
 out=$(run --compare stock nocb --issue 229 --no-post 2>&1)
-grep -qF "| idle exits | 3 | 3 | +0 |" <<<"$out" && grep -qF "| LOC | 800 | 800 | +0 |" <<<"$out" &&
+grep -qF "| idle exits | 4 | 4 | +0 |" <<<"$out" && grep -qF "| LOC | 800 | 800 | +0 |" <<<"$out" &&
   ok "--compare reports B against A" || bad "--compare: $out"
 [[ ! -e $T/posts ]] && ok "--no-post posts nothing" || bad "--no-post posted: $(cat "$T/posts")"
 
