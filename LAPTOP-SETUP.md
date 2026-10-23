@@ -322,7 +322,11 @@ It also keeps `[omarchy-asus]` on the channel that matches `[omarchy]` (see
 [Release channels](#release-channels)): when `[omarchy]` is on Omarchy stable it points the
 `Server` in `custom-repos.conf` at `.../releases/download/$arch`, on Omarchy rc at
 `.../rc-$arch`. A `Server` that isn't our release is left alone, and so is ours while
-`[omarchy]` is on any other channel (edge). Both edits go through one `sudo` call.
+`[omarchy]` is on any other channel (edge). Both edits go through one `sudo` call. Omarchy
+reports a failed hook and goes on to `pacman -Syyuu`, which without the repo would replace our
+builds with stock ones, so if an edit fails (a wrong sudo password, say) the hook stops the
+`omarchy-refresh-pacman` it runs under before that upgrade. Fix the error and run the same command
+again.
 
 Don't enable a second hook that inserts the same `Include` line, such as an older copy of the
 sample. Hooks run in name order, and the first one to add the line decides where it goes.
@@ -340,7 +344,29 @@ RELEASES=https://github.com/omarchy-asus/omarchy-asus/releases/download/
 
 [[ -r $SNIPPET ]] || exit 0
 
-server() { sed -n "/^\[$1\]\$/,/^\[/s/^Server *= *//p" "$2" | head -n1; }
+# pacman allows blanks around section names, keys and "=": the first Server of section $1 in $2.
+server() {
+  sed -n "/^[[:space:]]*\[$1\][[:space:]]*\$/,/^[[:space:]]*\[/s/^[[:space:]]*Server[[:space:]]*=[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*\$/\1/p" "$2" | head -n1
+}
+
+# Omarchy's hook runner reports a failed hook and goes on to pacman -Syyuu, which without
+# our repo (or on the wrong channel) replaces our builds with stock ones. So a failure
+# stops the omarchy-refresh-pacman this hook runs under, before that upgrade.
+stop() {
+  echo "omarchy-asus: $1" >&2
+  local pid=$PPID args
+  while [[ $pid =~ ^[0-9]+$ ]] && ((pid > 1)); do
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || break
+    if [[ $args == *omarchy-refresh-pacman* ]]; then
+      echo "omarchy-asus: stopping the refresh before its pacman -Syyuu; fix this and run the same command again" >&2
+      kill -TERM "$pid"
+      break
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  done
+  exit 1
+}
+
 case $(server omarchy "$CONF") in
   */stable/*) want=${RELEASES}\$arch ;;
   */rc/*) want=${RELEASES}rc-\$arch ;;
@@ -362,11 +388,14 @@ grep -qxF "$MARKER" "$CONF" || new_include=$MARKER
 # One sudo for both: Omarchy 4.5 runs hooks with sudo -N, which asks every time.
 sudo bash -c '
   if [[ -n $3 ]]; then
-    sed -i "/^\[omarchy-asus\]\$/,/^\[/s|^Server *= *https://github.com/omarchy-asus/omarchy-asus/releases/download/.*|Server = $3|" "$2" || exit 1
+    sed -i "/^[[:space:]]*\[omarchy-asus\][[:space:]]*\$/,/^[[:space:]]*\[/s|^[[:space:]]*Server[[:space:]]*=[[:space:]]*https://github.com/omarchy-asus/omarchy-asus/releases/download/.*|Server = $3|" "$2" || exit 1
   fi
   if [[ -n $4 ]]; then
-    sed -i -E "0,/^\[(omarchy|core)\]\$/s||$4\n\n&|" "$1" || exit 1
-  fi' _ "$CONF" "$SNIPPET" "$new_server" "$new_include"
+    sed -i -E "0,/^[[:space:]]*\[(omarchy|core)\][[:space:]]*\$/s||$4\n\n&|" "$1" || exit 1
+  fi' _ "$CONF" "$SNIPPET" "$new_server" "$new_include" || stop "could not update $SNIPPET and $CONF"
+[[ -z $new_server || $(server omarchy-asus "$SNIPPET") == "$new_server" ]] ||
+  stop "[omarchy-asus] in $SNIPPET is not on $new_server"
+grep -qxF "$MARKER" "$CONF" || stop "the line '$MARKER' is missing from $CONF"
 ```
 
 Apply it now with `omarchy refresh pacman`, or by running the hook directly. After that it runs on every

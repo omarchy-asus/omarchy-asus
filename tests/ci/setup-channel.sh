@@ -14,6 +14,10 @@
 #   h. LAPTOP-SETUP.md section 3 shows the same hook
 #   i. --channel is retired: exits 2, points at omarchy-channel-set, changes nothing, and says
 #      an older hook needs a rerun of the setup first
+#   j. indented sections and Server lines, tabs around "=": still read and moved
+#   k. through a refresh like omarchy-refresh-pacman's (its hook runner goes on after a failed
+#      hook): the upgrade runs after a good hook; when sudo fails, the hook stops the refresh
+#      before pacman -Syyuu, with or without the TERM trap Omarchy 4.5's refresh sets
 # Usage: tests/ci/setup-channel.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -23,6 +27,7 @@ mkdir -p "$S/bin" "$S/home"
 cat >"$S/bin/sudo" <<'STUB'
 #!/bin/bash
 echo "sudo $1" >>"$SUDO_LOG"
+[[ -z ${SUDO_FAIL:-} ]] || { echo "sudo: 3 incorrect password attempts" >&2; exit 1; }
 exec "$@"
 STUB
 chmod +x "$S/bin/sudo"
@@ -117,6 +122,46 @@ expect "$(sha256sum "$S/pacman.conf" "$S/custom-repos.conf")" "$before" "no file
 printf '#!/bin/bash\n# an older hook\n' >"$H"
 "$W/bin/omarchy-asus-setup" --channel rc >"$S/out" 2>&1
 grep -qF "older copy" "$S/out"; expect $? 0 "an older hook: says to rerun the setup first"
+
+echo "== j. blanks around sections, Server and ="
+template rc
+printf '[mine]\nServer = https://example.invalid/$arch\n\n  [omarchy-asus]  \n  SigLevel = Required\n\tServer\t=\t%s  \n' "$REL/\$arch" >"$S/custom-repos.conf"
+sed -i 's/^\[omarchy\]$/ [omarchy]/; s|^Server = https://pkgs|  Server\t= https://pkgs|' "$S/pacman.conf"
+hook; expect $? 0 "exits 0"
+expect "$(grep -c "^Server = $REL/rc-\\\$arch\$" "$S/custom-repos.conf")" 1 "[omarchy-asus] on the rc-x86_64 release"
+expect "$(grep -c "\\\$arch  \$\|$REL/\\\$arch" "$S/custom-repos.conf")" 0 "the old Server line is gone"
+grep -qxF "Include = $S/custom-repos.conf" "$S/pacman.conf"; expect $? 0 "the Include line is in"
+hook; expect "$(sudos)" 0 "a second run reads it back: no sudo"
+
+echo "== k. through a refresh"
+# Omarchy's hook runner: a failed hook is reported, and the refresh goes on.
+cat >"$S/bin/omarchy-hook" <<'STUB'
+#!/bin/bash
+bash "$HOOK_UNDER_TEST" || echo "Hook failed: $HOOK_UNDER_TEST"
+STUB
+cat >"$S/bin/omarchy-refresh-pacman" <<'STUB'
+#!/bin/bash
+[[ -n ${REFRESH_TRAP:-} ]] && trap 'exit 143' TERM
+cp "$TEMPLATE" "$OMARCHY_ASUS_PACMAN_CONF"
+omarchy-hook pre-refresh-pacman
+echo "pacman -Syyuu" >>"$PACMAN_LOG"
+STUB
+chmod +x "$S/bin/omarchy-hook" "$S/bin/omarchy-refresh-pacman"
+export HOOK_UNDER_TEST=$S/hook TEMPLATE=$S/template PACMAN_LOG=$S/pacman.log
+refresh() { rm -f "$PACMAN_LOG" "$SUDO_LOG"; { omarchy-refresh-pacman >"$S/out" 2>&1; } 2>/dev/null; }
+template rc; cp "$S/pacman.conf" "$S/template"
+snippet "$REL/\$arch"
+refresh; expect $? 0 "a good hook: the refresh exits 0"
+expect "$(cat "$PACMAN_LOG" 2>/dev/null)" "pacman -Syyuu" "and upgrades"
+expect "$(server omarchy-asus "$S/custom-repos.conf")" "$REL/rc-\$arch" "on the rc-x86_64 release"
+for trap in '' 1; do
+    snippet "$REL/\$arch"
+    SUDO_FAIL=1 REFRESH_TRAP=$trap refresh; r=$?
+    expect "$((r != 0))" 1 "sudo fails${trap:+ (TERM trap)}: the refresh exits non-zero ($r)"
+    if [[ -e $PACMAN_LOG ]]; then u=1; else u=0; fi
+    expect "$u" 0 "no pacman -Syyuu"
+    grep -qF 'stopping the refresh' "$S/out"; expect $? 0 "says it stopped the refresh"
+done
 
 ((fail)) && { echo "FAILED"; cat "$S/out"; exit 1; }
 echo "all passed"
