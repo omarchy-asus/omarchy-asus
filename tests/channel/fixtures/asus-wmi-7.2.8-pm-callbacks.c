@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Excerpt of drivers/platform/x86/asus-wmi.c, Linux v7.2.8 with linux-omarchy's
 // 0800 and 0803 applied: lines 5313-5442, the hibernate/resume callbacks.
-// tests/ci/linux-omarchy-local-patches.sh applies 0808 to it (and, online,
+// tests/channel/linux-omarchy-local-patches.sh applies 0808 to it (and, online,
 // checks it still matches the real file).
 
 /* Platform driver - hibernate/resume callbacks *******************************/
