@@ -318,6 +318,25 @@ json.dump(out, sys.stdout)
 PY
 }
 
+# Backlights. Reading actual_brightness asks the driver, and a backlight whose
+# device is runtime-suspended (the RTX's nvidia_0 in hybrid mode, which drives
+# nothing there) resumes it: each read held the RTX awake for about 20 s and
+# showed up in the very numbers being measured (#216). So a backlight whose
+# device is asleep is named, not read.
+bl_asleep() { # backlight dir
+  local s=''
+  read -r s 2>/dev/null <"$1/device/power/runtime_status"
+  [[ $s == suspended ]]
+}
+panel_brightness() { # the first awake backlight's actual_brightness
+  local b v
+  for b in "$SYS"/class/backlight/*; do
+    [[ -d $b ]] && ! bl_asleep "$b" || continue
+    read -r v 2>/dev/null <"$b/actual_brightness" && { printf '%s\n' "$v"; return; }
+  done
+  echo
+}
+
 # One phase: settle, snapshot, sample, snapshot. Writes $WORK/<n>-<name>/.
 PHASES=()
 measure() { # name note
@@ -344,7 +363,7 @@ measure() { # name note
   r=$(ask_root rapl) || r='rapl - - - -'
   printf '%s\n' "$r" >"$dir/rapl1"
   snapshot "$dir/s1.json"
-  cat "$SYS"/class/backlight/*/actual_brightness 2>/dev/null | head -n1 >"$dir/brightness"
+  panel_brightness >"$dir/brightness"
 }
 
 wait_battery() {
@@ -405,7 +424,11 @@ ctx kernel "$(uname -r)"
 ctx packages "omarchy $(pkgv omarchy), owe $(pkgv owe), hyprland $(pkgv hyprland), nvidia-open-dkms $(pkgv nvidia-open-dkms), power-profiles-daemon $(pkgv power-profiles-daemon)"
 pp=''; for d in "$SYS"/class/platform-profile/platform-profile-*; do [[ -d $d ]] || continue; pp+="$(cat "$d/name" 2>/dev/null)=$(cat "$d/profile" 2>/dev/null) "; done
 ctx "power profile" "$(powerprofilesctl get 2>/dev/null); platform ${pp% }; EPP $(cat "$SYS"/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)"
-bl=$(for b in "$SYS"/class/backlight/*; do [[ -r $b/max_brightness ]] && printf '%s %s%% ' "${b##*/}" "$(( $(cat "$b/actual_brightness" 2>/dev/null || echo 0) * 100 / $(cat "$b/max_brightness" 2>/dev/null || echo 1) ))"; done)
+bl=$(for b in "$SYS"/class/backlight/*; do
+  [[ -r $b/max_brightness ]] || continue
+  if bl_asleep "$b"; then printf '%s (device asleep, not read) ' "${b##*/}"; continue; fi
+  printf '%s %s%% ' "${b##*/}" "$(( $(cat "$b/actual_brightness" 2>/dev/null || echo 0) * 100 / $(cat "$b/max_brightness" 2>/dev/null || echo 1) ))"
+done)
 ctx brightness "$bl"
 ctx display "$(hyprctl monitors -j 2>/dev/null | python3 -I -c 'import json,sys
 try: print("; ".join("%s %sx%s@%.0fHz vrr=%s" % (m["name"], m["width"], m["height"], m["refreshRate"], m.get("vrr")) for m in json.load(sys.stdin)))
