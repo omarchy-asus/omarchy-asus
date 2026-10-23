@@ -4,7 +4,7 @@
 #   1. every local patch's b2sum and sha256sum sit at its own index (an entry
 #      one slot off still has the right count, and makepkg then blames the wrong file);
 #   2. 0808 (#185): the patch applies at fuzz 0 to asus-wmi.c's hibernate/resume
-#      callbacks as 0800 and 0803 leave them (tests/ci/fixtures), and
+#      callbacks as 0800 and 0803 leave them (tests/channel/fixtures), and
 #      asus_hotk_restore() then writes the thermal policy and fan curves back.
 #      Online, it also checks the fixture against v7.2.8's real file.
 set -u
@@ -40,7 +40,7 @@ grep -q '^patch 0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernat
 
 # ------------------------------------------------------------- 2. 0808 applies
 P=$R/0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernation.patch
-FX=$W/tests/ci/fixtures/asus-wmi-7.2.8-pm-callbacks.c
+FX=$W/tests/channel/fixtures/asus-wmi-7.2.8-pm-callbacks.c
 F=drivers/platform/x86/asus-wmi.c
 check_0808() { # tree: applies 0808 to $tree/$F and checks the result
   (
