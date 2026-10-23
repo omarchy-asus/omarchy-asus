@@ -75,7 +75,8 @@ chmod +x "$B/mkdir"
 "$REAL_MKDIR" -p "$TRB/instances/g16-wakeups-1"
 cp -r "$T/tmpl/." "$TRB/instances/g16-wakeups-1/"
 echo 1 >"$TRB/instances/g16-wakeups-1/tracing_on"; echo "other run" >"$TRB/instances/g16-wakeups-1/trace"
-# Two seconds of events: five idle exits, one of each cause.
+# Two seconds of events: six idle exits, one of each cause (the last one's IRQ
+# comes before cpuidle's exit event, as with a halting idle state).
 cat >"$T/fixture.trace" <<'EOF'
 # tracer: nop
 #           TASK-PID     CPU#  |||||  TIMESTAMP  FUNCTION
@@ -108,6 +109,14 @@ cat >"$T/fixture.trace" <<'EOF'
           <idle>-0       [000] d..1. 100.007100: cpu_idle: state=2 cpu_id=0
            herdr-777     [002] d..1. 100.007500: timer_start: timer=00000000eeee0000 function=process_timeout expires=2 [timeout=1] bucket_expiry=2 cpu=2 idx=0 flags=
           <idle>-0       [002] ..s1. 100.008000: timer_expire_entry: timer=00000000eeee0000 function=process_timeout now=1 baseclk=1
+        Hyprland-900     [001] d..1. 100.009500: hrtimer_start: hrtimer=00000000cdcd0000 function=timerfd_tmrproc expires=2000000 softexpires=2000000 mode=ABS was_armed=0
+          <idle>-0       [003] d..1. 100.010000: cpu_idle: state=1 cpu_id=3
+          <idle>-0       [003] d.h1. 100.010100: irq_handler_entry: irq=88 name=xhci_hcd
+          <idle>-0       [003] d..1. 100.010200: cpu_idle: state=4294967295 cpu_id=3
+          chrome-4242    [001] d.h1. 100.011000: workqueue_queue_work: work struct=00000000abab0000 function=amdgpu_dm_irq_work workqueue=events req_cpu=8192 cpu=1
+          chrome-4242    [001] d.h1. 100.011010: hrtimer_start: hrtimer=00000000efef0000 function=hrtimer_wakeup expires=3000000 softexpires=3000000 mode=ABS was_armed=0
+        Hyprland-900     [001] d.h1. 100.012000: hrtimer_expire_entry: hrtimer=00000000cdcd0000 function=timerfd_tmrproc now=2000001
+          <idle>-0       [002] d.h1. 100.012500: hrtimer_expire_entry: hrtimer=00000000efef0000 function=hrtimer_wakeup now=3000001
        HeapUser-31       [000] ...1. 100.009000: ipi_send_cpumask: cpumask=00000000,0000000c callsite=flush_tlb_mm_range+0x1f6/0x740 callback=generic_smp_call_function_single_interrupt+0x0/0x20
 EOF
 # bin/issue stub: records "N agent" per post and keeps the body.
@@ -148,12 +157,16 @@ grep -q 'events=.*power/cpu_idle.*timer/timer_start.*irq/tasklet_entry' "$K/meta
 R=$T/body.239
 [[ -s $R ]] || { bad "nothing posted to #239"; R=/dev/null; }
 chk() { grep -qF -- "$2" "$R" && ok "$1" || bad "$1: no '$2' in the report"; }
-chk "exit total" "Idle exits by cause: 2/s"
-chk "IPI with call site, sender, wakee" "| IPI ttwu_queue_wakelist from chrome waking herdr | 0.5 | 20 % | 0.0 | 0.5 |"
-chk "tick exit on Zen 5" "| timer: tick | 0.5 | 20 % | 0.5 | 0.0 |"
-chk "task timer with its owner, ahead of the tick that rode along" "| timer: hrtimer_wakeup armed by Hyprland | 0.5 | 20 % | 0.0 | 0.5 |"
+chk "exit total" "Idle exits by cause: 3/s"
+chk "IPI with call site, sender, wakee" "| IPI ttwu_queue_wakelist from chrome waking herdr | 0.5 | 17 % | 0.0 | 0.5 |"
+chk "tick exit on Zen 5" "| timer: tick | 0.5 | 17 % | 0.5 | 0.0 |"
+chk "task timer with its owner, ahead of the tick that rode along" "| timer: hrtimer_wakeup armed by Hyprland | 0.5 | 17 % | 0.0 | 0.5 |"
 chk "device IRQ" "| IRQ mt7925e | 0.5 |"
-chk "polling exit" "| none (polling exit, no interrupt) | 0.5 |"
+chk "polling exit, with the state it left" "| no interrupt (left idle state 2 on its own: polling or need_resched) | 0.5 |"
+chk "an IRQ ahead of cpuidle's exit event is the cause" "| IRQ xhci_hcd | 0.5 | 17 % | 0.0 | 0.5 |"
+chk "work queued from an interrupt is not the interrupted task's" "| events, amdgpu_dm_irq_work, irq context | 0.5 |"
+chk "a timer armed from an interrupt is not the interrupted task's" "| hrtimer_wakeup, irq context | 0.5 | 0 |"
+chk "slack per function: timerfd at 0 next to the same task's 50 us" "| timerfd_tmrproc, Hyprland | 0.5 | 0 |"
 chk "idle ticks: a tick first or second in the waking interrupt both count" "### Idle ticks: 1/s"
 chk "tick_stop refusal" "\`tick_stop\` refusals: RCU 0.5/s"
 chk "IPI totals, cross-L3 and to-idle shares" "### IPIs: 2/s, 100 % across L3 domains, 33 % to an idle CPU"
@@ -177,7 +190,7 @@ out=$(run --analyze "$K" --label nocb --issue 229 2>&1) && [[ $(cat "$T/posts") 
 [[ -s $H/state/nocb/summary.json ]] && ok "--analyze --label keeps a summary" || bad "no nocb summary"
 rm -f "$T/posts"
 out=$(run --compare stock nocb --issue 229 --no-post 2>&1)
-grep -qF "| idle exits | 2 | 2 | +0 |" <<<"$out" && grep -qF "| LOC | 800 | 800 | +0 |" <<<"$out" &&
+grep -qF "| idle exits | 3 | 3 | +0 |" <<<"$out" && grep -qF "| LOC | 800 | 800 | +0 |" <<<"$out" &&
   ok "--compare reports B against A" || bad "--compare: $out"
 [[ ! -e $T/posts ]] && ok "--no-post posts nothing" || bad "--no-post posted: $(cat "$T/posts")"
 

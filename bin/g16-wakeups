@@ -214,13 +214,15 @@ types = sorted({ctype(c) for c in topo} or {"all"})
 def fn(s):
     return re.sub(r"\+0x[0-9a-f]+/0x[0-9a-f]+$", "", s or "?")
 
-LINE = re.compile(r"^\s*(.*?)-(\d+)\s+(?:\(\s*[-\d]+\)\s+)?\[(\d+)\]\s+\S+\s+([\d.]+):\s+(\w+):\s?(.*)$")
+LINE = re.compile(r"^\s*(.*?)-(\d+)\s+(?:\(\s*[-\d]+\)\s+)?\[(\d+)\]\s+(\S+)\s+([\d.]+):\s+(\w+):\s?(.*)$")
 WAKING = re.compile(r"comm=(.*) pid=(\d+) prio=-?\d+ target_cpu=(\d+)")
 KV = re.compile(r"(\w+)=(\S+)")
 TICK_FNS = {"tick_nohz_handler", "tick_sched_timer", "tick_nohz_highres_handler"}
 TASK_TIMER_FNS = {"hrtimer_wakeup", "it_real_fn", "posix_timer_fn", "timerfd_tmrproc", "alarmtimer_fired"}
 
 idle = C.defaultdict(bool)
+counted = C.defaultdict(bool)   # cpu -> this idle period's exit is counted (the IRQ came first)
+istate = {}                     # cpu -> the idle state it entered
 pending = {}            # cpu -> True while an idle exit waits for its cause
 ptimer = {}             # cpu -> hrtimers expired by the timer interrupt that woke it
 last_ipi = {}           # dst cpu -> (callsite, sender, wakee)
@@ -237,7 +239,7 @@ ipi_pair = C.Counter()
 ipi_cross = ipi_total = ipi_to_idle = 0
 hrt_fn = C.Counter()
 hrt_task = C.Counter()              # (fn, arming task)
-slack = C.defaultdict(list)         # arming task -> slack in us
+slack = C.defaultdict(list)         # (function, arming task) -> slack in us
 wheel = C.Counter()                 # (function, arming task)
 tasklets = C.Counter()
 wq_exec = C.Counter()
@@ -264,7 +266,7 @@ def resolve_timer(cpu):
     elif ticks:
         resolve(cpu, "timer: tick")
     else:
-        resolve(cpu, "timer ?")
+        resolve(cpu, "timer: nothing expired (early or re-programmed event)")
 
 def ipi_cause(cpu, kind):
     site, sender, wakee = last_ipi.get(cpu, ("?", "?", ""))
@@ -279,28 +281,38 @@ for line in rd("trace").splitlines():
     m = LINE.match(line)
     if not m:
         continue
-    comm, _pid, cpu, ts, ev, rest = m.groups()
+    comm, _pid, cpu, flags, ts, ev, rest = m.groups()
     cpu = int(cpu)
     nlines += 1
     tsf = float(ts)
     t_first = tsf if t_first is None else t_first
     t_last = tsf
-    who = "irq context" if comm == "<idle>" else comm
+    # Interrupt context acts for no task: hardirq/NMI (h, H, z) or a softirq run
+    # on interrupt exit (s), except in the threads that exist to run them.
+    ctx = flags[2] if len(flags) > 2 else "."
+    if comm == "<idle>" or ctx in "hHz" or (ctx == "s" and not comm.startswith(("ksoftirqd/", "irq/"))):
+        who = "irq context"
+    else:
+        who = comm
     if ev == "cpu_idle":
         kv = dict(KV.findall(rest))
         st_ = int(kv.get("state", "0"))
         c = int(kv.get("cpu_id", cpu))
+        if c in ptimer:
+            resolve_timer(c)
         if st_ == 4294967295:
             if idle[c]:
                 idle[c] = False
-                pending[c] = True
-                exits_cpu[c] += 1
+                if not counted[c]:
+                    pending[c] = True
+                    exits_cpu[c] += 1
+            counted[c] = False
         else:
-            if c in ptimer:
-                resolve_timer(c)
             if pending.get(c):
-                resolve(c, "none (polling exit, no interrupt)")
+                resolve(c, f"no interrupt (left idle state {istate.get(c, '?')} on its own: polling or need_resched)")
             idle[c] = True
+            istate[c] = st_
+            counted[c] = False
         continue
     if ev == "sched_waking":
         w = WAKING.match(rest)
@@ -334,7 +346,7 @@ for line in rd("trace").splitlines():
         try:
             sl = (int(kv["expires"]) - int(kv["softexpires"])) / 1000
             if f in TASK_TIMER_FNS:
-                slack[who].append(sl)
+                slack[(f, who)].append(sl)
         except (KeyError, ValueError):
             pass
         continue
@@ -374,8 +386,18 @@ for line in rd("trace").splitlines():
         wq_queue[(kv.get("workqueue", "?"), fn(kv.get("function")), who)] += 1
         continue
     # the cause of a pending idle exit
+    if ev not in ("local_timer_entry", "call_function_single_entry", "call_function_entry",
+                  "reschedule_entry", "irq_handler_entry", "irq_work_entry"):
+        continue
     if cpu in ptimer:
         resolve_timer(cpu)
+    # With an idle state that halts with interrupts on (ACPI HLT), the waking
+    # interrupt runs before cpuidle logs the exit: the first interrupt of an idle
+    # period is its cause either way.
+    if idle[cpu] and not counted[cpu]:
+        counted[cpu] = True
+        pending[cpu] = True
+        exits_cpu[cpu] += 1
     if not pending.get(cpu):
         continue
     if ev == "local_timer_entry":
@@ -484,7 +506,7 @@ for f, n in hrt_fn.most_common(12):
 if hrt_task:
     o.append("\n| task timer (function, armed by) | /s | median slack µs |\n|---|---|---|")
     for (f, t), n in hrt_task.most_common(20):
-        sl = slack.get(t)
+        sl = slack.get((f, t))
         o.append(f"| {f}, {t} | {ps(n):.1f} | {st.median(sl):.0f} |" if sl else f"| {f}, {t} | {ps(n):.1f} | - |")
 if wheel:
     o.append("\n| timer-wheel function, armed by | /s |\n|---|---|")
