@@ -10,6 +10,7 @@
 # and the cases that keep distcc off (#163):
 #   6a. the key dir's ssh is not build/distcc-ssh (an older wrapper, or none): no mount
 #   6b. a recipe with a NO_DISTCC file: no mount
+#   6c. a chroot without ssh, which the wrapper needs to reach the helper (#221): no mount
 # and the release channel's chroot (#167; OMARCHY_ASUS_CHROOT is a temp dir):
 #   7. --channel rc against a chroot made from build/pacman.conf (Omarchy stable): refused
 #   8. --channel rc against a chroot made from build/pacman-rc.conf: built, staged in stage-rc only
@@ -29,7 +30,8 @@ printf '%s\n' "\$@" >"$S/args"
 STUB
 chmod +x "$S/bin/makechrootpkg"
 C=$S/chroot
-mkdir -p "$C/root/etc"
+mkdir -p "$C/root/etc" "$C/root/usr/bin"
+: >"$C/root/usr/bin/ssh"; chmod +x "$C/root/usr/bin/ssh"
 cp "$W/build/pacman.conf" "$C/root/etc/pacman.conf"
 export PATH=$S/bin:$PATH SUDO=env OMARCHY_ASUS_DATA=$S/data OMARCHY_ASUS_CHROOT=$C
 unset DISTCC_KEY_DIR OMARCHY_ASUS_CHANNEL OMARCHY_ASUS_WORKSPACE
@@ -80,6 +82,11 @@ printf 'precompiled headers\n' >"$S/recipes/demo/NO_DISTCC"
 build; expect "$(args)" "-c -u -r $C" "stock arguments"
 grep -q 'distcc: off for demo (recipes/demo/NO_DISTCC)' "$S/out"; expect $? 0 "says why"
 rm "$S/recipes/demo/NO_DISTCC"
+
+echo "== 6c. a chroot without ssh"
+rm "$C/root/usr/bin/ssh"
+build; expect "$(args)" "-c -u -r $C" "stock arguments"
+grep -q 'distcc: off: .* has no /usr/bin/ssh' "$S/out"; expect $? 0 "says why"
 
 refused() {  # refused <what> [build-pkg args]: build-pkg exits non-zero before makechrootpkg runs
     local what=$1; shift

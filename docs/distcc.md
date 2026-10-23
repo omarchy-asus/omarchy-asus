@@ -88,9 +88,10 @@ restrict,from="<build-host-addresses>",command="/usr/local/bin/distccd-gate --ni
 The key can only compile, as that account. Compiler options can still make
 gcc run other programs, so give the account nothing it would matter to lose.
 
-In the **build chroot** (`/var/lib/omarchy-asus/chroot/root`), install
-`distcc openssh` with `arch-nspawn ... pacman -S`, and create
-`/etc/makepkg.conf.d/distcc.conf`:
+In **each build chroot** (`/var/lib/omarchy-asus/chroot/root`, and the RC
+channel's `/var/lib/omarchy-asus/chroot-rc/root` once `bin/mkchroot --channel rc`
+has made it), install `distcc openssh` with `arch-nspawn <chroot>/root pacman -S`,
+and create `/etc/makepkg.conf.d/distcc.conf`:
 
 ```bash
 BUILDENV=(distcc color !ccache check !sign)
@@ -114,7 +115,10 @@ word, so options there are fragile. Put them in the wrapper.
 `<helper-address>` must be the name `known_hosts` was made for.
 
 `bin/build-pkg` mounts `~/.local/share/omarchy-asus/distcc` read-only at
-`/distcc` when `id_ed25519` is there (see `DISTCC_KEY_DIR` above). If the
+`/distcc` when `id_ed25519` is there (see `DISTCC_KEY_DIR` above). Without
+`openssh` in the chroot the wrapper can't connect and every job would compile
+on the build host, so `bin/build-pkg` leaves the key out and says
+`distcc: off: the <channel> chroot has no /usr/bin/ssh` (#221). If the
 helper is off, busy or refuses, distcc compiles locally. Linking, Rust and
 packaging always run on the build host.
 
