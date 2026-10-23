@@ -61,10 +61,8 @@ BUILD_USER=
 # Repo-db packages with no recipe are unpublished (the recipe was removed). Package names
 # listed here (space separated) are kept and only reported for attention.
 #KEEP_PUBLISHED=
-# Unpublish after this many consecutive runs without access to the upstream recipe.
-#FETCH_FAIL_UNPUBLISH_AFTER=2
 # Upstream dbs that cannot be fetched are used from cache for at most this many seconds;
-# past it, every package overriding upstream is withdrawn so stock flows.
+# past it, nothing overriding upstream is built or rebased (our builds stay published).
 #DB_MAX_STALE=86400
 # Hours a release asset the db no longer names is kept before bin/sync-release deletes it
 # (a whole number; 0 deletes at once). Unset: bin/sync-release's default, 72.

@@ -15,6 +15,14 @@
 #   j. --channel rc: repo/rc-x86_64 goes to the rc-x86_64 release only (created on first
 #      sync), with its own record in channel-rc; the x86_64 release and its record are
 #      untouched (#167)
+#   k. no regression (#201), on a fresh rc release whose previous release is a Quattro one
+#      serving foo, bar and baz, with recipes read through a stub sandbox: a first publish
+#      without our bar is withheld (no release made, nothing uploaded, bar in
+#      channel-rc/release-withheld), while a net-new recipe not built yet holds nothing; a
+#      held recipe's package counts too; a ready foo goes up while bar, behind, keeps our
+#      last build; a db missing bar is withheld while recipes/bar exists, also when it is
+#      unreadable, and goes up once the recipe is removed; an unreadable Quattro release
+#      refuses (exit 1); no recipes/ at all refuses (exit 1)
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -29,7 +37,7 @@ S=$(mktemp -d)
 cleanup() { GNUPGHOME=$S/data/gnupg gpgconf --kill gpg-agent >/dev/null 2>&1; rm -rf "$S"; }
 [[ ${1:-} == keep ]] && echo "state: $S" || trap cleanup EXIT
 R=$S/data/repo/x86_64
-mkdir -p "$S/ws/build" "$S/data/gnupg" "$R" "$S/release" "$S/bin" \
+mkdir -p "$S/ws/build" "$S/ws/recipes" "$S/data/gnupg" "$R" "$S/release" "$S/bin" \
     "$S/src/pkg" "$S/src/db/foo-1-1" "$S/src/files/foo-1-1"
 chmod 700 "$S/data/gnupg"
 printf '# test denylist\nzorbleplex\n' >"$S/denylist"
@@ -255,4 +263,120 @@ if [[ $( (cd "$S/release" && sha256sum -- *) ) == "$rel_before" ]]; then r=0; el
 if [[ $(cat "$S/data/release-db.sha256") == "$rec_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the x86_64 record unchanged"
 if [[ $(cat "$S/data/channel-rc/release-db.sha256" 2>/dev/null) == "$(sha256sum "$RR/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi
 expect "$r" 0 "channel-rc/release-db.sha256 records the rc db"
+
+echo "== k. no regression"
+# bin/ with a stub sandbox (runs the command in --chdir) and a makepkg that prints the
+# recipe's SRCINFO file (or fails when the recipe has a FAIL file)
+L=$S/lib
+mkdir -p "$L" "$S/pool"
+cp "$W/bin/sync-release" "$W/bin/env.sh" "$W/bin/publish-lib.sh" "$W/bin/check-upstream" "$L/"
+cat >"$L/recipe-sandbox" <<'STUB'
+#!/bin/bash
+dir=.
+while (($#)) && [[ $1 != -- ]]; do [[ $1 == --chdir ]] && { dir=$2; shift; }; shift; done
+shift; cd "$dir" && exec "$@"
+STUB
+cat >"$S/bin/makepkg" <<'STUB'
+#!/bin/bash
+[[ $* == --printsrcinfo && -f SRCINFO && ! -e FAIL ]] || exit 1
+cat SRCINFO
+STUB
+chmod +x "$L"/* "$S/bin/makepkg"
+recipe() {  # recipe <dir> <pkgver-pkgrel> <pkgname>...: a recipe makepkg reports at that version
+    local d=$S/ws/recipes/$1 v=$2 n; shift 2
+    mkdir -p "$d"; : >"$d/PKGBUILD"
+    { printf 'pkgbase = %s\n\tpkgver = %s\n\tpkgrel = %s\n' "${d##*/}" "${v%-*}" "${v##*-}"
+      for n; do printf '\npkgname = %s\n' "$n"; done; } >"$d/SRCINFO"
+}
+mkdb() {  # mkdb <repo dir> <name>-<pkgver>-<pkgrel>...: those packages (the same bytes every
+          # time: a pool), and a signed db and files naming them, as bin/publish leaves a repo
+    local dir=$1 e n v d k=$S/k; shift
+    rm -rf "$dir" "$k"; mkdir -p "$dir" "$k/db" "$k/files" "$k/pkg"
+    for e; do
+        n=${e%-*-*} v=${e#"$n"-}
+        if [[ ! -e $S/pool/$e-x86_64.pkg.tar.zst ]]; then
+            printf 'pkgname = %s\npkgver = %s\n' "$n" "$v" >"$k/pkg/.PKGINFO"
+            bsdtar -cf "$S/pool/$e-x86_64.pkg.tar.zst" -C "$k/pkg" .PKGINFO
+        fi
+        cp "$S/pool/$e-x86_64.pkg.tar.zst" "$dir/"
+        sign "$K1" "$dir/$e-x86_64.pkg.tar.zst" "$dir/$e-x86_64.pkg.tar.zst.sig"
+        mkdir -p "$k/db/$e" "$k/files/$e"
+        printf '%%FILENAME%%\n%s\n\n%%NAME%%\n%s\n\n%%VERSION%%\n%s\n' "$e-x86_64.pkg.tar.zst" "$n" "$v" \
+            >"$k/db/$e/desc"
+        cp "$k/db/$e/desc" "$k/files/$e/desc"
+    done
+    bsdtar -czf "$dir/omarchy-asus.db.tar.gz" -C "$k/db" "$@"
+    bsdtar -czf "$dir/omarchy-asus.files.tar.gz" -C "$k/files" "$@"
+    for d in db files; do
+        sign "$K1" "$dir/omarchy-asus.$d.tar.gz" "$dir/omarchy-asus.$d.tar.gz.sig"
+        ln -sf "omarchy-asus.$d.tar.gz" "$dir/omarchy-asus.$d"
+        ln -sf "omarchy-asus.$d.tar.gz.sig" "$dir/omarchy-asus.$d.sig"
+    done
+}
+KR=$S/release-rc-x86_64 KD=$S/data/channel-rc
+rm -rf "$KR" "$KD"; mkdir -p "$KD"
+run_k() { "$L/sync-release" --channel rc "$@" 2>&1; }
+exists() { if [[ -e $1 ]]; then echo 0; else echo 1; fi; }
+
+# The Quattro release (x86_64) serves foo, bar, bar-extra and baz: RC's previous release.
+mkdb "$S/qrepo" foo-1-1 bar-1-1 bar-extra-1-1 baz-1-1
+mkdir -p "$S/release"; rm -f "$S/release/omarchy-asus.db"; cp -L "$S/qrepo/omarchy-asus.db" "$S/release/"
+recipe foo 1-1 foo; recipe bar 1-1 bar bar-extra; recipe new 1-1 newpkg
+mkdb "$RR" foo-1-1
+touch "$KD/sync-pending"; rm -f "$S/calls"
+out=$(run_k); expect $? 3 "a first RC publish without our bar, which Quattro serves, is withheld (a regression)"
+expect "$(exists "$KR")" 1 "no rc release is made"
+uploaded; expect $? 1 "nothing uploaded"
+grep -qx 'regression bar (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names bar"
+grep -qx 'regression bar-extra (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "and its split package"
+grep -q 'newpkg' "$KD/release-withheld" 2>/dev/null; expect $? 1 "the net-new newpkg is no regression"
+grep -q 'regression bar ' <<<"$out"; expect $? 0 "the output names it"
+expect "$(exists "$KD/sync-pending")" 0 "sync-pending is kept"
+out=$(run_k --dry-run); expect $? 3 "a dry run says withheld too"
+
+recipe baz 1-1 baz; printf 'waits for a G16 boot\n' >"$S/ws/recipes/baz/HOLD"
+mkdb "$RR" foo-1-1 bar-1-1 bar-extra-1-1 baz-1-1
+out=$(run_k); expect $? 0 "our foo, bar and the held baz go up; the net-new newpkg, not built yet, does not hold them"
+grep -q 'missing newpkg' <<<"$out"; expect $? 0 "says newpkg goes up once built"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves it"
+expect "$(exists "$KD/release-withheld")" 1 "release-withheld is removed"
+expect "$(exists "$KD/sync-pending")" 1 "sync-pending is cleared"
+
+mkdb "$RR" foo-1-1 bar-1-1 bar-extra-1-1
+out=$(run_k); expect $? 3 "dropping the held baz, which the release serves, is a regression"
+grep -qx 'regression baz (recipes/baz)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names baz"
+
+recipe foo 1-2 foo; recipe bar 1-2 bar bar-extra
+mkdb "$RR" foo-1-2 bar-1-1 bar-extra-1-1 baz-1-1
+out=$(run_k); expect $? 0 "foo 1-2 is ready and goes up; bar, not ready at 1-2, keeps our 1-1"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves foo 1-2 next to our bar 1-1"
+
+mkdb "$RR" foo-1-2 baz-1-1
+rm -f "$S/calls"
+out=$(run_k); expect $? 3 "a db without our bar while recipes/bar exists is withheld, never stock in its place"
+uploaded; expect $? 1 "nothing uploaded"
+touch "$S/ws/recipes/bar/FAIL"
+out=$(run_k); expect $? 3 "with recipes/bar unreadable, a missing bar the release served is still withheld"
+grep -qx 'unknown bar (recipes/bar unreadable)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld says it cannot tell"
+mkdb "$RR" foo-1-2 bar-1-1 bar-extra-1-1 baz-1-1
+out=$(run_k); expect $? 0 "an unreadable recipe whose packages are all in the db holds nothing"
+rm "$S/ws/recipes/bar/FAIL"
+
+mv "$S/release" "$S/release.away"
+mkdb "$RR" foo-1-2 baz-1-1
+out=$(run_k); expect $? 1 "a Quattro release that cannot be read refuses"
+grep -q 'cannot read the Quattro release' <<<"$out"; expect $? 0 "says so"
+mv "$S/release.away" "$S/release"
+
+rm -rf "$S/ws/recipes/bar"
+out=$(run_k); expect $? 0 "once recipes/bar is removed (upstream replaced our patch), the db without bar goes up"
+cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves it"
+
+mv "$S/ws/recipes" "$S/ws/recipes.away"
+rm -f "$S/calls"
+mkdb "$RR" foo-1-2
+out=$(run_k); expect $? 1 "no recipes/ to check against refuses"
+grep -q 'cannot check' <<<"$out"; expect $? 0 "says it cannot check"
+uploaded; expect $? 1 "nothing uploaded"
+mv "$S/ws/recipes.away" "$S/ws/recipes"
 exit $fail

@@ -56,9 +56,11 @@ class PlanTest(unittest.TestCase):
         lines = [ln.split("\t") for ln in p.stdout.splitlines() if ln]
         return {f[0]: f for f in lines}
 
-    def test_expired_db_unpublishes_current_package(self):
+    def test_expired_db_keeps_current_package(self):
+        # never stock over our patch (#201): stale data builds nothing, and withdraws nothing
         line = self.plan([row("a", "current", "1.0-1.1")], **EXTRA_EXPIRED)["a"]
-        self.assertEqual(line[1], "unpublish")
+        self.assertEqual(line[1], "attention")
+        self.assertIn("stays published", line[5])
         self.assertIn("extra", line[5])
         self.assertIn("24h", line[5])
         self.assertIn("73h", line[5])
@@ -69,7 +71,35 @@ class PlanTest(unittest.TestCase):
         self.assertIn("extra", line[5])
 
     def test_expired_db_db_row_without_recipe_unpublishes(self):
-        line = self.plan([row("b", "current", "1.0-1.1", recipe="")], **EXTRA_EXPIRED)["(db) b"]
+        # a removed recipe (upstream replaced our patch) is withdrawn whatever the dbs say
+        line = self.plan([row("b", "current", "1.0-1.1", recipe="")], inventory_errors=[],
+                         **EXTRA_EXPIRED)["(db) b"]
+        self.assertEqual(line[1], "unpublish")
+
+    def test_dep_mismatch_keeps_our_build(self):
+        # never stock over our patch (#201): a moved exact-version dependency needs a recipe fix
+        r = dict(row("a", "dep-mismatch", "1.0-1.1"),
+                 dep_mismatch=[{"dep": "nvidia-utils", "want": "1.0", "upstream": "1.1"}])
+        line = self.plan([r], inventory_errors=[])["a"]
+        self.assertEqual(line[1], "attention")
+        self.assertIn("stays published", line[5])
+        self.assertIn("nvidia-utils=1.0", line[5])
+
+    def test_held_recipe_behind_upstream_keeps_our_build(self):
+        r = dict(row("a", "rebuild-needed", "1.0-1.1", upstream="1.1-1"), hold="waiting for a G16 boot")
+        line = self.plan([r], inventory_errors=[])["a"]
+        self.assertEqual(line[1], "attention")
+        self.assertIn("held", line[5])
+        self.assertIn("stays published", line[5])
+
+    def test_no_recipe_with_incomplete_inventory_is_kept_even_when_stale(self):
+        # the recipe may only be unreadable: withdraw nothing until the inventory is complete
+        line = self.plan([row("b", "rebuild-needed", "1.0-1.1", upstream="1.1-1", recipe="")],
+                         inventory_errors=["recipes/b: makepkg --printsrcinfo failed"])["(db) b"]
+        self.assertEqual(line[1], "attention")
+
+    def test_no_recipe_with_complete_inventory_unpublishes(self):
+        line = self.plan([row("b", "current", "1.0-1.1", recipe="")], inventory_errors=[])["(db) b"]
         self.assertEqual(line[1], "unpublish")
 
     def test_expired_db_respects_keep_published(self):

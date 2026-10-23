@@ -44,7 +44,7 @@ This repo fixes how those roles are filled and adds a sixth stage, publishing:
 | 3. Review (reviewer) | clud's `grind-reviewer` | reviews and corrects the worker's output against the goal and these rules (What reviewers flag, below) | the reviewer accepts the change |
 | 4. Integrate (integrator) | **one branch at a time** | rebase on `hub/main`; `ci/lint-scripts`; the offline tests (`tests/ci/*.sh`, `tests/test_*.py`, and the recipe's own); `bin/rebase-recipe <r> --version <v> --verify` or `makepkg --verifysource` for recipe changes; clud's `/clud-review` gate; push; open a ready PR (never a draft) | the PR is open and pushed |
 | 5. Land (lander) | the integrator's PR | wait for **every required check**: Lint `scripts` and `recipes`, Build `result` (clud's `pr_merge_watch`). Resolve every review thread. Then `gh pr merge N --squash --admin`. A red check goes back to stage 4 (at most 10 rounds; then file an issue and stop) | merged on `main` |
-| 6. Publish (this repo) | the build host only | packages only. `bin/build-pkg recipes/<r>` in the clean chroot (root via the build host's sudo; never a host build); `bin/publish <staged files>` (cohort members in build/cohorts.conf, e.g. omarchy + omarchy-settings, go in one call); `bin/sync-release --dry-run`, then `bin/sync-release` (the PII scan must pass); check the live channel with a throwaway pacman config (`pacman -Sl omarchy-asus`, `-Sw` verifies signatures) | the release serves the new version |
+| 6. Publish (this repo) | the build host only | packages only. `bin/build-pkg recipes/<r>` in the clean chroot (root via the build host's sudo; never a host build); `bin/publish <staged files>` (cohort members in build/cohorts.conf, e.g. omarchy + omarchy-settings, go in one call); `bin/sync-release --dry-run`, then `bin/sync-release`, from a checkout of the channel's branch (the PII scan must pass; it withholds the release, exit 3, while it would lack our build of a package the previous release served); check the live channel with a throwaway pacman config (`pacman -Sl omarchy-asus`, `-Sw` verifies signatures) | the release serves the new version |
 
 On top of clud's caps, these hold across all stages:
 
@@ -63,6 +63,12 @@ On top of clud's caps, these hold across all stages:
   `bin/sync-release`; the default is Quattro. The `bin/auto-update` timer publishes both
   channels, from scripts installed from `main` (systemd/README.md, "Release channels").
   README.md "Release channels" has the pairing.
+- **`main` drives the release channels.** Release tooling (the `bin/auto-update` pipeline, the
+  publish and release gates, `bin/env.sh`'s channel-to-branch map, `systemd/`) serves both
+  channels from `main`, so a change to it targets `main` (that is not a backport) and takes
+  effect once the pipeline is reinstalled. Omarchy software, recipes and patches go forward
+  first, on the newest channel's branch, and are backported to Quattro only when asked or
+  needed.
 - **Findings outside the task** (a flaky test, an unrelated bug) are filed with `bin/issue`,
   not fixed in passing.
 - **Never** publish from a branch, publish a build made outside the chroot, or put
