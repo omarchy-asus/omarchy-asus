@@ -362,8 +362,8 @@ cd /usr/src/nvidia-615.78.08 && find . -type f -print0 | sort -z | xargs -0 sha2
 If the digests differ, `sudo pacman -S omarchy-asus/nvidia-open-dkms` installs the repo copy.
 
 Remove any `IgnorePkg = nvidia-open-dkms` line once the repo is in use. The repo
-rebuilds the package when nvidia-utils moves, or drops it so the stock build flows through,
-and IgnorePkg would block both.
+rebuilds the package when nvidia-utils moves (until it does, `omarchy update` waits on the
+dependency rather than swapping in the stock build), and IgnorePkg would block that.
 
 ## 5. Back out
 
