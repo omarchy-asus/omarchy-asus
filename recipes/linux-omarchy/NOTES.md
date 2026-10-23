@@ -170,7 +170,7 @@ test answers (#238): power2 should read about 0 with the RTX in D3cold, track
 NVML's `power.draw` with it awake, and reading it must never change the RTX's
 `runtime_status`.
 
-**Check.** `tests/ci/linux-omarchy-amd-pmf-hwmon.sh` checks the recipe wiring
+**Check.** `tests/channel/linux-omarchy-amd-pmf-hwmon.sh` checks the recipe wiring
 and, on the build host, applies 0800-0802 and 0809 to `amd/pmf` and compiles
 the module with `W=1` against the installed linux-omarchy headers.
 
