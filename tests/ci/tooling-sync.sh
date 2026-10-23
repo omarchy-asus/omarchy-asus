@@ -5,6 +5,8 @@
 #   3. a file only on the RC branch, one missing there, and a mode change fail
 #   4. the excepted kit test may differ
 #   5. main moved: apply makes the check pass again, deletions included
+#   6. --base (a PR): main moved under a recipe PR: a warning, not a failure; a PR that
+#      changes tooling away from main fails; a sync PR passes
 # Usage: tests/ci/tooling-sync.sh [keep]
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -39,7 +41,7 @@ check "fails" eval '! ok'
 o=$(out)
 check "names the file" grep -q 'bin/tool' <<<"$o"
 check "is a CI error" grep -q '^::error title=Tooling differs from main::' <<<"$o"
-check "says to move it to main" grep -q 'move that change to a PR against main' <<<"$o"
+check "says to move it to main" grep -q 'Move the change to a PR against main' <<<"$o"
 check "says how to resync" grep -q "ci/tooling-sync apply origin/main" <<<"$o"
 reset
 
@@ -62,6 +64,25 @@ check "apply brings the new file" test -f "$R/bin/new"
 check "apply removes the deleted one" test ! -e "$R/bin/tool"
 check "apply leaves recipes alone" grep -qx 'pkgrel=101' "$R/recipes/k/PKGBUILD"
 check "then the check passes" ok
+
+echo "== 6. --base: only the PR's own tooling counts"
+g commit -qam "rc synced"; base=$(g rev-parse HEAD)
+g switch -q main; printf 'newer\n' >>"$R/bin/new"; g commit -qam "main moves again"; g switch -q rc
+pr() { (cd "$R" && ci/tooling-sync check main --base "$base" 2>&1); }
+printf 'pkgrel=102\n' >"$R/recipes/k/PKGBUILD"
+o=$(pr); rc=$?
+check "a recipe PR passes while main moved" [ "$rc" = 0 ]
+check "with a warning naming the file" grep -q '^::warning title=Tooling behind main::.*bin/new' <<<"$o"
+check "saying auto-update opens the sync" grep -q "auto-update opens a 'Tooling from main' PR" <<<"$o"
+printf 'mine\n' >"$R/ci/mine"; g add ci/mine
+o=$(pr); rc=$?
+check "a PR changing tooling fails" [ "$rc" = 1 ]
+check "the error names only its file" bash -c 'grep "^::error" <<<"$1" | grep -q "ci/mine (not on main)" && ! grep "^::error" <<<"$1" | grep -q "bin/new"' _ "$o"
+g rm -q -f ci/mine
+(cd "$R" && ci/tooling-sync apply main >/dev/null)
+o=$(pr); rc=$?
+check "a sync PR passes" [ "$rc" = 0 ]
+check "and matches main" grep -q '==> tooling matches main' <<<"$o"
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"
