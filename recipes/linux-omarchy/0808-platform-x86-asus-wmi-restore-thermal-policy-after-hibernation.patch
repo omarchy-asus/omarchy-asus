@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 -0400
+Subject: [PATCH] platform/x86: asus-wmi: restore thermal policy and fan curves
+ after hibernation
+
+Resume from hibernation follows a full power cycle. The firmware boots
+again and the EC starts from its own default thermal policy and fan
+tables, but the restored kernel still holds throttle_thermal_policy_mode
+and the custom fan curves that were in force before hibernation.
+asus_hotk_restore() refreshes rfkill, the keyboard backlight, fn-lock
+and tablet mode, but never sends either of these back, so the platform
+profile keeps reading e.g. "quiet" while the EC runs another table.
+
+On an ASUS ROG Zephyrus G16 (GA605KM, BIOS 307) on battery, with the
+asus-wmi profile at quiet, this left the three fans at about
+2100/1800/3800 rpm with the APU idle at 28 C after a day of
+suspend-then-hibernate cycles. The quiet table keeps them stopped below
+about 54 C. Writing the profile again brought the quiet table back.
+
+Write the cached policy back in .restore, then re-enable the custom fan
+curves that were enabled before, since a policy write clears them.
+Suspend to idle is not affected and is left alone: the EC keeps its
+state there.
+
+Downstream carry for omarchy-asus. Not yet submitted upstream.
+
+Assisted-by: LLM
+---
+ drivers/platform/x86/asus-wmi.c | 36 +++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/drivers/platform/x86/asus-wmi.c b/drivers/platform/x86/asus-wmi.c
+--- a/drivers/platform/x86/asus-wmi.c
++++ b/drivers/platform/x86/asus-wmi.c
+@@ -5313,6 +5313,40 @@ static void asus_wmi_remove(struct platform_device *device)
+ 
+ /* Platform driver - hibernate/resume callbacks *******************************/
+ 
++/*
++ * Resume from hibernation follows a full power cycle: the firmware boots and
++ * the EC starts from its own default thermal policy and fan tables, while the
++ * restored image still holds the mode and custom fan curves set before
++ * hibernation. Nothing re-sends them, so the platform profile reads e.g.
++ * "quiet" while the EC runs another table. Write them back.
++ */
++static void asus_wmi_restore_thermal_state(struct asus_wmi *asus)
++{
++	bool enabled[ARRAY_SIZE(asus->custom_fan_curves)];
++	int err, i;
++
++	for (i = 0; i < ARRAY_SIZE(asus->custom_fan_curves); i++)
++		enabled[i] = asus->custom_fan_curves[i].enabled;
++
++	if (asus->throttle_thermal_policy_dev) {
++		/* Clears the custom fan curves' enabled flags on success */
++		err = throttle_thermal_policy_write(asus);
++		if (err)
++			pr_warn("Failed to restore throttle thermal policy: %d\n", err);
++	}
++
++	for (i = 0; i < ARRAY_SIZE(asus->custom_fan_curves); i++) {
++		if (!enabled[i])
++			continue;
++		asus->custom_fan_curves[i].enabled = true;
++		err = fan_curve_write(asus, &asus->custom_fan_curves[i]);
++		if (err) {
++			pr_warn("Failed to restore custom fan curve %d: %d\n", i, err);
++			asus->custom_fan_curves[i].enabled = false;
++		}
++	}
++}
++
+ static int asus_hotk_thaw(struct device *device)
+ {
+ 	struct asus_wmi *asus = dev_get_drvdata(device);
+@@ -5390,6 +5424,8 @@ static int asus_hotk_restore(struct device *device)
+ 	if (asus_wmi_has_fnlock_key(asus))
+ 		asus_wmi_fnlock_update(asus);
+ 
++	asus_wmi_restore_thermal_state(asus);
++
+ 	asus_wmi_tablet_mode_get_state(asus);
+ 	return 0;
+ }

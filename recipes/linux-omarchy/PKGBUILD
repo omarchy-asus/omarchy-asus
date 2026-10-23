@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.8
-pkgrel=9.102
+pkgrel=9.103
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -208,6 +208,7 @@ source=(
   0805-hwmon-applesmc-charge-control-end-threshold.patch{,.sig}
   0806-platform-chrome-cros-usbpd-notify-parent-goog0004.patch{,.sig}
   0807-platform-x86-asus-armoury-ga605km-power-limits.patch
+  0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernation.patch
   0810-drm-amd-display-panel-power-savings-apply-now.patch
   0850-futex-wait-multiple.patch{,.sig}
   0851-futex-wait-multiple-fixes.patch{,.sig}
@@ -559,6 +560,7 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         'd45c82fbafcdd2caed85ded818246c0e5147c3966efa4297cab47f18d1cd3f6762ebb3f20f40ba0ccda3d4a4562d8bbdc0d3d57a624eabc8cf41bb18e08bbe75'
         'SKIP'
         '8b3928d132b92ca8780376281d74f1203b3425bbdcd40e94c2c49931d795a85f230f2c75552a738f1c95c12733a84c81aa6ae14538fdbf1288689c063ab625ae'
+        '0d9e1d5a1e0b5de499d31ff8e4b9656dd8d68e2a593537660012921b1f995fd9acb0cd5690d013af5a216e015419a2afacda30be5f7068b24311dd9d33985261'
         '0b4dd456e447281f71fb96e72d052faf59942e26cf82ac1eb28323548fc01a71ba82c7c6f8a15422cfc6c5ed337c69e869b24c2f900f33cac6083c7db8f39cb1'
         'aca0527f5630671a319e7ecff958a3a64f29df73b427c67c1d29763cc1801fa82e96761c3a61c22d936913943a49261da64d490a0752ba9ffc8e0c1d92f99835'
         'SKIP'
@@ -917,6 +919,7 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             'f151cb8df116730de6818ca714be87ff07361cd5fe9c5f1e6cd5fdb5fc26cdc2'
             'SKIP'
             'b7629486b03a2d018bc4d996539834d8decf4d0a5279058d275b3184edda23fd'
+            '099bbfee515661b2d5ccb731e73ee836d48e903abd85b0a4e6cc926e8ac907b8'
             '0bb15619bb9811afc4419908d7ac9027ca23cb80029cf91508392d187b7fbbac'
             '028bf538c870465e1752514725372fa9eef6b7178d9b8d1e2ecc15edc5a63cc8'
             'SKIP'
