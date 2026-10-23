@@ -1,7 +1,5 @@
 #!/bin/bash
-# Create (or update) the clean build chroot of a release channel. Needs sudo (or root:
-# bin/auto-update under systemd makes the RC chroot itself, from the installed root-owned
-# build/pacman-rc.conf).
+# Create (or update) the clean build chroot of a release channel. Needs sudo (or root).
 # Usage: bin/mkchroot [--channel quattro|rc]
 # quattro: $CHROOT from build/pacman.conf (Omarchy stable); rc: its own chroot from
 # build/pacman-rc.conf (Omarchy rc). An update rewrites the chroot's pacman.conf from the

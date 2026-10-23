@@ -16,7 +16,7 @@
 # Otherwise `dkms build` is re-run for a definite exit code and make.log is shown.
 #
 # Root, as for bin/build-pkg: run as a normal user it uses sudo for the chroot steps;
-# run as root (bin/auto-update under systemd) it needs BUILD_USER and reads the
+# run as root it needs BUILD_USER and reads the
 # package files as that user. Exit: 0 built, 1 module failed to build, 2 setup error.
 set -euo pipefail
 # --channel quattro|rc, first: the release channel (bin/env.sh); default quattro

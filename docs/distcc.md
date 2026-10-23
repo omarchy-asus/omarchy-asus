@@ -29,7 +29,7 @@ compiles) can read the mounted key and copy it. The read-only mount stops it
 being changed, not read. Treat the key as exposed to every build that mounts it:
 
 - Mount it only for this repo's own recipes: the reviewed `recipes/` and the
-  `bin/auto-update` rebuilds of them. Those builds already run the upstream
+  unattended upstream rebases of them. Those builds already run the upstream
   source that ends up in the packages, which is worse than a stolen key if
   it is hostile.
 - For anything else (an unreviewed pull request, a recipe you are trying
