@@ -3,7 +3,7 @@
 #   1. same tooling: check passes; recipes may differ
 #   2. a tooling change on the RC branch fails, naming the file and the fix
 #   3. a file only on the RC branch, one missing there, and a mode change fail
-#   4. the excepted kit test may differ
+#   4. the excepted kit test and tests/channel/ may differ
 #   5. main moved: apply makes the check pass again, deletions included
 #   6. --base (a PR): main moved under a recipe PR: a warning, not a failure; a PR that
 #      changes tooling away from main fails; a sync PR passes
@@ -53,6 +53,8 @@ chmod +x "$R/bin/tool"; check "a mode change fails" eval '! ok'; reset
 echo "== 4. the excepted kit test"
 printf 'rc kit\n' >>"$R/tests/test_g16_resume_probe.py"
 check "may differ" ok; reset
+mkdir -p "$R/tests/channel/fixtures"; printf 'rc\n' >"$R/tests/channel/rc-patch.sh"; printf 'f\n' >"$R/tests/channel/fixtures/x.c"
+g add tests/channel; check "tests/channel/ only on the RC branch passes" ok; reset
 
 echo "== 5. main moved"
 g switch -q main
