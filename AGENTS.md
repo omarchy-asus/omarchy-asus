@@ -54,6 +54,11 @@ On top of clud's caps, these hold across all stages:
 - **A recipe change bumps `pkgrel`.** If the package content changes, the version changes:
   the release refuses a filename it already has with different bytes, and pacman caches by
   filename.
+- **A merge that changes the pipeline is followed by a reinstall.** When a PR touches what
+  `bin/install-auto-update` installs (its `scripts` and `build_files`, or `systemd/`), the build
+  host re-runs `sudo bin/install-auto-update --apply` from an up-to-date `main` right after the
+  merge. Until then the timer publishes nothing on either channel (#217); the reinstall starts
+  the held-back run itself.
 - **Held recipes** (`recipes/<r>/HOLD`, first line the reason) are merged but not built or
   published, by hand or by `bin/auto-update`, until the hold is removed in its own PR.
 - **One channel per branch.** `main` is the Quattro channel (the `x86_64` release, Omarchy

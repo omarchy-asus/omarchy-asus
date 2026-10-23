@@ -274,9 +274,13 @@ journalctl -fu omarchy-asus-auto-update
 sudo systemctl enable --now omarchy-asus-auto-update.timer
 ```
 
-Re-run `sudo bin/install-auto-update --apply` after every merge that touches `bin/` (or the
-installed `build/pacman*.conf` or `build/distcc-ssh`). Until then the service stops with `(pipeline)` attention and
-publishes or unpublishes nothing.
+Re-run `sudo bin/install-auto-update --apply` from an up-to-date `main` right after every merge
+that touches `bin/` (or the installed `build/pacman*.conf` or `build/distcc-ssh`, or `systemd/`).
+Until then the service stops with `(pipeline)` attention and publishes or unpublishes nothing, on
+either channel. On 2026-10-22 two such merges went without it, and the RC channel's G16 packages
+waited about eight hours, across a G16 update (#217). With the timer already enabled, the
+reinstall then starts one run (`systemctl start --no-block`), so what the stale copy held back
+publishes at once instead of at the next timer slot; `--no-run` skips it.
 
 **After merging the RC channel support** (the PR that made the timer serve RC), that is the one
 thing to do: review `main`, then `sudo bin/install-auto-update --apply` from that checkout. The

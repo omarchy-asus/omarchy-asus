@@ -2,7 +2,7 @@
 # Install (or remove) the daily auto-update service. Prints what it would do unless
 # --apply is given; --apply must be run by the user with sudo, from a reviewed checkout.
 #
-# Usage: bin/install-auto-update [--apply] [--enable]     install / update the copy
+# Usage: bin/install-auto-update [--apply] [--enable] [--no-run]   install / update the copy
 #        bin/install-auto-update --uninstall [--apply]    remove it (state is kept)
 #
 # Installs a root-owned copy of the scripts to /usr/local/lib/omarchy-asus (the service
@@ -13,6 +13,9 @@
 # /etc/systemd/system, and /etc/omarchy-asus/auto-update.conf (only if missing, with
 # BUILD_USER set to the sudo user). --enable also starts the timer; without it the
 # timer is installed but off. Re-run after merging changes to bin/ to update the copy.
+# When the timer was already enabled (an update, not a first install), it then starts one
+# run without waiting for it (--no-run skips that): while the copy was stale every run
+# published nothing on either channel, and the next timer slot can be a day away (#217).
 # The source commit and sha256 of each installed script and build file go to
 # /usr/local/lib/omarchy-asus/installed; auto-update compares them with main (its bot clone)
 # and does nothing that publishes or unpublishes while they differ.
@@ -25,13 +28,14 @@ scripts=(ai-review auto-update auto-update-state build-pkg check-upstream env.sh
 build_files=(pacman.conf pacman-rc.conf distcc-ssh)
 units=(omarchy-asus-auto-update.service omarchy-asus-auto-update.timer)
 
-apply=0 enable=0 uninstall=0
+apply=0 enable=0 uninstall=0 run=1
 for a in "$@"; do
     case $a in
         --apply) apply=1 ;;
         --enable) enable=1 ;;
         --uninstall) uninstall=1 ;;
-        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+        --no-run) run=0 ;;
+        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *) echo "unknown argument: $a" >&2; exit 64 ;;
     esac
 done
@@ -98,10 +102,21 @@ else
         echo "would create $CONF from systemd/auto-update.conf.example with BUILD_USER=$user"
     fi
 fi
+# Read before --enable changes it: only an update of a running install starts a run now.
+timer_was_enabled=0
+systemctl is-enabled --quiet omarchy-asus-auto-update.timer 2>/dev/null && timer_was_enabled=1
 do_ systemctl daemon-reload
 if ((enable)); then do_ systemctl enable --now omarchy-asus-auto-update.timer
-else echo "timer not enabled; when ready: sudo systemctl enable --now omarchy-asus-auto-update.timer"; fi
+elif ((!timer_was_enabled)); then echo "timer not enabled; when ready: sudo systemctl enable --now omarchy-asus-auto-update.timer"; fi
 [[ -d /var/lib/omarchy-asus/chroot/root ]] || echo "note: no build chroot yet; run bin/mkchroot once (sudo) before the first run"
 [[ -d /var/lib/omarchy-asus/chroot-rc/root ]] ||
     echo "note: no RC build chroot yet; the service makes it (bin/mkchroot --channel rc) before its first RC build"
-echo "first run by hand (watch it): sudo systemctl start omarchy-asus-auto-update.service; journalctl -fu omarchy-asus-auto-update"
+if ((timer_was_enabled && run)); then
+    # Oneshot: --no-block returns at once; a run already going is left alone (start is a no-op).
+    do_ systemctl start --no-block omarchy-asus-auto-update.service
+    echo "a run publishes what the stale copy held back; watch it: journalctl -fu omarchy-asus-auto-update"
+elif ((timer_was_enabled)); then
+    echo "no run started (--no-run); the next timer run uses the new copy"
+else
+    echo "first run by hand (watch it): sudo systemctl start omarchy-asus-auto-update.service; journalctl -fu omarchy-asus-auto-update"
+fi
