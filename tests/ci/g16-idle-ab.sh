@@ -95,7 +95,7 @@ cat >"$B/systemctl" <<'EOF'
 [[ $1 == --user ]] && shift
 case $1 in
   is-active) [[ $2 == -q ]] && shift; [[ -e $STUB/active/$2 ]] ;;
-  stop) echo "stop $2" >>"$STUB/log"; rm -f "$STUB/active/$2" ;;
+  stop) echo "stop $2" >>"$STUB/log"; [[ -e $STUB/fail-stop ]] && exit 1; rm -f "$STUB/active/$2" ;;
   start) echo "start $2" >>"$STUB/log"; touch "$STUB/active/$2" ;;
   *) exit 1 ;;
 esac
@@ -111,7 +111,7 @@ EOF
 cat >"$B/bluetoothctl" <<'EOF'
 #!/bin/bash
 case $1 in
-  show) echo "	Powered: yes" ;;
+  show) [[ -e $STUB/bt-off ]] && echo "	Powered: no" || echo "	Powered: yes" ;;
   devices) [[ -e $STUB/bt-connected ]] && echo "Device 00:11:22:33:44:55 Some Buds" ; exit 0 ;;
   power) echo "bt power $2" >>"$STUB/log" ;;
 esac
@@ -244,6 +244,34 @@ want=$'ready '"$(id -u)"$'\nerr unknown tweak\nerr bad tweak\nerr unknown\nok 0\
 [[ $reply == "$want" ]] && ok "root helper refuses unknown tweaks and commands" || bad "root helper replies: $reply"
 printf 'apply nmi\napply bt-off\n' | "$SCRIPT" --root-helper "$S" "$P" 0 >/dev/null
 [[ $(cat "$P/sys/kernel/nmi_watchdog") == 1 && $(cat "$S/class/rfkill/rfkill7/soft") == 0 ]] && ok "root helper reverts on EOF" || bad "root helper left nmi/bt changed"
+
+# A restore write that fails is an error, stays applied, and EOF retries it.
+if ((EUID != 0)); then
+  reset
+  reply=$( { printf 'apply nmi\n'; sleep 0.3; chmod 444 "$P/sys/kernel/nmi_watchdog"; printf 'revert nmi\n'; sleep 0.3; chmod 644 "$P/sys/kernel/nmi_watchdog"; } | "$SCRIPT" --root-helper "$S" "$P" 0)
+  grep -q '^err restore write refused' <<<"$reply" && ok "root helper reports a failed restore" || bad "failed restore: $reply"
+  [[ $(cat "$P/sys/kernel/nmi_watchdog") == 1 ]] && ok "root helper retries a failed restore on EOF" || bad "nmi left at $(cat "$P/sys/kernel/nmi_watchdog")"
+fi
+
+# --------------------------- 6b. voxtype that won't stop is not measured
+reset
+touch "$ST/fail-stop"
+out=$(run --only voxtype,nmi "${FAST[@]}" --no-post 2>&1)
+grep -q 'voxtype did not stop' <<<"$out" && ok "voxtype stop failure noticed" || bad "voxtype stop failure: $out"
+grep -qE '^\| [0-9]+ \| [12] \| voxtype \|' "$T/home/report.md" && bad "voxtype phase measured though it never stopped" || ok "no voxtype phase when it didn't stop"
+
+# ------------ 6c. Bluetooth powered off at the start stays off (boot, dry)
+for mode in "--boot btoff" "--dry-run"; do
+  reset
+  touch "$ST/bt-off"
+  # shellcheck disable=SC2086 # mode is two words on purpose
+  run $mode --rounds 1 --measure 1 --settle 0 --interval 1 --no-post >/dev/null 2>&1
+  grep -q '^bt power' "$ST/log" && bad "$mode powered Bluetooth on" || ok "$mode leaves Bluetooth off"
+done
+reset
+touch "$ST/bt-off"
+run --only bt-off --rounds 1 --measure 1 --settle 0 --interval 1 --no-post >/dev/null 2>&1
+grep -q '^bt power' "$ST/log" && bad "bt-off powered an adapter that was off" || ok "bt-off doesn't power on an adapter that was off"
 
 # --------------------------------------- 7. nothing under the RTX was read
 # The unreadable stand-ins (mode 000) would make a read print an error; root

@@ -78,7 +78,7 @@ if [[ ${1:-} == --root-helper ]]; then
   sys=${2:?} proc=${3:?} dry=${4:-0}
   declare -A ORIG=() APPLIED=()
   rd() { local v=''; read -r v 2>/dev/null <"$1"; printf '%s' "$v"; }
-  wr() { ((dry)) && return 0; printf '%s\n' "$2" >"$1" 2>/dev/null; }
+  wr() { ((dry)) && return 0; printf '%s\n' "$2" 2>/dev/null >"$1"; }
   pci_by_id() { local d; for d in "$sys"/bus/pci/devices/*; do [[ $(rd "$d/vendor") == "$1" && $(rd "$d/device") == "$2" ]] && { printf '%s\n' "$d"; return 0; }; done; return 1; }
   usb_by_id() { local d; for d in "$sys"/bus/usb/devices/*; do [[ $(rd "$d/idVendor") == "$1" && $(rd "$d/idProduct") == "$2" ]] && { printf '%s\n' "$d"; return 0; }; done; return 1; }
   wlan() { local n; for n in "$sys"/class/net/*; do [[ -d $n/wireless || -e $n/phy80211 ]] && { printf '%s\n' "${n##*/}"; return 0; }; done; return 1; }
@@ -134,12 +134,14 @@ if [[ ${1:-} == --root-helper ]]; then
     esac
   }
   revert() { # tweak -> ok/err line
-    local t=$1 f v o p n
+    local t=$1 f v o p n rc=0
     [[ -n ${APPLIED[$t]:-} ]] || { echo "ok not applied"; return; }
     o=${ORIG[$t]}
+    # A write that fails leaves the tweak marked applied: the caller stops the
+    # run, and the exit handler tries it again.
     case $t in
-      nmi) wr "$proc/sys/kernel/nmi_watchdog" "$o" ;;
-      nvme-apst) read -r p n <<<"$o"; wr "$NV/apst_primary_timeout_ms" "$p"; wr "$NV/apst_secondary_timeout_ms" "$n"; nvme_reapply ;;
+      nmi) wr "$proc/sys/kernel/nmi_watchdog" "$o" || rc=1 ;;
+      nvme-apst) read -r p n <<<"$o"; { wr "$NV/apst_primary_timeout_ms" "$p" && wr "$NV/apst_secondary_timeout_ms" "$n" && nvme_reapply; } || rc=1 ;;
       sd-off)
         # Rescan below the reader's own port only, with the port held awake so
         # its bus can be read; then the port goes back to its own setting.
@@ -151,11 +153,12 @@ if [[ ${1:-} == --root-helper ]]; then
           [[ -n $v ]] && wr "$SD_PARENT/power/control" "$v"
         fi
         [[ -e $sys/bus/pci/devices/$SD_NAME ]] || { echo "err the SD reader did not come back (it returns at the next boot)"; unset "APPLIED[$t]"; return; } ;;
-      kbd-usb) read -r f v <<<"$o"; wr "$f/power/control" "$v" ;;
-      wifi-ps) read -r f v <<<"$o"; ((dry)) || iw dev "$f" set power_save "$v" 2>/dev/null ;;
-      numlock) for p in $o; do wr "${p%=*}/brightness" "${p##*=}"; done ;;
-      bt-off) read -r f v <<<"$o"; wr "$f/soft" "$v" ;;
+      kbd-usb) read -r f v <<<"$o"; wr "$f/power/control" "$v" || rc=1 ;;
+      wifi-ps) read -r f v <<<"$o"; ((dry)) || iw dev "$f" set power_save "$v" 2>/dev/null || rc=1 ;;
+      numlock) for p in $o; do wr "${p%=*}/brightness" "${p##*=}" || rc=1; done ;;
+      bt-off) read -r f v <<<"$o"; wr "$f/soft" "$v" || rc=1 ;;
     esac
+    ((rc == 0)) || { echo "err restore write refused"; return; }
     unset "APPLIED[$t]"
     echo "ok reverted"
   }
@@ -382,7 +385,8 @@ case $ROOT in
 esac
 
 STAY_FILE=$HOME/.local/state/omarchy/indicators/stay-awake
-STAY_AWAKE_SET=0 VOX_STOPPED=0 RESTORED=0 BT_CHECK=0
+STAY_AWAKE_SET=0 VOX_STOPPED=0 RESTORED=0 BT_CHECK=0 BT_POWERED=0
+have bluetoothctl && bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && BT_POWERED=1
 restore() {
   ((RESTORED)) && return
   RESTORED=1
@@ -394,7 +398,7 @@ restore() {
     wait "$HELPER_PID" 2>/dev/null
   fi
   # bluez powers the adapter again on unblock (AutoEnable); make sure.
-  if ((BT_CHECK)) && have bluetoothctl && ! bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then bluetoothctl power on >/dev/null 2>&1; fi
+  if ((BT_CHECK && BT_POWERED)) && have bluetoothctl && ! bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then bluetoothctl power on >/dev/null 2>&1; fi
   if ((STAY_AWAKE_SET)); then
     if have omarchy-toggle-idle; then omarchy-toggle-idle allow-idle >/dev/null 2>&1; else rm -f "$STAY_FILE"; fi
   fi
@@ -565,7 +569,7 @@ for t in "${SEL[@]}"; do
     voxtype) systemctl --user is-active -q voxtype.service 2>/dev/null && RUN+=("$t") || SKIP+=("$t: voxtype.service not running") ;;
     bt-off)
       if have bluetoothctl && (( $(bluetoothctl devices Connected 2>/dev/null | grep -c '^Device') > 0 )); then SKIP+=("$t: a Bluetooth device is connected")
-      else RUN+=("$t"); BT_CHECK=1; fi ;;
+      else RUN+=("$t"); fi ;;
     *) RUN+=("$t") ;;
   esac
 done
@@ -577,11 +581,17 @@ apply_t() { # tweak -> 0 when applied
   local r
   if [[ $1 == voxtype ]]; then
     ((DRY)) && return 0
-    VOX_STOPPED=1; systemctl --user stop voxtype.service 2>/dev/null; return 0
+    VOX_STOPPED=1
+    if ! systemctl --user stop voxtype.service 2>/dev/null || systemctl --user is-active -q voxtype.service 2>/dev/null; then
+      printf 'voxtype err did not stop\n' >>"$WORK/applied"; note "${R}voxtype did not stop; phase skipped${N}"; return 1
+    fi
+    printf 'voxtype ok stopped\n' >>"$WORK/applied"; return 0
   fi
   if [[ $1 == nvme-apst ]]; then r=$(ask_root "apply $1 $NVME_PRIMARY_MS $NVME_SECONDARY_MS"); else r=$(ask_root "apply $1"); fi
   printf '%s %s\n' "$1" "$r" >>"$WORK/applied"
   [[ $r == ok* ]] || { note "${R}$1 not applied: $r${N}"; return 1; }
+  [[ $1 == bt-off ]] && ((DRY == 0)) && BT_CHECK=1
+  return 0
 }
 revert_t() { # tweak; a revert that fails stops the run
   local r
@@ -592,7 +602,7 @@ revert_t() { # tweak; a revert that fails stops the run
   fi
   r=$(ask_root "revert $1")
   [[ $r == ok* ]] || die "$1 could not be put back ($r); stopping the run"
-  if [[ $1 == bt-off ]] && have bluetoothctl && ((DRY == 0)); then
+  if [[ $1 == bt-off ]] && ((BT_POWERED && DRY == 0)) && have bluetoothctl; then
     sleep 2; bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' || bluetoothctl power on >/dev/null 2>&1
   fi
 }
@@ -666,8 +676,9 @@ for i, p in enumerate(phases):
     if p["tweak"] == "-": continue
     before = next((q for q in reversed(phases[:i]) if q["tweak"] == "-"), None)
     after = next((q for q in phases[i + 1:] if q["tweak"] == "-"), None)
+    # Both baselines around it must be valid, or drift doesn't cancel.
     bases = [q for q in (before, after) if q and q["valid"] and q["bat"] is not None]
-    if not p["valid"] or p["bat"] is None or not bases: per.setdefault(p["tweak"], []).append(None); continue
+    if not p["valid"] or p["bat"] is None or len(bases) < 2: per.setdefault(p["tweak"], []).append(None); continue
     bb = st.mean(q["bat"] for q in bases)
     bs = [q["sock"] for q in bases if q["sock"] is not None]
     per.setdefault(p["tweak"], []).append((p["bat"] - bb, (p["sock"] - st.mean(bs)) if bs and p["sock"] is not None else None, p))
