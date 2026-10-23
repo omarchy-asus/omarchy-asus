@@ -56,7 +56,7 @@ SHAs are the commits of omacom/omarchy#12428, reachable there.
 | 0010-0011, 0022 | rtkit on x86_64; restart the portal, then PipeWire (0022: only for a session that started without rtkit) | #28 | omacom/omarchy#12428 (another contributor's PR, taken as is; 0022 is ours, not on that PR) |
 | 0012-0013, 0021 | no NVIDIA early load in the initramfs on hybrid machines (0021: only an unedited drop-in is removed) | #29 | omacom/omarchy#8263 (another contributor's PR; 0021 is ours, not on that PR) |
 | 0014-0015 | webcam menu guard answered from udev | #30 | omacom/omarchy#15670 |
-| 0016 | Tailscale bar follows tailscaled's IPN bus (one `tailscale debug watch-ipn` per panel) and runs no client while the panel is closed; the open panel refreshes everything on its interval. Fork commits cf5cf22a + 2a1d84b0 on asus/v4-5-0-rc1, squashed | #31 | omacom/omarchy#15671 (has only the first half, the closed-panel status-only poll) |
+| 0016 | Tailscale bar follows tailscaled's IPN bus (one `tailscale debug watch-ipn` per panel) and runs no client while the panel is closed; the open panel refreshes everything on its interval. Fork commits cf5cf22a + 2a1d84b0 + d3e137d8 on asus/v4-5-0-rc1, squashed | #31 | omacom/omarchy#15671 (has only the first half, the closed-panel status-only poll) |
 | 0017 | clamshell state from logind events instead of a 2 s poll | #32 | not submitted |
 | 0018 | launcher icon index rescanned at most once a minute | #33 | not submitted |
 | 0024 | a crashed shell retakes its stranded lock while voxtype's dictation OSD runs (stock Omarchy bug); the OSD is told apart by its `-p` argument in `/proc/<pid>/cmdline` (fork commits f87801d1 + d528fca1, squashed; test paths under `/data`) | #102, #130 | omacom/omarchy#15912 (replaces #15890) |
