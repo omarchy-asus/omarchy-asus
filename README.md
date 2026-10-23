@@ -38,12 +38,12 @@ The signed `[omarchy-asus]` repo, served from the
 
 | Package | Version | What it fixes | Upstream |
 |---|---|---|---|
-| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.3 (main: 7.2.8-9.4, held until it boots on a G16) | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
+| `linux-omarchy`, `linux-omarchy-headers` | 7.2.8-9.4 | Fn+Super (Win-lock) reports from the ROG N-Key keyboard reach userspace instead of being dropped by `hid-asus` | Sent to linux-input, patchwork 14804337, awaiting review |
 | | | The touchpad's I2C controller interrupts once per batch, not once per byte (backport) | linux-next `e7d5d642c089`, not in mainline yet |
 | | | `asus-armoury` knows the GA605KM's power-limit ranges (nothing is written at boot) | Not submitted yet |
 | | | Three amdgpu display backports: no self-refresh on tearing flips, s0i3 pipe teardown, OLED CACP control (off by default) | Mainline v7.3-rc1 / stable |
 | | | *9.4:* the GA605KM no longer wakes from s2idle at once while an HDMI monitor is connected (GPIO 16 wakeups ignored) | Not submitted yet (linux-gpio) |
-| | | *9.5 (RC, held until it boots on a G16):* a USB4 dock's monitors come back when the dock was replugged during suspend (amdgpu replays the hotplugs it skipped while resuming, #205) | Not submitted yet (amd-gfx) |
+| | | *9.5 (RC):* a USB4 dock's monitors come back when the dock was replugged during suspend (amdgpu replays the hotplugs it skipped while resuming, #205) | Not submitted yet (amd-gfx) |
 | | | *Plus an **experimental, default-off** scheduler series (Zen 5c-first soft park) for GA605KM battery testing. Compile-tested only. Nothing enables it. Not meant for upstream.* | Local carry ([notes](recipes/linux-omarchy/NOTES.md)) |
 | `nvidia-open-dkms` | 615.78.08-1.2 | No hang at power-off after hibernate | [NVIDIA/open-gpu-kernel-modules#1412](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412), open |
 | | | The dGPU no longer wakes from D3cold on every battery change | [NVIDIA/open-gpu-kernel-modules#1299](https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1299), open |
