@@ -63,6 +63,12 @@ On top of clud's caps, these hold across all stages:
   `bin/sync-release`; the default is Quattro. The `bin/auto-update` timer publishes both
   channels, from scripts installed from `main` (systemd/README.md, "Release channels").
   README.md "Release channels" has the pairing.
+- **`main` drives the release channels.** Release tooling (the `bin/auto-update` pipeline, the
+  publish and release gates, `bin/env.sh`'s channel-to-branch map, `systemd/`) serves both
+  channels from `main`, so a change to it targets `main` (that is not a backport) and takes
+  effect once the pipeline is reinstalled. Omarchy software, recipes and patches go forward
+  first, on the newest channel's branch, and are backported to Quattro only when asked or
+  needed.
 - **Findings outside the task** (a flaky test, an unrelated bug) are filed with `bin/issue`,
   not fixed in passing.
 - **Never** publish from a branch, publish a build made outside the chroot, or put
