@@ -13,7 +13,7 @@ pkgname='omarchy'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.101
+pkgrel=1.102
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH (omarchy-asus build)'
 # The payload is architecture-independent, but the dependency set is not: the
 # boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
@@ -111,7 +111,7 @@ else
         0013-Restore-the-drop-in-when-the-initramfs-rebuild-fails.patch
         0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch
         0015-Read-every-udev-record-before-asking-the-webcams.patch
-        0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch
+        0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch
         0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch
         0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch
         0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch
@@ -136,7 +136,7 @@ else
               '3b56da054d6126dfa64715c45c85124f927e564a74b38aa7d6cd29e4762fd6c6'
               '821965b3d2b7caece587b1869731c3cfdca0e2af31ddb19fba2e64eb93397da5'
               'bb543747b1867af60999478b7bf80b24375c2dd76108afc9ec6019f81911c317'
-              '2616dbab39c53b1f3c54a967ba246156c0c3ef77536c6ec8bafb78bc7743615f'
+              '51d8e98bab10d3e83a269bbd568991b02295864cd27591b49968f96261a594d8'
               'c94044fa6a7fc732190d1df89c5da5f9613701fdd7ca959c3602ae6957398115'
               '19208fceac618fc74eefacbd1e551d945e89719b276142bcd68ad8d862106473'
               '6f9aeb0ec6b52d995ea1afd6755ff66cd8bec8ae930dedfbde0268d501514b39'
@@ -168,7 +168,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0013-Restore-the-drop-in-when-the-initramfs-rebuild-fails.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0015-Read-every-udev-record-before-asking-the-webcams.patch"
-  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch"
