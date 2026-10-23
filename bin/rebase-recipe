@@ -2,7 +2,7 @@
 """Rebuild a recipe from a new upstream release plus our declared delta.
 
 Usage: bin/rebase-recipe RECIPE --version UPSTREAM_VER --out DIR
-                         [--verify] [--report FILE] [--force]
+                         [--channel quattro|rc] [--verify] [--report FILE] [--force]
 
 RECIPE is a directory name under recipes/. UPSTREAM_VER is the version upstream
 ships (pkgver-pkgrel, from bin/check-upstream). DIR receives the rebased recipe
@@ -39,7 +39,10 @@ The delta: recipes/<name>/DELTA, one directive per line (# comments):
                                    flag (never drop) when the new release tag, e.g.
                                    v{pkgver}, contains <commit> (GitHub compare API)
 
-Always: pkgrel = upstream pkgrel + ".1". Checksums: every source file upstream also
+Always: pkgrel = upstream pkgrel + ".1", or + ".101" with --channel rc (default: the
+channel in OMARCHY_ASUS_CHANNEL, else quattro). The RC channel's subreleases start at
+.101 so a package rebuilt for it never shares a filename with Quattro's build of the same
+upstream release (Quattro keeps .1 to .99; a bump adds 1 on either). Checksums: every source file upstream also
 has gets upstream's checksum (so a changed upstream download fails verification
 instead of being re-hashed); our local files are hashed here. No download is needed
 for this step.
@@ -78,6 +81,8 @@ ARCH_GIT_URL = os.environ.get("OMARCHY_ASUS_ARCH_GIT_URL",
 OMARCHY_PKGS_GIT_URL = os.environ.get("OMARCHY_ASUS_OMARCHY_PKGS_GIT_URL", "https://github.com/omacom/omarchy-pkgs.git")
 SUM_ALGOS = ("cksums", "md5sums", "sha1sums", "sha224sums", "sha256sums", "sha384sums", "sha512sums", "b2sums")
 DEFAULT_SKIP = (".git", ".SRCINFO", ".nvchecker.toml")
+# The first subrelease per release channel (bin/env.sh): filenames never repeat across channels.
+CHANNEL_SUBREL = {"quattro": 1, "rc": 101}
 BUILD_JUNK = ("src", "pkg")
 SANDBOX = os.path.join(os.path.dirname(os.path.realpath(__file__)), "recipe-sandbox")
 # makepkg refuses to start unless BUILDDIR, PKGDEST and SRCDEST are writable (default: the
@@ -519,9 +524,14 @@ def main():
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--report")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--channel", choices=sorted(CHANNEL_SUBREL),
+                    default=os.environ.get("OMARCHY_ASUS_CHANNEL") or "quattro")
     args = ap.parse_args()
+    if args.channel not in CHANNEL_SUBREL:  # a bad OMARCHY_ASUS_CHANNEL default
+        ap.error(f"unknown release channel {args.channel!r} ({', '.join(sorted(CHANNEL_SUBREL))})")
 
-    report = {"recipe": args.recipe, "upstream_version": args.version, "ok": False, "flags": []}
+    report = {"recipe": args.recipe, "upstream_version": args.version, "channel": args.channel,
+              "ok": False, "flags": []}
     code = 0
     try:
         rdir = os.path.join(WORKSPACE, "recipes", args.recipe)
@@ -530,7 +540,7 @@ def main():
         old_ver, old_rel = get_var(old_lines, "pkgver"), get_var(old_lines, "pkgrel")
         report["from"] = f"{old_ver}-{old_rel}"
         epoch, up_ver, up_rel = split_version(args.version)
-        new_rel = f"{up_rel}.1"
+        new_rel = f"{up_rel}.{CHANNEL_SUBREL[args.channel]}"
         report["to"] = f"{epoch + ':' if epoch else ''}{up_ver}-{new_rel}"
         report["pkgver_changed"] = up_ver != old_ver
 

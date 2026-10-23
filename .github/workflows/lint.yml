@@ -63,6 +63,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: makepkg --printsrcinfo and namcap (archlinux container)
+      # --channel: the target branch's release channel, whose pkgrel range applies (#201)
+      - name: makepkg --printsrcinfo, namcap and the channel's pkgrel range (archlinux container)
+        env:
+          BRANCH: ${{ github.base_ref || github.ref_name }}
         run: |
-          docker run --rm -v "$PWD:/repo:ro" ghcr.io/archlinux/archlinux:base-devel /repo/ci/check-recipes
+          set -euo pipefail
+          channel=$(ci/channel "$BRANCH")
+          docker run --rm -v "$PWD:/repo:ro" ghcr.io/archlinux/archlinux:base-devel \
+            /repo/ci/check-recipes --channel "$channel"
