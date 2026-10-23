@@ -80,6 +80,12 @@ case $CHANNEL in
         return 1
         ;;
 esac
+# The packager every chroot build is signed off as: bin/mkchroot writes it into each channel's
+# chroot (#201: the RC chroot had none, so its packages said "Unknown Packager").
+PACKAGER_FILE=etc/makepkg.conf.d/packager.conf
+PACKAGER_LINE='PACKAGER="omarchy-asus"'
+# chroot_packager_ok <chroot root>: 0 when its makepkg config carries $PACKAGER_LINE
+chroot_packager_ok() { grep -qxF "$PACKAGER_LINE" "$1/$PACKAGER_FILE" 2>/dev/null; }
 STAGE_DIR=$(channel_stage_dir "$CHANNEL")     # chroot build output before signing
 export OMARCHY_ASUS_CHANNEL=$CHANNEL          # children (bin/publish's helpers) see the same channel
 

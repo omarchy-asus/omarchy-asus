@@ -5,7 +5,8 @@
 # Usage: bin/mkchroot [--channel quattro|rc]
 # quattro: $CHROOT from build/pacman.conf (Omarchy stable); rc: its own chroot from
 # build/pacman-rc.conf (Omarchy rc). An update rewrites the chroot's pacman.conf from the
-# channel's, so the two never share package sources.
+# channel's, so the two never share package sources. Both get the same packager
+# ($PACKAGER_LINE, bin/env.sh).
 set -euo pipefail
 # --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
 if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
@@ -17,4 +18,9 @@ if [[ -d $CHROOT/root ]]; then
 else
     "${as_root[@]}" mkdir -p "$CHROOT"
     "${as_root[@]}" mkarchroot -C "$PACMAN_CONF" -M "$MAKEPKG_CONF" "$CHROOT/root" base-devel
+fi
+if ! chroot_packager_ok "$CHROOT/root"; then
+    "${as_root[@]}" mkdir -p "$CHROOT/root/${PACKAGER_FILE%/*}"
+    printf '%s\n' "$PACKAGER_LINE" | "${as_root[@]}" tee "$CHROOT/root/$PACKAGER_FILE" >/dev/null
+    "${as_root[@]}" chmod 644 "$CHROOT/root/$PACKAGER_FILE"
 fi

@@ -2,11 +2,15 @@
 # bin/build-pkg's optional distcc mount, offline: makechrootpkg is a stub that
 # records its arguments, SUDO=env stands in for sudo, the data dir is a temp dir.
 #   1. no key dir: makechrootpkg gets exactly the arguments it got before distcc
-#   2. key in the default dir: that dir is bound read-only (-D) at /distcc
+#   2. key and this repo's build/distcc-ssh as ssh in the default dir: bound read-only (-D) at /distcc
 #   3. DISTCC_KEY_DIR= (empty): no mount even though the default key exists
 #   4. DISTCC_KEY_DIR=<dir>: that dir is bound; extra args still come after it
 #   5. a key dir without id_ed25519: no mount
 #   6. a relative DISTCC_KEY_DIR: bound by its absolute path (build-pkg cds first)
+# and the cases that keep distcc off (#163):
+#   6a. the key dir's ssh is not build/distcc-ssh (an older wrapper, or none): no mount
+#   6b. a recipe with a NO_DISTCC file: no mount
+#   6c. a chroot without ssh, which the wrapper needs to reach the helper (#221): no mount
 # and the release channel's chroot (#167; OMARCHY_ASUS_CHROOT is a temp dir):
 #   7. --channel rc against a chroot made from build/pacman.conf (Omarchy stable): refused
 #   8. --channel rc against a chroot made from build/pacman-rc.conf: built, staged in stage-rc only
@@ -26,7 +30,8 @@ printf '%s\n' "\$@" >"$S/args"
 STUB
 chmod +x "$S/bin/makechrootpkg"
 C=$S/chroot
-mkdir -p "$C/root/etc"
+mkdir -p "$C/root/etc" "$C/root/usr/bin"
+: >"$C/root/usr/bin/ssh"; chmod +x "$C/root/usr/bin/ssh"
 cp "$W/build/pacman.conf" "$C/root/etc/pacman.conf"
 export PATH=$S/bin:$PATH SUDO=env OMARCHY_ASUS_DATA=$S/data OMARCHY_ASUS_CHROOT=$C
 unset DISTCC_KEY_DIR OMARCHY_ASUS_CHANNEL OMARCHY_ASUS_WORKSPACE
@@ -46,6 +51,7 @@ expect "$(ls "$S/data/stage")" demo-1-1-x86_64.pkg.tar.zst "package staged"
 
 echo "== 2. key in the default dir"
 mkdir -p "$S/data/distcc"; : >"$S/data/distcc/id_ed25519"
+cp "$W/build/distcc-ssh" "$S/data/distcc/ssh"
 build; expect "$(args)" "-c -u -r $C -D $S/data/distcc:/distcc" "default dir bound read-only"
 grep -q 'distcc: key dir mounted read-only at /distcc' "$S/out"; expect $? 0 "says so"
 
@@ -53,7 +59,7 @@ echo "== 3. DISTCC_KEY_DIR= disables it"
 DISTCC_KEY_DIR='' build; expect "$(args)" "-c -u -r $C" "stock arguments"
 
 echo "== 4. DISTCC_KEY_DIR=<dir>, extra args"
-mkdir -p "$S/other"; : >"$S/other/id_ed25519"
+mkdir -p "$S/other"; : >"$S/other/id_ed25519"; cp "$W/build/distcc-ssh" "$S/other/ssh"
 DISTCC_KEY_DIR=$S/other build -- --nocheck
 expect "$(args)" "-c -u -r $C -D $S/other:/distcc -- --nocheck" "override dir bound, extra args last"
 
@@ -63,6 +69,24 @@ DISTCC_KEY_DIR=$S/empty build; expect "$(args)" "-c -u -r $C" "stock arguments"
 
 echo "== 6. relative DISTCC_KEY_DIR"
 (cd "$S" && DISTCC_KEY_DIR=other build); expect "$(args)" "-c -u -r $C -D $S/other:/distcc" "bound by absolute path"
+
+echo "== 6a. key dir with an older ssh wrapper, or none"
+printf '#!/bin/sh\nexec ssh -i /distcc/id_ed25519 "$@"\n' >"$S/other/ssh"
+DISTCC_KEY_DIR=$S/other build; expect "$(args)" "-c -u -r $C" "older wrapper: stock arguments"
+grep -q 'distcc: off: .* is not build/distcc-ssh' "$S/out"; expect $? 0 "says why"
+rm "$S/other/ssh"
+DISTCC_KEY_DIR=$S/other build; expect "$(args)" "-c -u -r $C" "no wrapper: stock arguments"
+
+echo "== 6b. a NO_DISTCC recipe"
+printf 'precompiled headers\n' >"$S/recipes/demo/NO_DISTCC"
+build; expect "$(args)" "-c -u -r $C" "stock arguments"
+grep -q 'distcc: off for demo (recipes/demo/NO_DISTCC)' "$S/out"; expect $? 0 "says why"
+rm "$S/recipes/demo/NO_DISTCC"
+
+echo "== 6c. a chroot without ssh"
+rm "$C/root/usr/bin/ssh"
+build; expect "$(args)" "-c -u -r $C" "stock arguments"
+grep -q 'distcc: off: .* has no /usr/bin/ssh' "$S/out"; expect $? 0 "says why"
 
 refused() {  # refused <what> [build-pkg args]: build-pkg exits non-zero before makechrootpkg runs
     local what=$1; shift

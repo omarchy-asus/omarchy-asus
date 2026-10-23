@@ -1,0 +1,30 @@
+#!/bin/bash
+# The distcc key's forced command on the helper (docs/distcc.md):
+#   command="/usr/local/bin/distccd-gate --nice 19 --jobs <n> --log-level warning"
+# The build chroot's wrapper (build/distcc-ssh) sends its gcc and binutils versions as
+# omarchy-asus-toolchain=gcc-<ver>,binutils-<ver> in the command it asks for. This runs
+# "distccd --inetd <its own arguments>" only when the helper's versions (pacman -Q) are
+# exactly those; otherwise, or when nothing was sent (an older wrapper), it refuses and
+# distcc compiles that job on the build host. Objects from another compiler fail to build
+# or, worse, build differently (#163: GCC 16 vs the helper's gcc broke hyprland).
+# The requested command is only searched for that word, never run.
+set -uo pipefail
+read -ra words <<<"${SSH_ORIGINAL_COMMAND:-}"
+want=
+for w in "${words[@]}"; do
+    [[ $w == omarchy-asus-toolchain=* ]] && want=${w#omarchy-asus-toolchain=}
+done
+have=$(pacman -Q gcc binutils 2>/dev/null | tr ' ' '-' | paste -sd, -)
+if [[ -z $want ]]; then
+    echo "distccd-gate: refused: the build chroot sent no toolchain versions (install build/distcc-ssh as its DISTCC_SSH wrapper)" >&2
+    exit 1
+fi
+if [[ $have != gcc-*,binutils-* ]]; then
+    echo "distccd-gate: refused: can't read this helper's gcc and binutils versions" >&2
+    exit 1
+fi
+if [[ $want != "$have" ]]; then
+    echo "distccd-gate: refused: build chroot has $want, this helper has $have" >&2
+    exit 1
+fi
+exec distccd --inetd "$@"
