@@ -2,7 +2,8 @@
 # bin/auto-update keeps the RC branch's tooling main's (ci/tooling-sync, #201). The real
 # bin/auto-update, bin/env.sh and bin/auto-update-state make full --channel rc runs as this
 # user against a local origin (main and next/omarchy-4.5), a stub check-upstream (nothing to
-# do), a stub PII scan and a fake gh that logs what it is asked:
+# do), a stub PII scan and a fake gh that logs what it is asked (and, like gh on a branch
+# without required checks, fails "pr checks --required"):
 #   1. the RC branch matches main: no PR
 #   2. main's tooling moves: one "Tooling from main <sha>" PR with main's tooling and the
 #      RC recipes as they were
@@ -43,7 +44,10 @@ echo "\$*" >>"$T/gh.log"
 case "\$1 \$2" in
     "pr list") cat "$T/pr" 2>/dev/null; true ;;
     "pr create") echo https://github.test/pr/1 | tee "$T/pr" ;;
-    "pr checks") exit "\$(cat "$T/checks-rc" 2>/dev/null || echo 8)" ;;
+    "pr checks")
+        # as gh does on a branch without required checks (the RC branch)
+        [[ " \$* " == *" --required "* ]] && { echo "no required checks reported" >&2; exit 1; }
+        exit "\$(cat "$T/checks-rc" 2>/dev/null || echo 8)" ;;
     "pr close"|"pr merge") rm -f "$T/pr" ;;
     "auth git-credential") exit 1 ;;
 esac

@@ -51,7 +51,7 @@
 #   tooling:   a channel built from another branch than the pipeline's (RC) must carry the
 #              pipeline branch's tooling (ci/tooling-sync): when it doesn't, the run opens or
 #              refreshes the PR "Tooling from main <sha>" against its branch, and a later run
-#              merges it once every required check passed. Recipes are untouched.
+#              merges it once all its checks passed. Recipes are untouched.
 #   Before the first push or GitHub write, every commit (messages, author/committer, paths,
 #   patch text) and the PR title/body pass the PII scan and a local-path check; a hit
 #   pushes nothing and records class=pii.
@@ -1009,13 +1009,15 @@ tooling_sync_pr() {  # tooling_sync_pr: $BASE_BRANCH's tooling must be $PIPELINE
     if [[ $mode != full ]]; then
         note dry "tooling: would open or refresh $branch (\"$title\") against $BASE_BRANCH"; return 0
     fi
-    # Already proposed for this main and on top of the current base: merge it once the
-    # required checks pass (pending: a later run; failing: it waits for a look).
+    # Already proposed for this main and on top of the current base: merge it once all its
+    # checks pass (pending: a later run; failing: it waits for a look).
     if [[ -n $pr ]] && ugit fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" &&
         [[ $(ugit log -1 --format=%s "origin/$branch") == "$title" ]] &&
         ugit merge-base --is-ancestor "origin/$BASE_BRANCH" "origin/$branch"; then
         head=$(ugit rev-parse "origin/$branch")
-        as_user gh pr checks "$pr" -R "$GH_REPO" --required >/dev/null 2>&1 || rc=$?
+        # every check, not --required: the RC branch has no required checks, and gh then
+        # exits 1 ("no required checks reported") as for a failure
+        as_user gh pr checks "$pr" -R "$GH_REPO" >/dev/null 2>&1 || rc=$?
         case $rc in
             0)
                 if as_user gh pr merge "$pr" -R "$GH_REPO" --squash --delete-branch --admin --match-head-commit "$head" >/dev/null; then
@@ -1032,7 +1034,7 @@ tooling_sync_pr() {  # tooling_sync_pr: $BASE_BRANCH's tooling must be $PIPELINE
     fi
     body="The tooling of \`$BASE_BRANCH\` is \`$PIPELINE_BRANCH\`'s, which both channels run: \`ci/tooling-sync apply origin/$PIPELINE_BRANCH\` at $main_sha. Recipes, the G16 kit, its test and \`bin/g16-check\` stay this branch's.
 
-Automated by \`bin/auto-update\` (run $run_id): it merges this PR once every required check passes."
+Automated by \`bin/auto-update\` (run $run_id): it merges this PR once all its checks pass."
     ugit checkout --quiet -B "$branch" "origin/$BASE_BRANCH"
     as_user "$sync" apply "origin/$PIPELINE_BRANCH" >/dev/null
     ugit commit --quiet -m "$title" -m "Automated by bin/auto-update: ci/tooling-sync apply origin/$PIPELINE_BRANCH."
