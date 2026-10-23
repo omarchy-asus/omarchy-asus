@@ -24,6 +24,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The RC branch's tooling must be main's, which both channels run (ci/tooling-sync):
+      # a PR to it that changes bin/, ci/, the workflows... fails here, saying what to do.
+      - name: Tooling matches main (RC branch only)
+        env:
+          BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ $(ci/channel "$BRANCH") != rc ]]; then echo "$BRANCH is not the RC branch: nothing to compare"; exit 0; fi
+          git fetch --no-tags --depth=1 origin main
+          ci/tooling-sync check FETCH_HEAD
       - name: shellcheck, bash -n, py_compile
         run: |
           shellcheck --version | sed -n 2p
