@@ -4,9 +4,13 @@
 #   bash -n and `makepkg --printsrcinfo` must succeed (fatal)
 #   namcap findings are reported as warnings (not fatal), except the known
 #   false positives in NAMCAP_IGNORE, which are printed but not annotated
-# Usage: ci/check-recipes
+#   with --channel, pkgrel must be in that release channel's range (ci/check-pkgrel,
+#   fatal): the RC channel builds .101 and up, Quattro .1 to .99
+# Usage: ci/check-recipes [--channel quattro|rc]   (the target branch's: ci/channel <branch>)
 set -uo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+channel=
+if [[ ${1:-} == --channel ]]; then channel=${2:?--channel needs quattro or rc}; fi
 
 # Known namcap false positives: "<recipe>|<message>", where <message> is the
 # exact text namcap prints after "W: " or "E: ". Exact, so a changed finding
@@ -43,6 +47,10 @@ for pkgbuild in "$repo"/recipes/*/PKGBUILD; do
         echo "::error file=$rel/PKGBUILD::makepkg --printsrcinfo failed"; fail=1
     else
         grep -E '^(pkgbase|	pkgver|	pkgrel|pkgname) = ' "$work/.SRCINFO"
+        pkgrel=$(awk '$1 == "pkgrel" {print $3; exit}' "$work/.SRCINFO")
+        if [[ -n $channel ]] && ! why=$("$repo/ci/check-pkgrel" "$channel" "$pkgrel"); then
+            echo "::error file=$rel/PKGBUILD,title=pkgrel::$channel channel: $why"; fail=1
+        fi
     fi
     out=$(runuser -u builder -- env -C "$work" namcap PKGBUILD 2>&1)
     if [[ -n $out ]]; then
