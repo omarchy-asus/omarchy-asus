@@ -26,10 +26,10 @@ b2=$(bash -c 'source "$1"; printf "%s\n" "${b2sums[@]}"' _ "$R/PKGBUILD")
 sha=$(bash -c 'source "$1"; printf "%s\n" "${sha256sums[@]}"' _ "$R/PKGBUILD")
 i=$(grep -n -x "${P##*/}" <<<"$src" | cut -d: -f1)
 prev=$(sed -n "$((i - 1))p" <<<"$src")
-[[ -n $i && $prev == 0807-* ]] && ok "0809 follows 0807 in source=()" || bad "0809 position: after '$prev'"
+[[ -n $i && $prev == 0808-* ]] && ok "0809 follows 0808 in source=()" || bad "0809 position: after '$prev'"
 [[ $(sed -n "${i}p" <<<"$b2") == "$(b2sum "$P" | cut -d' ' -f1)" ]] && ok "b2sum matches" || bad "b2sum mismatch"
 [[ $(sed -n "${i}p" <<<"$sha") == "$(sha256sum "$P" | cut -d' ' -f1)" ]] && ok "sha256sum matches" || bad "sha256sum mismatch"
-grep -q '^patch 0809-platform-x86-amd-pmf-hwmon-apu-dgpu-socket-power.patch after 0807-\*' "$R/DELTA" &&
+grep -q '^patch 0809-platform-x86-amd-pmf-hwmon-apu-dgpu-socket-power.patch after 0808-\*' "$R/DELTA" &&
   ok "DELTA re-applies 0809" || bad "DELTA has no 0809 line"
 
 # ------------------------------------------------------------ 2. shape
