@@ -19,10 +19,10 @@
 #      stub sandbox: a first publish that lacks a recipe's package is withheld (no release
 #      made, nothing uploaded, the gap in channel-rc/release-withheld); a complete set (a held
 #      recipe does not count) goes up; a db that adds a build while another recipe is behind
-#      is withheld; a db that adds nothing to the release's goes up; a db that withdraws a
-#      package the release serves goes up even with a build in it, and the next build is
-#      withheld while the withdrawn recipe is missing; a recipe whose makepkg --printsrcinfo
-#      fails is a gap, unless it is held; no recipes/ at all refuses (exit 1)
+#      is withheld; a db that adds nothing to the release's goes up; a recipe whose makepkg
+#      --printsrcinfo fails is a gap, unless it is held; a db that drops a package whose recipe
+#      still exists is withheld like any other gap, and goes up once the recipe is removed;
+#      no recipes/ at all refuses (exit 1)
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -370,12 +370,13 @@ cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc r
 
 recipe foo 1-3 foo
 mkdb "$RR" foo-1-3
-out=$(run_k); expect $? 0 "a db that withdraws bar is not held back, though it carries foo 1-3"
-grep -q 'withdraws bar bar-extra' <<<"$out"; expect $? 0 "a warning names the withdrawal"
+rm -f "$S/calls"
+out=$(run_k); expect $? 3 "a db that drops bar while recipes/bar exists is withheld, foo 1-3 with it"
+uploaded; expect $? 1 "nothing uploaded"
+grep -qx 'not-built bar 1-2 (recipes/bar)' "$KD/release-withheld" 2>/dev/null; expect $? 0 "release-withheld names bar"
+rm -rf "$S/ws/recipes/bar"
+out=$(run_k); expect $? 0 "once recipes/bar is removed (upstream replaced it), foo 1-3 without bar goes up"
 cmp -s "$KR/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expect $? 0 "the rc release serves it"
-recipe foo 1-4 foo
-mkdb "$RR" foo-1-4
-out=$(run_k); expect $? 3 "then foo 1-4, while bar is still withdrawn, is withheld"
 
 mv "$S/ws/recipes" "$S/ws/recipes.away"
 rm -f "$S/calls"

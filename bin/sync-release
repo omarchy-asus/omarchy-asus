@@ -39,9 +39,8 @@
 #   every recipe on the channel's branch that is not held, at the recipe's version
 #   (bin/check-upstream --complete against $WORKSPACE/recipes, offline). An incomplete db
 #   still goes up when it adds nothing to the release's db (every package it names is there
-#   at the same version), or when it withdraws a package the release serves: a withdrawal
-#   lets the stock build flow through where our stale copy would block or break updates, so
-#   it is never held back, and the builds in the same db go up with it (a warning says so).
+#   at the same version). A withdrawal (a removed recipe) waits for the whole set like any
+#   other change: bin/auto-update never withdraws our build for a failure (#201).
 #   Any other incomplete db (a first publish, a build published while another recipe is
 #   still unbuilt or behind) is withheld: nothing is uploaded, the gaps are printed and
 #   written to $CHANNEL_DATA/release-withheld, $CHANNEL_DATA/sync-pending stays, and the
@@ -382,7 +381,7 @@ check_publisher() {  # check_publisher [first]: exits 1 on a foreign db
 }
 check_publisher first
 
-# --- whole channel or nothing: a complete set, nothing new, or a withdrawal ---
+# --- whole channel or nothing: a complete set, or nothing new ---
 withheld=$CHANNEL_DATA/release-withheld crc=0
 OMARCHY_ASUS_WORKSPACE=$WORKSPACE "$(dirname "$0")/check-upstream" --complete "$up/$REPO_NAME.db" >"$up/.gaps" 2>"$up/.gaps.err" || crc=$?
 if ((crc == 10)); then
@@ -400,17 +399,9 @@ if ((crc == 10)); then
         fi
         rm -f "$remote_dl/$REPO_NAME.db"
     fi
-    # package names of "<name>-<pkgver>-<pkgrel>/" entries
-    names() { sed 's,/$,,; s,-[^-]*-[^-]*$,,' "$1" | sort -u; }
     added=$(comm -23 "$up/.local-entries" "$up/.release-entries")
-    names "$up/.local-entries" >"$up/.local-names"
-    names "$up/.release-entries" >"$up/.release-names"
-    dropped=$(comm -23 "$up/.release-names" "$up/.local-names")
     if [[ -z $added ]]; then
         echo "the $CHANNEL channel is not complete, but this db adds nothing to the release's: syncing"
-    elif [[ -n $dropped ]]; then
-        echo "warning: the $CHANNEL channel is not complete, but this db withdraws $(paste -sd' ' <<<"$dropped")" \
-            "from release $GH_TAG: a withdrawal is never held back, so it goes up with the builds it carries" >&2
     else
         echo "withheld: the $CHANNEL channel is not complete, and its db adds to what release $GH_TAG serves;" \
             "nothing uploaded, the release keeps its set. Not served at the recipe version (recipes from $WORKSPACE):" >&2

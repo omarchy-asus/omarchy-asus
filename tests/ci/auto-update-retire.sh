@@ -2,8 +2,8 @@
 # Removing a recipe retires its published packages (#82): bin/auto-update-state plans
 # "unpublish" for a repo db entry with no recipe, whatever its check-upstream status,
 # unless KEEP_PUBLISHED names it, or check-upstream reports inventory_errors (or the
-# check JSON has no inventory_errors key) and the entry is not stale. Offline: a
-# hand-made check-upstream JSON.
+# check JSON has no inventory_errors key), stale or not: the recipe may only be unreadable,
+# and we never put stock over our patch (#201). Offline: a hand-made check-upstream JSON.
 #
 # CI runs this with plain bash on ubuntu-24.04, which has no vercmp. bin/auto-update-state
 # only calls vercmp when it compares two versions (VerKey.__lt__): every case here has a
@@ -50,10 +50,10 @@ expect "removed recipe, inventory errors: attention" \
     "$(plan_action "$(row gone current 1.0-1.1 '"1.0-1"')" '"inventory_errors":["somerecipe"]')" attention
 expect "removed recipe, no inventory_errors key: attention" \
     "$(plan_action "$(row gone current 1.0-1.1 '"1.0-1"')" '')" attention
-expect "removed recipe, stale, inventory errors: still unpublish (stale pins block updates)" \
-    "$(plan_action "$(row gone rebuild-needed 1.0-1.1 '"2.0-1"')" '"inventory_errors":["somerecipe"]')" unpublish
-expect "removed recipe, stale, no inventory_errors key: still unpublish" \
-    "$(plan_action "$(row gone upstream-older 1.0-1.1 '"0.9-1"')" '')" unpublish
+expect "removed recipe, stale, inventory errors: attention (kept)" \
+    "$(plan_action "$(row gone rebuild-needed 1.0-1.1 '"2.0-1"')" '"inventory_errors":["somerecipe"]')" attention
+expect "removed recipe, stale, no inventory_errors key: attention (kept)" \
+    "$(plan_action "$(row gone upstream-older 1.0-1.1 '"0.9-1"')" '')" attention
 expect "recipe still present, current: current" \
     "$(plan_action "$(recipe_row a current 1.0-1.1)")" current
 exit $fails

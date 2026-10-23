@@ -13,26 +13,28 @@ comes from its `[omarchy]`.
 When upstream moves past a package's base version, the service has two outcomes:
 
 - It rebases our patches onto the new upstream recipe. The PR goes through a chroot build and a verified AI review (`bin/ai-review`), plus the Claude fixer. `bin/ai-review` is this pipeline's own review gate, because no clud reviewer runs in the unattended loop. It merges and publishes only when every gate passes.
-- Otherwise, it removes the package from the repo so the stock build flows through.
+- Otherwise, our last build stays published and the run says what needs fixing. It never falls back to stock.
 
 Nothing here is installed by default. `bin/install-auto-update` prints what it would do. It changes the system only with `--apply`, run through sudo by the user.
 
-## Why a stale package must go immediately
+## Never stock over our patch (#201)
 
-pacman takes the **first** repo that has a package name, whatever the version. `[omarchy-asus]` is listed first, so an old build here never yields to a newer stock one:
+On our channels you always get our patched build. A package leaves the repo only when its
+recipe is removed, because Omarchy or the original upstream has folded our fix in.
 
-- `nvidia-open-dkms` pins `nvidia-utils=<ver>`. When the mirror moves `nvidia-utils`, `omarchy update` fails on the dependency.
-- A kernel or Hyprland build that is left behind silently holds the system back.
+pacman takes the **first** repo that has a package name, whatever the version. `[omarchy-asus]`
+is listed first, so while we publish a package, a newer stock one never replaces it. Every
+failure path therefore keeps our last good build and records why:
 
-So every failure path ends in `bin/unpublish` + `bin/sync-release` in the same run. This includes:
+- patches that no longer apply, or an inconsistent upstream recipe
+- a failed build, reverse-dependency check, merge or publish
+- a PR that waits for a human, or a release-cohort partner not built yet
+- an upstream db past its grace period
 
-- patches that no longer apply
-- a failed build
-- an inconsistent upstream recipe
-- a PR that waits for a human
-- an exact-version dependency (`depends=(x=ver)`) that no longer matches
-
-Falling back to stock is always better than a stale pin.
+Users stay one upstream bump behind until the fix lands, never without our patch. The cost:
+when a package of ours pins an exact version (`nvidia-open-dkms` needs `nvidia-utils=<ver>`)
+and the mirror moves that dependency, `omarchy update` fails on the dependency until the
+recipe is rebased. The plan raises it as attention (`dep-mismatch`) on the same run.
 
 ## What one run does
 
@@ -48,7 +50,7 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
                        (Arch packaging git tag, or the omarchy-pkgs commit with that pkgver/pkgrel)
                        + recipes/<r>/DELTA, pkgrel = upstream + ".1", checksums from upstream's
                        sums (our files hashed locally), makepkg --nobuild = all patches apply
-                       ├─ fails: unpublish + sync, status, exit 1
+                       ├─ fails: our last build stays, status, exit 1
                        └─ ok: branch auto-update/<r>, push, PR (ready for review)
                              → chroot build of the PR head (root: makechrootpkg only)
                              → bin/ai-review on the head: codex finds, a second model verifies (review + `ai-review` status)
@@ -58,12 +60,12 @@ timer (daily, 04:30 + up to 2h, Persistent, skipped on battery)
                                (a fix outside NOTES.md is never auto-merged: a human merges)
                              → one PR comment with the results
                              → gates all pass: squash-merge (--admin: bypasses only the approval ruleset), bin/publish, bin/sync-release
-                               otherwise: PR stays open (next run resumes it), stale package
-                               unpublished meanwhile
+                               otherwise: PR stays open (next run resumes it), our last
+                               build stays published meanwhile
             build      recipe on the branch not in the repo db: build, publish, sync
-            unpublish  stale and nothing to rebuild from, or in the repo db with no recipe
-                       (recipe removed; KEEP_PUBLISHED exempts); while check-upstream reports
-                       inventory_errors (a recipe that failed to parse), only if it is stale
+            unpublish  in the repo db with no recipe (recipe removed: upstream replaced our
+                       patch; KEEP_PUBLISHED exempts); never while check-upstream reports
+                       inventory_errors (a recipe that failed to parse may still exist)
             attention  listed in the status, no automatic change (e.g. upstream merged one of
                        our patches' PRs: flagged, never dropped automatically)
 ```
@@ -101,7 +103,7 @@ What differs for RC:
   needs it, the RC run checks that `/var/lib/omarchy-asus/chroot-rc` exists and uses the servers
   of the installed `build/pacman-rc.conf`; otherwise it runs `bin/mkchroot --channel rc` (as
   root, from the root-owned copy). If that fails, the run records a `(chroot)` failure, the
-  RC builds fail and their stale packages are withdrawn, as for any failed build. The Quattro
+  RC builds fail and our last builds stay published, as for any failed build. The Quattro
   chroot is still made by hand (Install, below).
 - **The first RC publish creates the `rc-x86_64` release** (`bin/sync-release --channel rc`, with
   `build/release-notes-rc.md`). Until then, every recipe on `next/omarchy-4.5` is "not built"
@@ -128,7 +130,7 @@ otherwise `dkms build` is re-run for an exit code and make.log is logged.
 - **A kernel build** compiles every listed DKMS package against its new headers. It uses
   our published package, or the staged build of the DKMS recipe. If the module doesn't
   build, the kernel counts as a failed build: it is not published, the PR stays open, and
-  the stale kernel is unpublished.
+  our last kernel stays published.
 - **A DKMS build** (`nvidia-open-dkms`) compiles against the headers of the kernel we
   publish, or stock `linux-omarchy-headers` from `[omarchy]` if we carry none. If that
   fails, it is not published.
@@ -137,7 +139,7 @@ otherwise `dkms build` is re-run for an exit code and make.log is logged.
   kernel, the published headers file or the stock headers version for a DKMS package. The
   stage markers record a key of that counterpart; when it changed, the checks run again
   before the build counts as good or is published.
-- **Withdrawing our kernel** (a failed build or rebase, a stale pin) would hand users the
+- **Withdrawing our kernel** (its recipe removed) would hand users the
   stock kernel with the DKMS package we still publish. So the retained DKMS package is first
   compiled against the stock headers; if that fails (or its file is missing), it is
   withdrawn together with the kernel.
@@ -148,9 +150,9 @@ otherwise `dkms build` is re-run for an exit code and make.log is logged.
 When a fetch fails it uses the cached copy and marks the run **degraded**: the run notes
 which dbs are stale and how old they are, and records an attention item. A cached copy
 older than `DB_MAX_STALE` seconds (default 86400, set in `auto-update.conf`) is
-**expired**: nothing is built or rebased on it, and every published package that overrides
-upstream is withdrawn so the stock build flows through (local-only recipes, with a
-`LOCAL_ONLY` file, are not affected). Once the db is reachable again, the usual plan builds them back.
+**expired**: nothing that overrides upstream is built or rebased on it, and what we publish
+stays (local-only recipes, with a `LOCAL_ONLY` file, are not affected). Once the db is
+reachable again, the usual plan resumes.
 
 `bin/auto-update --plan` lists the checks a pending build would trigger. To run one by
 hand (it uses sudo for the chroot steps):
@@ -168,8 +170,8 @@ reverse-dependency checks writes `$STAGE_DIR/.staged-<r>` with the recipe tree i
 A member is published only once every partner is staged from its recipe on the base branch
 (the marker matches that tree) at the same version; then all members go out in one
 `bin/publish` call, which refuses an incomplete cohort on its own. Until then the built
-member is held back: nothing is published, the stale pair is unpublished so the stock
-packages flow through, and the recipe is recorded as attention, not failed. The next run
+member is held back: nothing is published, the pair we published before stays, and the
+recipe is recorded as attention, not failed. The next run
 publishes it from the staged build, without rebuilding, once the partner is built.
 A partner already in the repo db at exactly the same version also counts: the built member
 publishes next to it, the same rule `bin/publish` and `bin/release-cohort check-publish`
@@ -186,14 +188,14 @@ a lone member never publishes next to a partner at another version.
 - The agent's fix commits changed nothing in the recipe but `NOTES.md`. Its edit limits are only
   a prompt, so anything else (PKGBUILD, sources, checksums, install files) waits for a human.
 - There are no flags. A flag is raised when upstream merged or closed one of the PRs our patches carry (`UPSTREAM_PRS`). It is also raised when a release contains a fix that a `fixed-upstream` line names. And it is raised when an exact-version dependency of the recipe as proposed (`depends=(x=ver)`) no longer matches upstream; this is re-checked on every run.
-- `bin/ai-review` reviewed the head, and no finding is blocking: a P0/P1 finding blocks unless the verifier refuted it, and an unverified one (verifier failed) blocks too. This is the review gate for this pipeline (#77). If `codex` is missing or not logged in, or the review errors or times out, `bin/ai-review` exits non-zero and the head counts as not reviewed ("ai-review has not reviewed the head"). The PR stays open for a human, the stale package is unpublished meanwhile, and the next run retries. `AI_REVIEW=off` removes this gate entirely, so PRs then merge on the build and recipe gates alone. Use it only for testing, together with `MERGE_MODE=pr`.
+- `bin/ai-review` reviewed the head, and no finding is blocking: a P0/P1 finding blocks unless the verifier refuted it, and an unverified one (verifier failed) blocks too. This is the review gate for this pipeline (#77). If `codex` is missing or not logged in, or the review errors or times out, `bin/ai-review` exits non-zero and the head counts as not reviewed ("ai-review has not reviewed the head"). The PR stays open for a human, our last build stays published meanwhile, and the next run retries. `AI_REVIEW=off` removes this gate entirely, so PRs then merge on the build and recipe gates alone. Use it only for testing, together with `MERGE_MODE=pr`.
 - Optionally (`REQUIRE_AGENT_APPROVAL=yes`) the Claude fixer's own verdict approves too. It is not the review: the fixer is the author of its fix commits, and the review gate is the Codex `ai-review` above.
 - `MERGE_MODE=auto`.
 
 After the merge, the run publishes only if `recipes/<r>` in the merge commit is the tree it built.
 `--match-head-commit` pins the PR head, not the base. If the base branch changed the same recipe
 during the build and review, the squash merge holds a recipe that was never built. Then nothing
-is published, the stale package is unpublished, and the next run builds the base branch's recipe.
+is published, our last build stays, and the next run builds the base branch's recipe.
 
 Every PR comment and thread reply goes through the same denylist scan as the release
 (`bin/sync-release --pii-scan-text`). If the body has a hit, the denylist is missing or the scan
@@ -220,7 +222,7 @@ Rebasing each recipe onto its current base reproduces the committed recipe. The 
   - the log is written by a user-side `tee`
   - the lock is a user-side `flock`, held through a pipe to root's process
 - **Recipe code runs in `bin/recipe-sandbox`.** A PKGBUILD is shell code from upstream, and `makepkg --printsrcinfo`, `--nobuild` and `--verifysource` run it. The sandbox is bubblewrap with a cleared environment, no `/home`, `/root` or `/run`, no `GH_TOKEN`, and only the recipe, work and srcdest dirs bound; it has network only for source downloads. `GH_TOKEN_FILE` and `OPENROUTER_API_KEY_FILE` are hidden too when they live elsewhere. So a compromised upstream recipe cannot read the signing key, the gh or codex logins or the token file. It needs the `bubblewrap` package and unprivileged user namespaces; without `bwrap` the run refuses to start.
-- **Nothing is pushed before the PII scan.** Every commit (messages, author and committer, file paths, patch text) and the PR title and body go through the release's denylist scan and a check for local absolute paths (home dir, data dir, bot clone) before the first push or GitHub write. A hit in the rebase commit pushes nothing, opens no PR, unpublishes the stale package and records `class=pii`; a hit in a fixer commit drops that commit, the gates run on the unchanged head, and the PR waits for a human (the fixer's answers to the review may rest on the dropped edits).
+- **Nothing is pushed before the PII scan.** Every commit (messages, author and committer, file paths, patch text) and the PR title and body go through the release's denylist scan and a check for local absolute paths (home dir, data dir, bot clone) before the first push or GitHub write. A hit in the rebase commit pushes nothing, opens no PR, keeps our last build published and records `class=pii`; a hit in a fixer commit drops that commit, the gates run on the unchanged head, and the PR waits for a human (the fixer's answers to the review may rest on the dropped edits).
 - **The chroot build is the same as the interactive one.** `makechrootpkg -c -u -r /var/lib/omarchy-asus/chroot -U BUILD_USER` runs in the user's work dir with `SUDO_USER=BUILD_USER`, which is what `sudo makechrootpkg` sees today. makepkg runs as the user (or as the chroot's builduser), never as root. The recipe is copied and its PGP-verified sources are fetched as the user.
 - **GitHub access is scoped.** Under systemd, gh cannot reach the desktop keyring. Use a fine-grained token limited to omarchy-asus/omarchy-asus (Contents, Pull requests and Commit statuses read/write; `bin/ai-review` posts the `ai-review` status) in a `0600` file owned by `BUILD_USER`, and set `GH_TOKEN_FILE`. Git pushes use it through `gh auth git-credential`.
 - **The agent cannot act on its own.** It runs as the user with read tools plus `Edit`/`Write` limited to `recipes/<r>/**`. It has no shell and no web access. Its verdict is one gate among several. The mechanical gates (our patches untouched, fuzz 0, build of the exact head) cannot be overridden by a review, so a prompt injection in upstream content can at most block a merge.
@@ -242,7 +244,7 @@ Throttling is the main external constraint, so every GitHub call is bounded:
 - **One publication at a time.** `bin/publish`, `bin/unpublish` and `bin/sync-release` share one lock (`publish.lock` in the data dir). A second caller waits up to `PUBLISH_LOCK_WAIT` seconds, then exits 75 without touching the repo or the release.
 - **Publish and unpublish are staged.** They build the new repo next to the current one and check every signature before they swap it in. If a step fails, the previous repo stays in place as it was.
 - **A journal marks a release that may lag.** `bin/publish` and `bin/unpublish` write `sync-pending` in the data dir before they change the local repo. `bin/sync-release` removes it only after it has checked that the release matches the local repo. While it exists, `auto-update` syncs first on its next run and reports the run as failed (as attention when the release was withheld, below), so a crash between publish and sync is retried.
-- **Whole channel or nothing (#201).** Before anything goes up, `bin/sync-release` checks the local db against the recipes of the channel's branch (`bin/check-upstream --complete`, offline): every package of every recipe that isn't held must be in it at the recipe's version. If one is missing or behind, the db goes up only when it adds nothing to the db the release already serves, or when it withdraws a package the release serves: a withdrawal lets the stock build flow through where our stale copy would block or break updates, so it is never held back, and any build in the same db goes up with it (with a warning). Otherwise nothing is uploaded, the release keeps the set it had, and the sync exits 3 with the gaps listed (and written to `release-withheld` in the channel's data dir). `auto-update` takes that as attention, not a failure: it records a `(release)` entry with the gaps, and the run's later syncs put the whole set up once the last recipe is published. A recipe whose `makepkg --printsrcinfo` fails counts as a gap, unless it is held. So a channel never gets a new build next to a recipe that is still unbuilt or behind (on the first RC publish, or when a bump is published while another recipe is still building), except in the sync that carries a withdrawal.
+- **Whole channel or nothing (#201).** Before anything goes up, `bin/sync-release` checks the local db against the recipes of the channel's branch (`bin/check-upstream --complete`, offline): every package of every recipe that isn't held must be in it at the recipe's version. If one is missing or behind, the db goes up only when it adds nothing to the db the release already serves. Otherwise nothing is uploaded, the release keeps the set it had, and the sync exits 3 with the gaps listed (and written to `release-withheld` in the channel's data dir). `auto-update` takes that as attention, not a failure: it records a `(release)` entry with the gaps, and the run's later syncs put the whole set up once the last recipe is published. A recipe whose `makepkg --printsrcinfo` fails counts as a gap, unless it is held. So a channel never gets a new build next to a recipe that is still unbuilt or behind (on the first RC publish, or when a bump is published while another recipe is still building). A withdrawal (a removed recipe) waits for the whole set like any other change.
 - **One publisher per release.** `bin/sync-release` records the release db it last uploaded in `release-db.sha256` in the data dir (each db is recorded before its upload, so a sync that dies mid-upload is not taken for another publisher). If the release's db has changed since then (another host or a manual upload), it refuses to sync. After checking the release by hand, `SYNC_ADOPT_REMOTE=1 bin/sync-release` adopts it. `auto-update` never sets this.
 - **Each release channel has its own state.** The data-dir files above (`sync-pending`, `release-db.sha256`, `prune-candidates`) are the Quattro channel's; `--channel rc` keeps its own in `channel-rc/` of the data dir, next to its own local repo (`repo/rc-x86_64`) and stage dir (`stage-rc`). The publication lock is shared. `auto-update` serves both channels, one run each ("Release channels" above), and the RC run's own status, journals and pending removals are in `channel-rc/` too.
 - **The PII scan fails closed.** An archive that the scan cannot read counts as a hit, and nothing is uploaded.

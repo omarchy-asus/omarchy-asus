@@ -101,9 +101,9 @@ Signing key: [`keys/omarchy-asus.asc`](keys/omarchy-asus.asc), fingerprint
 
 The repo is listed first in `pacman.conf`, so our build wins even when upstream ships a newer
 one. That means we have to keep up. A daily check compares each package with upstream and
-rebuilds it when upstream moves. If a patch stops applying or the build fails, our package is
-withdrawn from the repo and the stock build flows through again. You never get stuck on a
-stale pin. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
+rebuilds it when upstream moves. If a patch stops applying or the build fails, our last build
+stays published and the run flags what needs fixing: on our channels you always get our patched
+version, never the stock one, until upstream folds the fix in and we drop the recipe. That check is `bin/auto-update`, run by a daily systemd timer: it opens a rebase
 pull request, builds it in a clean chroot as CI, and merges and publishes only after
 a verified AI review (`bin/ai-review`) and an agent review pass. The timer runs daily on the build host.
 
@@ -184,7 +184,8 @@ Where our fixes are headed:
   refuses to publish a release cohort member from `build/cohorts.conf` (e.g. omarchy and
   omarchy-settings) without its partner at the same version, in the same call or already in
   the db.
-- `bin/unpublish PKG`: drops a package so the stock build flows through; it withdraws the
+- `bin/unpublish PKG`: drops a package so the stock build flows through (once its recipe is
+  removed: `bin/auto-update` withdraws nothing else); it withdraws the
   whole release cohort (the partners the db holds) with it.
 - `bin/release-cohort members|check-publish|check-recipes`: the release cohorts in
   `build/cohorts.conf`. `members` lists a package's partners, `check-publish` is the gate
@@ -195,8 +196,8 @@ Where our fixes are headed:
 - `bin/sync-release`: mirrors the local repo to the `x86_64` GitHub release (`--channel rc`: the
   RC repo to the `rc-x86_64` release). It uploads nothing (exit 3) while a recipe of the
   checkout it runs from, held ones aside, is missing from the repo or behind, unless the db adds
-  nothing to the release's or withdraws a package from it (systemd/README.md, "Whole channel or
-  nothing"), so run it from a checkout of the channel's branch.
+  nothing to the release's (systemd/README.md, "Whole channel or nothing"), so run it from a
+  checkout of the channel's branch.
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:
   `python3 -I tests/test_issue.py`.
@@ -207,7 +208,7 @@ Where our fixes are headed:
 - `bin/revdep-check`: builds a DKMS package against a kernel headers package in a throwaway
   chroot; `build/revdeps.conf` lists the pairs checked before publishing either one.
 - `bin/auto-update`: the daily pipeline (rebase PR, chroot build, reviews, merge and
-  publish, or unpublish on failure).
+  publish; on failure our last build stays published).
 - `bin/install-auto-update` and `systemd/`: the service and timer units and their installer;
   [systemd/README.md](systemd/README.md) covers the design and the privilege model.
 - `recipes/omarchy-asus-g16-apply/`: the user-run command for the G16 fixes no package can
