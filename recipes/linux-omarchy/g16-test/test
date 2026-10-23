@@ -21,6 +21,9 @@
 #              and no USB4 DP tunnel was torn down as "not active" this boot. With --dock
 #              it walks you through #205's dock scenario (unplug the dock with the lid
 #              closed, replug it while suspended, resume) and checks the monitors return
+#   0809       amd_pmf hwmon: APU/dGPU/socket power read as numbers; reading leaves a
+#              runtime-suspended RTX asleep; awake (nvidia-smi), dGPU within 25%
+#              of NVML. Anything it can't establish is a FAIL, so the HOLD stays
 #   suspend    one s2idle cycle (RTC wakes it after 30 s): at least 10 s of s0i3
 #   hibernate  only with --hibernate: hibernate, power-off, resume (needs a button press)
 #   9900       Zen 5c soft park knobs all at their defaults (off)
@@ -475,6 +478,80 @@ check_dock() {
   fi
 }
 
+# 0809 (#238): amd_pmf's hwmon. Read only power*_input under it, never `sensors`
+# (which reads the RTX's own hwmon too, and that wakes it).
+pmf_hwmon_dir() {
+  local h
+  for h in /sys/class/hwmon/hwmon*; do
+    [[ $(cat "$h/name" 2>/dev/null) == amd_pmf ]] && { printf '%s\n' "$h"; return 0; }
+  done
+  return 1
+}
+pmf_watts() { # hwmon dir -> "APU x W, dGPU y W, socket z W"
+  local i out=''
+  for i in 1 2 3; do
+    out+="$(cat "$1/power${i}_label" 2>/dev/null) $(awk '{printf "%.2f", $1 / 1e6}' "$1/power${i}_input" 2>/dev/null) W, "
+  done
+  printf '%s\n' "${out%, }"
+}
+
+check_pmf_hwmon() {
+  local h d rs0 rs1 st=PASS det=() i v w smi pm nm sp
+  pmf_fail() { st=FAIL; det+=("$1"); }
+  h=$(pmf_hwmon_dir) || { result FAIL 0809 "no amd_pmf hwmon device (is amd_pmf loaded? amd_pmf.hwmon_support=0 on the command line?)"; return; }
+  d=$(dgpu_dir) || { result FAIL 0809 "no NVIDIA GPU on the PCI bus"; return; }
+  # Asleep: all three channels read as numbers, and reading leaves the RTX in D3cold.
+  for ((i = 0; i < 60; i++)); do
+    rs0=$(cat "$d/power/runtime_status" 2>/dev/null)
+    [[ $rs0 == suspended ]] && break
+    sleep 1
+  done
+  det+=("hwmon: ${h##*/}" "RTX runtime_status before reading: $rs0 (waited ${i}s)")
+  for i in 1 2 3; do
+    v=$(cat "$h/power${i}_input" 2>/dev/null)
+    [[ $v =~ ^[0-9]+$ ]] || pmf_fail "power${i}_input ($(cat "$h/power${i}_label" 2>/dev/null)) did not read as a number: '${v}'"
+  done
+  w=$(pmf_watts "$h")
+  v=$(cat "$h/power2_input" 2>/dev/null)
+  sleep 2
+  rs1=$(cat "$d/power/runtime_status" 2>/dev/null)
+  det+=("asleep read: $w" "RTX runtime_status 2 s after reading: $rs1")
+  if [[ $rs0 == suspended ]]; then
+    [[ $rs1 == suspended ]] || pmf_fail "reading amd_pmf's hwmon woke the RTX"
+    [[ $v =~ ^[0-9]+$ ]] && ((v > 500000)) && pmf_fail "dGPU reads over 0.5 W while the RTX is in D3cold"
+  else
+    pmf_fail "the RTX never runtime-suspended in 60 s, so the asleep reading is untested"
+  fi
+  # Awake: nvidia-smi wakes the RTX on purpose; amd_pmf's dGPU figure must track NVML.
+  if have nvidia-smi; then
+    smi=$(mktemp)
+    timeout 15 nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits -lms 1000 >"$smi" 2>/dev/null &
+    sp=$!
+    sleep 4
+    pm=0
+    for ((i = 0; i < 8; i++)); do
+      v=$(cat "$h/power2_input" 2>/dev/null)
+      if [[ $v =~ ^[0-9]+$ ]]; then pm=$((pm + v)); else pmf_fail "awake read $((i + 1)) of power2_input failed: '${v}'"; fi
+      sleep 1
+    done
+    wait "$sp"
+    pm=$(awk -v s="$pm" 'BEGIN {printf "%.2f", s / 8 / 1e6}')
+    nm=$(awk '$1 + 0 > 0 {s += $1; c++} END {if (c) printf "%.2f", s / c}' "$smi")
+    rm -f "$smi"
+    det+=("awake: amd_pmf dGPU mean $pm W, NVML power.draw mean ${nm:-?} W")
+    if [[ -z $nm ]]; then
+      pmf_fail "nvidia-smi gave no power.draw, so the awake reading is unchecked"
+    elif awk -v p="$pm" 'BEGIN {exit !(p < 0.5)}'; then
+      pmf_fail "dgpu_power is not populated: about 0 W with the RTX awake (NVML $nm W)"
+    elif ! awk -v p="$pm" -v n="$nm" 'BEGIN {d = p - n; if (d < 0) d = -d; exit !(d / n <= 0.25)}'; then
+      pmf_fail "dGPU reading is more than 25% from NVML"
+    fi
+  else
+    pmf_fail "no nvidia-smi: the awake reading is unchecked"
+  fi
+  result "$st" 0809 "amd_pmf hwmon: $w; RTX $rs0 -> $rs1; awake dGPU ${pm:-?} W vs NVML ${nm:-?} W" "${det[@]}"
+}
+
 check_hfi() {
   local d st=PASS det=() hits
   grep -q 'amd_hfi.ranking' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amd_hfi.ranking"); }
@@ -605,6 +682,7 @@ run_checks() {
     check_gpio16
     check_dock
     check_hfi
+    check_pmf_hwmon
     check_nvidia
     check_suspend
     check_hibernate

@@ -1,0 +1,321 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <omarchy-asus@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 23:35:23 -0400
+Subject: [PATCH] platform/x86/amd/pmf: expose APU, dGPU and socket power via
+ hwmon
+
+PMFW's metrics table carries the APU, dGPU and socket power, but the driver
+only uses them internally (Auto Mode, CnQF, Smart PC inputs), and only when
+one of those features runs. The values come from platform telemetry, so
+they are the one way to read a hybrid laptop's dGPU power without touching
+the dGPU's PCI device: NVML and nvidia-smi resume a runtime-suspended dGPU
+from D3cold to answer.
+
+Register a read-only hwmon device "amd_pmf" with power1 (APU), power2
+(dGPU) and power3 (socket) on the SoCs whose metrics table layout the
+driver knows (Rembrandt, Phoenix, family 1Ah models 20h and 60h), when no
+other feature polls the table (Smart PC, Auto Mode and CnQF program the
+table address once and rely on it). A read asks PMFW for a fresh table at
+most once a second, into a buffer of its own that is allocated before the
+hwmon device is registered (so it is freed only after unregistration); the
+table address is set before every transfer and a failure to set it stops
+the read. Nothing is sent to PMFW until a value is read.
+amd_pmf.hwmon_support=0 turns the device off.
+---
+ drivers/platform/x86/amd/pmf/Makefile |   1 +
+ drivers/platform/x86/amd/pmf/core.c   |   1 +
+ drivers/platform/x86/amd/pmf/hwmon.c  | 229 ++++++++++++++++++++++++++
+ drivers/platform/x86/amd/pmf/pmf.h    |  14 ++
+ 4 files changed, 245 insertions(+)
+ create mode 100644 drivers/platform/x86/amd/pmf/hwmon.c
+
+diff --git a/drivers/platform/x86/amd/pmf/Makefile b/drivers/platform/x86/amd/pmf/Makefile
+index 8cac511..9bc80f2 100644
+--- a/drivers/platform/x86/amd/pmf/Makefile
++++ b/drivers/platform/x86/amd/pmf/Makefile
+@@ -8,5 +8,6 @@ obj-$(CONFIG_AMD_PMF)		+= amd-pmf.o
+ amd-pmf-y 			:= core.o acpi.o sps.o \
+ 				   auto-mode.o cnqf.o \
+ 				   tee-if.o spc.o metrics.o
++amd-pmf-y			+= hwmon.o
+ # Build util.c only when AMD_PMF_UTIL_SUPPORT is enabled
+ amd-pmf-$(CONFIG_AMD_PMF_UTIL_SUPPORT) += util.o
+diff --git a/drivers/platform/x86/amd/pmf/core.c b/drivers/platform/x86/amd/pmf/core.c
+index b4eae65..e3c3766 100644
+--- a/drivers/platform/x86/amd/pmf/core.c
++++ b/drivers/platform/x86/amd/pmf/core.c
+@@ -555,6 +555,7 @@ static int amd_pmf_probe(struct platform_device *pdev)
+ 		amd_pmf_notify_sbios_heartbeat_event_v2(dev, ON_LOAD);
+ 
+ 	amd_pmf_set_device(dev->dev);
++	amd_pmf_hwmon_init(dev);
+ 
+ 	err = amd_pmf_cdev_register(dev);
+ 	if (err)
+diff --git a/drivers/platform/x86/amd/pmf/hwmon.c b/drivers/platform/x86/amd/pmf/hwmon.c
+new file mode 100644
+index 0000000..08c6e7b
+--- /dev/null
++++ b/drivers/platform/x86/amd/pmf/hwmon.c
+@@ -0,0 +1,229 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * AMD Platform Management Framework Driver - hwmon power readings
++ *
++ * Exposes the APU, dGPU and socket power that PMFW reports in its metrics
++ * table, read-only. The dGPU figure comes from platform telemetry, so reading
++ * it never touches the dGPU's PCI device and never resumes a runtime-suspended
++ * dGPU.
++ */
++
++#include <linux/cleanup.h>
++#include <linux/hwmon.h>
++#include <linux/jiffies.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/string.h>
++#include <linux/units.h>
++#include <linux/wordpart.h>
++#include <asm/io.h>
++
++#include "pmf.h"
++
++#if IS_REACHABLE(CONFIG_HWMON)
++
++static bool hwmon_support = true;
++module_param(hwmon_support, bool, 0444);
++MODULE_PARM_DESC(hwmon_support, "Expose APU/dGPU/socket power as a hwmon device (default = true)");
++
++enum amd_pmf_hwmon_ch {
++	AMD_PMF_HWMON_APU,
++	AMD_PMF_HWMON_DGPU,
++	AMD_PMF_HWMON_SOCKET,
++	AMD_PMF_HWMON_MAX,
++};
++
++static const char * const amd_pmf_hwmon_labels[AMD_PMF_HWMON_MAX] = {
++	[AMD_PMF_HWMON_APU]	= "APU",
++	[AMD_PMF_HWMON_DGPU]	= "dGPU",
++	[AMD_PMF_HWMON_SOCKET]	= "socket",
++};
++
++static bool amd_pmf_hwmon_supported(struct amd_pmf_dev *dev)
++{
++	switch (dev->cpu_id) {
++	case AMD_CPU_ID_PS:
++	case AMD_CPU_ID_RMB:
++	case PCI_DEVICE_ID_AMD_1AH_M20H_ROOT:
++	case PCI_DEVICE_ID_AMD_1AH_M60H_ROOT:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static size_t amd_pmf_hwmon_table_size(struct amd_pmf_dev *dev)
++{
++	switch (dev->cpu_id) {
++	case PCI_DEVICE_ID_AMD_1AH_M20H_ROOT:
++	case PCI_DEVICE_ID_AMD_1AH_M60H_ROOT:
++		return sizeof(struct smu_pmf_metrics_v2);
++	default:
++		return sizeof(struct smu_pmf_metrics);
++	}
++}
++
++/* Point PMFW's table transfers at @buf; unlike amd_pmf_set_dram_addr(), fail on error. */
++static int amd_pmf_hwmon_point(struct amd_pmf_dev *dev, void *buf)
++{
++	phys_addr_t phys = virt_to_phys(buf);
++	int ret;
++
++	ret = amd_pmf_send_cmd(dev, SET_DRAM_ADDR_HIGH, SET_CMD, upper_32_bits(phys), NULL);
++	if (ret)
++		return ret;
++
++	return amd_pmf_send_cmd(dev, SET_DRAM_ADDR_LOW, SET_CMD, lower_32_bits(phys), NULL);
++}
++
++/*
++ * Ask PMFW for a fresh metrics table, at most once a second (PMFW's own
++ * sampling period). The table goes into hwmon's own buffer, allocated before
++ * the hwmon device is registered, so it outlives every read. PMFW's table
++ * address is set before every transfer and the transfer is skipped if that
++ * fails. Registration is refused when Auto Mode, CnQF or Smart PC poll the
++ * table, since they program the address once and rely on it staying put; the
++ * only other user (amd_pmf_get_npu_data()) sets it before each transfer too.
++ */
++static int amd_pmf_hwmon_update(struct amd_pmf_dev *dev)
++{
++	struct smu_pmf_metrics_v2 v2 = {};
++	struct smu_pmf_metrics v1 = {};
++	int ret;
++
++	guard(mutex)(&dev->metrics_mutex);
++
++	if (dev->hwmon_valid && time_before(jiffies, dev->hwmon_updated + HZ))
++		return 0;
++
++	guard(mutex)(&dev->update_mutex);
++
++	memset(dev->hwmon_buf, 0, dev->hwmon_buf_size);
++	ret = amd_pmf_hwmon_point(dev, dev->hwmon_buf);
++	if (ret)
++		return ret;
++
++	ret = amd_pmf_send_cmd(dev, SET_TRANSFER_TABLE, SET_CMD, METRICS_TABLE_ID, NULL);
++	if (ret)
++		return ret;
++
++	switch (dev->cpu_id) {
++	case PCI_DEVICE_ID_AMD_1AH_M20H_ROOT:
++	case PCI_DEVICE_ID_AMD_1AH_M60H_ROOT:
++		memcpy(&v2, dev->hwmon_buf, sizeof(v2));
++		dev->hwmon_mw[AMD_PMF_HWMON_APU] = v2.apu_power;
++		dev->hwmon_mw[AMD_PMF_HWMON_DGPU] = v2.dgpu_power;
++		dev->hwmon_mw[AMD_PMF_HWMON_SOCKET] = v2.socket_power;
++		break;
++	default:
++		memcpy(&v1, dev->hwmon_buf, sizeof(v1));
++		dev->hwmon_mw[AMD_PMF_HWMON_APU] = v1.apu_power;
++		dev->hwmon_mw[AMD_PMF_HWMON_DGPU] = v1.dgpu_power;
++		dev->hwmon_mw[AMD_PMF_HWMON_SOCKET] = v1.apu_power + v1.dgpu_power;
++		break;
++	}
++
++	dev->hwmon_updated = jiffies;
++	dev->hwmon_valid = true;
++
++	return 0;
++}
++
++static umode_t amd_pmf_hwmon_is_visible(const void *data, enum hwmon_sensor_types type,
++					u32 attr, int channel)
++{
++	if (type != hwmon_power || channel >= AMD_PMF_HWMON_MAX)
++		return 0;
++
++	switch (attr) {
++	case hwmon_power_input:
++	case hwmon_power_label:
++		return 0444;
++	default:
++		return 0;
++	}
++}
++
++static int amd_pmf_hwmon_read(struct device *hwdev, enum hwmon_sensor_types type,
++			      u32 attr, int channel, long *val)
++{
++	struct amd_pmf_dev *dev = dev_get_drvdata(hwdev);
++	int ret;
++
++	if (type != hwmon_power || attr != hwmon_power_input || channel >= AMD_PMF_HWMON_MAX)
++		return -EOPNOTSUPP;
++
++	ret = amd_pmf_hwmon_update(dev);
++	if (ret)
++		return ret;
++
++	/* PMFW reports mW, hwmon wants uW */
++	*val = (long)dev->hwmon_mw[channel] * MICROWATT_PER_MILLIWATT;
++
++	return 0;
++}
++
++static int amd_pmf_hwmon_read_string(struct device *hwdev, enum hwmon_sensor_types type,
++				     u32 attr, int channel, const char **str)
++{
++	if (type != hwmon_power || attr != hwmon_power_label || channel >= AMD_PMF_HWMON_MAX)
++		return -EOPNOTSUPP;
++
++	*str = amd_pmf_hwmon_labels[channel];
++
++	return 0;
++}
++
++static const struct hwmon_ops amd_pmf_hwmon_ops = {
++	.is_visible = amd_pmf_hwmon_is_visible,
++	.read = amd_pmf_hwmon_read,
++	.read_string = amd_pmf_hwmon_read_string,
++};
++
++static const struct hwmon_channel_info * const amd_pmf_hwmon_info[] = {
++	HWMON_CHANNEL_INFO(power,
++			   HWMON_P_INPUT | HWMON_P_LABEL,
++			   HWMON_P_INPUT | HWMON_P_LABEL,
++			   HWMON_P_INPUT | HWMON_P_LABEL),
++	NULL
++};
++
++static const struct hwmon_chip_info amd_pmf_hwmon_chip_info = {
++	.ops = &amd_pmf_hwmon_ops,
++	.info = amd_pmf_hwmon_info,
++};
++
++void amd_pmf_hwmon_init(struct amd_pmf_dev *dev)
++{
++	struct device *hwdev;
++
++	if (!hwmon_support || !amd_pmf_hwmon_supported(dev))
++		return;
++
++	/*
++	 * Smart PC, Auto Mode and CnQF (when its init succeeded) poll the table
++	 * into dev->buf and expect its address to stay set.
++	 */
++	if (dev->smart_pc_enabled || dev->cnqf_supported ||
++	    is_apmf_func_supported(dev, APMF_FUNC_AUTO_MODE)) {
++		dev_dbg(dev->dev, "metrics table polled by another feature, no hwmon\n");
++		return;
++	}
++
++	/* devm: allocated before registration, so freed only after unregistration */
++	dev->hwmon_buf_size = amd_pmf_hwmon_table_size(dev);
++	dev->hwmon_buf = devm_kzalloc(dev->dev, dev->hwmon_buf_size, GFP_KERNEL);
++	if (!dev->hwmon_buf)
++		return;
++
++	hwdev = devm_hwmon_device_register_with_info(dev->dev, "amd_pmf", dev,
++						     &amd_pmf_hwmon_chip_info, NULL);
++	if (IS_ERR(hwdev)) {
++		dev_warn(dev->dev, "failed to register hwmon device: %ld\n", PTR_ERR(hwdev));
++		return;
++	}
++
++	dev->hwmon_dev = hwdev;
++}
++
++#endif /* IS_REACHABLE(CONFIG_HWMON) */
+diff --git a/drivers/platform/x86/amd/pmf/pmf.h b/drivers/platform/x86/amd/pmf/pmf.h
+index 07ec006..8b8f156 100644
+--- a/drivers/platform/x86/amd/pmf/pmf.h
++++ b/drivers/platform/x86/amd/pmf/pmf.h
+@@ -676,6 +676,13 @@ struct amd_pmf_dev {
+ 	struct amd_pmf_arg_data dram_addr;
+ 	struct amd_pmf_metrics_v3 prev_metrics;	/* Previous metrics for delta calculation */
+ 	bool npu_metrics_have_prev;
++	/* hwmon power readings, guarded by metrics_mutex */
++	struct device *hwmon_dev;
++	void *hwmon_buf;			/* hwmon's own metrics table buffer */
++	size_t hwmon_buf_size;
++	unsigned long hwmon_updated;
++	u32 hwmon_mw[3];			/* APU, dGPU, socket, in mW */
++	bool hwmon_valid;
+ };
+ 
+ struct apmf_sps_prop_granular_v2 {
+@@ -1145,6 +1152,13 @@ int amd_pmf_tee_init(struct amd_pmf_dev *dev, const uuid_t *uuid);
+ void amd_pmf_tee_deinit(struct amd_pmf_dev *dev);
+ int amd_pmf_start_policy_engine(struct amd_pmf_dev *dev);
+ 
++/* hwmon Layer */
++#if IS_REACHABLE(CONFIG_HWMON)
++void amd_pmf_hwmon_init(struct amd_pmf_dev *dev);
++#else
++static inline void amd_pmf_hwmon_init(struct amd_pmf_dev *dev) {}
++#endif
++
+ /* Util Layer */
+ #if IS_ENABLED(CONFIG_AMD_PMF_UTIL_SUPPORT)
+ int amd_pmf_cdev_register(struct amd_pmf_dev *dev);
