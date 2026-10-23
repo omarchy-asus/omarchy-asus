@@ -65,12 +65,13 @@ jobs:
       # fail instead of skipping when a tool is missing.
       - name: Install bsdtar
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libarchive-tools
-      # Offline tests: tests/test_*.py (python unittest, e.g. bin/issue's) and
-      # tests/ci/*.sh (hermetic shell tests opt in by living there).
+      # Offline tests: tests/test_*.py (python unittest, e.g. bin/issue's),
+      # tests/ci/*.sh (hermetic shell tests opt in by living there) and tests/channel/*.sh
+      # (the same, for one channel's recipes: ci/tooling-sync leaves them per branch).
       - name: Offline tests
         run: |
           shopt -s nullglob
-          py=(tests/test_*.py) sh=(tests/ci/*.sh)
+          py=(tests/test_*.py) sh=(tests/ci/*.sh tests/channel/*.sh)
           if (( ${#py[@]} + ${#sh[@]} == 0 )); then echo "no offline tests on this branch"; exit 0; fi
           for t in "${py[@]}"; do echo "==> $t"; python3 -I "$t"; done
           for t in "${sh[@]}"; do echo "==> $t"; bash "$t"; done
