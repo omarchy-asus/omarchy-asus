@@ -48,6 +48,10 @@
 #   release served (RC: also the Quattro release's); the run then records "(release)" attention
 #   with those packages instead of failing, and a later sync puts the db up once they are built
 #   (on the first RC publish: once the kernel, built last, is done).
+#   tooling:   a channel built from another branch than the pipeline's (RC) must carry the
+#              pipeline branch's tooling (ci/tooling-sync): when it doesn't, the run opens or
+#              refreshes the PR "Tooling from main <sha>" against its branch, and a later run
+#              merges it once every required check passed. Recipes are untouched.
 #   Before the first push or GitHub write, every commit (messages, author/committer, paths,
 #   patch text) and the PR title/body pass the PII scan and a local-path check; a hit
 #   pushes nothing and records class=pii.
@@ -984,6 +988,69 @@ EOF
     ugit checkout --quiet "$BASE_BRANCH"
 }
 
+tooling_sync_pr() {  # tooling_sync_pr: $BASE_BRANCH's tooling must be $PIPELINE_BRANCH's (ci/tooling-sync,
+    # #201): open or refresh the "Tooling from main" PR against it, or merge it once green
+    local branch=$BRANCH_PREFIX/tooling-from-main sync=$CLONE/ci/tooling-sync main_sha title body pr head rc=0
+    ugit fetch --quiet origin "+refs/heads/$PIPELINE_BRANCH:refs/remotes/origin/$PIPELINE_BRANCH"
+    main_sha=$(ugit rev-parse --short "origin/$PIPELINE_BRANCH")
+    if ! as_user test -x "$sync"; then
+        note tooling "$BASE_BRANCH has no ci/tooling-sync yet: not compared"; return 0
+    fi
+    pr=$(as_user gh pr list -R "$GH_REPO" --head "$branch" --base "$BASE_BRANCH" --state open --json url --jq '.[0].url // ""')
+    if as_user "$sync" check "origin/$PIPELINE_BRANCH" >/dev/null 2>&1; then
+        note tooling "$BASE_BRANCH's tooling matches $PIPELINE_BRANCH ($main_sha)"
+        if [[ -n $pr && $mode == full ]]; then
+            as_user gh pr close "$pr" -R "$GH_REPO" --delete-branch \
+                --comment "$BASE_BRANCH's tooling already matches $PIPELINE_BRANCH ($main_sha): nothing to sync." >/dev/null || true
+        fi
+        return 0
+    fi
+    title="Tooling from main $main_sha"
+    if [[ $mode != full ]]; then
+        note dry "tooling: would open or refresh $branch (\"$title\") against $BASE_BRANCH"; return 0
+    fi
+    # Already proposed for this main and on top of the current base: merge it once the
+    # required checks pass (pending: a later run; failing: it waits for a look).
+    if [[ -n $pr ]] && ugit fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" &&
+        [[ $(ugit log -1 --format=%s "origin/$branch") == "$title" ]] &&
+        ugit merge-base --is-ancestor "origin/$BASE_BRANCH" "origin/$branch"; then
+        head=$(ugit rev-parse "origin/$branch")
+        as_user gh pr checks "$pr" -R "$GH_REPO" --required >/dev/null 2>&1 || rc=$?
+        case $rc in
+            0)
+                if as_user gh pr merge "$pr" -R "$GH_REPO" --squash --delete-branch --admin --match-head-commit "$head" >/dev/null; then
+                    note tooling "merged $pr ($title)"
+                else
+                    note tooling "could not merge $pr; it stays open"
+                fi
+                ;;
+            8) note tooling "$pr waits for its checks" ;;
+            *) note ATTENTION "tooling: $pr has failing checks; it stays open for a look"
+               record "(tooling)" attention none message="$pr ($title) has failing checks" ;;
+        esac
+        return 0
+    fi
+    body="The tooling of \`$BASE_BRANCH\` is \`$PIPELINE_BRANCH\`'s, which both channels run: \`ci/tooling-sync apply origin/$PIPELINE_BRANCH\` at $main_sha. Recipes, the G16 kit, its test and \`bin/g16-check\` stay this branch's.
+
+Automated by \`bin/auto-update\` (run $run_id): it merges this PR once every required check passes."
+    ugit checkout --quiet -B "$branch" "origin/$BASE_BRANCH"
+    as_user "$sync" apply "origin/$PIPELINE_BRANCH" >/dev/null
+    ugit commit --quiet -m "$title" -m "Automated by bin/auto-update: ci/tooling-sync apply origin/$PIPELINE_BRANCH."
+    if ! outgoing_ok tooling "origin/$BASE_BRANCH" "the tooling sync" "$title" "$body"; then
+        ugit checkout --quiet --force "$BASE_BRANCH"
+        record "(tooling)" failed sync class=pii message="not pushed: the tooling sync failed the PII scan (run $run_id: tooling.outgoing.txt)"
+        failed=1; return 0
+    fi
+    ugit push --quiet --force origin "HEAD:refs/heads/$branch"
+    if [[ -z $pr ]]; then
+        pr=$(as_user gh pr create -R "$GH_REPO" --base "$BASE_BRANCH" --head "$branch" --title "$title" --body "$body" | tail -1)
+    else
+        as_user gh pr edit "$pr" -R "$GH_REPO" --title "$title" --body "$body" >/dev/null || true
+    fi
+    note tooling "PR: $pr ($title)"
+    ugit checkout --quiet --force "$BASE_BRANCH"
+}
+
 handle_build() {  # handle_build <recipe> <repo names> <note>: build the base branch's recipe as is
     local r=$1 in_repo=$2 ver
     ver=$(recipe_version "$CLONE/recipes/$r")
@@ -1250,6 +1317,19 @@ fi
 # reads the local db, so the run decides what is current against a release that matches it.
 if [[ $mode == full ]] && { as_user test -e "$CHANNEL_DATA/sync-pending" || as_user test -e "$AU/sync-pending"; }; then
     sync_now
+fi
+
+# The RC branch's tooling follows the pipeline branch's (ci/tooling-sync); an error here
+# never stops the run.
+if [[ $PIPELINE_BRANCH != "$BASE_BRANCH" && -z $workspace_arg && $mode != plan ]]; then
+    set +e
+    ( set -e; tooling_sync_pr )
+    rc=$?
+    set -e
+    if ((rc != 0)); then
+        note tooling "unexpected error (exit $rc); see $LOG"
+        ugit checkout --quiet --force "$BASE_BRANCH" 2>/dev/null || true
+    fi
 fi
 
 check=$RUN/check.json
