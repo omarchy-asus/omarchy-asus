@@ -1,9 +1,13 @@
 #!/bin/bash
 # Print the release channel a branch builds for, and the chroot pacman.conf of that channel
 # (README.md "Release channels", bin/env.sh): next/omarchy-4.5 is the RC channel, built against
-# Omarchy's rc repos (build/pacman-rc.conf); every other branch is Quattro (build/pacman.conf).
+# Omarchy's rc repos (build/pacman-rc.conf); main is Quattro (build/pacman.conf).
 # CI passes it to ci/find-build and ci/build-recipe, so a PR builds against the package sources
 # of the channel it will be published to.
+# Any other branch is a stacked PR's base: it is on the channel branch it is fewest commits
+# ahead of (GitHub's compare API, as $GITHUB_REPOSITORY; CI's checkouts are shallow), so a PR
+# stacked on an RC fix is linted and built as RC. If that can't be settled it fails rather
+# than guess Quattro.
 # Usage: ci/channel <branch>          prints quattro|rc
 #        ci/channel --conf <channel>  prints the channel's pacman.conf path (repo-relative)
 #        ci/channel --tag <channel>   prints the channel's release tag (x86_64, rc-x86_64)
@@ -24,5 +28,18 @@ case ${1:?usage: ci/channel <branch> | --conf <channel> | --tag <channel>} in
         esac
         ;;
     next/omarchy-4.5) echo rc ;;
-    *) echo quattro ;;
+    main) echo quattro ;;
+    *)
+        repo=${GITHUB_REPOSITORY:-omarchy-asus/omarchy-asus}
+        best='' least=''
+        for b in main next/omarchy-4.5; do
+            if ! n=$(gh api "repos/$repo/compare/$b...$1" --jq .ahead_by 2>/dev/null) ||
+                [[ ! $n =~ ^[0-9]+$ ]]; then
+                echo "ci/channel: can't compare '$1' with $b in $repo (gh api, GH_TOKEN)" >&2
+                exit 1
+            fi
+            if [[ -z $least ]] || ((n < least)); then best=$b least=$n; fi
+        done
+        "$0" "$best"
+        ;;
 esac

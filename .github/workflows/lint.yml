@@ -29,10 +29,12 @@ jobs:
       - name: Tooling matches main (RC branch only)
         env:
           BRANCH: ${{ github.base_ref || github.ref_name }}
+          GH_TOKEN: ${{ github.token }} # ci/channel: a stacked PR's base, by compare API
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if [[ $(ci/channel "$BRANCH") != rc ]]; then echo "$BRANCH is not the RC branch: nothing to compare"; exit 0; fi
+          ch=$(ci/channel "$BRANCH")
+          if [[ $ch != rc ]]; then echo "$BRANCH is not the RC branch: nothing to compare"; exit 0; fi
           git fetch --no-tags --depth=1 origin main
           main=$(git rev-parse FETCH_HEAD)
           # a PR fails only on tooling it changes; the branch lagging behind main is a warning
@@ -84,6 +86,7 @@ jobs:
       - name: makepkg --printsrcinfo, namcap and the channel's pkgrel range (archlinux container)
         env:
           BRANCH: ${{ github.base_ref || github.ref_name }}
+          GH_TOKEN: ${{ github.token }} # ci/channel: a stacked PR's base, by compare API
         run: |
           set -euo pipefail
           channel=$(ci/channel "$BRANCH")
