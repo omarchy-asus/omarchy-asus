@@ -15,7 +15,7 @@
 # Nothing is installed: no perf, no bpftrace. Events: power:cpu_idle, the IRQ-vector
 # entries (local timer, call-function, reschedule, irq_work), irq_handler_entry,
 # ipi_send_cpu/_cpumask, sched_waking, hrtimer_start/_expire_entry,
-# timer_expire_entry, tick_stop, tasklet_entry and the workqueue events. The ring
+# timer_start/_expire_entry, tick_stop, tasklet_entry and the workqueue events. The ring
 # buffer is read only after tracing stops, so reading it adds no wakeups to the
 # window.
 #
@@ -28,7 +28,7 @@
 #   3. IPIs by call site, waker -> wakee pairs, the share crossing L3 domains and
 #      the share that hit an idle CPU;
 #   4. hrtimer and timer-wheel expiries by function and arming task, and each task's
-#      timer slack;
+#      hrtimer slack;
 #   5. tasklet and workqueue functions, with the workqueue and the queuing task;
 #   6. the /proc/interrupts and /proc/softirqs rates over the same window.
 #
@@ -55,8 +55,8 @@ EVENTS=(
   irq/irq_handler_entry
   ipi/ipi_send_cpu ipi/ipi_send_cpumask
   sched/sched_waking
-  timer/hrtimer_start timer/hrtimer_expire_entry timer/timer_expire_entry timer/tick_stop
-  tasklet/tasklet_entry
+  timer/hrtimer_start timer/hrtimer_expire_entry timer/timer_start timer/timer_expire_entry timer/tick_stop
+  irq/tasklet_entry
   workqueue/workqueue_queue_work workqueue/workqueue_execute_start
 )
 
@@ -71,8 +71,9 @@ if [[ ${1:-} == --capture ]]; then
   [[ $uid =~ ^[0-9]+$ ]] || { echo "capture: bad uid" >&2; exit 2; }
   [[ -d $out && ! -L $out ]] || { echo "capture: no output directory" >&2; exit 1; }
   [[ -d $base/instances ]] || { echo "capture: no tracefs at $base" >&2; exit 1; }
-  TR=$base/instances/g16-wakeups
-  mkdir "$TR" 2>/dev/null || [[ -d $TR ]] || { echo "capture: cannot create a tracefs instance" >&2; exit 1; }
+  # An instance of its own: two runs at once never share (or clear) a buffer.
+  TR=$base/instances/g16-wakeups-$$
+  mkdir "$TR" 2>/dev/null || { echo "capture: cannot create the tracefs instance ${TR##*/} (in use?)" >&2; exit 1; }
   w() { printf '%s\n' "$2" 2>/dev/null >"$1"; }
   cleanup() {
     w "$TR/tracing_on" 0
@@ -221,10 +222,11 @@ TASK_TIMER_FNS = {"hrtimer_wakeup", "it_real_fn", "posix_timer_fn", "timerfd_tmr
 
 idle = C.defaultdict(bool)
 pending = {}            # cpu -> True while an idle exit waits for its cause
-ptimer = {}             # cpu -> True after a timer interrupt woke it, until the hrtimer is known
+ptimer = {}             # cpu -> hrtimers expired by the timer interrupt that woke it
 last_ipi = {}           # dst cpu -> (callsite, sender, wakee)
 last_waking = {}        # src cpu -> wakee comm
 hrt_owner = {}          # hrtimer pointer -> arming task
+wheel_owner = {}        # timer-wheel timer pointer -> arming task
 
 exits = C.Counter()                 # (type, cause)
 exits_cpu = C.Counter()
@@ -236,7 +238,7 @@ ipi_cross = ipi_total = ipi_to_idle = 0
 hrt_fn = C.Counter()
 hrt_task = C.Counter()              # (fn, arming task)
 slack = C.defaultdict(list)         # arming task -> slack in us
-wheel = C.Counter()
+wheel = C.Counter()                 # (function, arming task)
 tasklets = C.Counter()
 wq_exec = C.Counter()
 wq_queue = C.Counter()
@@ -246,6 +248,23 @@ t_first = t_last = None
 def resolve(cpu, cause):
     exits[(ctype(cpu), cause)] += 1
     pending.pop(cpu, None)
+
+def resolve_timer(cpu):
+    # Every hrtimer the waking interrupt expired: a tick among them is an idle
+    # tick wherever it came; the exit's cause is the first other timer, if any
+    # (the tick only rode along), else the tick.
+    fired = ptimer.pop(cpu, [])
+    ticks = [f for f in fired if f[0] in TICK_FNS]
+    other = [f for f in fired if f[0] not in TICK_FNS]
+    if ticks:
+        idle_ticks[cpu] += 1
+    if other:
+        f, owner = other[0]
+        resolve(cpu, f"timer: {f}" + (f" armed by {owner}" if owner else ""))
+    elif ticks:
+        resolve(cpu, "timer: tick")
+    else:
+        resolve(cpu, "timer ?")
 
 def ipi_cause(cpu, kind):
     site, sender, wakee = last_ipi.get(cpu, ("?", "?", ""))
@@ -277,10 +296,10 @@ for line in rd("trace").splitlines():
                 pending[c] = True
                 exits_cpu[c] += 1
         else:
+            if c in ptimer:
+                resolve_timer(c)
             if pending.get(c):
                 resolve(c, "none (polling exit, no interrupt)")
-            if ptimer.pop(c, None):
-                resolve(c, "timer ?")
             idle[c] = True
         continue
     if ev == "sched_waking":
@@ -326,16 +345,16 @@ for line in rd("trace").splitlines():
         owner = hrt_owner.get(kv.get("hrtimer"), "?") if f in TASK_TIMER_FNS else ""
         if owner:
             hrt_task[(f, owner)] += 1
-        if ptimer.pop(cpu, None):
-            if f in TICK_FNS:
-                idle_ticks[cpu] += 1
-                resolve(cpu, "timer: tick")
-            else:
-                resolve(cpu, f"timer: {f}" + (f" armed by {owner}" if owner else ""))
+        if cpu in ptimer:
+            ptimer[cpu].append((f, owner))
+        continue
+    if ev == "timer_start":
+        kv = dict(KV.findall(rest))
+        wheel_owner[kv.get("timer")] = who
         continue
     if ev == "timer_expire_entry":
         kv = dict(KV.findall(rest))
-        wheel[fn(kv.get("function"))] += 1
+        wheel[(fn(kv.get("function")), wheel_owner.get(kv.get("timer"), "?"))] += 1
         continue
     if ev == "tick_stop":
         kv = dict(KV.findall(rest))
@@ -355,14 +374,13 @@ for line in rd("trace").splitlines():
         wq_queue[(kv.get("workqueue", "?"), fn(kv.get("function")), who)] += 1
         continue
     # the cause of a pending idle exit
-    if ptimer.get(cpu) and ev != "local_timer_entry":
-        ptimer.pop(cpu)
-        resolve(cpu, "timer ?")
+    if cpu in ptimer:
+        resolve_timer(cpu)
     if not pending.get(cpu):
         continue
     if ev == "local_timer_entry":
         pending.pop(cpu)
-        ptimer[cpu] = True
+        ptimer[cpu] = []
     elif ev in ("call_function_single_entry", "call_function_entry"):
         resolve(cpu, ipi_cause(cpu, "IPI"))
     elif ev == "reschedule_entry":
@@ -372,6 +390,9 @@ for line in rd("trace").splitlines():
         resolve(cpu, f"IRQ {kv.get('name', '?')}")
     elif ev == "irq_work_entry":
         resolve(cpu, "irq_work")
+
+for c in list(ptimer):
+    resolve_timer(c)
 
 span = secs
 if t_first is not None and t_last is not None and t_last > t_first:
@@ -412,7 +433,7 @@ missing = [e for e in ("power/cpu_idle", "ipi/ipi_send_cpu", "timer/hrtimer_expi
            if e not in meta.get("events", "")]
 if missing:
     o.append(f"- missing events: {', '.join(missing)} (those sections are incomplete)")
-if "tasklet/tasklet_entry" not in meta.get("events", ""):
+if "irq/tasklet_entry" not in meta.get("events", ""):
     o.append("- no tasklet events in this kernel: BH workqueue items (run in the TASKLET softirq since 6.9) still show under workqueues")
 o.append("")
 
@@ -466,9 +487,9 @@ if hrt_task:
         sl = slack.get(t)
         o.append(f"| {f}, {t} | {ps(n):.1f} | {st.median(sl):.0f} |" if sl else f"| {f}, {t} | {ps(n):.1f} | - |")
 if wheel:
-    o.append("\n| timer-wheel function | /s |\n|---|---|")
-    for f, n in wheel.most_common(10):
-        o.append(f"| {f} | {ps(n):.1f} |")
+    o.append("\n| timer-wheel function, armed by | /s |\n|---|---|")
+    for (f, t), n in wheel.most_common(15):
+        o.append(f"| {f}, {t} | {ps(n):.1f} |")
 o.append("")
 
 o.append("### Softirq work\n")
