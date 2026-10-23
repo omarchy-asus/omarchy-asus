@@ -562,7 +562,7 @@ class MissingReviewer(unittest.TestCase):
         self.assertIn("claude not found", str(cm.exception))
 
     def test_main_exits_nonzero_without_json(self):
-        """bin/auto-update's ai_review_state needs a non-zero exit and no --json view."""
+        """A failed review exits non-zero and writes no --json view, so no gate reads it as passed."""
         out = os.path.join(tempfile.mkdtemp(dir=TMP), "view.json")
 
         def missing(*a, **k):

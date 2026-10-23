@@ -8,7 +8,7 @@
 # is built.
 #
 # Run as a normal user: makechrootpkg is started through sudo (SUDO="sudo -S"
-# reads the password from stdin). Run as root (bin/auto-update under systemd):
+# reads the password from stdin). Run as root:
 # BUILD_USER must be set; everything except makechrootpkg runs as that user, and
 # makechrootpkg gets SUDO_USER=$BUILD_USER, which is what an interactive
 # `sudo makechrootpkg` sees (files owned by, and makepkg run as, the build user).
@@ -56,7 +56,7 @@ log=$LOG_DIR/$name-$(date +%Y%m%d-%H%M%S).log
 # Recipes with keys/pgp (validpgpkeys): download and verify sources here, with
 # a keyring holding only the recipe's keys, then let the chroot build skip
 # the PGP step (checksums are still checked there). makepkg --verifysource runs
-# the recipe's PKGBUILD (in bin/auto-update, an unreviewed PR head), so it runs
+# the recipe's PKGBUILD (in an unattended rebase, an unreviewed upstream recipe), so it runs
 # in bin/recipe-sandbox: network, the work dir and that keyring only -- no
 # signing key, no gh logins, no home dir, no inherited environment. A sandbox
 # failure (125: bwrap missing) fails the build; there is no unsandboxed fallback.

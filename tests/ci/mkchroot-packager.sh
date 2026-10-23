@@ -4,7 +4,7 @@
 # are stubs, the chroots are temp dirs.
 #   a. a new chroot (quattro, then rc) gets etc/makepkg.conf.d/packager.conf
 #   b. an existing chroot without one (the RC chroot before this fix) gets it on update
-#   c. bin/env.sh chroot_packager_ok tells the two apart (bin/auto-update re-runs mkchroot on it)
+#   c. bin/env.sh chroot_packager_ok tells the two apart
 # Usage: tests/ci/mkchroot-packager.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)

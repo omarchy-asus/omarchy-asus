@@ -1,6 +1,5 @@
 # Shared paths for the omarchy-asus build/publish scripts (sourced).
-# Overrides (bin/auto-update and the systemd unit set these: there the scripts run
-# from a root-owned copy and act for an unprivileged build user):
+# Overrides (for scripts run from another checkout, or as root for an unprivileged build user):
 #   OMARCHY_ASUS_WORKSPACE  checkout whose recipes/ and build/ are used (default: this script's repo)
 #   OMARCHY_ASUS_DATA       state dir (default: ~/.local/share/omarchy-asus of BUILD_USER when
 #                           running as root, else of $HOME)
