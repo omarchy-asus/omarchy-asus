@@ -203,5 +203,9 @@ export CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,local
 ```
 
 `bin/build-pkg` mounts the cache dir read-write at `/ccache` when it exists.
-Create the directory before enabling ccache in the chroot: with ccache on and
-nothing mounted at `/ccache`, compiles fail.
+Otherwise (no cache dir, or `CCACHE_HOST_DIR=` empty to leave it out of one
+build) it mounts `build/no-ccache.conf` read-only at
+`/etc/makepkg.conf.d/zz-no-ccache.conf`, which loads after `ccache.conf` and
+turns `ccache` off in `BUILDENV`, distcc unchanged. Without that, ccache
+couldn't create the missing `/ccache` and every compile would fail with
+`ccache: error: Permission denied` (#237).
