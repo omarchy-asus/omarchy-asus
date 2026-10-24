@@ -18,10 +18,20 @@
 #      is that helper's knob-set and knob-restore, the trace its trace-start and
 #      trace-stop, each call with a reason, and nothing asks for root; with no
 #      session it falls back to pkexec, and G16_ROOT=testd then refuses to start.
+#  10. usb4 and the CACP levels (cacp3, cacp4) apply, cycle DPMS and go back;
+#  11. --design pb12 (#276): the dry run prints the matrix and changes nothing; a
+#      run sets each phase to its row's tweaks, fits every tweak and the dummy
+#      columns, posts each tweak's row and puts everything back; tweaks that switch
+#      the same setting, or more than 11, are refused;
+#  12. pb12 through an open g16-testd session: the CACP level is its knob,
+#      usb4 is skipped, every knob-set has its knob-restore;
+#  13. pb12 verdicts come from the fit alone; a failed DPMS cycle fails the CACP
+#      apply; a run killed with a CACP level on puts it back and cycles the panel
+#      on; a testd dry run doesn't trace, and a killed testd helper stops its trace.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
-trap 'rm -rf "$T"' EXIT
+trap 'chmod -R u+w "$T" 2>/dev/null; rm -rf "$T"' EXIT
 fails=0
 ok() { echo "ok: $1"; }
 bad() { echo "FAIL: $1"; fails=$((fails + 1)); }
@@ -86,6 +96,12 @@ build_fake() {
   mkdir -p "$S/class/net/wlan0/wireless" "$S/class/leds/input12::numlock" "$S/class/rfkill/rfkill7"
   echo 1 >"$S/class/leds/input12::numlock/brightness"
   echo bluetooth >"$S/class/rfkill/rfkill7/type"; echo 0 >"$S/class/rfkill/rfkill7/soft"
+  # A USB4 NHI left awake (power/control on) and the eDP panel's CACP level.
+  pci 0000:67:00.5 0000:00:08.3 0x1022 0x1668 0x0c0340
+  mkdir -p "$S/bus/pci/drivers/thunderbolt"
+  ln -s "$S/bus/pci/drivers/thunderbolt" "$S/devices/pci0000:00/0000:00:08.3/0000:67:00.5/driver"
+  mkdir -p "$S/class/drm/card1-eDP-1/amdgpu"
+  echo 0 >"$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings"
   echo 1 >"$P/sys/kernel/nmi_watchdog"
   echo "BOOT_IMAGE=/vmlinuz quiet" >"$P/cmdline"
   printf 'cpu  1 2 3 4\nintr 1000 0\nctxt 5000\n' >"$P/stat"
@@ -96,9 +112,12 @@ orig_state() {
     "$(cat "$S/module/nvme_core/parameters/apst_secondary_timeout_ms")" "$(cat "$S/class/nvme/nvme0/power/pm_qos_latency_tolerance_us")" \
     "$(cat "$S/bus/pci/devices/0000:62:00.0/power/control")" "$(cat "$S/devices/pci0000:00/0000:00:02.2/power/control")" \
     "$(cat "$S/bus/usb/devices/3-4/power/control")" "$(cat "$ST/wifi")" "$(cat "$S/class/leds/input12::numlock/brightness")" \
-    "$(cat "$S/class/rfkill/rfkill7/soft")" "$( [[ -e $ST/active/voxtype.service ]] && echo vox-on || echo vox-off)"
+    "$(cat "$S/class/rfkill/rfkill7/soft")" "$( [[ -e $ST/active/voxtype.service ]] && echo vox-on || echo vox-off)" \
+    "$(cat "$S/bus/pci/devices/0000:67:00.5/power/control")" "$(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings")"
 }
-WANT="1 100 2000 100000 on auto on off 1 0 vox-on "
+WANT="1 100 2000 100000 on auto on off 1 0 vox-on on 0 "
+ALL=(nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle usb4 cacp3 cacp4)
+PB_DEFAULT=(nmi nvme-apst sd-off kbd-usb wifi-ps bt-off voxtype usb4 cacp3)
 
 mkdir -p "$B"
 cat >"$B/systemctl" <<'EOF'
@@ -126,6 +145,12 @@ case $1 in
   devices) [[ -e $STUB/bt-connected ]] && echo "Device 00:11:22:33:44:55 Some Buds" ; exit 0 ;;
   power) echo "bt power $2" >>"$STUB/log" ;;
 esac
+EOF
+cat >"$B/hyprctl" <<'EOF'
+#!/bin/bash
+[[ $1 == dispatch && $2 == dpms ]] || exit 0
+[[ -e $STUB/dpms-fail ]] && { echo "dpms failed" >>"$STUB/log"; echo "error"; exit 0; }
+echo "dpms $3 $4" >>"$STUB/log"; echo ok
 EOF
 cat >"$B/omarchy-toggle-idle" <<'EOF'
 #!/bin/bash
@@ -159,8 +184,8 @@ reset() {
   echo off >"$ST/wifi"
 }
 run() {
-  env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT=none G16_AB_SYS="$S" G16_AB_PROC="$P" \
-    G16_AB_ISSUE="$B/issue" G16_AB_STATE="$T/home/state" G16_AB_REPORT="$T/home/report.md" "$SCRIPT" "$@"
+  env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT=none G16_AB_SYS="$S" G16_AB_PROC="$P" G16_AB_DPMS_WAIT=0 \
+    HYPRLAND_INSTANCE_SIGNATURE=test G16_AB_ISSUE="$B/issue" G16_AB_STATE="$T/home/state" G16_AB_REPORT="$T/home/report.md" "$SCRIPT" "$@"
 }
 FAST=(--rounds 2 --measure 1 --settle 0 --interval 1 --seed 7)
 
@@ -171,7 +196,7 @@ out=$(run --dry-run "${FAST[@]}" 2>&1); rc=$?
 [[ $(orig_state) == "$WANT" ]] && ok "dry run changes nothing" || bad "dry run changed: $(orig_state)"
 grep -qE '^(stop|iw|idle)' "$ST/log" && bad "dry run acted: $(cat "$ST/log")" || ok "dry run stops, sets and toggles nothing"
 ls "$ST"/posted-* >/dev/null 2>&1 && bad "dry run posted" || ok "dry run posts nothing"
-for t in nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle; do
+for t in "${ALL[@]}"; do
   grep -q "^| $t |" "$T/home/report.md" && ok "dry run reports $t" || bad "dry run report has no $t row"
 done
 grep -q '^Baseline over the run: battery 9.00 W' "$T/home/report.md" && ok "battery watts from current_now x voltage_now" || bad "battery: $(grep '^Baseline' "$T/home/report.md")"
@@ -188,14 +213,18 @@ out=$(run "${FAST[@]}" 2>&1); rc=$?
 [[ $(grep -c '^iw on' "$ST/log") == 2 ]] && ok "Wi-Fi power save set once per round" || bad "iw: $(grep '^iw' "$ST/log")"
 r=$T/home/report.md
 n=$(grep -cE '^\| [0-9]+ \| [12] \| baseline \|' "$r")
-((n == 20)) && ok "each round brackets every tweak with baselines (20 baselines)" || bad "$n baseline phases"
-for t in nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle; do
+((n == 2 * (${#ALL[@]} + 1))) && ok "each round brackets every tweak with baselines ($n baselines)" || bad "$n baseline phases"
+for t in "${ALL[@]}"; do
   grep -qE "^\| $t \| #[0-9]+ \| 2/2 \|" "$r" && ok "$t measured in both rounds" || bad "$t row: $(grep "^| $t |" "$r")"
 done
 grep -q 'nvme-apst ok 30/500 ms' "$r" && ok "APST timeouts 30/500 applied" || bad "APST apply: $(grep nvme-apst "$r")"
 reply=$( { printf 'apply kbd-usb\n'; sleep 0.5; cat "$S/class/leds/input12::numlock/brightness" "$S/bus/usb/devices/3-4/power/control" >"$T/kbd-mid"; } | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n1)
 [[ $reply == "ok auto" && $(paste -sd' ' "$T/kbd-mid") == "0 auto" ]] && ok "kbd-usb sets autosuspend and the Num Lock LED off" || bad "kbd-usb: $reply / $(paste -sd' ' "$T/kbd-mid")"
 [[ $(cat "$S/class/leds/input12::numlock/brightness") == 1 && $(cat "$S/bus/usb/devices/3-4/power/control") == on ]] && ok "kbd-usb reverted on EOF" || bad "kbd-usb left changed"
+grep -q 'usb4 ok auto on 1' "$r" && ok "usb4 sets the awake NHI to auto" || bad "usb4 apply: $(grep usb4 "$r")"
+grep -q 'cacp3 ok 3' "$r" && grep -q 'cacp4 ok 4' "$r" && ok "cacp3 and cacp4 write their levels" || bad "cacp apply: $(grep cacp "$r")"
+# Two rounds, two levels, a DPMS off/on after each write and each revert.
+[[ $(grep -c '^dpms off eDP-1' "$ST/log") == 8 && $(grep -c '^dpms on eDP-1' "$ST/log") == 8 ]] && ok "CACP: one DPMS cycle per level change" || bad "dpms: $(grep -c '^dpms' "$ST/log") lines"
 grep -q 'usb-idle ok auto, blocked' "$r" && ok "usb-idle sets the keyboard to auto and blocks Bluetooth" || bad "usb-idle apply: $(grep usb-idle "$r")"
 grep -qE '\| bt active; codec|bt active;.*kbd active;.*xhci D0' "$r" && ok "phases log the Bluetooth radio and the xHCI controller" || bad "states: $(grep -m1 '| baseline |' "$r")"
 [[ -e $ST/posted-198 ]] && grep -q '^## G16 idle A/B' "$ST/posted-198" && ok "report posted to #198" || bad "not posted to #198"
@@ -374,7 +403,7 @@ EOF
 chmod +x "$B/g16-testd" "$B/systemd-run"
 run_td() { # like run, with G16_ROOT left to the script
   env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_TESTD="$B/g16-testd" G16_AB_SYS="$S" G16_AB_PROC="$P" \
-    G16_AB_ISSUE="$B/issue" G16_AB_STATE="$T/home/state" G16_AB_REPORT="$T/home/report.md" "$SCRIPT" "$@"
+    G16_AB_DPMS_WAIT=0 HYPRLAND_INSTANCE_SIGNATURE=test G16_AB_ISSUE="$B/issue" G16_AB_STATE="$T/home/state" G16_AB_REPORT="$T/home/report.md" "$SCRIPT" "$@"
 }
 reset
 touch "$ST/td-open"
@@ -430,5 +459,138 @@ reset
 out=$(G16_ROOT=testd run_td --dry-run "${FAST[@]}" 2>&1); rc=$?
 ((rc == 1)) && grep -q 'no g16-testd session is open' <<<"$out" && ! grep -q '^systemd-run' "$ST/log" &&
   ok "G16_ROOT=testd with no session refuses, asks nothing" || bad "G16_ROOT=testd: rc=$rc $out"
+# ------------------------------------------------ 10. usb4 and CACP
+reset
+reply=$(printf 'apply cacp3\napply cacp4\nrevert cacp3\napply usb4\n' | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n +2)
+[[ $reply == $'ok 3\nerr the other CACP level is applied\nok reverted\nok auto on 1' ]] && ok "root helper: one CACP level at a time; usb4 applies" || bad "cacp/usb4 replies: $reply"
+[[ $(cat "$S/bus/pci/devices/0000:67:00.5/power/control") == on && $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 0 ]] && ok "usb4 and CACP back on EOF" || bad "usb4/cacp left: $(orig_state)"
+echo auto >"$S/bus/pci/devices/0000:67:00.5/power/control"
+out=$(run --only usb4,nmi "${FAST[@]}" --no-post 2>&1)
+grep -q 'skipped: usb4: no USB4/Thunderbolt NHI or router is awake' <<<"$out" && ok "usb4 skipped when nothing is awake" || bad "usb4 skip: $out"
+reset
+echo 2 >"$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings"
+out=$(run --only cacp3,nmi "${FAST[@]}" --no-post 2>&1)
+grep -q 'skipped: cacp3: panel_power_savings is 2, not 0' <<<"$out" && ok "CACP skipped unless the level is 0" || bad "cacp skip: $out"
+reset
+run --only cacp4 "${FAST[@]}" --no-post --no-dpms >/dev/null 2>&1
+grep -q '^dpms' "$ST/log" && bad "--no-dpms still cycled DPMS" || ok "--no-dpms: the write alone"
+[[ $(orig_state) == "$WANT" ]] && ok "cacp4 put back" || bad "cacp4 left: $(orig_state)"
+
+# ------------------------------------------------------ 11. pb12
+# phase rows of a pb12 report -> "row on-set" lines
+pb_phases() { grep -oE '^\| [0-9]+ \| [0-9]+ \| row [0-9]+ \([^)]*\)' "$1" | sed -E 's/.*row ([0-9]+) \(([^)]*)\)/\1 \2/'; }
+# the tweaks a pb12 row switches on, for these columns
+pb_row() { # row tweaks...
+  local signs i on=''; signs=$("$SCRIPT" --pb12 rows | sed -n "${1}p"); shift
+  for ((i = 0; i < $#; i++)); do [[ ${signs:i:1} == + ]] && { j=$((i + 1)); on+=${on:+,}${!j}; }; done
+  echo "${on:--}"
+}
+reset
+out=$(run --dry-run --design pb12 --rounds 1 --measure 1 --settle 0 --interval 1 --seed 5 2>&1); rc=$?
+((rc == 0)) && ok "pb12 dry run exits 0" || bad "pb12 dry run exit $rc: $out"
+grep -q 'Plackett-Burman design, 12 phases a round, 9 tweaks, 2 dummy columns' <<<"$out" && ok "pb12 dry run prints the design" || bad "pb12 header: $out"
+for ((j = 0; j < 11; j++)); do
+  w=${PB_DEFAULT[j]:-dummy}
+  grep -q "column $((j + 1)): $w\$" <<<"$out" || bad "pb12 column $((j + 1)) is not $w"
+done
+ok "pb12 columns: the default set in order, then the dummies"
+[[ $(grep -cE '^ +[0-9]+ +([+-]  ){10}[+-]' <<<"$out") == 12 ]] && ok "pb12 dry run prints the 12 rows" || bad "pb12 matrix rows: $(grep -cE '^ +[0-9]+ ' <<<"$out")"
+[[ $(orig_state) == "$WANT" ]] && ok "pb12 dry run changes nothing" || bad "pb12 dry run changed: $(orig_state)"
+grep -qE '^(stop|iw|dpms)' "$ST/log" && bad "pb12 dry run acted: $(cat "$ST/log")" || ok "pb12 dry run stops, sets and cycles nothing"
+[[ $(pb_phases "$T/home/report.md" | wc -l) == 12 ]] && ok "pb12 dry run walks 12 phases" || bad "pb12 dry phases: $(pb_phases "$T/home/report.md" | wc -l)"
+
+reset
+out=$(run --design pb12 --rounds 2 --measure 1 --settle 0 --interval 1 --seed 5 2>&1); rc=$?
+r=$T/home/report.md
+((rc == 0)) && ok "pb12 run exits 0" || bad "pb12 run exit $rc: $out"
+[[ $(orig_state) == "$WANT" ]] && ok "pb12: every setting back at the end" || bad "pb12 left: $(orig_state) (want $WANT)"
+n=0 wrong=0 seen=''
+while read -r row on; do
+  n=$((n + 1)); seen+=" $row"
+  [[ $on == "$(pb_row "$row" "${PB_DEFAULT[@]}")" ]] || { wrong=$((wrong + 1)); echo "  row $row on '$on', want '$(pb_row "$row" "${PB_DEFAULT[@]}")'"; }
+done < <(pb_phases "$r")
+((n == 24 && wrong == 0)) && ok "pb12: 24 phases, each with exactly its row's tweaks on" || bad "pb12 phases: $n, $wrong wrong"
+[[ $(tr ' ' '\n' <<<"$seen" | grep -c .) == 24 && $(tr ' ' '\n' <<<"$seen" | sort -u | grep -c .) == 12 ]] && ok "pb12: every row in each round" || bad "pb12 rows seen: $seen"
+# A tweak changes only when its level differs from the row before: voxtype stops
+# once per run of rows with it on, never twice in a row.
+stops=$(grep -c '^stop voxtype' "$ST/log"); starts=$(grep -c '^start voxtype' "$ST/log")
+((stops == starts && stops >= 2 && stops <= 12)) && ok "pb12: voxtype stopped and started in pairs ($stops)" || bad "pb12 voxtype: $stops stops, $starts starts"
+[[ -z $(grep voxtype "$ST/log" | uniq -d) ]] && ok "pb12: no tweak applied twice without a revert" || bad "pb12: voxtype stopped twice in a row"
+for t in "${PB_DEFAULT[@]}"; do
+  grep -qE "^\| $t \| #[0-9]+ \| 12 / 12 \| [+-][0-9.]+ \| [0-9.]+ \|" "$r" && ok "pb12 fits $t (12 phases on, 12 off)" || bad "pb12 $t row: $(grep "^| $t |" "$r")"
+done
+[[ $(grep -c '^| (dummy, column 1[01]) |' "$r") == 2 ]] && ok "pb12 reports the two dummy columns" || bad "pb12 dummies: $(grep dummy "$r")"
+grep -q '^Fit: 24 valid phases' "$r" && grep -q 'assumes the effects add up' "$r" && ok "pb12 report: the fit and the additivity assumption" || bad "pb12 fit line: $(grep '^Fit' "$r")"
+want_posts=$(( 1 + $(for t in "${PB_DEFAULT[@]}"; do "$SCRIPT" --list | awk -v t="$t" '$1 == t {print $2}'; done | sort -u | wc -l) ))
+nposts=$(ls "$ST"/posted-* | wc -l)
+((nposts == want_posts)) && ok "pb12: one post per tweak issue plus #198 ($nposts)" || bad "pb12: $nposts posts, want $want_posts"
+grep -q '^Verdict: ' "$ST/posted-225" && grep -q 'assumes the effects add up' "$ST/posted-225" && ok "pb12 post carries the verdict and the assumption" || bad "pb12 post #225: $(cat "$ST/posted-225")"
+
+out=$(run --design pb12 --only kbd-usb,numlock --dry-run 2>&1); rc=$?
+((rc == 2)) && grep -q "kbd-usb and numlock switch the same setting" <<<"$out" && ok "pb12 refuses tweaks that switch the same setting" || bad "pb12 conflict: exit $rc: $out"
+out=$(run --design pb12 --only cacp3,cacp4 --dry-run 2>&1); rc=$?
+((rc == 2)) && ok "pb12 refuses cacp3 with cacp4" || bad "pb12 cacp conflict: exit $rc"
+out=$(run --design pb12 --only "$(IFS=,; echo "${ALL[*]}")" --dry-run 2>&1); rc=$?
+((rc == 2)) && grep -q 'at most 11 tweaks' <<<"$out" && ok "pb12 refuses more than 11 tweaks" || bad "pb12 12 tweaks: exit $rc: $out"
+out=$(run --design xyz --dry-run 2>&1); rc=$?
+((rc == 2)) && ok "an unknown --design is refused" || bad "--design xyz: exit $rc"
+
+# ------------------------------- 12. pb12 through a G16 test session
+reset
+touch "$ST/td-open"
+out=$(run_td --design pb12 --rounds 1 --measure 1 --settle 0 --interval 1 --seed 5 --no-post 2>&1); rc=$?
+((rc == 0)) && ok "testd pb12 run exits 0" || bad "testd pb12 run exit $rc: $out"
+grep -q "skipped: usb4: not on g16-testd's allowlist" <<<"$out" && ok "testd: usb4 skipped" || bad "testd usb4: $out"
+grep -q '^knob-set panel-power-savings 3 |' "$ST/td.log" && ok "testd: cacp3 is the panel-power-savings knob" || bad "testd cacp3: $(grep panel "$ST/td.log")"
+nset=$(grep -c '^knob-set' "$ST/td.log") nres=$(grep -c '^knob-restore' "$ST/td.log")
+((nset > 0 && nset == nres)) && ok "testd pb12: every knob-set has its knob-restore ($nset)" || bad "testd pb12: $nset sets, $nres restores"
+[[ $(grep -c '^| (dummy, column' "$T/home/report.md") == 3 ]] && ok "testd pb12: 8 tweaks, 3 dummy columns" || bad "testd pb12 dummies: $(grep dummy "$T/home/report.md")"
+[[ $(orig_state) == "$WANT" ]] && ok "testd pb12: nothing changed behind g16-testd's back" || bad "testd pb12 changed: $(orig_state)"
+
+# --------------------------------------------- 13. review fixes (#276)
+# pb12 verdicts come from the fit only, even with a small selection
+reset
+run --design pb12 --only nmi,wifi-ps --rounds 1 --measure 1 --settle 0 --interval 1 --seed 5 >/dev/null 2>&1
+r=$T/home/report.md
+[[ $(grep -c '^| tweak |' "$r") == 1 ]] && ok "pb12: one tweak table (no one-at-a-time table)" || bad "pb12 tables: $(grep '^| tweak |' "$r")"
+row=$(grep '^| nmi |' "$r")
+[[ $row == *"| 6 / 6 |"* ]] && grep -qF "$row" "$ST/posted-225" && ok "pb12: the posted row is the fitted one" || bad "pb12 nmi row: $row / $(grep '^| nmi' "$ST/posted-225")"
+# a DPMS cycle that fails: the CACP phase isn't measured and the run stops with the level back
+reset
+touch "$ST/dpms-fail"
+out=$(run --only cacp3,nmi "${FAST[@]}" --no-post 2>&1); rc=$?
+((rc == 1)) && grep -q 'cacp3: the DPMS cycle failed' <<<"$out" && ok "a failed DPMS cycle is a failed CACP apply" || bad "dpms fail: exit $rc: $out"
+grep -qE '^\| [0-9]+ \| [12] \| cacp3 \|' "$T/home/report.md" 2>/dev/null && bad "cacp3 measured without its DPMS cycle" || ok "no cacp3 phase without the DPMS cycle"
+[[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 0 ]] && ok "dpms fail: the level is back" || bad "dpms fail: level $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings")"
+rm -f "$ST/dpms-fail"
+reset
+# No Hyprland session: an empty runtime dir, so none is found (the hyprctl stub stays first).
+mkdir -p "$T/xdg"
+env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT=none G16_AB_SYS="$S" G16_AB_PROC="$P" G16_AB_DPMS_WAIT=0 \
+  HYPRLAND_INSTANCE_SIGNATURE= XDG_RUNTIME_DIR="$T/xdg" G16_AB_REPORT="$T/home/report.md" "$SCRIPT" --only cacp3,nmi "${FAST[@]}" --no-post >"$T/out" 2>&1
+grep -q 'skipped: cacp3: no Hyprland session for the DPMS cycle' "$T/out" && ok "CACP skipped without a Hyprland session" || bad "no hyprland: $(cat "$T/out")"
+grep -q '^dpms' "$ST/log" && bad "no Hyprland session, yet DPMS was cycled" || ok "no Hyprland session: no DPMS"
+# killed while a CACP level is on: the level goes back and the panel is cycled back on
+reset
+env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT=none G16_AB_SYS="$S" G16_AB_PROC="$P" G16_AB_DPMS_WAIT=0 HYPRLAND_INSTANCE_SIGNATURE=test \
+  G16_AB_REPORT="$T/home/report.md" "$SCRIPT" --only cacp3 --rounds 1 --measure 20 --settle 0 --interval 1 --no-post >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 300); do [[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 3 ]] && grep -q '^dpms on' "$ST/log" && break; sleep 0.1; done
+sleep 0.5
+kill -TERM "$pid"; wait "$pid" 2>/dev/null
+[[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 0 ]] && ok "killed with CACP on: the level is back" || bad "killed: level $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings")"
+[[ $(grep -c '^dpms off' "$ST/log") == 2 && $(grep '^dpms' "$ST/log" | tail -n1) == "dpms on eDP-1" ]] && ok "killed with CACP on: one more DPMS cycle, panel on" || bad "killed dpms: $(grep '^dpms' "$ST/log" | paste -sd' ')"
+# testd: no trace in a dry run; a trace in progress is stopped when the helper is killed
+reset
+touch "$ST/td-open"
+run_td --dry-run --only nmi --rounds 1 --measure 1 --settle 0 --interval 1 >/dev/null 2>&1
+grep -q '^trace-' "$ST/td.log" 2>/dev/null && bad "testd dry run traced: $(grep '^trace-' "$ST/td.log")" || ok "testd dry run: no trace"
+reset
+touch "$ST/td-open"
+{ printf 'trace 10\n'; sleep 1; } | G16_TESTD="$B/g16-testd" STUB="$ST" "$SCRIPT" --testd-helper 0 30/500 test >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 50); do grep -q '^trace-start' "$ST/td.log" 2>/dev/null && break; sleep 0.1; done
+kill -TERM "$pid"; wait "$pid" 2>/dev/null
+grep -q '^trace-stop idle-ab-' "$ST/td.log" && ok "testd helper killed mid-trace stops the trace" || bad "testd trace left on: $(cat "$ST/td.log")"
 
 ((fails == 0)) && echo "PASS" || { echo "$fails failed"; exit 1; }
