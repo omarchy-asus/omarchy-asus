@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build one recipe in a clean chroot copy at low priority; output lands in $STAGE_DIR.
-# Usage: bin/build-pkg [--channel quattro|rc] recipes/<name> [extra makechrootpkg args]
+# Usage: bin/build-pkg [--channel quattro|rc] [--] recipes/<name> [extra makechrootpkg args]
 # The channel (bin/env.sh) picks the chroot and the stage dir: an RC build runs in the rc
 # chroot (Omarchy's rc packages, bin/mkchroot --channel rc) and lands in the rc stage dir,
 # so bin/publish for the other channel refuses it. A chroot whose pacman.conf does not
@@ -21,11 +21,26 @@
 # /etc/makepkg.conf.d/*.conf are still read, the user overrides are not.
 # PACKAGER still comes from the chroot's own /etc/makepkg.conf.d.
 set -euo pipefail
-# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
-if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
+usage() { sed -n '2,8s/^# \{0,1\}//p' "$0"; }
+# The arguments are checked before anything else runs or is created (#301): -h/--help
+# prints the usage; an unknown option, no recipe or a dir without a PKGBUILD is exit 2.
+while (($#)); do
+    case $1 in
+        -h | --help) usage; exit 0 ;;
+        # --channel quattro|rc: the release channel (bin/env.sh); default quattro
+        --channel)
+            (($# >= 2)) || { echo "--channel needs quattro or rc" >&2; usage >&2; exit 2; }
+            export OMARCHY_ASUS_CHANNEL=$2; shift 2 ;;
+        --) shift; break ;;
+        -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+(($#)) || { echo "no recipe given" >&2; usage >&2; exit 2; }
+[[ -f $1/PKGBUILD ]] || { echo "not a recipe dir (no PKGBUILD): $1" >&2; usage >&2; exit 2; }
 source "$(dirname "$0")/env.sh"
 lib=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
-recipe=$(realpath "$1"); shift
+recipe=$(realpath -- "$1"); shift
 name=$(basename "$recipe")
 
 if [[ $EUID -eq 0 ]]; then
