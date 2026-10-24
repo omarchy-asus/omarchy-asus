@@ -18,9 +18,10 @@
 #              (kprobe on dmub_cacp_set_level; level 1 for 3 s, then back to 0)
 #   0773       gpiolib-acpi ignores GPIO 16 wakeups (the quirk, not a command-line option)
 #   0570       GL9767 SD reader runtime PM (#226): with the slot empty it suspends and
-#              stays suspended (under 10% active over 10 s); asks whether to cycle a
-#              card: seen when inserted while suspended, suspended and settled again
-#              after removal (the resume loop the first version had)
+#              stays suspended (under 10% active over 10 s); then a card cycle: seen
+#              when inserted while suspended, suspended and settled again after
+#              removal (the resume loop the first version had). Without the cycle
+#              (declined, or no terminal) it is a WARN: removal untested
 #   0482       amdgpu replays DMUB HPDs skipped during resume (#205): the module has it,
 #              and no USB4 DP tunnel was torn down as "not active" this boot. With --dock
 #              it walks you through #205's dock scenario (unplug the dock with the lid
@@ -80,7 +81,7 @@ while (($#)); do
     --no-suspend) SUSPEND=0 ;;
     --dock) DOCK=1 ;;
     --yes | -y) YES=1 ;;
-    -h | --help) sed -n '2,51s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,52s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -423,7 +424,7 @@ sd_settled() { # dir label -> 0 when suspended within 10 s and under 10% active 
   [[ $(<"$d/power/runtime_status") == suspended ]] && ((a1 - a0 < 1000))
 }
 check_sdreader() {
-  local st=PASS det=() d i msg
+  local st=PASS det=() d i msg cycled=0
   d=$(sd_dir)
   [[ -n $d ]] || { result SKIP 0570 "no GL9767 SD reader on the PCI bus"; return; }
   if sd_card; then
@@ -433,7 +434,8 @@ check_sdreader() {
   det+=("reader ${d##*/}: $(sd_state "$d")")
   [[ $(<"$d/power/control") == auto ]] || { result FAIL 0570 "runtime PM not allowed (power/control is not auto)" "${det[@]}"; return; }
   sd_settled "$d" "slot empty" || st=FAIL
-  if [[ $st == PASS ]] && ask "Cycle an SD card through the reader (insert, then remove)?"; then
+  if [[ $st == PASS ]] && ((INTERACTIVE)) && ask "Cycle an SD card through the reader (insert, then remove)?"; then
+    cycled=1
     read -r -p "    Insert an SD card, then press Enter... " _
     for ((i = 0; i < 10; i++)); do [[ -e /dev/mmcblk0 ]] && break; sleep 0.5; done
     if [[ -e /dev/mmcblk0 ]]; then det+=("card seen: $(lsblk -dno NAME,SIZE /dev/mmcblk0)")
@@ -444,7 +446,17 @@ check_sdreader() {
   fi
   msg=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -m1 'times in a row with no card')
   [[ -z $msg ]] || { st=FAIL; det+=("$msg"); }
-  result "$st" 0570 "SD reader $([[ $st == PASS ]] && echo 'runtime-suspends with the slot empty' || echo 'does not stay runtime-suspended')" "${det[@]}"
+  # The empty slot passed with the first version too; only the card cycle tests the fix.
+  if [[ $st == PASS ]] && ((!cycled)); then
+    st=WARN
+    det+=("card removal untested (no card cycle): run the test again at the G16 with an SD card")
+  fi
+  case $st in
+    PASS) msg='runtime-suspends with the slot empty and settles again after a card is removed' ;;
+    WARN) msg='runtime-suspends with the slot empty; card removal untested' ;;
+    *) msg='does not stay runtime-suspended' ;;
+  esac
+  result "$st" 0570 "SD reader $msg" "${det[@]}"
 }
 
 # 0482 (#205): DP connectors of the amdgpu card, one "name status [link_settings]"
