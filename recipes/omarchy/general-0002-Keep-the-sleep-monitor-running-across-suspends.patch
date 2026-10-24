@@ -1,0 +1,515 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sat, 24 Oct 2026 02:38:44 -0400
+Subject: [PATCH] Keep the sleep monitor running across suspends
+
+omarchy-sleep-lock.service exited after every lock and was restarted by
+systemd two seconds later. Until it came back nothing held a delay
+inhibitor, so a suspend that started then did not wait for the lock. The
+restart also tended to land inside logind's sleep transition, where a new
+delay inhibitor is refused as "already running", so the unit failed
+around every resume and the gap grew by another restart.
+
+One monitor process now lasts the session. It starts dbus-monitor first
+and takes the inhibitor once dbus-monitor's own NameAcquired shows the
+match is in place. On PrepareForSleep(true) it locks, then releases the
+inhibitor; on PrepareForSleep(false), when logind accepts inhibitors
+again, it takes a new one. An "already running" rejection (a monitor
+started mid-transition) is retried briefly and then left to the next
+PrepareForSleep(false) instead of exiting. Other rejections and a lost
+event stream still exit 1 for Restart=.
+
+The inhibitor is held by a child that ends with the monitor (tail
+--pid), so a killed monitor can't leave logind waiting out its delay on
+every later suspend. The test drives two suspend cycles in one process,
+a mid-transition start, a refused inhibitor, a lost event stream, TERM
+and SIGKILL.
+
+Same problem as omacom/omarchy#13782, which retries the rejected
+restart; this removes the restart instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bin/omarchy-system-sleep-monitor   | 178 +++++++++++++++-------
+ test/shell.d/sleep-monitor-test.sh | 234 ++++++++++++++++++++++-------
+ 2 files changed, 308 insertions(+), 104 deletions(-)
+
+diff --git a/bin/omarchy-system-sleep-monitor b/bin/omarchy-system-sleep-monitor
+index 2100ceebf..aa15cf798 100755
+--- a/bin/omarchy-system-sleep-monitor
++++ b/bin/omarchy-system-sleep-monitor
+@@ -4,58 +4,132 @@
+ # omarchy:group=system
+ # omarchy:hidden=true
+ 
+-consume_sleep_events() {
+-  local line sleep_lock
+-  sleep_lock="$OMARCHY_PATH/bin/omarchy-system-sleep-lock"
+-
+-  while IFS= read -r line; do
+-    if [[ $line == *"boolean true"* ]]; then
+-      "$sleep_lock"
+-      return 0
+-    fi
+-  done
+-}
+-
+-monitor_sleep_events() {
+-  local monitor_fd monitor_pid status
+-
+-  coproc SLEEP_EVENTS {
+-    exec dbus-monitor --system \
+-      "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"
+-  }
+-  monitor_fd=${SLEEP_EVENTS[0]}
+-  monitor_pid=$SLEEP_EVENTS_PID
+-
+-  cleanup_monitor() {
+-    kill "$monitor_pid" 2>/dev/null || true
+-    wait "$monitor_pid" 2>/dev/null || true
+-  }
+-  trap cleanup_monitor EXIT
+-
+-  consume_sleep_events <&"$monitor_fd"
+-  status=$?
+-  cleanup_monitor
+-  trap - EXIT
+-
+-  return "$status"
+-}
+-
+-case ${1:-} in
+-  --consume)
+-    consume_sleep_events
+-    exit 0
+-    ;;
+-  --inhibited)
+-    monitor_sleep_events
+-    exit 0
+-    ;;
+-esac
++# One process watches every suspend of the session. It holds a delay inhibitor
++# between suspends, locks when logind announces one, releases the inhibitor so
++# the suspend can go ahead, and takes a new one once logind reports the resume.
++# Exiting after each lock and leaving the restart to systemd held no inhibitor
++# until the unit came back, and logind rejects a new delay inhibitor until its
++# sleep transition is over, so that restart often failed as well.
+ 
++sleep_lock="$OMARCHY_PATH/bin/omarchy-system-sleep-lock"
+ sleep_monitor="$OMARCHY_PATH/bin/omarchy-system-sleep-monitor"
+ 
+-exec systemd-inhibit \
+-  --what=sleep \
+-  --mode=delay \
+-  --who=Omarchy \
+-  --why="Lock screen before suspend" \
+-  "$sleep_monitor" --inhibited
++# The inhibitor is held for as long as systemd-inhibit's child runs. That child
++# also ends with the monitor itself, so a killed monitor never leaves logind
++# waiting on a lock nobody is going to take.
++if [[ ${1:-} == --hold ]]; then
++  printf 'held %s\n' "$$"
++  # tail -f quits once nobody reads its stdout, and the monitor stops reading.
++  exec tail --pid="$2" -f /dev/null >/dev/null 2>&1
++fi
++
++events_pid=""
++inhibit_pid=""
++holder_pid=""
++
++# Stopped before the child reported in, systemd-inhibit itself is the one to
++# end; the child then follows the monitor out.
++release_inhibitor() {
++  if [[ -n $holder_pid ]]; then
++    kill "$holder_pid" 2>/dev/null
++  elif [[ -n $inhibit_pid ]]; then
++    kill "$inhibit_pid" 2>/dev/null
++  fi
++  [[ -n $inhibit_pid ]] && wait "$inhibit_pid" 2>/dev/null
++  holder_pid=""
++  inhibit_pid=""
++}
++
++# logind answers "already running" while a sleep transition is in progress:
++# the monitor started during one, or the resume is not quite done. Its
++# PrepareForSleep(false) ends the transition and takes the inhibitor again, so
++# that is not an error. Anything else is, and systemd restarts the monitor.
++take_inhibitor() {
++  local line reply inhibit_fd
++
++  [[ -n $holder_pid ]] && return 0
++
++  for _ in {1..8}; do
++    exec {inhibit_fd}< <(
++      exec systemd-inhibit \
++        --what=sleep \
++        --mode=delay \
++        --who=Omarchy \
++        --why="Lock screen before suspend" \
++        "$sleep_monitor" --hold "$$" 2>&1
++    )
++    inhibit_pid=$!
++
++    # Everything before the child's report, or instead of it, is the reason
++    # systemd-inhibit gave.
++    reply=""
++    while IFS= read -r line <&"$inhibit_fd"; do
++      if [[ $line == "held "* ]]; then
++        holder_pid=${line#held }
++        break
++      fi
++      reply+="${reply:+ }$line"
++    done
++    exec {inhibit_fd}<&-
++
++    [[ -n $holder_pid ]] && return 0
++
++    wait "$inhibit_pid" 2>/dev/null
++    inhibit_pid=""
++
++    if [[ $reply != *"already running"* ]]; then
++      printf 'omarchy-system-sleep-monitor: %s\n' "${reply:-systemd-inhibit failed}" >&2
++      return 1
++    fi
++
++    sleep 0.25
++  done
++
++  return 0
++}
++
++stop_monitor() {
++  release_inhibitor
++  if [[ -n $events_pid ]]; then
++    kill "$events_pid" 2>/dev/null
++    wait "$events_pid" 2>/dev/null
++  fi
++  events_pid=""
++}
++
++# Die by the signal itself: systemd counts exit 143 as a failed stop.
++stop_on_signal() {
++  stop_monitor
++  trap - "$1" EXIT
++  kill -"$1" $$
++}
++trap 'stop_on_signal TERM' TERM
++trap 'stop_on_signal INT' INT
++trap stop_monitor EXIT
++
++exec {events_fd}< <(
++  exec dbus-monitor --system \
++    "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"
++)
++events_pid=$!
++
++# dbus-monitor prints its own NameAcquired once its match is in place. Taking
++# the inhibitor before then could hold up a suspend whose signal it never sees.
++IFS= read -r -t 5 _ <&"$events_fd"
++
++take_inhibitor || exit 1
++
++while IFS= read -r line <&"$events_fd"; do
++  case $line in
++    *"boolean true"*)
++      "$sleep_lock"
++      release_inhibitor
++      ;;
++    *"boolean false"*)
++      take_inhibitor || exit 1
++      ;;
++  esac
++done
++
++# dbus-monitor lost the system bus; a fresh monitor subscribes again.
++exit 1
+diff --git a/test/shell.d/sleep-monitor-test.sh b/test/shell.d/sleep-monitor-test.sh
+index 20850d4b6..77848a04c 100755
+--- a/test/shell.d/sleep-monitor-test.sh
++++ b/test/shell.d/sleep-monitor-test.sh
+@@ -6,14 +6,28 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
+ 
+ sleep_monitor="$ROOT/bin/omarchy-system-sleep-monitor"
+ tmpdir=$(mktemp -d)
+-trap 'rm -rf "$tmpdir"' EXIT
++monitor_pid=""
++events_writer=""
++
++cleanup() {
++  [[ -n $monitor_pid ]] && kill -9 "$monitor_pid" 2>/dev/null
++  [[ -n $events_writer ]] && exec {events_writer}>&-
++  pkill -9 -f "$tmpdir" 2>/dev/null
++  rm -rf "$tmpdir"
++}
++trap cleanup EXIT
+ 
+ mock_bin="$tmpdir/bin"
+ mock_omarchy="$tmpdir/omarchy"
+ producer_pid_file="$tmpdir/producer-pid"
++inhibit_log="$tmpdir/inhibit-log"
++inhibit_reject="$tmpdir/inhibit-reject"
+ lock_log="$tmpdir/lock-log"
++events_fifo="$tmpdir/events"
+ mkdir -p "$mock_bin" "$mock_omarchy/bin"
+ 
++# Each inhibitor taken logs the pid of the child it runs: logind holds the
++# inhibitor exactly as long as that pid lives.
+ cat >"$mock_bin/systemd-inhibit" <<'SH'
+ #!/bin/bash
+ 
+@@ -21,6 +35,12 @@ while [[ $1 == --* ]]; do
+   shift
+ done
+ 
++if [[ -e $INHIBIT_REJECT ]]; then
++  echo "Failed to inhibit: $(<"$INHIBIT_REJECT")" >&2
++  exit 1
++fi
++
++echo "$$" >>"$INHIBIT_LOG"
+ exec "$@"
+ SH
+ 
+@@ -28,14 +48,19 @@ cat >"$mock_bin/dbus-monitor" <<'SH'
+ #!/bin/bash
+ 
+ echo "$$" >"$PRODUCER_PID_FILE"
+-printf '   boolean true\n'
+-exec sleep 30
++printf 'signal time=0 sender=org.freedesktop.DBus -> destination=:1.1 member=NameAcquired\n'
++exec cat "$EVENTS_FIFO"
+ SH
+ 
+ cat >"$mock_omarchy/bin/omarchy-system-sleep-lock" <<'SH'
+ #!/bin/bash
+ 
+-echo locked >>"$LOCK_LOG"
++holder=$(tail -n 1 "$INHIBIT_LOG" 2>/dev/null)
++if [[ -n $holder ]] && kill -0 "$holder" 2>/dev/null; then
++  echo "locked held" >>"$LOCK_LOG"
++else
++  echo "locked unheld" >>"$LOCK_LOG"
++fi
+ SH
+ 
+ chmod +x \
+@@ -44,63 +69,168 @@ chmod +x \
+   "$mock_omarchy/bin/omarchy-system-sleep-lock"
+ ln -s "$sleep_monitor" "$mock_omarchy/bin/omarchy-system-sleep-monitor"
+ 
+-start_us=${EPOCHREALTIME//[!0-9]/}
+-OMARCHY_PATH="$mock_omarchy" \
+-  PATH="$mock_bin:$PATH" \
+-  PRODUCER_PID_FILE="$producer_pid_file" \
+-  LOCK_LOG="$lock_log" \
+-  "$sleep_monitor"
+-elapsed_us=$((10#${EPOCHREALTIME//[!0-9]/} - 10#$start_us))
++wait_for() {
++  local _
++  for _ in {1..300}; do
++    "$@" && return 0
++    sleep 0.01
++  done
++  return 1
++}
+ 
+-[[ $(<"$lock_log") == "locked" ]] ||
+-  fail "sleep monitor invokes the lock helper for a sleep event"
+-pass "sleep monitor invokes the lock helper for a sleep event"
++inhibitors() {
++  [[ -s $inhibit_log ]] && wc -l <"$inhibit_log" || echo 0
++}
+ 
+-(( elapsed_us < 2000000 )) ||
+-  fail "sleep monitor releases the inhibitor after locking" "elapsed: ${elapsed_us}us"
+-pass "sleep monitor releases the inhibitor after locking"
++current_holder() {
++  tail -n 1 "$inhibit_log"
++}
+ 
+-producer_pid=$(<"$producer_pid_file")
+-if kill -0 "$producer_pid" 2>/dev/null; then
+-  fail "sleep monitor reaps its event producer" "producer still running: $producer_pid"
+-fi
+-pass "sleep monitor reaps its event producer"
++holding() {
++  [[ -s $inhibit_log ]] && kill -0 "$(current_holder)" 2>/dev/null
++}
+ 
+-# Terminating the monitor must also clean up the producer instead of orphaning
+-# it under the user systemd instance.
+-cat >"$mock_bin/dbus-monitor" <<'SH'
+-#!/bin/bash
++not_holding() {
++  ! holding
++}
+ 
+-sleep 0.1
+-echo "$$" >"$PRODUCER_PID_FILE"
+-exec sleep 30
+-SH
+-chmod +x "$mock_bin/dbus-monitor"
+-rm -f "$producer_pid_file"
++inhibitor_count_is() {
++  [[ $(inhibitors) == "$1" ]]
++}
+ 
+-OMARCHY_PATH="$mock_omarchy" \
+-  PATH="$mock_bin:$PATH" \
+-  PRODUCER_PID_FILE="$producer_pid_file" \
+-  LOCK_LOG="$lock_log" \
+-  "$sleep_monitor" &
+-monitor_pid=$!
++lock_count_is() {
++  [[ -s $lock_log && $(wc -l <"$lock_log") == "$1" ]]
++}
+ 
+-for _ in {1..100}; do
+-  [[ -s $producer_pid_file ]] && break
+-  sleep 0.01
+-done
+-if [[ ! -s $producer_pid_file ]]; then
++running() {
++  kill -0 "$1" 2>/dev/null
++}
++
++stopped() {
++  ! kill -0 "$1" 2>/dev/null
++}
++
++start_monitor() {
++  rm -f "$events_fifo" "$inhibit_log" "$lock_log" "$producer_pid_file"
++  mkfifo "$events_fifo"
++  exec {events_writer}<>"$events_fifo"
++
++  OMARCHY_PATH="$mock_omarchy" \
++    PATH="$mock_bin:$PATH" \
++    PRODUCER_PID_FILE="$producer_pid_file" \
++    INHIBIT_LOG="$inhibit_log" \
++    INHIBIT_REJECT="$inhibit_reject" \
++    LOCK_LOG="$lock_log" \
++    EVENTS_FIFO="$events_fifo" \
++    "$sleep_monitor" 2>"$tmpdir/monitor-stderr" &
++  monitor_pid=$!
++
++  wait_for test -s "$producer_pid_file" || fail "sleep monitor starts its event producer"
++}
++
++send_event() {
++  printf '   boolean %s\n' "$1" >&"$events_writer"
++}
++
++stop_monitor() {
+   kill "$monitor_pid" 2>/dev/null || true
+   wait "$monitor_pid" 2>/dev/null || true
+-  fail "sleep monitor starts its event producer"
+-fi
++  monitor_pid=""
++  exec {events_writer}>&-
++  events_writer=""
++}
+ 
++# A full suspend and resume, twice, within one monitor process.
++rm -f "$inhibit_reject"
++start_monitor
++
++wait_for holding || fail "sleep monitor holds an inhibitor once it is listening"
++pass "sleep monitor holds an inhibitor once it is listening"
++
++for cycle in 1 2; do
++  holder=$(current_holder)
++  send_event true
++  wait_for lock_count_is "$cycle" ||
++    fail "sleep monitor locks for a sleep event (cycle $cycle)"
++  [[ $(tail -n 1 "$lock_log") == "locked held" ]] ||
++    fail "sleep monitor locks while the inhibitor still holds the suspend (cycle $cycle)"
++  wait_for stopped "$holder" ||
++    fail "sleep monitor releases the inhibitor after locking (cycle $cycle)"
++  running "$monitor_pid" ||
++    fail "sleep monitor keeps running after a suspend (cycle $cycle)"
++
++  send_event false
++  wait_for inhibitor_count_is $((cycle + 1)) ||
++    fail "sleep monitor takes a new inhibitor on resume (cycle $cycle)"
++  wait_for holding ||
++    fail "sleep monitor holds the new inhibitor (cycle $cycle)"
++done
++pass "sleep monitor locks while holding the inhibitor, then releases it"
++pass "sleep monitor stays up across suspends and takes a new inhibitor on resume"
++
++# Stopping the unit reaps the inhibitor and the event producer.
++holder=$(current_holder)
+ producer_pid=$(<"$producer_pid_file")
+-kill "$monitor_pid"
+-wait "$monitor_pid" 2>/dev/null || true
+-
+-if kill -0 "$producer_pid" 2>/dev/null; then
+-  kill "$producer_pid" 2>/dev/null || true
++stop_monitor
++wait_for stopped "$holder" || fail "sleep monitor releases its inhibitor when terminated"
++wait_for stopped "$producer_pid" ||
+   fail "sleep monitor cleans up its producer when terminated" "producer still running: $producer_pid"
+-fi
+-pass "sleep monitor cleans up its producer when terminated"
++pass "sleep monitor cleans up its inhibitor and producer when terminated"
++
++# Started while logind is still in a sleep transition: logind rejects the
++# inhibitor as already running. That is not a failure: the resume's
++# PrepareForSleep(false) takes it.
++echo "The operation inhibition has been requested for is already running" >"$inhibit_reject"
++start_monitor
++sleep 2.5
++running "$monitor_pid" ||
++  fail "sleep monitor keeps running when logind is mid-transition" "$(<"$tmpdir/monitor-stderr")"
++inhibitor_count_is 0 || fail "sleep monitor holds no inhibitor logind rejected"
++rm -f "$inhibit_reject"
++send_event false
++wait_for holding || fail "sleep monitor takes the inhibitor once the transition ends"
++pass "sleep monitor waits out a sleep transition instead of exiting"
++stop_monitor
++
++# Any other rejection is a real failure, left to the unit's Restart=.
++echo "Access denied" >"$inhibit_reject"
++start_monitor
++producer_pid=$(<"$producer_pid_file")
++wait_for stopped "$monitor_pid" || fail "sleep monitor exits when logind refuses the inhibitor"
++wait "$monitor_pid" && fail "sleep monitor reports a refused inhibitor as a failure"
++[[ $(<"$tmpdir/monitor-stderr") == *"Access denied"* ]] ||
++  fail "sleep monitor logs why the inhibitor was refused" "$(<"$tmpdir/monitor-stderr")"
++wait_for stopped "$producer_pid" || fail "sleep monitor reaps its producer when it fails"
++monitor_pid=""
++exec {events_writer}>&-
++events_writer=""
++rm -f "$inhibit_reject"
++pass "sleep monitor fails on any other inhibitor rejection"
++
++# The event stream ending (the system bus went away) is a failure too, and
++# the inhibitor goes with it.
++start_monitor
++wait_for holding || fail "sleep monitor holds an inhibitor once it is listening"
++holder=$(current_holder)
++kill "$(<"$producer_pid_file")"
++wait_for stopped "$monitor_pid" || fail "sleep monitor exits when its event stream ends"
++wait "$monitor_pid" && fail "sleep monitor reports a lost event stream as a failure"
++wait_for stopped "$holder" || fail "sleep monitor releases the inhibitor when its event stream ends"
++monitor_pid=""
++exec {events_writer}>&-
++events_writer=""
++pass "sleep monitor fails and releases the inhibitor when its event stream ends"
++
++# A monitor killed outright cannot clean up; its inhibitor must not outlive it
++# and hold up every later suspend.
++start_monitor
++wait_for holding || fail "sleep monitor holds an inhibitor once it is listening"
++holder=$(current_holder)
++kill -9 "$monitor_pid"
++wait "$monitor_pid" 2>/dev/null || true
++monitor_pid=""
++wait_for stopped "$holder" || sleep 2
++stopped "$holder" || fail "sleep monitor's inhibitor ends with a killed monitor"
++exec {events_writer}>&-
++events_writer=""
++pass "sleep monitor's inhibitor ends with a killed monitor"
+-- 
+2.56.0
+
