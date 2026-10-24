@@ -898,7 +898,7 @@ ctx display "$(hyprctl monitors -j 2>/dev/null | python3 -I -c 'import json,sys
 try: print("; ".join("%s %sx%s@%.0fHz vrr=%s" % (m["name"], m["width"], m["height"], m["refreshRate"], m.get("vrr")) for m in json.load(sys.stdin)))
 except Exception: print("?")')"
 ctx "battery sensor" "$( [[ -r $BAT/power_now ]] && echo power_now || echo current_now×voltage_now); SoC: $( [[ -n $AMDGPU ]] && echo 'amdgpu gpu_metrics' || echo none)"
-ctx "Bluetooth" "$(have bluetoothctl && { bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && echo powered || echo 'not powered'; } || echo '?'), $(have bluetoothctl && bluetoothctl devices Connected 2>/dev/null | grep -c '^Device' || echo '?') connected"
+ctx "Bluetooth" "$(have bluetoothctl && { bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && echo powered || echo 'not powered'; } || echo '?'), $(have bluetoothctl && { bluetoothctl devices Connected 2>/dev/null | grep -c '^Device' || true; } || echo '?') connected"
 ask_root_lines diag >"$WORK/diag" || true
 say "20 s IPI and timer trace (before any change)"
 ask_root_lines "trace 20" >"$WORK/trace" || true

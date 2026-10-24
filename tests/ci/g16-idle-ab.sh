@@ -10,6 +10,7 @@
 #   3. it refuses to start on the charger or with the RTX awake, changing nothing;
 #   4. a run killed mid-phase puts everything back;
 #   5. a connected Bluetooth device skips the Bluetooth phases (bt-off, usb-idle);
+#      the report's Bluetooth line counts connected devices, 0 included (#307);
 #   6. the root helper refuses unknown tweaks and commands;
 #   7. it never reads the nvidia_0 backlight or anything under the RTX but its
 #      runtime_status (a read-only stand-in makes such a read fail loudly);
@@ -202,6 +203,7 @@ done
 grep -q '^Baseline over the run: battery 9.00 W' "$T/home/report.md" && ok "battery watts from current_now x voltage_now" || bad "battery: $(grep '^Baseline' "$T/home/report.md")"
 grep -q 'SoC 4.50 W' "$T/home/report.md" && ok "SoC watts from gpu_metrics" || bad "SoC: $(grep '^Baseline' "$T/home/report.md")"
 grep -q 'GFX 0.03 W, all CPU cores 0.18 W' "$T/home/report.md" && ok "GFX and core split from gpu_metrics" || bad "split: $(grep '^SoC split' "$T/home/report.md")"
+grep -qx -- '- Bluetooth: powered, 0 connected' "$T/home/report.md" && ok "no device connected: one Bluetooth line, 0 connected (#307)" || bad "bluetooth line: $(grep -A1 -- '- Bluetooth' "$T/home/report.md")"
 
 # ------------------------------------------------------------- 2. real run
 reset
@@ -284,6 +286,7 @@ grep -q 'skipped: bt-off: a Bluetooth device is connected' <<<"$out" && ok "conn
 out=$(run --only usb-idle,nmi "${FAST[@]}" --no-post 2>&1)
 grep -q 'skipped: usb-idle: a Bluetooth device is connected' <<<"$out" && ok "connected device: usb-idle phase skipped" || bad "usb-idle: $out"
 [[ $(cat "$S/class/rfkill/rfkill7/soft") == 0 ]] && ok "connected device: rfkill untouched" || bad "rfkill changed"
+grep -qx -- '- Bluetooth: powered, 1 connected' "$T/home/report.md" && ok "connected device: report counts 1 connected" || bad "bluetooth line: $(grep -A1 -- '- Bluetooth' "$T/home/report.md")"
 
 # ------------------------------------------------------- 6. the root helper
 reset
