@@ -281,7 +281,7 @@ diff --git a/shell/services/AppLibrary.qml b/shell/services/AppLibrary.qml
 index f73a205ec..a1692d9f3 100644
 --- a/shell/services/AppLibrary.qml
 +++ b/shell/services/AppLibrary.qml
-@@ -102,8 +102,10 @@ Item {
+@@ -89,8 +89,10 @@ Item {
      // Start gtk-launch inside a scope under app-graphical.slice so apps do not
      // inherit wayland-wm@.service. Keeping gtk-launch as the desktop-entry
      // resolver supports IDs with spaces and entries that UWSM rejects.
