@@ -189,10 +189,15 @@ touch "$T/session"
 run trace start >"$T/tr1" 2>&1; rc=$?
 ((rc == 0)) && ok "trace start exits 0" || bad "trace start exits $rc"
 has "$T/testd.args" '^call trace-start hdmi rpm/rpm_suspend,rpm/rpm_resume,rpm/rpm_return_int,power/suspend_resume - 32768 --reason #158' "trace start asks testd for the allowlisted events"
-# every event asked for is on testd's allowlist
-for e in rpm/rpm_suspend rpm/rpm_resume rpm/rpm_return_int power/suspend_resume; do
-  grep -q "$e" "$W/recipes/omarchy-asus-g16-testd/g16-testd" || bad "$e is not on g16-testd's allowlist"
-done
+# every event asked for is on testd's allowlist (the recipe lives on the RC branch only)
+TD=$W/recipes/omarchy-asus-g16-testd/g16-testd
+if [[ -f $TD ]]; then
+  for e in rpm/rpm_suspend rpm/rpm_resume rpm/rpm_return_int power/suspend_resume; do
+    grep -q "$e" "$TD" || bad "$e is not on g16-testd's allowlist"
+  done
+else
+  echo "skip: g16-testd's allowlist (its recipe isn't on this branch)"
+fi
 cat >"$T/hdmi.trace" <<'EOF'
 # tracer: nop
      kworker/6:1-120     [006] d..1.   100.000100: rpm_resume: 0000:64:00.0 flags-4 cnt-1 dep-0 auto-1 p-0 irq-0 child-0
