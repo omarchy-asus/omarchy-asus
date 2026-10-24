@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Steam compatibility tool: Valve's Proton Experimental with omarchy-asus's winex11 fix.
+
+Steam runs this as `proton <verb> <command...>` inside the Steam Linux Runtime, like
+Valve's own `proton` script. This package ships only the X11 driver (winex11.so, both
+architectures) rebuilt from the wine commit of one Proton Experimental build (PROTON_PIN),
+with recipes/proton-experimental-asus/general-0001-*.patch applied. Everything else comes
+from the Proton Experimental that Steam installed:
+
+  1. Find Proton Experimental (Steam app 1493710) in the Steam libraries.
+  2. If its `version` is the pinned build, make (once) a copy of it under
+     $XDG_DATA_HOME/omarchy-asus/proton-experimental-asus/<build>/: hard links where the
+     filesystem allows (no extra space), copies otherwise, with our winex11.so in place of
+     Valve's. Then run that copy's `proton` with the same arguments.
+  3. Any other build: our winex11.so doesn't match its win32u.so, so run Valve's Proton
+     Experimental unchanged and say so on stderr (Steam's log). The game still starts.
+
+OMARCHY_ASUS_PROTON_DIR (a Proton Experimental directory) overrides step 1, for tests.
+"""
+import fcntl
+import os
+import re
+import shutil
+import sys
+
+APPID = "1493710"
+HERE = os.path.dirname(os.path.realpath(__file__))
+OVERLAY = ("lib/wine/x86_64-unix/winex11.so", "lib/wine/i386-unix/winex11.so")
+MARKER = ".omarchy-asus-overlay"
+
+
+def log(msg):
+    sys.stderr.write(f"proton-experimental-asus: {msg}\n")
+    sys.stderr.flush()
+
+
+def read_pin():
+    with open(os.path.join(HERE, "PROTON_PIN")) as f:
+        return f.readline().strip()
+
+
+def installed_build(proton_dir):
+    """The build name in a Proton directory's `version` file ("<timestamp> <build>")."""
+    try:
+        with open(os.path.join(proton_dir, "version")) as f:
+            fields = f.readline().split()
+    except OSError:
+        return None
+    return fields[1] if len(fields) > 1 else None
+
+
+def vdf_values(path, key):
+    """Every value of `"key" "value"` lines in a Valve KeyValues text file."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return []
+    return [m.group(1).replace("\\\\", "\\")
+            for m in re.finditer(r'^\s*"' + re.escape(key) + r'"\s+"((?:[^"\\]|\\.)*)"', text, re.M)]
+
+
+def steam_dirs():
+    seen = []
+    for d in (os.environ.get("STEAM_COMPAT_CLIENT_INSTALL_PATH"),
+              os.path.expanduser("~/.local/share/Steam"),
+              os.path.expanduser("~/.steam/steam")):
+        if d and os.path.isdir(d) and os.path.realpath(d) not in seen:
+            seen.append(os.path.realpath(d))
+    return seen
+
+
+def find_proton_experimental():
+    override = os.environ.get("OMARCHY_ASUS_PROTON_DIR")
+    if override:
+        return override if os.path.isfile(os.path.join(override, "proton")) else None
+    libraries = []
+    for steam in steam_dirs():
+        for lib in [steam] + vdf_values(os.path.join(steam, "steamapps", "libraryfolders.vdf"), "path"):
+            if lib not in libraries:
+                libraries.append(lib)
+    for lib in libraries:
+        apps = os.path.join(lib, "steamapps")
+        for name in vdf_values(os.path.join(apps, f"appmanifest_{APPID}.acf"), "installdir"):
+            d = os.path.join(apps, "common", name)
+            if os.path.isfile(os.path.join(d, "proton")):
+                return d
+    return None
+
+
+def link_or_copy(src, dst):
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def make_copy(valve_dir, dest, build):
+    """Copy valve_dir to dest (hard links where possible), our winex11.so in place."""
+    parent = os.path.dirname(dest)
+    os.makedirs(parent, exist_ok=True)
+    tmp = f"{dest}.tmp-{os.getpid()}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    # symlinks stay symlinks (Proton's own are relative, inside files/)
+    shutil.copytree(valve_dir, tmp, symlinks=True, copy_function=link_or_copy,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    for rel in OVERLAY:
+        ours, theirs = os.path.join(HERE, rel), os.path.join(tmp, "files", rel)
+        if not os.path.exists(os.path.dirname(theirs)):
+            continue  # an architecture this build doesn't ship
+        if os.path.lexists(theirs):
+            os.unlink(theirs)  # a hard link to Valve's file: never write through it
+        shutil.copy2(ours, theirs)
+    with open(os.path.join(tmp, MARKER), "w") as f:
+        f.write(build + "\n")
+    shutil.rmtree(dest, ignore_errors=True)
+    os.rename(tmp, dest)
+    # older builds' copies are of no further use
+    for name in os.listdir(parent):
+        path = os.path.join(parent, name)
+        if path != dest and os.path.isfile(os.path.join(path, MARKER)):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def copy_is_current(dest, build):
+    """dest holds a finished copy of build with our current winex11.so."""
+    try:
+        with open(os.path.join(dest, MARKER)) as f:
+            if f.readline().strip() != build:
+                return False
+    except OSError:
+        return False
+    for rel in OVERLAY:
+        ours, theirs = os.path.join(HERE, rel), os.path.join(dest, "files", rel)
+        if os.path.exists(os.path.dirname(theirs)) and (
+                not os.path.isfile(theirs) or os.path.getsize(ours) != os.path.getsize(theirs)
+                or int(os.path.getmtime(ours)) != int(os.path.getmtime(theirs))):
+            return False
+    return installed_build(dest) == build
+
+
+def main(argv):
+    pin = read_pin()
+    valve_dir = find_proton_experimental()
+    if not valve_dir:
+        log("Proton Experimental is not installed: install it in Steam (Library, Tools), "
+            "then start the game again")
+        return 1
+    build = installed_build(valve_dir)
+    target = valve_dir
+    if build != pin:
+        log(f"Proton Experimental is {build}, this fix is built for {pin}: "
+            "running Proton Experimental unchanged until omarchy-asus updates the package")
+    else:
+        data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+        dest = os.path.join(data, "omarchy-asus", "proton-experimental-asus", build)
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            # one launch at a time checks and (re)makes the copy: another game starting
+            # at the same moment must not see it half made or have it deleted under it
+            with open(os.path.join(os.path.dirname(dest), ".lock"), "w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if not copy_is_current(dest, build):
+                    log(f"preparing {build} with the winex11 fix in {dest}")
+                    make_copy(valve_dir, dest, build)
+            target = dest
+        except OSError as e:
+            log(f"could not prepare the fixed copy ({e}): running Proton Experimental unchanged")
+    script = os.path.join(target, "proton")
+    os.execv(sys.executable, [sys.executable, script] + argv[1:])
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

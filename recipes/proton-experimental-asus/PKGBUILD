@@ -1,0 +1,105 @@
+# Valve's Proton Experimental with one winex11 fix, as a Steam compatibility tool.
+#
+# Ships only the X11 driver (winex11.so, x86_64 and i386) rebuilt from the wine commit
+# of the pinned Proton Experimental build, with general-0001 applied, plus a `proton`
+# launcher that runs the Proton Experimental Steam installed with that driver swapped in
+# (and runs it unchanged when Steam has a different build). See README.md.
+
+pkgname=proton-experimental-asus
+# Proton tag experimental-11.0-20261014 (ValveSoftware/Proton 7a94df4) names its wine
+# commit: "-w7fc704-". The launcher compares PROTON_PIN with the installed build's
+# `version` file, so both move together.
+_build=experimental-11.0-20261014-x86_64
+_winecommit=7fc704ef49c50e9702c9983a5250d5738697bb04
+# dlls/winevulkan/make_vulkan's VK_XML_VERSION at that commit
+_vkxml=1.4.357
+pkgver=11.0.20261014
+pkgrel=101
+pkgdesc="Proton Experimental with a fix for exclusive fullscreen on a monitor the compositor chose (omarchy-asus)"
+arch=('x86_64')
+url='https://github.com/omarchy-asus/omarchy-asus'
+license=('LGPL-2.1-or-later')
+depends=('python')
+optdepends=('steam: runs the compatibility tool')
+# X, GL and Vulkan headers: winex11 compiles in support for what configure finds.
+# check() makes sure it found what Valve's build has.
+_xlibs=('libx11' 'libxext' 'libxrandr' 'libxinerama' 'libxcomposite' 'libxi' 'libxfixes'
+        'libxcursor' 'libxrender' 'libxxf86vm' 'mesa' 'vulkan-icd-loader')
+makedepends=('autoconf' 'bison' 'flex' 'perl' 'python' 'lib32-gcc-libs'
+             "${_xlibs[@]}" "${_xlibs[@]/#/lib32-}")
+options=('!debug' '!lto')
+source=("wine-${_winecommit}.tar.gz::https://github.com/ValveSoftware/wine/archive/${_winecommit}.tar.gz"
+        "vk-${_vkxml}.xml::https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/v${_vkxml}/xml/vk.xml"
+        "video-${_vkxml}.xml::https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/v${_vkxml}/xml/video.xml"
+        'general-0001-winex11-Only-expect-a-ConfigureNotify-for-_NET_WM_FU.patch'
+        'proton'
+        'compatibilitytool.vdf'
+        'toolmanifest.vdf'
+        'README.md')
+sha256sums=('1a0393f820cb61091818a50893ac6a850db385c5d9149849349a6d1c372068de'
+            '264d0d7350e37d70c82407fb430d085040fc01a9a961d43dec8c2d6ed1dfd183'
+            'd018b914014c06605e367a3b929670511e6f6de2f225c405a8b5e2d912408b76'
+            'e5ffe6c1b6fc33139e8c8688fafa5eb1906f684651aba63a4a1081a626c567d8'
+            '1f269c5363b798f63d65559c1208edfdbdcbecdba9a5a29ab5d78735d7a192e5'
+            'b042a2f03660d768bc7675524474c6fe5344f9757d312358374725c17510aec1'
+            'bb81d44a687cc6f4ea7ae05fa9f0502f35c48e462051809dce3b2a58492e3498'
+            'b9a6da490202946356ececf1df29dfb35eb7d20322eecc077e09d59790e5f50e')
+
+prepare() {
+    cd "wine-${_winecommit}"
+    patch -Np1 -i "$srcdir/general-0001-winex11-Only-expect-a-ConfigureNotify-for-_NET_WM_FU.patch"
+    # Generated files Proton's build makes before configuring wine (Makefile.in,
+    # .wine-post-source and rules-wine-requests): configure, the server protocol
+    # headers, the Vulkan thunks and the spec files.
+    autoreconf -f
+    tools/make_requests
+    python dlls/winevulkan/make_vulkan -x "$srcdir/vk-${_vkxml}.xml" -X "$srcdir/video-${_vkxml}.xml"
+    tools/make_specfiles
+}
+
+build() {
+    # Proton's own flags for the unix side (Makefile.in: CFLAGS, x86_64_CFLAGS, i386_CFLAGS)
+    local common='-O2 -fwrapv -fno-strict-aliasing -ffunction-sections -fdata-sections -fno-omit-frame-pointer'
+    # FreeType is for win32u's fonts, which winex11 doesn't use; configure stops without it
+    local opts=(--without-mingw --disable-tests --without-freetype)
+    unset CFLAGS CXXFLAGS LDFLAGS
+
+    mkdir -p build64 build32
+    cd build64
+    CFLAGS="$common -mcmodel=small -march=nocona -mtune=core-avx2 -mfpmath=sse" \
+        ../"wine-${_winecommit}"/configure --enable-win64 "${opts[@]}"
+    make dlls/winex11.drv/winex11.so
+
+    cd ../build32
+    CC='gcc -m32' PKG_CONFIG_PATH=/usr/lib32/pkgconfig \
+        CFLAGS="$common -mstackrealign -march=nocona -mtune=core-avx2 -mfpmath=sse" \
+        ../"wine-${_winecommit}"/configure --with-wine-tools=../build64 "${opts[@]}"
+    make dlls/winex11.drv/winex11.so
+}
+
+check() {
+    # The libraries Valve's winex11.so loads (Proton experimental-11.0-20261014, both
+    # architectures); a missing header at configure time would silently drop one.
+    local want='libGL.so.1 libX11.so.6 libXcomposite.so.1 libXcursor.so.1 libXext.so.6 libXfixes.so.3 libXi.so.6 libXinerama.so.1 libXrandr.so.2 libXrender.so.1 libXxf86vm.so.1 libc.so.6 libm.so.6 libvulkan.so.1'
+    local arch got
+    for arch in 64 32; do
+        got=$(strings "build$arch/dlls/winex11.drv/winex11.so" | grep -E '^lib[A-Za-z0-9_-]+\.so(\.[0-9]+)*$' |
+              LC_ALL=C sort -u | tr '\n' ' ')
+        if [[ ${got% } != "$want" ]]; then
+            echo "build$arch winex11.so loads: ${got% }" >&2
+            echo "Valve's loads:            $want" >&2
+            return 1
+        fi
+    done
+}
+
+package() {
+    local tool="$pkgdir/usr/share/steam/compatibilitytools.d/$pkgname"
+    install -Dm755 proton "$tool/proton"
+    install -Dm644 compatibilitytool.vdf toolmanifest.vdf README.md -t "$tool"
+    echo "$_build" > "$tool/PROTON_PIN"
+    install -Dm755 build64/dlls/winex11.drv/winex11.so "$tool/lib/wine/x86_64-unix/winex11.so"
+    install -Dm755 build32/dlls/winex11.drv/winex11.so "$tool/lib/wine/i386-unix/winex11.so"
+    strip --strip-unneeded "$tool"/lib/wine/*-unix/winex11.so
+    install -Dm644 "wine-${_winecommit}/COPYING.LIB" "$pkgdir/usr/share/licenses/$pkgname/COPYING.LIB"
+}
