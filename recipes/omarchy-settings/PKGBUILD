@@ -13,7 +13,7 @@ pkgname='omarchy-settings'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.108
+pkgrel=1.109
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -152,7 +152,6 @@ else
         0015-Read-every-udev-record-before-asking-the-webcams.patch
         0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch
         0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch
-        0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch
         0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch
         0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch
         0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch
@@ -163,7 +162,8 @@ else
         0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch
         general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch
         general-0002-Keep-the-sleep-monitor-running-across-suspends.patch
-        general-0003-Restore-lock-screen-password-focus-lost-on-suspend.patch)
+        general-0003-Restore-lock-screen-password-focus-lost-on-suspend.patch
+        general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch)
   sha256sums=('532a3d500a3b96d429ec14a113f577b49406b11071a99105eaaf59506975485f'
               'b86866617b28d01f3c59a963a2c8202802d3960d549a54c9d0cb926b60eb6433'
               'd88f78f5a59dbd031b3a42b5c4cf604e3f14f0b4d237ddae2bad579580f7949e'
@@ -182,7 +182,6 @@ else
               'bb543747b1867af60999478b7bf80b24375c2dd76108afc9ec6019f81911c317'
               '6bc1cf36292c878357aef33b20101d04c2f66be372a6fe3d27abd00ee478c5ed'
               'c94044fa6a7fc732190d1df89c5da5f9613701fdd7ca959c3602ae6957398115'
-              '19208fceac618fc74eefacbd1e551d945e89719b276142bcd68ad8d862106473'
               '6f9aeb0ec6b52d995ea1afd6755ff66cd8bec8ae930dedfbde0268d501514b39'
               '1f7b0dec99c60830061d36c12524b77fbd96082ae25f564b9ad777d0a05c71db'
               'ae380acd6edee4e028c294e54978a87cd64e5da59bf5b861ab2acdbd03203749'
@@ -190,10 +189,11 @@ else
               '236fd084a6fca8f6805743069eb5f73121c758002be1d24ac774b621be750489'
               '5c930fa21b4e83a280d04b7d07b19bb739ddce140f01580b5aeca21a8eb2a379'
               '21b75af7231909ce026cf2e4c35333a11cf7af50b9ef91c345c6ef06d0f82b1c'
-              '2c04276cd781eeca469ca8f1347c93ec60f607f00df4f00f9514b899c5f81639'
+              '4f1d7137d54af0d93bf82aa58cf7875498c34ef186a1367d3f965163ca13dd4e'
               '74b7b6ee369764da1d086bf48bf5580c60dbacaa92a44d435a5973b22334f967'
               '517940a31b8549c5e8fd454a52b74f1b2817b1865bc3b5e978743653b43b1c44'
-              'a65a4f9945c1a2c10c74b3acdb285d43be9915ffd36b055983baabfc3f1b966a')
+              'a65a4f9945c1a2c10c74b3acdb285d43be9915ffd36b055983baabfc3f1b966a'
+              '24f07e9ba99f0b3a1373ce1cc05d8da438b8e149de53675725d476d1d894741d')
 fi
 
 prepare() {
@@ -219,7 +219,6 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0015-Read-every-udev-record-before-asking-the-webcams.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch"
-  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch"
@@ -231,6 +230,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0002-Keep-the-sleep-monitor-running-across-suspends.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0003-Restore-lock-screen-password-focus-lost-on-suspend.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch"
 }
 
 # Print the HOOKS that result from sourcing mkinitcpio drop-ins onto a line.

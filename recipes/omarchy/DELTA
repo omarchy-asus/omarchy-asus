@@ -30,7 +30,6 @@ patch 0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch prepare om
 patch 0015-Read-every-udev-record-before-asking-the-webcams.patch prepare omarchy
 patch 0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch prepare omarchy
 patch 0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch prepare omarchy
-patch 0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch prepare omarchy
 patch 0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch prepare omarchy
 patch 0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch prepare omarchy
 patch 0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch prepare omarchy
@@ -44,3 +43,4 @@ patch 0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch prepare om
 patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy
 patch general-0002-Keep-the-sleep-monitor-running-across-suspends.patch prepare omarchy
 patch general-0003-Restore-lock-screen-password-focus-lost-on-suspend.patch prepare omarchy
+patch general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch prepare omarchy
