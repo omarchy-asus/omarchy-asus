@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.104**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.105**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,10 +14,10 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.104` (kernel release string becomes `7.2.8-9.104-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.105` (kernel release string becomes `7.2.8-9.105-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
-   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808; 9.104 added 0809.
+   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808; 9.104 added 0809; 9.105 added 0570.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -42,7 +42,9 @@ Compared with upstream, only:
    `0808-...` (amd_pmf hwmon: APU, dGPU and socket power; see "0809" below).
 10. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
    `0809-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
-11. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
+11. New patch `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch` after `0569-...`
+   (the GL9767 SD reader runtime-suspends with the slot empty; see "0570" below).
+12. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -134,6 +136,36 @@ cycle that wakes at once.
 
 **Upstream.** Not submitted (target: linux-gpio). Drop it once an equivalent
 entry is merged.
+
+## 0570: GL9767 SD reader runtime PM with the slot empty (#226)
+
+**What.** `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch` gives the GL9767 entry in
+`drivers/mmc/host/sdhci-pci-gli.c` runtime PM: `allow_runtime_pm` with its own
+`runtime_suspend`/`runtime_resume`. It suspends only with the slot empty, the host
+powered off, card detect stable (`SDHCI_CD_STABLE`) and a PME able to wake it
+(`pci_dev_run_wake()`); otherwise it stays in D0 as before. Insert wakeup is armed
+while suspended. On resume it re-applies the vendor config-space settings; a wakeup
+that finds a card starts a rescan, a resume for a host claim does nothing more. Eight
+quick wakes in a row with no card stop runtime suspend until the next card change.
+
+**Why.** Without it sdhci-pci keeps its probe-time runtime-PM reference: the reader and
+its root port 00:02.2 sit in D0 for the whole boot (`runtime_suspended_time` 0 over
+8.5 h). A udev `power/control=auto` rule can't fix that.
+
+**History.** The first version (tested as a module swap on 9.104, 2026-10-24) suspended
+and saw a card inserted while suspended, but after removal it cycled through
+suspend/resume several times a second (74 % active, no mmc interrupts). Its resume
+queued a rescan whenever the card-present bit read set, it suspended before card
+detect had settled, and nothing bounded the cycle. The current version fixes all three.
+
+**Default behaviour and risk.** Only GL9767 readers change. With a card in the slot,
+or no PME from D3, nothing changes. The worst case is the reader staying in D0, as
+before.
+
+**Test.** The kit's `0570` check (slot empty, then an optional card cycle). Power: the
+idle A/B's `sd-off` phase is the upper bound.
+
+**Upstream.** Not submitted yet (target: linux-mmc), pending the G16 result.
 
 ## 0809: amd_pmf exposes APU, dGPU and socket power through hwmon (#238)
 
@@ -361,8 +393,8 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900).
-2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0570, 0773, 0807, 0810, 9900).
+2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568, 0569 and 0570 after the last `056x` patch,
    0807, 0808, 0809 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
    9900 last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.

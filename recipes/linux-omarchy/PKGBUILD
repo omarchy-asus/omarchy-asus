@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.8
-pkgrel=9.104
+pkgrel=9.105
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -157,6 +157,7 @@ source=(
   0567-hid-magicmouse-null-deref-without-input-device.patch{,.sig}
   0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch
   0569-i2c-designware-size-rx-fifo-threshold.patch
+  0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch
   0601-thunderbolt-updates.patch{,.sig}
   0602-thunderbolt-fixes.patch{,.sig}
   0603-usb-updates.patch{,.sig}
@@ -461,6 +462,7 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         'SKIP'
         'b76651be94c53a9dc4152a512f510217a83133dc18047bba99b5fc11d80752ab371bcda3171c73577411548731cc35f72880116e8071c403672b85e9a60a9f97'
         '8b018c6cac74121f4ba8bf8aa89582b58f1b8c65582f91525a4e0acb3dfc7152d8ccb8f74033dd197fb6cfa6aeda2107537d549fe59e8103808692d0a90c1877'
+        '1ae26f0bbdd735b7821e83c36d54d1916d2bca996412b1c9a7e48e1348eb14c798d598d2ae7de22f92ed77cff60e8c1a6356064bbfef17fcf52e4a70c8daacc2'
         'e3d60abe9fbfa046409598588dd23a9b16439474595136526e3169ff47982e011ede263d403211f5f5692ac43cf88af5bbf0d11b8e7e959478305c67687c525d'
         'SKIP'
         '1fb895cb1deb1b227515087e12fb0f7fab70b0db25a1a535fa3c294a5455af4d987d02c7c8ff24aed41359055d1383ea90bf9709999382610ed156dbc4069086'
@@ -821,6 +823,7 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             'SKIP'
             '5afe17346c978608cae488ec1d5de69c8c40360b1efec3a6538a7509d2e3d116'
             'cfdb656f32d1e34dd9f1411475fa88d26d684ef3294df16ef6e8d04d5b98ddf3'
+            '9ad0237af297198efb7544312beeeb420785db3e8123d1b6238f0d253db300cc'
             '1b070eef78ccffb3763b464f5a1b0636936f4c33b0be9b44ab116c5dcbadbebe'
             'SKIP'
             'eb0923de01175707151930d28b1a1a912d24bbc171248fa9f45f57a2125d077a'
