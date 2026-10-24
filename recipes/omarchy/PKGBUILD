@@ -13,7 +13,7 @@ pkgname='omarchy'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.109
+pkgrel=1.110
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH (omarchy-asus build)'
 # The payload is architecture-independent, but the dependency set is not: the
 # boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
@@ -123,7 +123,6 @@ else
         0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch
         general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch
         general-0002-Keep-the-sleep-monitor-running-across-suspends.patch
-        general-0003-Restore-lock-screen-password-focus-lost-on-suspend.patch
         general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch)
   sha256sums=('532a3d500a3b96d429ec14a113f577b49406b11071a99105eaaf59506975485f'
               'b86866617b28d01f3c59a963a2c8202802d3960d549a54c9d0cb926b60eb6433'
@@ -153,7 +152,6 @@ else
               '4f1d7137d54af0d93bf82aa58cf7875498c34ef186a1367d3f965163ca13dd4e'
               '74b7b6ee369764da1d086bf48bf5580c60dbacaa92a44d435a5973b22334f967'
               '517940a31b8549c5e8fd454a52b74f1b2817b1865bc3b5e978743653b43b1c44'
-              'a65a4f9945c1a2c10c74b3acdb285d43be9915ffd36b055983baabfc3f1b966a'
               '24f07e9ba99f0b3a1373ce1cc05d8da438b8e149de53675725d476d1d894741d')
 fi
 
@@ -190,7 +188,6 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0002-Keep-the-sleep-monitor-running-across-suspends.patch"
-  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0003-Restore-lock-screen-password-focus-lost-on-suspend.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch"
 }
 
