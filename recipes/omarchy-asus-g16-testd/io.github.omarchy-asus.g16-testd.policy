@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- omarchy-asus-g16-testd (#277): the one dialog of a G16 test session. It runs
+     only `g16-testd root-start`, which starts the session's root helper; the
+     helper's own calls need no further dialog and work only while it runs. -->
+<policyconfig>
+  <action id="io.github.omarchy-asus.g16-testd.session-start">
+    <description>Open a G16 test session</description>
+    <message>Authentication is required to open a G16 test session: a root helper with fixed, allowlisted steps, all put back when the session ends</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/omarchy-asus-g16-testd/g16-testd</annotate>
+  </action>
+</policyconfig>

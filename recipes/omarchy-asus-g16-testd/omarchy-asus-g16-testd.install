@@ -1,0 +1,24 @@
+# Nothing starts at install time: the helper runs only between
+# `g16-testd session start` and `session stop` (or its expiry).
+
+_omarchy_asus_g16_testd_check() {
+  local dmi=/sys/class/dmi/id
+  [ "$(cat "$dmi/sys_vendor" 2>/dev/null)" = "ASUSTeK COMPUTER INC." ] &&
+    grep -q "ROG" "$dmi/product_family" 2>/dev/null &&
+    { grep -qi -- "GA605KM" "$dmi/product_name" 2>/dev/null ||
+      grep -qi -- "GA605KM" "$dmi/product_family" 2>/dev/null; } && return 0
+  printf '==> WARNING: omarchy-asus-g16-testd is for the ASUS ROG Zephyrus G16 GA605KM only; it refuses to open a session elsewhere.\n' >&2
+}
+
+post_install() {
+  _omarchy_asus_g16_testd_check
+}
+
+post_upgrade() {
+  _omarchy_asus_g16_testd_check
+}
+
+pre_remove() {
+  # An open session puts everything back when its unit stops.
+  systemctl stop omarchy-asus-g16-testd.service 2>/dev/null || true
+}
