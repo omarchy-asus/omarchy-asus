@@ -60,7 +60,7 @@ SHAs are the commits of omacom/omarchy#12428, reachable there.
 | 0017 | clamshell state from logind events instead of a 2 s poll | #32 | not submitted |
 | 0018 | launcher icon index rescanned at most once a minute | #33 | not submitted |
 | 0024 | a crashed shell retakes its stranded lock while voxtype's dictation OSD runs (stock Omarchy bug); the OSD is told apart by its `-p` argument in `/proc/<pid>/cmdline` (fork commits f87801d1 + d528fca1, squashed; test paths under `/data`) | #102, #130 | omacom/omarchy#15912 (replaces #15890) |
-| 0025 | a migration swaps the G16 Control widget's dead link (`~/.config/omarchy/plugins/omarchy-asus.g16`, from the transitional `asus-zephyrus-g16-control`, which `asus-rog-nkey-winlock` now replaces) for the omarchy-asus plugin, so `omarchy-update` alone finishes the move; a failed add does not fail the update. Fork commit 8d8b946b | #275 | not for upstream (our packages only) |
+| 0025 | a migration swaps the G16 Control widget's dead link (`~/.config/omarchy/plugins/omarchy-asus.g16`, from the transitional `asus-zephyrus-g16-control`, which `asus-rog-nkey-winlock` now replaces) for the omarchy-asus plugin, so `omarchy-update` alone finishes the move. The link goes only once the plugin is on the bar; until then the migration fails and stays pending, so a failed clone or enable is retried by the next update or login. Fork commits 8d8b946b + 34f25e1a, squashed | #275 | not for upstream (our packages only) |
 
 **General fixes (`general-` series):** fixes to Omarchy's own software that don't help the
 hardware, carried with the maintainer's approval and kept apart from the ASUS patches above.
