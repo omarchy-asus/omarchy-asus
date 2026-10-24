@@ -225,6 +225,9 @@ Where our fixes are headed:
   [systemd/README.md](systemd/README.md) covers the design and the privilege model.
 - `recipes/omarchy-asus-g16-apply/`: the user-run command for the G16 fixes no package can
   ship (they live in your config or `/etc`); `--check` is read-only.
+- `recipes/omarchy-asus-g16-testd/`: G16 hardware test sessions' root helper, started with
+  one polkit dialog per session, with fixed allowlisted steps that are all put back at the
+  end (held; test tooling).
 - `keys/`: the repo signing key.
 - `.github/workflows/`, `ci/`: PR CI on GitHub Actions (lint, build the changed recipes in an Arch
   container with the package sources of the channel the PR targets (`ci/channel`), compile

@@ -1,0 +1,28 @@
+# Nothing starts at install time: the helper runs only between
+# `g16-testd session start` and `session stop` (or its expiry).
+
+_omarchy_asus_g16_testd_check() {
+  local dmi=/sys/class/dmi/id
+  [ "$(cat "$dmi/sys_vendor" 2>/dev/null)" = "ASUSTeK COMPUTER INC." ] &&
+    grep -q "ROG" "$dmi/product_family" 2>/dev/null &&
+    { grep -qi -- "GA605KM" "$dmi/product_name" 2>/dev/null ||
+      grep -qi -- "GA605KM" "$dmi/product_family" 2>/dev/null; } && return 0
+  printf '==> WARNING: omarchy-asus-g16-testd is for the ASUS ROG Zephyrus G16 GA605KM only; it refuses to open a session elsewhere.\n' >&2
+}
+
+post_install() {
+  _omarchy_asus_g16_testd_check
+}
+
+post_upgrade() {
+  _omarchy_asus_g16_testd_check
+}
+
+pre_remove() {
+  # End an open session and put back everything a session left, boot drop-ins
+  # included (limine-update runs then): a stopped unit alone keeps the drop-ins,
+  # and the helper that removes them goes with the package.
+  /usr/lib/omarchy-asus-g16-testd/g16-testd cleanup ||
+    printf '==> WARNING: g16-testd cleanup could not put everything back; see above. Drop-ins are /etc/limine-entry-tool.d/omarchy-asus-g16-testd-*.conf (remove them, then run limine-update).\n' >&2
+  systemctl stop omarchy-asus-g16-testd.service 2>/dev/null || true
+}

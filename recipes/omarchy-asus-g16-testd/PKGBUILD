@@ -1,0 +1,42 @@
+# EXPERIMENTAL: ASUS ROG Zephyrus G16 GA605KM only.
+#
+# omarchy-asus-g16-testd (#277): one root helper per G16 hardware test session.
+# `g16-testd session start` asks for root once (pkexec) and starts the helper as a
+# transient system unit; the session's root steps then go through it without
+# further dialogs, until `session stop` or its expiry puts everything back and the
+# unit goes away. Nothing is started or enabled at install time, and nothing pulls
+# this package in. See README.md.
+#
+# A local package with no upstream build to track, so pkgrel does not use the
+# repo's "<upstream>.1" scheme.
+
+pkgname=omarchy-asus-g16-testd
+pkgver=0.1.0
+pkgrel=101
+pkgdesc='One root helper per G16 test session: fixed, allowlisted root steps, all put back at the end (EXPERIMENTAL)'
+arch=('any')
+url='https://github.com/omarchy-asus/omarchy-asus'
+license=('MIT')
+depends=('python' 'polkit' 'systemd' 'kmod')
+optdepends=('iw: the wifi-ps knob'
+            'limine-mkinitcpio-hook: limine-update, for the boot drop-ins')
+options=('!debug' '!strip')
+install=omarchy-asus-g16-testd.install
+source=('g16-testd'
+        'io.github.omarchy-asus.g16-testd.policy'
+        'README.md'
+        'LICENSE')
+sha256sums=('db661267939a76f6a645ffdc83aaaa56ee045752949bc11e559ce8b8d799bb9a'
+            '98424253c91ae055dbabaa132b62544024766c8ac639a96a94680da01e98b491'
+            '8e37bce173946f965f5ee51ee3a8f3f001368e8a70511b3c3f5b4f44741dee45'
+            '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
+
+package() {
+  install -Dm755 g16-testd "$pkgdir/usr/lib/$pkgname/g16-testd"
+  install -d "$pkgdir/usr/bin"
+  ln -s "/usr/lib/$pkgname/g16-testd" "$pkgdir/usr/bin/g16-testd"
+  install -Dm644 io.github.omarchy-asus.g16-testd.policy \
+    "$pkgdir/usr/share/polkit-1/actions/io.github.omarchy-asus.g16-testd.policy"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

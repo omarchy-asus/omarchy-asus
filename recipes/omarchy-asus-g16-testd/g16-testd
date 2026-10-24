@@ -1,0 +1,1224 @@
+#!/usr/bin/python3 -I
+# g16-testd: one root helper per G16 test session (#277). EXPERIMENTAL, G16 only.
+#
+#   g16-testd session start [--hours H] [--module NAME=SHA256]...
+#                                  open a session: one polkit dialog starts the root
+#                                  daemon as a transient system unit, for H hours
+#                                  (4, at most 12); NAME=SHA256 are the only module
+#                                  builds module-swap may load in this session
+#   g16-testd session stop         put everything back (knobs, modules, drop-ins,
+#                                  traces, frozen scopes) and end the session
+#   g16-testd session status       expiry and what is changed right now
+#   g16-testd available            exit 0 when a session is open for this user
+#   g16-testd list                 the allowlists (knobs, events, kprobes, drop-ins)
+#   g16-testd cleanup              root, from the package's removal: stop an open
+#                                  session and put back all it left, drop-ins included
+#   g16-testd call METHOD ARG... --reason TEXT
+#                                  one root step; METHOD is one of
+#     ec-read OFFSET LEN                  EC RAM bytes through ec_sys, read-only
+#     trace-start NAME EVENTS [KPROBES] [BUFFER_KB]
+#                                         a private tracefs instance; EVENTS and KPROBES
+#                                         are comma lists from the allowlists ("-": none)
+#     trace-stop NAME                     stop it; the trace is handed to you, and the
+#                                         instance and its kprobes are removed
+#     knob-set KNOB VALUE / knob-restore KNOB
+#     module-swap NAME PATH / module-restore NAME
+#     boot-dropin NAME on|off             prints the resulting kernel command lines
+#     freeze SCOPE [SECONDS] / thaw SCOPE user app scopes only; thawed after SECONDS
+#                                         (300, at most 1800) whatever happens
+#
+# The daemon runs only fixed operations on fixed allowlists; nothing a caller sends is
+# run as a command. It answers only the user who opened the session (the socket is
+# theirs, mode 0600, and every connection's peer uid is checked). Every change is
+# recorded under /var/lib/omarchy-asus-g16-testd before it is made, and put back on
+# `session stop`, at expiry, when the daemon is stopped, and at the next start after a
+# crash. Boot drop-ins outlive a reboot on purpose (a boot A/B needs one): they go on
+# `session stop`, at expiry, or with `boot-dropin NAME off`. Every call is logged to the
+# journal with the caller's uid and pid and the reason.
+#
+# Test mode keeps the laptop awake: `session start` records Omarchy's stay-awake state
+# (omarchy-toggle-idle status) and turns it on, so no idle dim, lock or suspend cuts
+# into an unattended A/B. The end of the session (stop, expiry, the unit stopping, or
+# the next start after a crash) runs allow-idle only if stay-awake was off before.
+#
+# Exit status: 0 done, 1 refused or failed, 2 bad usage, 3 no session open.
+import argparse
+import hashlib
+import inspect
+import json
+import os
+import pwd
+import re
+import shutil
+import signal
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import time
+
+UNIT = "omarchy-asus-g16-testd"
+LIBEXEC = "/usr/lib/omarchy-asus-g16-testd/g16-testd"
+SOCKET = os.environ.get("G16_TESTD_SOCKET", "/run/omarchy-asus-g16-testd/socket")
+DEFAULT_HOURS, MAX_HOURS = 4, 12
+FREEZE_DEFAULT, FREEZE_MAX = 300, 1800
+TRACE_MAX_SECONDS = 1800
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+MODULE_RE = re.compile(r"^[a-z0-9_-]{1,56}$")
+SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# --------------------------------------------------------------- allowlists
+# Tracepoints a test may enable in its own instance (bin/g16-wakeups, bin/g16-idle-ab,
+# #239's IPI/timer sources, runtime PM).
+EVENTS = frozenset("""
+irq/irq_handler_entry irq/softirq_entry irq/tasklet_entry
+ipi/ipi_send_cpu ipi/ipi_send_cpumask
+irq_vectors/call_function_entry irq_vectors/call_function_single_entry
+irq_vectors/reschedule_entry irq_vectors/local_timer_entry
+csd/csd_queue_cpu
+sched/sched_waking sched/sched_switch sched/sched_wakeup
+timer/hrtimer_start timer/hrtimer_expire_entry timer/timer_start timer/timer_expire_entry
+timer/tick_stop
+workqueue/workqueue_queue_work workqueue/workqueue_execute_start
+power/cpu_idle power/suspend_resume power/wakeup_source_activate
+rpm/rpm_suspend rpm/rpm_resume rpm/rpm_idle rpm/rpm_return_int
+""".split())
+# name -> the kernel symbol a kprobe goes on (named g16testd/<name> in tracefs)
+KPROBES = {
+    "asus-wmi-set-devstate": "asus_wmi_set_devstate",
+    "pci-set-power-state": "pci_set_power_state",
+    "pm-runtime-resume": "__pm_runtime_resume",
+}
+# name -> what the drop-in appends to the default kernel command line
+DROPINS = {
+    "rcu-nocbs-all": " rcu_nocbs=all",
+    "nmi-watchdog-off": " nmi_watchdog=0",
+}
+
+
+def fail(msg):
+    raise Refused(msg)
+
+
+class Refused(Exception):
+    pass
+
+
+# --------------------------------------------------------------- the machine
+class Host:
+    """Paths and commands, under a fake root for the offline tests (--fake)."""
+
+    def __init__(self, fake=None):
+        self.fake = fake
+        r = fake or "/"
+        j = lambda *p: os.path.join(r, *p)  # noqa: E731
+        self.sys, self.proc = j("sys"), j("proc")
+        self.state = j("var/lib", UNIT)
+        self.run_dir = j("run", UNIT)
+        self.etc_dropins = j("etc/limine-entry-tool.d")
+        self.default_limine = j("etc/default/limine")
+        self.root = r
+        self.canned = {}
+        if fake and os.path.exists(j("fake-commands.json")):
+            with open(j("fake-commands.json")) as f:
+                self.canned = json.load(f)
+
+    def tracefs(self):
+        t = os.path.join(self.sys, "kernel/tracing")
+        return t if os.path.isdir(os.path.join(t, "instances")) else os.path.join(self.sys, "kernel/debug/tracing")
+
+    def run(self, argv, check=True):
+        """A fixed command; in fake mode logged (and answered from fake-commands.json)."""
+        if self.fake:
+            with open(os.path.join(self.fake, "commands.log"), "a") as f:
+                f.write(" ".join(argv) + "\n")
+            out = self.canned.get(" ".join(argv), "")
+            rc = 0
+            if isinstance(out, dict):  # {"rc": N, "out": "..."}: a command that fails
+                rc, out = out.get("rc", 1), out.get("out", "")
+            if check and rc != 0:
+                fail(f"{argv[0]} failed (rc {rc})")
+            return rc, out
+        try:
+            p = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            fail(f"{argv[0]}: {e}")
+        if check and p.returncode != 0:
+            fail(f"{argv[0]} failed: {(p.stderr or p.stdout).strip()[:300]}")
+        return p.returncode, p.stdout
+
+    def mkinstance(self, path):
+        os.mkdir(path)
+        # tracefs fills a new instance itself; the fake copies a template
+        if self.fake and os.path.isdir(os.path.join(self.fake, "fake-instance")):
+            shutil.copytree(os.path.join(self.fake, "fake-instance"), path, dirs_exist_ok=True)
+
+    def rmdir(self, path):
+        if self.fake:
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            os.rmdir(path)
+
+    def boot_id(self):
+        return rd(os.path.join(self.proc, "sys/kernel/random/boot_id"))
+
+
+def rd(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def wr(path, value):
+    try:
+        with open(path, "w") as f:
+            f.write(f"{value}\n")
+    except OSError as e:
+        fail(f"write {value!r} to {path} refused: {e.strerror}")
+
+
+def glob_dirs(base, test):
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return []
+    return [os.path.join(base, n) for n in names if test(os.path.join(base, n))]
+
+
+def pci_by_id(h, vendor, device):
+    d = glob_dirs(os.path.join(h.sys, "bus/pci/devices"),
+                  lambda p: rd(f"{p}/vendor") == vendor and rd(f"{p}/device") == device)
+    return d[0] if d else None
+
+
+def usb_by_id(h, vendor, product):
+    d = glob_dirs(os.path.join(h.sys, "bus/usb/devices"),
+                  lambda p: rd(f"{p}/idVendor") == vendor and rd(f"{p}/idProduct") == product)
+    return d[0] if d else None
+
+
+# --------------------------------------------------------------- knobs
+# Each knob: check(value) raises on a value outside its range; get() reads the current
+# value as a string; set(value) writes it. The original is what get() said before the
+# first set in a session, plus whatever save() records, and restore is load(original):
+# set(original value) unless the knob needs more than one value back.
+class Knob:
+    def __init__(self, what, values, get, set_, save=None, load=None):
+        self.what, self.values, self.get, self.set = what, values, get, set_
+        self.save = save or (lambda h: {})
+        self.load = load or (lambda h, orig: set_(h, orig["value"]))
+
+    def check(self, h, v):
+        allowed = self.values(h) if callable(self.values) else self.values
+        if isinstance(allowed, range):
+            if not re.fullmatch(r"[0-9]{1,6}", v) or int(v) not in allowed:
+                fail(f"value {v!r} out of range {allowed.start}..{allowed.stop - 1}")
+        elif isinstance(allowed, re.Pattern):
+            if not allowed.fullmatch(v):
+                fail(f"value {v!r} not of the form {allowed.pattern}")
+        elif v not in allowed:
+            fail(f"value {v!r} not one of {', '.join(sorted(allowed))}")
+
+
+def _need(path, what):
+    if not path or not os.path.exists(path):
+        fail(f"{what} absent")
+    return path
+
+
+def _nvme_params(h):
+    return os.path.join(h.sys, "module/nvme_core/parameters")
+
+
+def _nvme_get(h):
+    p = _nvme_params(h)
+    _need(os.path.join(p, "apst_primary_timeout_ms"), "nvme_core APST parameters")
+    return f"{rd(p + '/apst_primary_timeout_ms')}/{rd(p + '/apst_secondary_timeout_ms')}"
+
+
+def _nvme_set(h, v):
+    p = _nvme_params(h)
+    prim, sec = v.split("/")
+    if int(prim) > 60000 or int(sec) > 60000:
+        fail("APST timeouts are at most 60000 ms")
+    wr(os.path.join(p, "apst_primary_timeout_ms"), prim)
+    wr(os.path.join(p, "apst_secondary_timeout_ms"), sec)
+    # APST is set up when the controller starts and when its latency tolerance changes:
+    # step the tolerance by one and back, so the new timeouts take effect.
+    for q in glob_dirs(os.path.join(h.sys, "class/nvme"), lambda d: os.path.exists(f"{d}/power/pm_qos_latency_tolerance_us")):
+        q += "/power/pm_qos_latency_tolerance_us"
+        cur = rd(q)
+        if cur.isdigit():
+            wr(q, int(cur) + 1)
+            wr(q, cur)
+
+
+SD_ID = ("0x17a0", "0x9767")  # Genesys GL9767 SD reader (#226)
+
+
+def _sd_get(h):
+    return "present" if pci_by_id(h, *SD_ID) else "removed"
+
+
+def _sd_set(h, v, state=None):
+    # state: the reader's PCI name and its port, recorded while it is present
+    dev = pci_by_id(h, *SD_ID)
+    if v == "removed":
+        if dev:
+            wr(os.path.join(dev, "remove"), 1)
+        return
+    if dev:
+        return
+    port = state.get("port") if state else None
+    if not port or not os.path.isdir(port):
+        fail("the SD reader's port is unknown; it returns at the next boot")
+    # The port's own setting was recorded at the first set, so a retry after a failed
+    # rescan never takes the forced "on" for it.
+    ctl = state.get("port_control")
+    # Rescan below the reader's port only, with the port held awake so its bus can be read.
+    wr(f"{port}/power/control", "on")
+    try:
+        wr(f"{port}/rescan" if os.path.exists(f"{port}/rescan") else os.path.join(h.sys, "bus/pci/rescan"), 1)
+        for _ in range(10):
+            if pci_by_id(h, *SD_ID):
+                break
+            time.sleep(0.5)
+    finally:
+        if ctl:
+            wr(f"{port}/power/control", ctl)
+    if not pci_by_id(h, *SD_ID):
+        fail("the SD reader did not come back (it returns at the next boot)")
+
+
+def _sd_state(h):
+    dev = pci_by_id(h, *SD_ID)
+    if not dev:
+        return {}
+    port = os.path.realpath(os.path.join(dev, ".."))
+    return {"port": port, "port_control": rd(f"{port}/power/control")}
+
+
+def _power_control(find, what):
+    def get(h):
+        d = _need(find(h), what)
+        return rd(f"{d}/power/control")
+
+    def set_(h, v):
+        wr(f"{_need(find(h), what)}/power/control", v)
+    return get, set_
+
+
+def _leds(h):
+    return [f"{d}/brightness" for d in glob_dirs(os.path.join(h.sys, "class/leds"),
+                                                  lambda p: p.endswith("::numlock") and os.path.exists(f"{p}/brightness"))]
+
+
+def _numlock_get(h):
+    leds = _leds(h)
+    if not leds:
+        fail("no Num Lock LED")
+    return "1" if any(rd(f) not in ("", "0") for f in leds) else "0"
+
+
+def _numlock_set(h, v):
+    for f in _leds(h):
+        wr(f, v)
+
+
+def _numlock_load(h, orig):
+    # each LED back to its own value (two keyboards can differ)
+    for f, v in orig["leds"].items():
+        if os.path.exists(f):
+            wr(f, v)
+
+
+def _wlan(h):
+    d = glob_dirs(os.path.join(h.sys, "class/net"),
+                  lambda p: os.path.isdir(f"{p}/wireless") or os.path.exists(f"{p}/phy80211"))
+    if not d:
+        fail("no Wi-Fi interface")
+    return os.path.basename(d[0])
+
+
+def _wifi_get(h):
+    _, out = h.run(["iw", "dev", _wlan(h), "get", "power_save"])
+    v = out.split()[-1] if out.split() else ""
+    if v not in ("on", "off"):
+        fail("Wi-Fi power save unreadable")
+    return v
+
+
+def _wifi_set(h, v):
+    h.run(["iw", "dev", _wlan(h), "set", "power_save", v])
+
+
+def _rfkill_bt(h):
+    d = glob_dirs(os.path.join(h.sys, "class/rfkill"), lambda p: rd(f"{p}/type") == "bluetooth")
+    if not d:
+        fail("no Bluetooth rfkill switch")
+    return f"{d[0]}/soft"
+
+
+def _panel(h):
+    d = glob_dirs(os.path.join(h.sys, "class/drm"),
+                  lambda p: "-eDP-" in os.path.basename(p) and os.path.exists(f"{p}/amdgpu/panel_power_savings"))
+    if not d:
+        fail("no panel_power_savings on the eDP panel")
+    return f"{d[0]}/amdgpu/panel_power_savings"
+
+
+def _profile(h):
+    return _need(os.path.join(h.sys, "firmware/acpi/platform_profile"), "platform_profile")
+
+
+def _profile_choices(h):
+    return set(rd(os.path.join(h.sys, "firmware/acpi/platform_profile_choices")).split())
+
+
+def _file_knob(path_of):
+    return (lambda h: rd(path_of(h))), (lambda h, v: wr(path_of(h), v))
+
+
+_sd_dev = lambda h: pci_by_id(h, *SD_ID)  # noqa: E731
+_kbd_dev = lambda h: usb_by_id(h, "0b05", "19b6")  # noqa: E731
+
+KNOBS = {
+    "nmi-watchdog": Knob("kernel.nmi_watchdog (#225)", {"0", "1"},
+                         *_file_knob(lambda h: _need(os.path.join(h.proc, "sys/kernel/nmi_watchdog"), "nmi_watchdog"))),
+    "nvme-apst": Knob("NVMe APST idle timeouts PRIMARY/SECONDARY ms, re-applied (#232)",
+                      re.compile(r"[0-9]{1,5}/[0-9]{1,5}"), _nvme_get, _nvme_set),
+    "sd-reader": Knob("GL9767 SD reader on the PCI bus: present or removed (#226)", {"present", "removed"},
+                      _sd_get, _sd_set, save=_sd_state, load=lambda h, o: _sd_set(h, o["value"], o)),
+    "sd-reader-pm": Knob("GL9767 SD reader runtime PM, power/control (#226)", {"on", "auto"},
+                         *_power_control(_sd_dev, "the GL9767 SD reader")),
+    "kbd-usb-pm": Knob("N-Key keyboard (USB 0b05:19b6) runtime PM, power/control (#233)", {"on", "auto"},
+                       *_power_control(_kbd_dev, "the N-Key keyboard")),
+    "numlock-led": Knob("Num Lock LED (the LED only, not the key state) (#228)", {"0", "1"},
+                        _numlock_get, _numlock_set, save=lambda h: {"leds": {f: rd(f) for f in _leds(h)}},
+                        load=_numlock_load),
+    "wifi-ps": Knob("Wi-Fi power save, iw (#227)", {"on", "off"}, _wifi_get, _wifi_set),
+    "bt-rfkill": Knob("Bluetooth rfkill soft block (#234)", {"0", "1"}, *_file_knob(_rfkill_bt)),
+    "panel-power-savings": Knob("OLED CACP, amdgpu panel_power_savings (#172)", range(0, 5), *_file_knob(_panel)),
+    "platform-profile": Knob("ACPI platform_profile", _profile_choices, *_file_knob(_profile)),
+}
+
+
+# --------------------------------------------------------------- the daemon
+class Daemon:
+    def __init__(self, h, uid, expires, modules, stay_awake_before="unknown", session=""):
+        self.h, self.uid, self.expires, self.modules = h, uid, expires, modules
+        self.stay_awake_before, self.session, self.idle_put_back = stay_awake_before, session, False
+        self.rec = {"boot_id": h.boot_id(), "knobs": {}, "modules": {}, "dropins": [],
+                    "ec_loaded": False, "traces": {}, "frozen": {}}
+        self.records = os.path.join(h.state, "records.json")
+        self.stopping = False
+
+    # -- records: written before every change, so a crash still knows what to put back
+    def save(self):
+        os.makedirs(self.h.state, mode=0o755, exist_ok=True)
+        tmp = self.records + ".tmp"
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            json.dump(self.rec, f, indent=1)
+        os.replace(tmp, self.records)
+
+    def recover(self):
+        """Put back what a previous daemon left changed (it crashed or was killed)."""
+        try:
+            with open(self.records) as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            return
+        dropins = [d for d in old.get("dropins", []) if d in DROPINS]
+        if old.get("boot_id") == self.rec["boot_id"]:
+            self.rec.update({k: old.get(k, v) for k, v in self.rec.items() if k not in ("boot_id", "dropins")})
+            log(f"recovering the previous session's changes: {self.summary()}")
+            # Not stay-awake: this session's client has yet to turn it on, and the last
+            # session's is put back by its own record at session start.
+            self.restore_runtime(idle=False)
+        else:
+            log("previous session was in an earlier boot: its runtime changes reset with it")
+        # Drop-ins survive the reboot they were made for; they stay recorded until stop.
+        self.rec["dropins"] = dropins
+        self.save()
+
+    def summary(self):
+        r = self.rec
+        return ", ".join(f"{k}={len(r[k]) if not isinstance(r[k], bool) else r[k]}"
+                         for k in ("knobs", "modules", "dropins", "traces", "frozen", "ec_loaded"))
+
+    def restore_runtime(self, idle=True):
+        """Everything but the boot drop-ins; each failure logged, the rest still tried."""
+        errs = []
+        for scope in list(self.rec["frozen"]):
+            self._try(errs, self.thaw, scope)
+        for name in list(self.rec["traces"]):
+            self._try(errs, self.trace_stop, name, False)
+        for name in list(self.rec["modules"]):
+            self._try(errs, self.module_restore, name)
+        for name in list(self.rec["knobs"]):
+            self._try(errs, self.knob_restore, name)
+        if self.rec["ec_loaded"]:
+            self._try(errs, self.ec_unload)
+        if idle:
+            self._try(errs, self.idle_restore)
+        return errs
+
+    def idle_restore(self):
+        """Omarchy's stay-awake back off, as the user, only if it was off at start."""
+        if self.stay_awake_before != "off" or self.idle_put_back:
+            return
+        try:
+            pw = pwd.getpwuid(self.uid)
+        except KeyError:
+            fail(f"uid {self.uid} has no passwd entry; stay-awake left on")
+        self.h.run(["setpriv", f"--reuid={self.uid}", f"--regid={pw.pw_gid}", "--init-groups",
+                    "--reset-env", "omarchy-toggle-idle", "allow-idle"])
+        self.idle_put_back = True
+        # Tells the client's record this session's stay-awake is settled, so a later
+        # session start doesn't undo a stay-awake the user turned on since.
+        if self.session:
+            marker = os.path.join(self.h.state, f"idle-done-{self.uid}")
+            os.makedirs(self.h.state, mode=0o755, exist_ok=True)
+            with open(marker + ".tmp", "w") as f:
+                f.write(self.session + "\n")
+            os.chmod(marker + ".tmp", 0o644)
+            os.replace(marker + ".tmp", marker)
+
+    def restore_all(self):
+        errs = self.restore_runtime()
+        for name in list(self.rec["dropins"]):
+            self._try(errs, self.boot_dropin, name, "off")
+        return errs
+
+    @staticmethod
+    def _try(errs, fn, *a):
+        try:
+            fn(*a)
+        except Refused as e:
+            errs.append(str(e))
+            log(f"restore: {e}")
+
+    # -- knobs
+    def knob_set(self, name, value):
+        k = KNOBS.get(name) or fail(f"unknown knob {name!r} (g16-testd list)")
+        k.check(self.h, value)
+        if name not in self.rec["knobs"]:
+            self.rec["knobs"][name] = {"value": k.get(self.h), **k.save(self.h)}
+            self.save()
+        if name == "sd-reader":
+            _sd_set(self.h, value, self.rec["knobs"][name])
+        else:
+            k.set(self.h, value)
+        return k.get(self.h)
+
+    def knob_restore(self, name):
+        k = KNOBS.get(name) or fail(f"unknown knob {name!r}")
+        orig = self.rec["knobs"].get(name)
+        if orig is None:
+            return "not changed"
+        k.load(self.h, orig)
+        del self.rec["knobs"][name]
+        self.save()
+        return k.get(self.h)
+
+    # -- EC RAM, read-only
+    def ec_read(self, offset, length):
+        o, n = _int(offset, 0, 255, "offset"), _int(length, 1, 256, "length")
+        if o + n > 256:
+            fail("offset + length is past the 256-byte EC RAM")
+        mod = os.path.join(self.h.sys, "module/ec_sys")
+        if os.path.isdir(mod):
+            if rd(f"{mod}/parameters/write_support") not in ("N", "0"):
+                fail("ec_sys is loaded with write_support on; unload it first (this helper never writes the EC)")
+        else:
+            self.rec["ec_loaded"] = True
+            self.save()
+            self.h.run(["modprobe", "ec_sys", "write_support=0"])
+        io = os.path.join(self.h.sys, "kernel/debug/ec/ec0/io")
+        try:
+            with open(io, "rb") as f:
+                f.seek(o)
+                data = f.read(n)
+        except OSError as e:
+            fail(f"cannot read {io}: {e.strerror}")
+        return data.hex()
+
+    def ec_unload(self):
+        self.h.run(["modprobe", "-r", "ec_sys"])
+        self.rec["ec_loaded"] = False
+        self.save()
+
+    # -- tracing
+    def trace_start(self, name, events, kprobes="-", buffer_kb="16384"):
+        if not NAME_RE.fullmatch(name):
+            fail("instance name: lowercase letters, digits and dashes, up to 32")
+        if name in self.rec["traces"]:
+            fail(f"trace {name} is already running")
+        ev = [] if events == "-" else events.split(",")
+        kp = [] if kprobes == "-" else kprobes.split(",")
+        bad = [e for e in ev if e not in EVENTS] + [k for k in kp if k not in KPROBES]
+        if bad:
+            fail(f"not on the allowlist: {', '.join(bad)} (g16-testd list)")
+        if not ev and not kp:
+            fail("no events and no kprobes")
+        kb = _int(buffer_kb, 64, 65536, "buffer_kb")
+        base = self.h.tracefs()
+        if not os.path.isdir(os.path.join(base, "instances")):
+            fail(f"no tracefs at {base}")
+        inst = os.path.join(base, "instances", f"g16-testd-{name}")
+        self.rec["traces"][name] = {"started": time.time(), "kprobes": kp}
+        self.save()
+        try:
+            self.h.mkinstance(inst)
+        except OSError as e:
+            del self.rec["traces"][name]
+            self.save()
+            fail(f"cannot create the tracefs instance: {e.strerror}")
+        wr(f"{inst}/tracing_on", 0)
+        wr(f"{inst}/buffer_size_kb", kb)
+        for k in kp:
+            self._kprobe_add(base, k)
+        on, missing = [], []
+        for e in ev + [f"g16testd/{_kp_event(k)}" for k in kp]:
+            f = f"{inst}/events/{e}/enable"
+            if os.path.exists(f):
+                wr(f, 1)
+                on.append(e)
+            else:
+                missing.append(e)
+        if not on:
+            self.trace_stop(name, False)
+            fail("none of the events exist in this kernel")
+        wr(f"{inst}/tracing_on", 1)
+        return {"on": on, "missing": missing}
+
+    def _kprobe_add(self, base, k):
+        line = f"p:g16testd/{_kp_event(k)} {KPROBES[k]}\n"
+        try:
+            with open(os.path.join(base, "kprobe_events"), "a") as f:
+                f.write(line)
+        except OSError as e:
+            fail(f"kprobe {k} ({KPROBES[k]}) refused: {e.strerror}")
+
+    def trace_stop(self, name, keep=True):
+        t = self.rec["traces"].get(name) or fail(f"no trace {name} running")
+        base = self.h.tracefs()
+        inst = os.path.join(base, "instances", f"g16-testd-{name}")
+        out = None
+        if os.path.isdir(inst):
+            wr(f"{inst}/tracing_on", 0)
+            if keep:
+                outdir = os.path.join(self.h.run_dir, "out")
+                os.makedirs(outdir, mode=0o755, exist_ok=True)
+                out = os.path.join(outdir, f"{name}.trace")
+                with open(f"{inst}/trace", "rb") as src, open(out, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                if not self.h.fake:
+                    os.chown(out, self.uid, -1)
+                os.chmod(out, 0o600)
+            self.h.rmdir(inst)
+        in_use = {k for n, o in self.rec["traces"].items() if n != name for k in o["kprobes"]}
+        for k in t["kprobes"]:
+            if k not in in_use:
+                try:
+                    with open(os.path.join(base, "kprobe_events"), "a") as f:
+                        f.write(f"-:g16testd/{_kp_event(k)}\n")
+                except OSError as e:
+                    log(f"kprobe {k} removal refused: {e.strerror}")
+        del self.rec["traces"][name]
+        self.save()
+        return out or "discarded"
+
+    # -- modules
+    def module_swap(self, name, path):
+        if not MODULE_RE.fullmatch(name):
+            fail("bad module name")
+        want = self.modules.get(name) or fail(f"module {name} is not on this session's list (session start --module)")
+        if name in self.rec["modules"]:
+            fail(f"{name} is already swapped; module-restore it first")
+        # Read as root, so only a file the caller could read too: theirs, or anyone's.
+        # Checked before opening (a FIFO or device must never be opened) and again on
+        # the open file, non-blocking, in case the path was swapped in between.
+        def readable(st):
+            return stat.S_ISREG(st.st_mode) and (st.st_uid == self.uid or st.st_mode & 0o004)
+        try:
+            pre = os.lstat(path)
+        except OSError as e:
+            fail(f"cannot open {path}: {e.strerror}")
+        if not readable(pre):
+            fail(f"{path} is not a regular file you own or anyone can read")
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
+        except OSError as e:
+            fail(f"cannot open {path}: {e.strerror}")
+        st = os.fstat(fd)
+        if not readable(st) or (st.st_dev, st.st_ino) != (pre.st_dev, pre.st_ino):
+            os.close(fd)
+            fail(f"{path} changed while it was opened")
+        # Hash the copy that will be loaded, not the caller's file, which could change.
+        store = os.path.join(self.h.state, "modules")
+        os.makedirs(store, mode=0o700, exist_ok=True)
+        copy = os.path.join(store, f"{name}-{want[:16]}.ko" + _ko_suffix(path))
+        with os.fdopen(fd, "rb") as src, open(copy, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        got = sha256(copy)
+        if got != want:
+            os.unlink(copy)
+            fail(f"{path} has sha256 {got}, not this session's {want}")
+        _, inner = self.h.run(["modinfo", "-F", "name", copy])
+        if inner.strip().replace("-", "_") != name.replace("-", "_"):
+            os.unlink(copy)
+            fail(f"{path} is module {inner.strip() or '?'}, not {name}")
+        loaded = os.path.isdir(os.path.join(self.h.sys, "module", name.replace("-", "_")))
+        self.rec["modules"][name] = {"stock_loaded": loaded, "copy": copy}
+        self.save()
+        if loaded:
+            self.h.run(["rmmod", name])
+        rc, _ = self.h.run(["insmod", copy], check=False)
+        if rc != 0:
+            self.module_restore(name)
+            fail(f"insmod {name} failed; the stock module is back")
+        return f"{name} {want[:12]} loaded"
+
+    def module_restore(self, name):
+        r = self.rec["modules"].get(name)
+        if r is None:
+            return "not swapped"
+        if os.path.isdir(os.path.join(self.h.sys, "module", name.replace("-", "_"))):
+            self.h.run(["rmmod", name])
+        if r["stock_loaded"]:
+            self.h.run(["modprobe", name])
+        try:
+            os.unlink(r["copy"])
+        except OSError:
+            pass
+        del self.rec["modules"][name]
+        self.save()
+        return f"{name}: stock module {'loaded' if r['stock_loaded'] else 'left unloaded, as before'}"
+
+    # -- boot drop-ins
+    def boot_dropin(self, name, state):
+        if name not in DROPINS:
+            fail(f"unknown drop-in {name!r} (g16-testd list)")
+        if state not in ("on", "off"):
+            fail("state is on or off")
+        f = os.path.join(self.h.etc_dropins, f"{UNIT}-{name}.conf")
+        if state == "on":
+            if name not in self.rec["dropins"]:
+                self.rec["dropins"].append(name)
+                self.save()
+            os.makedirs(self.h.etc_dropins, mode=0o755, exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write(f"# {UNIT}: test session drop-in {name} (#277); removed by g16-testd session stop.\n"
+                         f'KERNEL_CMDLINE[default]+="{DROPINS[name]}"\n')
+        else:
+            try:
+                os.unlink(f)
+            except FileNotFoundError:
+                pass
+        self.h.run(["limine-update"])
+        if state == "off" and name in self.rec["dropins"]:
+            self.rec["dropins"].remove(name)
+            self.save()
+        return {"cmdlines": self.cmdlines()}
+
+    def cmdlines(self):
+        esp = "/boot"
+        for line in rd(self.h.default_limine).splitlines():
+            m = re.match(r'^ESP_PATH="?([^"]*)"?$', line.strip())
+            if m:
+                esp = m.group(1)
+        root = self.h.root
+        for c in ("limine.conf", "EFI/limine/limine.conf", "limine/limine.conf", "EFI/BOOT/limine.conf"):
+            p = os.path.join(root, esp.lstrip("/"), c)
+            if os.path.isfile(p):
+                seen = []
+                for line in rd(p).splitlines():
+                    m = re.match(r"^\s*(?:kernel_)?cmdline:\s*(.*)$", line)
+                    if m and m.group(1) not in seen:
+                        seen.append(m.group(1))
+                return seen
+        return ["(no limine.conf found: check the boot menu by hand before rebooting)"]
+
+    # -- freezing user app scopes
+    def _scope(self, scope):
+        if not re.fullmatch(r"app-[A-Za-z0-9_.@:\\-]{1,200}\.scope", scope):
+            fail("only user app scopes (app-*.scope), never services")
+        top = os.path.join(self.h.sys, f"fs/cgroup/user.slice/user-{self.uid}.slice/user@{self.uid}.service/app.slice")
+        for d, subdirs, _ in os.walk(top):
+            if scope in subdirs:
+                return os.path.join(d, scope)
+            subdirs[:] = [s for s in subdirs if s.startswith("app") and s.endswith(".slice")]
+        fail(f"no scope {scope} in your app.slice")
+
+    def freeze(self, scope, seconds=str(FREEZE_DEFAULT)):
+        s = _int(seconds, 1, FREEZE_MAX, "seconds")
+        cg = self._scope(scope)
+        if scope not in self.rec["frozen"]:
+            # a scope already frozen before the session stays frozen after it
+            self.rec["frozen"][scope] = {"path": cg, "orig": rd(f"{cg}/cgroup.freeze") or "0"}
+        self.rec["frozen"][scope]["until"] = time.time() + s
+        self.save()
+        wr(f"{cg}/cgroup.freeze", 1)
+        return f"frozen for at most {s} s"
+
+    def thaw(self, scope):
+        r = self.rec["frozen"].get(scope) or fail(f"{scope} is not frozen by this session")
+        orig = r.get("orig", "0")
+        if os.path.isdir(r["path"]):
+            wr(f"{r['path']}/cgroup.freeze", orig)
+        del self.rec["frozen"][scope]
+        self.save()
+        return "thawed" if orig == "0" else "back to frozen, as it was before the session"
+
+    def watchdogs(self):
+        now = time.time()
+        for scope, r in list(self.rec["frozen"].items()):
+            if now >= r["until"]:
+                log(f"watchdog: thawing {scope}")
+                self._try([], self.thaw, scope)
+        for name, t in list(self.rec["traces"].items()):
+            if now - t["started"] > TRACE_MAX_SECONDS:
+                log(f"watchdog: trace {name} ran {TRACE_MAX_SECONDS} s; stopping it, kept for trace-stop")
+                self._try([], self.trace_stop, name, True)
+
+    def status(self):
+        return {"uid": self.uid, "expires": int(self.expires), "left_s": int(self.expires - time.time()),
+                "knobs": {k: v["value"] for k, v in self.rec["knobs"].items()},
+                "modules": sorted(self.rec["modules"]), "dropins": self.rec["dropins"],
+                "traces": sorted(self.rec["traces"]), "frozen": sorted(self.rec["frozen"]),
+                "ec_loaded": self.rec["ec_loaded"], "session_modules": self.modules,
+                "stay_awake_before": self.stay_awake_before}
+
+    METHODS = {
+        "ec-read": "ec_read", "trace-start": "trace_start", "trace-stop": "trace_stop",
+        "knob-set": "knob_set", "knob-restore": "knob_restore", "module-swap": "module_swap",
+        "module-restore": "module_restore", "boot-dropin": "boot_dropin", "freeze": "freeze",
+        "thaw": "thaw", "status": "status",
+    }
+
+    def handle(self, req, peer):
+        method, args, reason = req.get("method"), req.get("args", []), clean(req.get("reason", ""))
+        if not isinstance(method, str):
+            fail("bad method")
+        if not isinstance(args, list) or not all(isinstance(a, str) and len(a) < 4096 for a in args):
+            fail("bad arguments")
+        log(f"call {method} {' '.join(args)!r} by uid {peer[1]} pid {peer[0]}: {reason or '-'}")
+        if method == "stop":
+            errs = self.restore_all()
+            self.stopping = True
+            return {"restored": not errs, "errors": errs}
+        if method != "status" and not reason:
+            fail("--reason is required")
+        fn = self.METHODS.get(method) or fail(f"unknown method {method!r}")
+        if method == "trace-stop":
+            args = args[:1]
+        f = getattr(self, fn)
+        try:
+            inspect.signature(f).bind(*args)
+        except TypeError:
+            fail(f"wrong number of arguments for {method}")
+        return f(*args)
+
+    def serve(self):
+        os.makedirs(self.h.run_dir, mode=0o755, exist_ok=True)
+        sock_path = os.path.join(self.h.run_dir, "socket") if not self.h.fake else SOCKET
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        old = os.umask(0o177)
+        srv.bind(sock_path)
+        os.umask(old)
+        if not self.h.fake:
+            os.chown(sock_path, self.uid, -1)
+        os.chmod(sock_path, 0o600)
+        srv.listen(8)
+        srv.settimeout(1.0)
+        log(f"session open for uid {self.uid} until {time.strftime('%F %T', time.localtime(self.expires))}")
+        try:
+            while not self.stopping:
+                if time.time() >= self.expires:
+                    log("session expired: putting everything back")
+                    self.restore_all()
+                    break
+                self.watchdogs()
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                with conn:
+                    self.answer(conn)
+        finally:
+            srv.close()
+            try:
+                os.unlink(sock_path)
+            except FileNotFoundError:
+                pass
+            # Whatever ended the loop (stop, expiry, a signal, an error), the runtime
+            # changes go back; the records stay while anything is left to put back.
+            if not self.restore_runtime() and not self.rec["dropins"]:
+                try:
+                    os.unlink(self.records)
+                except FileNotFoundError:
+                    pass
+            log("session closed")
+
+    def answer(self, conn):
+        conn.settimeout(10)
+        pid, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        try:
+            if uid not in (self.uid, 0):
+                fail(f"uid {uid} is not this session's user")
+            buf = b""
+            while not buf.endswith(b"\n") and len(buf) < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            req = json.loads(buf or b"{}")
+            if not isinstance(req, dict):
+                fail("bad request")
+            reply = {"ok": True, "result": self.handle(req, (pid, uid))}
+        except Refused as e:
+            log(f"refused (uid {uid} pid {pid}): {e}")
+            reply = {"ok": False, "error": str(e)}
+        except Exception as e:  # one bad call never takes the session (and its restore) down
+            log(f"error (uid {uid} pid {pid}): {type(e).__name__}: {e}")
+            reply = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        try:
+            conn.sendall((json.dumps(reply) + "\n").encode())
+        except OSError:
+            pass
+
+
+def _kp_event(k):
+    return k.replace("-", "_")
+
+
+def _ko_suffix(path):
+    for s in (".zst", ".xz", ".gz"):
+        if path.endswith(".ko" + s):
+            return s
+    return ""
+
+
+def _int(v, lo, hi, what):
+    if not re.fullmatch(r"(0x)?[0-9a-fA-F]{1,6}", v):
+        fail(f"{what}: not a number")
+    n = int(v, 16) if v.startswith("0x") else int(v)
+    if not lo <= n <= hi:
+        fail(f"{what} {n} out of range {lo}..{hi}")
+    return n
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def clean(s):
+    return re.sub(r"[^\x20-\x7e]", "?", str(s))[:200]
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def parse_modules(items):
+    mods = {}
+    for m in items or []:
+        name, _, sha = m.partition("=")
+        if not MODULE_RE.fullmatch(name) or not SHA_RE.fullmatch(sha):
+            raise SystemExit(f"g16-testd: --module wants NAME=SHA256, got {m!r}")
+        mods[name] = sha
+    return mods
+
+
+def is_ga605km(sys_root="/sys"):
+    d = os.path.join(sys_root, "class/dmi/id")
+    return (rd(f"{d}/sys_vendor") == "ASUSTeK COMPUTER INC." and "ROG" in rd(f"{d}/product_family")
+            and ("GA605KM" in rd(f"{d}/product_name").upper() or "GA605KM" in rd(f"{d}/product_family").upper()))
+
+
+# --------------------------------------------------------------- root entry points
+def cmd_daemon(a):
+    if not a.fake and os.geteuid() != 0:
+        raise SystemExit("g16-testd daemon: runs as root, from session start")
+    d = Daemon(Host(a.fake), a.uid, a.expires, parse_modules(a.module), a.stay_awake_before, a.session)
+    stop = lambda *_: setattr(d, "stopping", True)  # noqa: E731
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGHUP, stop)
+    d.recover()
+    d.serve()
+    return 0
+
+
+def cmd_root_start(a):
+    """Run by pkexec: start the daemon as a transient system unit for the calling user."""
+    if os.geteuid() != 0:
+        raise SystemExit("g16-testd root-start: run by session start through pkexec")
+    uid = os.environ.get("PKEXEC_UID", "")
+    if not uid.isdigit() or int(uid) == 0:
+        raise SystemExit("g16-testd root-start: no calling user (PKEXEC_UID)")
+    if not is_ga605km():
+        raise SystemExit("g16-testd: this is not an ASUS ROG Zephyrus G16 GA605KM; no session opened")
+    hours = a.hours
+    if not 0 < hours <= MAX_HOURS:
+        raise SystemExit(f"g16-testd: --hours is 0..{MAX_HOURS}")
+    mods = parse_modules(a.module)
+    if subprocess.run(["systemctl", "is-active", "-q", f"{UNIT}.service"]).returncode == 0:
+        raise SystemExit("g16-testd: a session is already open (g16-testd session stop ends it)")
+    subprocess.run(["systemctl", "reset-failed", f"{UNIT}.service"], capture_output=True)
+    expires = int(time.time() + hours * 3600)
+    argv = ["systemd-run", f"--unit={UNIT}", "--description=G16 test session root helper (#277)",
+            "--collect", "-p", f"RuntimeMaxSec={int(hours * 3600) + 300}", "-p", "TimeoutStopSec=120",
+            LIBEXEC, "daemon", "--uid", uid, "--expires", str(expires), "--stay-awake-before", a.stay_awake_before,
+            "--session", a.session]
+    for n, s in mods.items():
+        argv += ["--module", f"{n}={s}"]
+    subprocess.run(argv, check=True, capture_output=True)
+    for _ in range(50):
+        if os.path.exists(SOCKET):
+            print(f"g16-testd: session open until {time.strftime('%F %T', time.localtime(expires))}")
+            return 0
+        time.sleep(0.2)
+    raise SystemExit(f"g16-testd: the daemon did not come up; journalctl -u {UNIT}")
+
+
+def cmd_cleanup(a):
+    """Run by the package's pre_remove: end an open session and put back everything,
+    boot drop-ins included, also what a session that is no longer running left."""
+    if not a.fake and os.geteuid() != 0:
+        raise SystemExit("g16-testd cleanup: runs as root, from the package's removal")
+    r = call("stop", reason="package removal")
+    if r is not None:
+        if r.get("ok") and r["result"]["restored"]:
+            print("g16-testd: the open session was stopped; everything put back")
+            return 0
+        print(f"g16-testd: the open session was stopped, but: {r.get('error') or r['result']['errors']}",
+              file=sys.stderr)
+        if not a.fake:  # let its unit finish before the records are read here
+            subprocess.run(["systemctl", "stop", f"{UNIT}.service"], capture_output=True)
+    d = Daemon(Host(a.fake), -1, 0, {})
+    if not os.path.exists(d.records):
+        return 0 if r is None else 1
+    d.recover()
+    errs = d.restore_all()
+    if not errs:
+        os.unlink(d.records)
+        print("g16-testd: an earlier session's changes put back")
+        return 0
+    print(f"g16-testd: these did not go back: {errs}", file=sys.stderr)
+    return 1
+
+
+# --------------------------------------------------------------- client
+STATE = os.environ.get("G16_TESTD_STATE", f"/var/lib/{UNIT}")
+IDLE_RECORD = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                           UNIT, "stay-awake-before")
+
+
+def idle(action):
+    """omarchy-toggle-idle as this user; status -> on/off, or unknown without it."""
+    try:
+        p = subprocess.run(["omarchy-toggle-idle", action], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if action != "status":
+        return "ok" if p.returncode == 0 else "unknown"
+    try:
+        return "on" if json.loads(p.stdout).get("enabled") else "off"
+    except (ValueError, AttributeError):
+        return "unknown"
+
+
+def idle_put_back_leftover():
+    """A session whose daemon didn't put stay-awake back (a crash, a failed allow-idle)
+    left its record behind; one whose daemon did is marked done and is only retired.
+    False when it could not be put back: the record stays, and no session starts over it."""
+    try:
+        with open(IDLE_RECORD) as f:
+            before, _, session = f.read().strip().partition(" ")
+    except OSError:
+        return True
+    done = rd(os.path.join(STATE, f"idle-done-{os.getuid()}"))
+    if before == "off" and not (session and done == session):
+        if idle("allow-idle") != "ok":
+            print("g16-testd: could not put stay-awake from an earlier session back off"
+                  " (omarchy-toggle-idle allow-idle); no session started", file=sys.stderr)
+            return False
+        print("g16-testd: stay-awake from an earlier session put back off")
+    os.unlink(IDLE_RECORD)
+    return True
+
+
+def call(method, args=(), reason=""):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCKET)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return None
+    except PermissionError:
+        return {"ok": False, "error": "the open session belongs to another user"}
+    with s:
+        s.settimeout(300)
+        s.sendall((json.dumps({"method": method, "args": list(args), "reason": reason}) + "\n").encode())
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    try:
+        return json.loads(buf)
+    except ValueError:
+        return {"ok": False, "error": "no answer from the daemon"}
+
+
+def show(reply):
+    if reply is None:
+        print("g16-testd: no session open (g16-testd session start)", file=sys.stderr)
+        return 3
+    if not reply.get("ok"):
+        print(f"g16-testd: {reply.get('error')}", file=sys.stderr)
+        return 1
+    r = reply.get("result")
+    if isinstance(r, str):
+        print(r)
+    elif isinstance(r, dict) and "cmdlines" in r:
+        print("kernel command lines after the next boot:")
+        for c in r["cmdlines"]:
+            print(f"  {c}")
+    else:
+        print(json.dumps(r, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_session(a):
+    if a.action == "start":
+        if os.geteuid() == 0:
+            raise SystemExit("g16-testd: run session start as your normal user")
+        if call("status") is not None:
+            print("g16-testd: a session is already open", file=sys.stderr)
+            return 1
+        mods = parse_modules(a.module)
+        # A new session would record the leftover stay-awake as "on" and lose the
+        # earlier one's "off", so it starts only once that one is put back.
+        if not idle_put_back_leftover():
+            return 1
+        before = idle("status")
+        session = os.urandom(8).hex()
+        argv = ["pkexec", LIBEXEC, "root-start", "--hours", str(a.hours), "--stay-awake-before", before,
+                "--session", session]
+        for n, s in mods.items():
+            argv += ["--module", f"{n}={s}"]
+        why = f"Open a {a.hours} h G16 test session: fixed, allowlisted root steps, all put back at the end"
+        # Through the desktop's polkit agent, like the kits (systemd-run --user), so a
+        # terminal or agent outside the graphical session still gets the dialog.
+        wrap = os.environ.get("G16_POLKIT_REASON")
+        if wrap:
+            argv = ["systemd-run", "--user", "--wait", "-q", "-P", wrap, "run", why, "--"] + argv
+        else:
+            argv = ["systemd-run", "--user", "--wait", "-q", "-P", argv[0], "--disable-internal-agent"] + argv[1:]
+        rc = subprocess.run(argv).returncode
+        if rc == 0:
+            os.makedirs(os.path.dirname(IDLE_RECORD), exist_ok=True)
+            with open(IDLE_RECORD, "w") as f:
+                f.write(f"{before} {session}\n")
+            idle("stay-awake")
+            print(f"g16-testd: stay-awake on for the session (it was {before})")
+        return rc
+    if a.action == "stop":
+        r = call("stop", reason="session stop")
+        if r is None:
+            print("g16-testd: no session open; nothing to put back")
+            return 0
+        if r.get("ok") and r["result"]["restored"]:
+            try:
+                os.unlink(IDLE_RECORD)  # the daemon put stay-awake back
+            except FileNotFoundError:
+                pass
+            print("g16-testd: everything put back; session closed")
+            return 0
+        print(f"g16-testd: closed, but these did not go back: {r.get('error') or r['result']['errors']}", file=sys.stderr)
+        return 1
+    return show(call("status"))
+
+
+def cmd_list(_a):
+    print("knobs (knob-set NAME VALUE):")
+    for n, k in KNOBS.items():
+        v = k.values
+        vs = ("from platform_profile_choices" if callable(v) else f"{v.start}..{v.stop - 1}" if isinstance(v, range)
+              else v.pattern if isinstance(v, re.Pattern) else "|".join(sorted(v)))
+        print(f"  {n:20} {vs:22} {k.what}")
+    print("trace events (trace-start):\n  " + "\n  ".join(sorted(EVENTS)))
+    print("kprobes (trace-start):\n  " + "\n  ".join(f"{k:22} {s}" for k, s in KPROBES.items()))
+    print("boot drop-ins (boot-dropin NAME on|off):\n  " + "\n  ".join(f"{k:22}{s}" for k, s in DROPINS.items()))
+    return 0
+
+
+def _session_id(v):
+    if not re.fullmatch(r"[0-9a-f]{0,32}", v):
+        raise argparse.ArgumentTypeError("a hex session id")
+    return v
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="g16-testd", description="One root helper per G16 test session (#277).")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("session")
+    s.add_argument("action", choices=["start", "stop", "status"])
+    s.add_argument("--hours", type=float, default=DEFAULT_HOURS)
+    s.add_argument("--module", action="append")
+    sub.add_parser("available")
+    sub.add_parser("list")
+    c = sub.add_parser("call")
+    c.add_argument("method", choices=sorted(Daemon.METHODS))
+    c.add_argument("args", nargs="*")
+    c.add_argument("--reason", default="")
+    d = sub.add_parser("daemon")
+    d.add_argument("--uid", type=int, required=True)
+    d.add_argument("--expires", type=float, required=True)
+    d.add_argument("--module", action="append")
+    d.add_argument("--stay-awake-before", choices=["on", "off", "unknown"], default="unknown")
+    d.add_argument("--session", default="", type=_session_id)
+    d.add_argument("--fake", help=argparse.SUPPRESS)
+    cl = sub.add_parser("cleanup")
+    cl.add_argument("--fake", help=argparse.SUPPRESS)
+    r = sub.add_parser("root-start")
+    r.add_argument("--hours", type=float, default=DEFAULT_HOURS)
+    r.add_argument("--module", action="append")
+    r.add_argument("--stay-awake-before", choices=["on", "off", "unknown"], default="unknown")
+    r.add_argument("--session", default="", type=_session_id)
+    a = p.parse_args(argv)
+    # Through pkexec only root-start runs: the dialog's action is opening a session.
+    if os.geteuid() == 0 and os.environ.get("PKEXEC_UID") and a.cmd != "root-start":
+        raise SystemExit("g16-testd: through pkexec, only root-start")
+    if a.cmd == "session":
+        return cmd_session(a)
+    if a.cmd == "available":
+        r = call("status")
+        return 0 if r and r.get("ok") else 3
+    if a.cmd == "list":
+        return cmd_list(a)
+    if a.cmd == "call":
+        return show(call(a.method, a.args, a.reason))
+    if a.cmd == "daemon":
+        return cmd_daemon(a)
+    if a.cmd == "cleanup":
+        return cmd_cleanup(a)
+    return cmd_root_start(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
