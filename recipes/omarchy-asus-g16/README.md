@@ -19,7 +19,9 @@ identical copies both apply until this package is removed.
 The package doesn't enable or start anything at install time. Its install
 script warns when the DMI data doesn't name a GA605KM, and the Limine entries
 are rebuilt (`limine-update`) when the kernel command-line drop-in arrives,
-changes or goes, so the next boot matches the package. It uses
+changes or goes, so the next boot matches the package. A running
+NetworkManager is asked to reread its configuration on install, upgrade and
+removal. It uses
 the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 `omarchy-hw-match GA605KM`.
 
@@ -29,6 +31,7 @@ the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 | `omarchy-asus-g16` | `/usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf` | [hibernate mode](#hibernatemodeshutdown) |
 | `omarchy-asus-g16` | `/usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf` | [nvidia-powerd start limit](#nvidia-powerd-start-limit) |
 | `omarchy-asus-g16` | `/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf`, `/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook` | [`rcu_nocbs=all`](#rcu_nocbsall) |
+| `omarchy-asus-g16` | `/usr/lib/NetworkManager/conf.d/omarchy-asus-g16-mt7925-auth-retries.conf` | [Wi-Fi back after a wake](#wi-fi-stays-down-after-a-wake) |
 
 ## Touchpad doesn't wake the laptop
 
@@ -166,6 +169,51 @@ are in.
 
 **When to remove:** if linux-omarchy turns on `CONFIG_RCU_NOCB_CPU_DEFAULT_ALL`,
 or if the A/B shows no saving.
+
+## Wi-Fi stays down after a wake
+
+**Fixes (#196):** the G16's MediaTek MT7925 (`mt7925e`) authenticates and
+associates after a resume, then times out the WPA four-way handshake
+(`Reason: 15=4WAY_HANDSHAKE_TIMEOUT`). It happens once on most cold boots too,
+and the next try usually connects within a second. NetworkManager reads a
+handshake timeout on a `wpa-psk` connection as a possibly wrong password: it
+retries while `connection.auth-retries` (3 by default) has tries left, then
+asks a secret agent for a new key (`disconnected during association, asking
+for new key`). Omarchy runs no secret agent, so that request fails (`No agents
+were available for this request`), the device fails with `no-secrets`, and
+NetworkManager blocks autoconnect for the connection until a secret agent
+registers, which on Omarchy never happens. After two timeouts in a row Wi-Fi stayed down until it was
+reconnected by hand.
+
+The drop-in gives devices on the `mt7925e` driver six tries instead of three,
+in its own `[connection-…]` section matched with `match-device=driver:mt7925e`,
+so no other Wi-Fi card and no other connection setting changes. A connection
+with its own `auth-retries` keeps it.
+
+**This one isn't a fork mirror:** the fork has no equivalent.
+
+**Path:** NetworkManager reads `conf.d` from `/usr/lib`, `/run` and `/etc` and
+merges files by basename, so only an `/etc` file with this basename would mask
+it; no Omarchy file uses it. A matching `[connection-…]` section only answers
+for the keys it sets, so Omarchy's `[connection]` keys (`wifi.powersave`)
+still apply.
+
+**Check:** `NetworkManager --print-config | grep -A2 mt7925` prints the
+section. After a wake,
+`journalctl -b -u NetworkManager | grep -E "reauthenticating|asking for new key|no-secrets"`
+shows at most `reauthenticating` lines.
+
+**Cost:** a password that is really wrong on a connection that worked before
+fails after six handshake timeouts instead of three, so it takes a few
+seconds longer to give up. A new connection is unaffected: NetworkManager asks for its key at the first failure.
+
+**Upstream:** not reported. Two parts: the lost first handshake after a wake
+(mt76, kernel) and NetworkManager treating a handshake timeout as a wrong key
+when no agent can answer. Tracked in #196; a human decides whether either is
+reported.
+
+**When to remove:** when mt7925 keeps its first handshake after a wake, or when
+NetworkManager stops treating a handshake timeout as a wrong key.
 
 ## Not packaged
 

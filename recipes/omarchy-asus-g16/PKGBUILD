@@ -11,7 +11,7 @@
 pkgbase=omarchy-asus-g16
 pkgname=omarchy-asus-g16
 pkgver=1.0.0
-pkgrel=102
+pkgrel=103
 pkgdesc='System fixes for the ASUS ROG Zephyrus G16 GA605KM on Omarchy (EXPERIMENTAL)'
 arch=('x86_64')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -22,6 +22,7 @@ source=('99-omarchy-asus-g16-touchpad-wake.rules'
         'nvidia-powerd-20-omarchy-asus.conf'
         'omarchy-asus-g16-rcu-nocbs.conf'
         'omarchy-asus-g16-limine.hook'
+        'omarchy-asus-g16-mt7925-auth-retries.conf'
         'omarchy-asus-g16.install'
         'README.md'
         'LICENSE')
@@ -30,16 +31,18 @@ sha256sums=('48c521b2ebdc5840f21d6e90931c7fc5b302d14837de5e2039852e308ba7579f'
             '10bc994e5e8e9eec01fc5ebb4270fba13af672c6d5d0e3b1a63ab6f812517a91'
             '96e5ed436514c68642dc8064f4b7bda61adae2062da04d7bd8003eb94d01fbe9'
             'ce84fc6c73c8323a06a9394e1dbc8b82662e55fe2987fff9319f0e12a3279acd'
-            '03e0652ee50a983a5a32d932959f8bbf73bf06a4764fb1808e149d3663eac160'
-            '6b2fac9c5795fd7909facbf28df2462bcbed1818d5f993cd482f3d015d07c1c8'
+            '1a425601f082673b4145af86b4848878d44d8eb249584994bac947703767b664'
+            '8b128d53a94087daae5a0c3d52dc4f6c8048675c037598f88943a2811209c408'
+            'a0364acedab025aa642a77f29fb7b4b72691f77bb5591590dc0c675c45fcf179'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 package() {
-  pkgdesc='Touchpad wake, hibernate mode, nvidia-powerd start-limit and rcu_nocbs fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
+  pkgdesc='Touchpad wake, hibernate mode, nvidia-powerd start-limit, rcu_nocbs and Wi-Fi reconnect fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
   depends=('systemd')
   optdepends=('limine-mkinitcpio-hook: limine-update, which puts rcu_nocbs=all on the boot entries'
               'nvidia-utils: provides nvidia-powerd.service'
-              'asusctl: asusd starts nvidia-powerd on charger plug-in')
+              'asusctl: asusd starts nvidia-powerd on charger plug-in'
+              'networkmanager: reads the mt7925 auth-retries drop-in')
   install=omarchy-asus-g16.install
 
   # asus/touchpad-wake: disarm the ASUF1209 touchpad as a wake source.
@@ -56,6 +59,9 @@ package() {
     "$pkgdir/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf"
   install -Dm644 omarchy-asus-g16-limine.hook \
     "$pkgdir/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook"
+  # #196: more 4-way handshake tries for the mt7925 before NetworkManager gives up.
+  install -Dm644 omarchy-asus-g16-mt7925-auth-retries.conf \
+    "$pkgdir/usr/lib/NetworkManager/conf.d/omarchy-asus-g16-mt7925-auth-retries.conf"
 
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

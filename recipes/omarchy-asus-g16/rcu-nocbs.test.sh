@@ -33,7 +33,7 @@ CONF=$T/pkg/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf
 HOOK=$T/pkg/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook
 [[ -f $CONF && -f $HOOK ]] && ok "drop-in and hook installed" || bad "missing: $(cd "$T/pkg" && find . -type f)"
 got=$(cd "$T/pkg" && find . -type f | sort | paste -sd' ')
-want="./usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf ./usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf ./usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules ./usr/share/doc/omarchy-asus-g16/README.md ./usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook ./usr/share/licenses/omarchy-asus-g16/LICENSE ./usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf"
+want="./usr/lib/NetworkManager/conf.d/omarchy-asus-g16-mt7925-auth-retries.conf ./usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf ./usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf ./usr/lib/udev/rules.d/99-omarchy-asus-g16-touchpad-wake.rules ./usr/share/doc/omarchy-asus-g16/README.md ./usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook ./usr/share/licenses/omarchy-asus-g16/LICENSE ./usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf"
 [[ $got == "$want" ]] && ok "no other new files" || bad "files: $got"
 for f in "$CONF" "$HOOK"; do
   [[ $(stat -c %a "$f" 2>/dev/null) == 644 ]] || bad "$(basename "$f") not 0644"
@@ -58,6 +58,10 @@ exec_line=$(sed -n 's/^Exec = //p' "$HOOK")
 mkdir -p "$T/bin" "$T/nobin"
 printf '#!/bin/sh\necho ran >>"%s/updates"\n' "$T" >"$T/bin/limine-update"
 chmod +x "$T/bin/limine-update"
+# The install script also asks NetworkManager to reread its configuration
+# (#196, checked in mt7925-auth-retries.test.sh); never let it reach the host's.
+printf '#!/bin/sh\nexit 0\n' >"$T/bin/nmcli"
+chmod +x "$T/bin/nmcli"
 for b in sh cat grep printf; do ln -sf "$(command -v "$b")" "$T/nobin/$b"; done
 [[ ${exec_line%% *} == /bin/sh ]] || bad "Exec does not start with /bin/sh: $exec_line"
 cmdstr=$(sed -n "s/^Exec = \/bin\/sh -c '\(.*\)'$/\1/p" "$HOOK")
