@@ -100,7 +100,7 @@ state_line() {
   printf '%srtx=%s gpio%s=%s gpio%s=%s suspends=%s\n' "$out" "$(cat "$DEV/power/runtime_status" 2>/dev/null || echo '?')" \
     "$HPD_PIN" "$(gpio_count $HPD_PIN || true)" "$OTHER_PIN" "$(gpio_count $OTHER_PIN || true)" "$(suspends)"
 }
-klines() { journalctl -k -b "${1:-0}" -o short-precise --no-pager -q 2>/dev/null || dmesg 2>/dev/null; }
+klines() { journalctl -k -b 0 -o short-precise --no-pager -q 2>/dev/null || dmesg 2>/dev/null; }
 
 # ------------------------------------------------------------------ snapshot
 snapshot() {
