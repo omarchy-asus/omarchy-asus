@@ -346,6 +346,19 @@ class Session(unittest.TestCase):
         run("session", "start")
         self.assertEqual(open(self.idle_calls).read().split()[-3:], ["allow-idle", "status", "stay-awake"])
 
+    def test_failed_leftover_put_back_stops_session_start(self):
+        run = self.client()
+        put(self.root, self.record, "off 0123abcd")
+        stub = os.path.join(self.root, "bin/omarchy-toggle-idle")
+        put(self.root, stub, f'#!/bin/sh\necho "$1" >>{self.idle_calls}\n[ "$1" = allow-idle ] && exit 1\n'
+            'if [ "$1" = status ]; then echo \'{"enabled":true}\'; fi\nexit 0\n')
+        os.chmod(stub, 0o755)
+        p = run("session", "start")
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("no session started", p.stderr)
+        self.assertEqual(get(self.root, self.record), "off 0123abcd")
+        self.assertEqual(open(self.idle_calls).read().split(), ["allow-idle"])
+
     def test_expiry_retires_the_idle_record(self):
         run = self.client()
         run("session", "start")

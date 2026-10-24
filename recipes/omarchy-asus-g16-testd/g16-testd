@@ -1043,19 +1043,22 @@ def idle(action):
 
 def idle_put_back_leftover():
     """A session whose daemon didn't put stay-awake back (a crash, a failed allow-idle)
-    left its record behind; one whose daemon did is marked done and is only retired."""
+    left its record behind; one whose daemon did is marked done and is only retired.
+    False when it could not be put back: the record stays, and no session starts over it."""
     try:
         with open(IDLE_RECORD) as f:
             before, _, session = f.read().strip().partition(" ")
     except OSError:
-        return
+        return True
     done = rd(os.path.join(STATE, f"idle-done-{os.getuid()}"))
     if before == "off" and not (session and done == session):
         if idle("allow-idle") != "ok":
-            print("g16-testd: could not put stay-awake from an earlier session back off", file=sys.stderr)
-            return
+            print("g16-testd: could not put stay-awake from an earlier session back off"
+                  " (omarchy-toggle-idle allow-idle); no session started", file=sys.stderr)
+            return False
         print("g16-testd: stay-awake from an earlier session put back off")
     os.unlink(IDLE_RECORD)
+    return True
 
 
 def call(method, args=(), reason=""):
@@ -1108,7 +1111,10 @@ def cmd_session(a):
             print("g16-testd: a session is already open", file=sys.stderr)
             return 1
         mods = parse_modules(a.module)
-        idle_put_back_leftover()
+        # A new session would record the leftover stay-awake as "on" and lose the
+        # earlier one's "off", so it starts only once that one is put back.
+        if not idle_put_back_leftover():
+            return 1
         before = idle("status")
         session = os.urandom(8).hex()
         argv = ["pkexec", LIBEXEC, "root-start", "--hours", str(a.hours), "--stay-awake-before", before,
