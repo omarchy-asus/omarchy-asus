@@ -370,8 +370,14 @@ if [[ -n $NODE ]]; then
       fail "$unit is ${act:-inactive}: sudo systemctl start $unit; see journalctl -u $unit"
     fi
   fi
-  if have g16-winlock && out=$(g16-winlock status 2>&1); then
+  # status exits 3 when the service answers but nothing has reported the lock since it
+  # started: the keyboard can't be asked, so that is normal until the first Fn+Super.
+  out='' rc=127
+  have g16-winlock && { out=$(g16-winlock status 2>&1); rc=$?; }
+  if ((rc == 0)); then
     pass "g16-winlockd answers on the system bus: $out"
+  elif ((rc == 3)); then
+    warn "g16-winlockd answers, but the Win-lock state is not known until the first Fn+Super (or g16-winlock lock/unlock)"
   else
     fail "g16-winlockd does not answer ($WINLOCKD): ${out:-g16-winlock not installed}"
   fi

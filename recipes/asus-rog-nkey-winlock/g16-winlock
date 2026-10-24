@@ -6,6 +6,8 @@ Modes for `watch`:
   unlock  — same OSD, then immediately clear the lock (Active Guard)
 
 Also: lock | unlock | status | toggle  (one-shot control)
+`status` prints locked=True/False, or locked=unknown and exits 3 while the
+service doesn't know yet (nothing reports the lock until the first Fn+Super).
 
 The keyboard belongs to the root service g16-winlockd: this helper opens no
 device. It follows the service's LockChanged signal and calls its Status and
@@ -32,6 +34,7 @@ BUS_NAME = "io.github.omarchy_asus.WinLock1"
 OBJECT_PATH = "/io/github/omarchy_asus/WinLock1"
 SYSFS = os.environ.get("G16_WINLOCK_SYSFS", "/sys/class/hidraw")  # tests move it
 CALL_TIMEOUT_S = 30  # SetLocked may wait on polkit
+UNKNOWN_ERROR = f"{BUS_NAME}.Error.Unknown"
 
 # OSD icons (bottom-center omarchy-osd). Locked uses the color-emoji lock
 # because Omarchy OSD paints Nerd Font glyphs with popup text color only.
@@ -68,18 +71,19 @@ def _call(method: str, *args: str) -> str:
 def set_lock(locked: bool) -> None:
     """SetLocked(b): the service writes SetFeature 5D BF 00 xx and the 01 01 commit."""
     _call("SetLocked", "true" if locked else "false")
-    print(f"Win-lock {'on' if locked else 'off'}")
+    print(f"Win-lock {'on' if locked else 'off'}", flush=True)
 
 
-def get_status() -> bool | None:
+def query_status() -> bool | None:
+    """Status(): True/False, or None while the service doesn't know (no Fn+Super or
+    SetLocked since it started). Other failures raise SystemExit."""
     try:
         reply = _call("Status")
     except SystemExit as e:
-        print(e, file=sys.stderr)
-        return None
-    locked = reply == "(true,)"
-    print(f"locked={locked}")
-    return locked
+        if UNKNOWN_ERROR in str(e):
+            return None
+        raise
+    return reply == "(true,)"
 
 
 NOTIFY_TIMEOUT_S = 5  # a stuck notifier must not stall the report loop
@@ -120,8 +124,10 @@ def toast(message: str, *, icon: str = ICON_LOCKED, duration_ms: int = 2000) -> 
     print(f"toast FAILED: no OSD/notifier delivered {message!r}", flush=True)
 
 
-# gdbus monitor prints each signal as "<path>: <interface>.<member> (<args>)".
+# gdbus monitor prints each signal as "<path>: <interface>.<member> (<args>)",
+# and "The name ... is owned by :1.N" (or "is now owned by") once it follows the service.
 SIGNAL_RE = re.compile(re.escape(f"{OBJECT_PATH}: {BUS_NAME}.LockChanged (") + r"(true|false),\)")
+OWNED_RE = re.compile(r"is (now )?owned by")
 
 
 def watch(mode: str) -> None:
@@ -150,12 +156,27 @@ def watch(mode: str) -> None:
                 suppress_off = _handle(m.group(1) == "true", mode, suppress_off)
             elif line.strip():
                 print(line.rstrip(), flush=True)  # gdbus: who owns the name now
+                if mode == "unlock" and OWNED_RE.search(line):
+                    suppress_off = _unlock_at_start(suppress_off)
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
         proc.terminate()
     if proc.wait() not in (0, -15):
         raise SystemExit(f"gdbus monitor exited with {proc.returncode}")
+
+
+def _unlock_at_start(suppress_off: int) -> int:
+    """Unlock mode, when the service (re)starts: a lock kept over a reboot or set while
+    nothing watched sends no report, so clear it unless the service knows it is off."""
+    try:
+        if query_status() is False:
+            return suppress_off
+        set_lock(False)
+    except SystemExit as e:
+        print(e, file=sys.stderr)
+        return suppress_off
+    return suppress_off + 1  # a possible echo of our own unlock
 
 
 def _handle(locked: bool, mode: str, suppress_off: int) -> int:
@@ -207,16 +228,23 @@ def main() -> None:
 
     args = p.parse_args()
     if args.cmd == "status":
-        if get_status() is None:
-            raise SystemExit(1)
+        try:
+            locked = query_status()
+        except SystemExit as e:
+            print(e, file=sys.stderr)
+            raise SystemExit(1) from None
+        if locked is None:
+            print("locked=unknown (g16-winlockd learns it at the first Fn+Super, lock or unlock)")
+            raise SystemExit(3)
+        print(f"locked={locked}")
     elif args.cmd == "lock":
         set_lock(True)
     elif args.cmd == "unlock":
         set_lock(False)
     elif args.cmd == "toggle":
-        cur = get_status()
+        cur = query_status()
         if cur is None:
-            raise SystemExit("Cannot toggle without a readable status")
+            raise SystemExit("Cannot toggle: the lock state is not known until the first Fn+Super")
         set_lock(not cur)
     elif args.cmd == "watch":
         watch(args.mode)

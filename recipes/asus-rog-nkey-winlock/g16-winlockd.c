@@ -5,9 +5,19 @@
  * an instance whose node doesn't declare report ID 0x5D exits at once. The one
  * that does waits on the node (epoll, no timers), turns every 5D BF 01 xx report
  * into the D-Bus signal LockChanged(b), and offers two methods:
- *   Status() -> b      GetFeature 5D, or the last reported state
- *   SetLocked(b)       SetFeature 5D BF 00 xx, then output report 01 01;
+ *   Status() -> b      the last state seen (a 5D BF 01 xx report or SetLocked's
+ *                      read-back); Error.Unknown before either
+ *   SetLocked(b)       SetFeature 5D BF 00 xx, output report 01 01, then
+ *                      GetFeature 5D to read the result back; Error.Failed when
+ *                      the keyboard reads back the other state;
  *                      root, or polkit io.github.omarchy-asus.winlock.set-locked
+ *
+ * Feature report 0x5D answers the last command written to it, and at boot that
+ * is Aura's, not Win-lock's: there is no read-only query for the lock. Windows'
+ * AsusWinKeyActiveGuard only reads it back right after its own 5D BF write, and
+ * so does SetLocked here. A later Fn+Super doesn't refresh that reply, so it is
+ * only read right after the write.
+ *
  * Raw reports never leave the process.
  *
  * G16_WINLOCKD_SYSFS and G16_WINLOCKD_DEV move /sys/class/hidraw and /dev, for
@@ -22,6 +32,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 #include <systemd/sd-bus.h>
 #include <systemd/sd-event.h>
@@ -33,7 +44,7 @@
 #define REPORT_LEN 64
 
 static int hid = -1;
-static int last = -1; /* last reported state, -1 = none yet */
+static int last = -1; /* last state seen, -1 = none yet */
 static sd_bus *bus;
 
 static const char *env_or(const char *name, const char *dflt) {
@@ -98,14 +109,19 @@ static int on_report(sd_event_source *s, int fd, uint32_t revents, void *u) {
     return 0;
 }
 
-static int method_status(sd_bus_message *m, void *u, sd_bus_error *err) {
+/* GetFeature 5D: the lock state (0 or 1) when the reply is to a 5D BF command,
+ * else -1 (the reply belongs to Aura, or the ioctl failed). */
+static int read_back(void) {
     unsigned char buf[REPORT_LEN] = {REPORT_ID};
     int n = ioctl(hid, HIDIOCGFEATURE(REPORT_LEN), buf);
-    /* Report 0x5D is shared with Aura: only a 5D BF ?? xx reply carries the flag. */
-    if (n >= 4 && buf[0] == REPORT_ID && buf[1] == 0xBF)
-        return sd_bus_reply_method_return(m, "b", buf[3] != 0);
+    if (n >= 4 && buf[0] == REPORT_ID && buf[1] == 0xBF) return buf[3] != 0;
+    return -1;
+}
+
+static int method_status(sd_bus_message *m, void *u, sd_bus_error *err) {
     if (last >= 0) return sd_bus_reply_method_return(m, "b", last);
-    return sd_bus_error_set(err, NAME ".Error.Unknown", "the keyboard did not report its Win-lock state");
+    return sd_bus_error_set(err, NAME ".Error.Unknown",
+                            "Win-lock state not known until the first Fn+Super or SetLocked");
 }
 
 /* Root, or polkit says yes for this caller (allow_active: the local, active session). */
@@ -142,6 +158,13 @@ static int method_set_locked(sd_bus_message *m, void *u, sd_bus_error *err) {
     static const unsigned char commit[2] = {0x01, 0x01}; /* a write, not another SetFeature */
     if (ioctl(hid, HIDIOCSFEATURE(REPORT_LEN), f) < 0 || write(hid, commit, sizeof commit) != sizeof commit)
         return sd_bus_error_set_errno(err, errno ? errno : EIO);
+    /* The Windows tool's read-back: 100 ms, then GetFeature now answers 5D BF.
+     * Without a 5D BF reply, the write went through: take it as the state. */
+    nanosleep(&(struct timespec){.tv_nsec = 100 * 1000 * 1000}, NULL);
+    int s = read_back();
+    last = s >= 0 ? s : locked != 0;
+    if (last != (locked != 0))
+        return sd_bus_error_setf(err, NAME ".Error.Failed", "the keyboard kept Win-lock %s", last ? "on" : "off");
     return sd_bus_reply_method_return(m, "");
 }
 

@@ -1,6 +1,9 @@
 /* LD_PRELOAD shim for winlockd.test.sh: the fake hidraw node is a pty, which
  * has no feature reports, so HIDIOCSFEATURE is logged to $FAKE_HID_LOG as hex and
- * HIDIOCGFEATURE answers 5D BF 00 <$FAKE_HID_STATE> (or fails without it). */
+ * HIDIOCGFEATURE answers like the keyboard: the last command written to report
+ * 0x5D, and before any, an Aura reply (5D 05 20 ..., no BF), as on the G16 at boot.
+ * While the file $FAKE_HID_KEEP exists, a SetFeature 5D BF 00 xx doesn't take: the
+ * reply reads back the state in that file instead (a keyboard that refuses the write). */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
@@ -10,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+
+static unsigned char mailbox[64] = {0x5D, 0x05, 0x20, 0x31};
 
 int ioctl(int fd, unsigned long req, ...) {
     va_list ap;
@@ -22,13 +27,18 @@ int ioctl(int fd, unsigned long req, ...) {
         if (!f) return -1;
         fprintf(f, "SetFeature %02x %02x %02x %02x\n", b[0], b[1], b[2], b[3]);
         fclose(f);
+        memcpy(mailbox, b, sizeof mailbox);
+        const char *keep = getenv("FAKE_HID_KEEP");
+        FILE *k = keep ? fopen(keep, "r") : NULL;
+        if (k) {
+            int v = 0;
+            if (fscanf(k, "%d", &v) == 1) mailbox[3] = (unsigned char)v;
+            fclose(k);
+        }
         return 64;
     }
     if (req == HIDIOCGFEATURE(64)) {
-        const char *s = getenv("FAKE_HID_STATE");
-        if (!s) { errno = EIO; return -1; }
-        memset(b, 0, 64);
-        b[0] = 0x5D; b[1] = 0xBF; b[3] = (unsigned char)atoi(s);
+        memcpy(b, mailbox, sizeof mailbox);
         return 64;
     }
     int (*real)(int, unsigned long, void *) = (int (*)(int, unsigned long, void *))dlsym(RTLD_NEXT, "ioctl");
