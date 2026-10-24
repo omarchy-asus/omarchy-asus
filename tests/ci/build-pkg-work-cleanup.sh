@@ -61,7 +61,7 @@ expect "$(works)" "" "no work dir left"
 
 echo "== 3. no package made"
 build nopkg
-[[ $rc -ne 0 ]]; expect $? 0 "build-pkg fails"
+expect "$((rc != 0))" 1 "build-pkg fails"
 expect "$(works)" "" "no work dir left"
 
 echo "== 4. files the build user can't remove"
