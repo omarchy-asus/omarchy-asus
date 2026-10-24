@@ -31,12 +31,13 @@ exit at once. It waits on the node (no timers, no polling) and turns each
 `5D BF 01 xx` report into the D-Bus signal `LockChanged(b)` on the system bus
 (`io.github.omarchy_asus.WinLock1`). It has two methods and nothing else:
 
-- `Status() -> b`: GetFeature `5D`, or the last state seen. Before the first
-  Fn+Super or `SetLocked` since the service started it returns
+- `Status() -> b`: the last state seen, from a `5D BF 01 xx` report or
+  `SetLocked`'s read-back. Before either since the service started it returns
   `io.github.omarchy_asus.WinLock1.Error.Unknown` (see below).
 - `SetLocked(b)`: SetFeature `5D BF 00 xx`, output report `01 01`, then after
   100 ms GetFeature `5D` to read the result back (the sequence
-  AsusWinKeyActiveGuard uses on Windows). Allowed for root and,
+  AsusWinKeyActiveGuard uses on Windows); `Error.Failed` when the keyboard
+  reads back the other state. Allowed for root and,
   through polkit (`io.github.omarchy-asus.winlock.set-locked`, `allow_active`),
   for the user of the active local session.
 
@@ -45,7 +46,8 @@ The keyboard can't be asked for the lock without changing it: feature report
 Aura's, with no `BF` in it. AsusWinKeyActiveGuard has the same limit: it only
 reads the state back after its own `5D BF` write, and starts out assuming the
 key is unlocked. So `Status()` knows the state once a Fn+Super has reported it
-or a `SetLocked` has read it back, and `g16-winlock status` prints
+or a `SetLocked` has read it back (a later Fn+Super doesn't refresh the
+feature reply, so it is only read right after the write), and `g16-winlock status` prints
 `locked=unknown` (exit 3) until then.
 
 Raw reports never leave the service, and the node stays `root:root 0600`.

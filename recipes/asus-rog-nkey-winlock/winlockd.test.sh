@@ -37,7 +37,7 @@ cc -O2 -Wall -o "$T/fake_polkit" "$here/fake_polkit.c" $CFLAGS_SD
 read -r DBUS_SYSTEM_BUS_ADDRESS BUS_PID < <(dbus-daemon --session --fork --nopidfile \
     --print-address=1 --print-pid=1 | paste -sd' ')
 export DBUS_SYSTEM_BUS_ADDRESS
-export FAKE_POLKIT_LOG=$T/polkit.log FAKE_HID_LOG=$T/hid.log
+export FAKE_POLKIT_LOG=$T/polkit.log FAKE_HID_LOG=$T/hid.log FAKE_HID_KEEP=$T/keep
 touch "$FAKE_POLKIT_LOG" "$FAKE_HID_LOG" "$T/written.log"
 
 # Fake sysfs: hidraw0 is another interface of the keyboard (no report 0x5D),
@@ -124,6 +124,13 @@ if [[ $out == '()' ]] && grep -qx 'SetFeature 5d bf 00 00' "$FAKE_HID_LOG" &&
 else
     fail "SetLocked(false): $out / $(cat "$FAKE_HID_LOG") / $(cat "$T/written.log")"
 fi
+# 4b. A Fn+Super after SetLocked wins over the feature reply, which still answers the old write.
+report '5d bf 01 01'
+wait_for "$T/daemon.log" '^Win-lock on$' || true
+out=$(call Status)
+[[ $out == '(true,)' ]] && pass "Status after SetLocked(false) then Fn+Super: the report (true)" ||
+    fail "Status after SetLocked then a report: $out"
+report '5d bf 01 00'
 grep -qx 'io.github.omarchy-asus.winlock.set-locked system-bus-name' "$FAKE_POLKIT_LOG" &&
     pass "SetLocked checks polkit io.github.omarchy-asus.winlock.set-locked for the caller" ||
     fail "polkit not asked: $(cat "$FAKE_POLKIT_LOG")"
@@ -145,6 +152,19 @@ out=$(python3 -I "$src/g16-winlock" lock 2>&1) && grep -qx 'SetFeature 5d bf 00 
     pass "g16-winlock lock -> SetLocked(true)" || fail "g16-winlock lock: $out / $(cat "$FAKE_HID_LOG")"
 out=$(python3 -I "$src/g16-winlock" status 2>&1 || true)
 [[ $out == locked=True ]] && pass "g16-winlock status after lock (read back): $out" || fail "g16-winlock status: $out"
+
+# 6b. The keyboard reads back locked after an unlock: SetLocked fails, Status stays locked,
+# and g16-winlock unlock fails instead of printing "Win-lock off".
+echo 1 >"$FAKE_HID_KEEP"
+out=$(call SetLocked false || true)
+[[ $out == *"$NAME.Error.Failed"*"kept Win-lock on"* ]] && pass "SetLocked(false) read back locked: Error.Failed" ||
+    fail "SetLocked with a refused write: $out"
+out=$(python3 -I "$src/g16-winlock" unlock 2>&1) && rc=0 || rc=$?
+[[ $rc != 0 && $out != *"Win-lock off"* ]] && pass "g16-winlock unlock fails when the keyboard keeps the lock" ||
+    fail "g16-winlock unlock with a refused write: exit $rc, $out"
+out=$(call Status)
+[[ $out == '(true,)' ]] && pass "Status after a refused unlock: true" || fail "Status after a refused unlock: $out"
+rm -f "$FAKE_HID_KEEP"
 
 # 7. watch --mode=unlock: clears the lock it finds at start (locked since 6), then on
 # Fn+Super: OSD, SetLocked(false), and its echo suppressed.

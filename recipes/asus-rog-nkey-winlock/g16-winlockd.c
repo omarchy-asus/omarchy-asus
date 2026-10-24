@@ -5,16 +5,19 @@
  * an instance whose node doesn't declare report ID 0x5D exits at once. The one
  * that does waits on the node (epoll, no timers), turns every 5D BF 01 xx report
  * into the D-Bus signal LockChanged(b), and offers two methods:
- *   Status() -> b      GetFeature 5D, or the last state seen; Error.Unknown
- *                      before the first report or SetLocked
+ *   Status() -> b      the last state seen (a 5D BF 01 xx report or SetLocked's
+ *                      read-back); Error.Unknown before either
  *   SetLocked(b)       SetFeature 5D BF 00 xx, output report 01 01, then
- *                      GetFeature 5D to read the result back;
+ *                      GetFeature 5D to read the result back; Error.Failed when
+ *                      the keyboard reads back the other state;
  *                      root, or polkit io.github.omarchy-asus.winlock.set-locked
  *
  * Feature report 0x5D answers the last command written to it, and at boot that
  * is Aura's, not Win-lock's: there is no read-only query for the lock. Windows'
  * AsusWinKeyActiveGuard only reads it back right after its own 5D BF write, and
- * so does SetLocked here.
+ * so does SetLocked here. A later Fn+Super doesn't refresh that reply, so it is
+ * only read right after the write.
+ *
  * Raw reports never leave the process.
  *
  * G16_WINLOCKD_SYSFS and G16_WINLOCKD_DEV move /sys/class/hidraw and /dev, for
@@ -116,8 +119,6 @@ static int read_back(void) {
 }
 
 static int method_status(sd_bus_message *m, void *u, sd_bus_error *err) {
-    int s = read_back();
-    if (s >= 0) last = s;
     if (last >= 0) return sd_bus_reply_method_return(m, "b", last);
     return sd_bus_error_set(err, NAME ".Error.Unknown",
                             "Win-lock state not known until the first Fn+Super or SetLocked");
@@ -162,6 +163,8 @@ static int method_set_locked(sd_bus_message *m, void *u, sd_bus_error *err) {
     nanosleep(&(struct timespec){.tv_nsec = 100 * 1000 * 1000}, NULL);
     int s = read_back();
     last = s >= 0 ? s : locked != 0;
+    if (last != (locked != 0))
+        return sd_bus_error_setf(err, NAME ".Error.Failed", "the keyboard kept Win-lock %s", last ? "on" : "off");
     return sd_bus_reply_method_return(m, "");
 }
 
