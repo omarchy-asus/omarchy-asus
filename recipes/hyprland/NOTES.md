@@ -1,15 +1,18 @@
-# hyprland 0.56.2-4.1
+# hyprland 0.56.2-4.102 (RC channel)
 
 **Base:** Arch's `hyprland` 0.56.2-4 packaging, commit `abb207b` ("upgpkg: 0.56.2-4") of
 https://gitlab.archlinux.org/archlinux/packaging/packages/hyprland. The Omarchy stable mirror's
 `extra` carries the same build: `hyprland` and `hyprpm` 0.56.2-4, with a package sha256 identical to
 Arch's `extra`. Arch's split (`hyprland` + `hyprpm`, split out in 0.56.2-3) is unchanged, so both
-packages are built at 0.56.2-4.1 and replace exactly what Arch ships. The PKGBUILD is Arch's (0BSD, see
+packages are built at 0.56.2-4.102 and replace exactly what Arch ships. The PKGBUILD is Arch's (0BSD, see
 `LICENSE`).
 
-**Our changes to Arch's PKGBUILD:** `pkgrel=4.1` (`4.101` and up on the RC channel), plus
-`reconnect-render-offset.patch` and `seat-leave-on-capability-loss.patch` added to `source`/`sha256sums`
-and applied at the end of `prepare()`.
+**Our changes to Arch's PKGBUILD:** `pkgrel=4.102`, `(omarchy-asus build)` appended to both
+`pkgdesc`s (`pkgbuild-pkgdesc-label.diff`), plus `reconnect-render-offset.patch` and
+`seat-leave-on-capability-loss.patch` added to `source`/`sha256sums` and applied at the end of `prepare()`.
+On the RC channel our pkgrel is Arch's pkgrel + `.101` and up (`.1` to `.99` is Quattro's range, where
+this recipe is at 4.2): 4.101 moved the recipe into the RC range (#201), and 4.102 added
+`seat-leave-on-capability-loss.patch` (#302, #305).
 
 **Patch:** `reconnect-render-offset.patch` (`src/output/Monitor.cpp`, `CMonitor::onConnect`). After an HDMI
 replug, the monitor gets its remembered workspace back through an internal `changeWorkspace()`.
@@ -48,10 +51,11 @@ Discussions). Drop the patch once a release sends leave before dropping the capa
 `fixed-upstream` line flags the first release that contains `e9e2f64c`. By hand:
 1. `git -C recipes/.hyprland-arch-checkout pull` (the gitignored Arch packaging checkout), then
    `git -C recipes/.hyprland-arch-checkout show origin/main:PKGBUILD > recipes/hyprland/PKGBUILD`.
-2. Reapply the edits above, with pkgrel = Arch's pkgrel + `.1`.
+2. Reapply the edits above, with pkgrel = Arch's pkgrel + `.101` (`bin/rebase-recipe --channel rc` starts there).
 3. If pkgver changed: check whether the release contains `e9e2f64c`. If it does, test without
-   `reconnect-render-offset.patch`, and if the bug is gone, drop that patch. Check the same for
-   `seat-leave-on-capability-loss.patch`. Only when neither patch is left, `bin/unpublish hyprland hyprpm`
-   and delete this recipe. Regenerate each patch that is still needed against the new source
-   (`makepkg --nobuild --nodeps` in a scratch copy).
+   `reconnect-render-offset.patch`, and if the bug is gone, drop that patch. Separately, check whether the
+   release's `CWLSeatProtocol::updateCapabilities()` sends `leave` before dropping a capability; if it does,
+   test without `seat-leave-on-capability-loss.patch` (lock, suspend, resume, type) and drop it if typing works.
+   Only when neither patch is left, `bin/unpublish hyprland hyprpm` and delete this recipe. Regenerate
+   each patch that is still needed against the new source (`makepkg --nobuild --nodeps` in a scratch copy).
 4. Run `bin/check-upstream`, then `bin/build-pkg recipes/hyprland`.
