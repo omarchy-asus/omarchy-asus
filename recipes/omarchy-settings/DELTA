@@ -43,3 +43,4 @@ patch 0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch prepare om
 # maintainer's approval and kept apart from the ASUS patches above (NOTES.md).
 patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy
 patch general-0002-Keep-the-sleep-monitor-running-across-suspends.patch prepare omarchy
+patch general-0003-Restore-lock-screen-password-focus-lost-on-suspend.patch prepare omarchy
