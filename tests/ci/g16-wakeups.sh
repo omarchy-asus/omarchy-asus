@@ -11,7 +11,11 @@
 #      the home path; --no-post posts nothing;
 #   4. --analyze re-reads a kept bundle without root, and --compare reports B
 #      against A;
-#   5. bad options exit 2, and a missing tracefs fails without leaving a bundle.
+#   5. bad options exit 2, and a missing tracefs fails without leaving a bundle;
+#   6. inside an open g16-testd session (a stand-in that logs its calls) the trace
+#      goes through its trace-start and trace-stop with a reason, only the events on
+#      its allowlist, the report says which were left out, and nothing asks for
+#      root; with no session it falls back to pkexec.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -218,5 +222,66 @@ done
 rm -rf "$TRB"
 out=$(run --seconds 1 --label broken --no-post 2>&1); rc=$?
 [[ $rc == 1 && ! -e $H/state/broken ]] && ok "no tracefs: fails and keeps no bundle" || bad "no tracefs: rc=$rc, $(ls "$H/state" 2>&1)"
+
+# 6. through g16-testd: the stand-in allows every event but irq_work_entry, and hands
+# back the fixture as the trace.
+cat >"$B/g16-testd" <<'EOF'
+#!/bin/bash
+case $1 in
+  available) [[ -e $STUB/td-open ]] ;;
+  list) printf 'knobs (knob-set NAME VALUE):\n  nmi-watchdog  0, 1  x\ntrace events (trace-start):\n'
+    printf '  %s\n' power/cpu_idle irq_vectors/local_timer_entry irq_vectors/call_function_entry irq_vectors/call_function_single_entry \
+      irq_vectors/reschedule_entry irq/irq_handler_entry ipi/ipi_send_cpu ipi/ipi_send_cpumask sched/sched_waking sched/sched_switch \
+      timer/hrtimer_start timer/hrtimer_expire_entry timer/timer_start timer/timer_expire_entry timer/tick_stop irq/tasklet_entry \
+      workqueue/workqueue_queue_work workqueue/workqueue_execute_start
+    printf 'kprobes (trace-start):\n  pci-set-power-state  pci_set_power_state\n' ;;
+  call)
+    shift; m=$1 r=''; shift; a=()
+    while (($#)); do if [[ $1 == --reason ]]; then r=$2; shift 2; else a+=("$1"); shift; fi; done
+    [[ -n $r && -e $STUB/td-open ]] || exit 3
+    echo "$m ${a[*]} | $r" >>"$STUB/td.log"
+    case $m in
+      trace-start) printf '{\n "missing": [],\n "on": ["%s"]\n}\n' "${a[1]//,/\", \"}" ;;
+      trace-stop) # the file is the caller's, the directory root's (read-only here)
+        mkdir -p "$STUB/td-out"; chmod 755 "$STUB/td-out"; cp "$STUB/fixture.trace" "$STUB/td-out/${a[0]}.trace"
+        chmod 555 "$STUB/td-out"; echo "$STUB/td-out/${a[0]}.trace" ;;
+    esac ;;
+esac
+EOF
+cat >"$B/systemd-run" <<'EOF'
+#!/bin/bash
+echo "systemd-run $*" >>"$STUB/root.log"; exit 1
+EOF
+chmod +x "$B/g16-testd" "$B/systemd-run"
+mkdir -p "$TRB/instances"
+run_td() { env HOME="$H" STUB="$T" PATH="$B:$PATH" G16_TESTD="$B/g16-testd" G16_WK_SYS="$S" G16_WK_PROC="$P" \
+  G16_WK_ISSUE="$B/issue" G16_WK_STATE="$H/state" "$SCRIPT" "$@"; }
+touch "$T/td-open"; rm -f "$T/posts"
+out=$(run_td --seconds 1 --label viatd 2>&1); rc=$?
+[[ $rc == 0 ]] && ok "testd capture and report exit 0" || bad "testd exit $rc: $out"
+[[ ! -e $T/root.log ]] && ok "testd capture asks for no root" || bad "testd asked for root: $(cat "$T/root.log")"
+L=$T/td.log
+grep -q '^trace-start wakeups-[0-9]* power/cpu_idle,.*,workqueue/workqueue_execute_start - 16384 | Record 1 s' "$L" &&
+  ok "trace-start with the allowed events and the reason" || bad "trace-start: $(cat "$L")"
+grep -q 'irq_work_entry' "$L" && bad "an event off the allowlist was asked for" || ok "only events on the allowlist are asked for"
+grep -q '^trace-stop wakeups-' "$L" && ok "trace-stop at the end" || bad "no trace-stop: $(cat "$L")"
+K=$H/state/viatd
+grep -q '^via=g16-testd' "$K/meta" && grep -q '^left_out=irq_vectors/irq_work_entry$' "$K/meta" && grep -q '^power=Discharging' "$K/meta" &&
+  ok "testd meta records the helper and what it left out" || bad "testd meta: $(cat "$K/meta")"
+if ((EUID != 0)); then
+  for f in "$T"/td-out/*.trace; do [[ -s $f ]] && bad "trace data left in the helper's directory" || ok "the helper's trace file is emptied"; done
+fi
+chmod 755 "$T/td-out"
+R=$T/body.239
+grep -qF "Idle exits by cause: 8/s" "$R" && ok "testd trace attributed like a root one" || bad "testd report: $(grep -m1 'Idle exits' "$R")"
+grep -qF "recorded through g16-testd (ring-buffer overruns not read); not on its allowlist, so left out: irq_vectors/irq_work_entry" "$R" &&
+  ok "the report says the trace went through g16-testd" || bad "testd report header: $(grep -m1 'window' "$R")"
+rm -f "$T/td-open" "$L"
+out=$(run_td --seconds 1 --label nosession --no-post 2>&1); rc=$?
+[[ $rc == 1 ]] && grep -q 'pkexec' "$T/root.log" && [[ ! -e $L && ! -e $H/state/nosession ]] &&
+  ok "no session: falls back to pkexec" || bad "no session: rc=$rc $(cat "$T/root.log" 2>&1) $out"
+out=$(G16_ROOT=testd run_td --seconds 1 --label forced --no-post 2>&1); rc=$?
+[[ $rc == 1 && $out == *"no g16-testd session is open"* && ! -e $H/state/forced ]] &&
+  ok "G16_ROOT=testd with no session refuses" || bad "G16_ROOT=testd: rc=$rc $out"
 
 ((fails == 0)) && echo "all g16-wakeups checks passed" || { echo "$fails check(s) failed"; exit 1; }

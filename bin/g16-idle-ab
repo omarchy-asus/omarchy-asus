@@ -41,9 +41,12 @@
 # issue, the whole report to #198, through bin/issue next to this script (its
 # denylist scan refuses a hit; without bin/issue nothing is posted).
 #
-# Root: G16_ROOT=pkexec (default: through the desktop's polkit agent, via
-# systemd-run --user), sudo, or none (tests only). G16_POLKIT_REASON=<wrapper>
-# runs `<wrapper> run REASON -- pkexec ...` so the dialog says why.
+# Root: inside an open g16-testd session (omarchy-asus-g16-testd, #277) every
+# change goes through that helper, with no dialog; otherwise pkexec, through the
+# desktop's polkit agent via systemd-run --user. G16_ROOT=testd or pkexec forces
+# one, sudo or none (tests only) are the others. G16_POLKIT_REASON=<wrapper> runs
+# `<wrapper> run REASON -- pkexec ...` so the dialog says why. Through g16-testd
+# the debugfs diagnostics are not read.
 #
 # Exit status: 0 when the run finished, 1 on a problem or a guard, 2 on bad usage.
 set -uo pipefail
@@ -236,6 +239,112 @@ if [[ ${1:-} == --root-helper ]]; then
   exit 0
 fi
 
+# ------------------------------------------------------------- g16-testd helper
+# The same protocol, run as you, for a run inside an open g16-testd session
+# (omarchy-asus-g16-testd, #277): each tweak is the helper's knob-set calls and its
+# revert their knob-restore, so no dialog is needed. The trace goes through the
+# helper's trace-start/trace-stop. diag and rapl have no helper call: diag reports
+# that, rapl answers "-". A tweak whose knob is already changed in the session (by
+# another test) is refused: its knob-restore would undo that test's setting. On EOF
+# it reverts every tweak still applied (and the session's stop puts back anything
+# left after that).
+if [[ ${1:-} == --testd-helper ]]; then
+  dry=${2:-0} nvme=${3:-30/500} why=${4:-}
+  TD=${G16_TESTD:-g16-testd}
+  declare -A APPLIED=()
+  knobs() { # tweak -> "knob=value ..." in the order they are set
+    case $1 in
+      nmi) echo nmi-watchdog=0 ;;
+      nvme-apst) echo "nvme-apst=$nvme" ;;
+      sd-off) echo sd-reader=removed ;;
+      kbd-usb) echo kbd-usb-pm=auto numlock-led=0 ;;
+      wifi-ps) echo wifi-ps=on ;;
+      numlock) echo numlock-led=0 ;;
+      bt-off) echo bt-rfkill=1 ;;
+      usb-idle) echo kbd-usb-pm=auto numlock-led=0 bt-rfkill=1 ;;
+    esac
+  }
+  td() { # call... -> its last line (the error on a failure)
+    local out rc
+    out=$("$TD" call "$@" --reason "$why" 2>&1); rc=$?
+    printf '%s' "${out##*$'\n'}"
+    return $rc
+  }
+  # knob... -> those already changed in the session (by another test): their
+  # knob-restore would undo that test's setting, so the tweak is refused instead.
+  taken() {
+    "$TD" session status 2>/dev/null | python3 -I -c '
+import json, sys
+try: knobs = json.load(sys.stdin).get("knobs", {})
+except ValueError: knobs = {}
+print(" ".join(k for k in sys.argv[1:] if k in knobs))' "$@"
+  }
+  apply() {
+    local t=$1 kv got=() r busy
+    [[ -n ${APPLIED[$t]:-} ]] && { echo "err already applied"; return; }
+    kv=$(knobs "$t"); [[ -n $kv ]] || { echo "err unknown tweak"; return; }
+    # shellcheck disable=SC2046,SC2086 # kv: knob=value words, one knob name each
+    busy=$(taken $(printf '%s\n' $kv | cut -d= -f1))
+    [[ -z $busy ]] || { echo "err already changed in this g16-testd session: $busy (knob-restore it, or run in a session of its own)"; return; }
+    APPLIED[$t]=1
+    ((dry)) && { echo "ok dry"; return; }
+    for kv in $kv; do
+      r=$(td knob-set "${kv%%=*}" "${kv#*=}") || { echo "err ${kv%%=*}: $r"; return; }
+      got+=("$r")
+    done
+    echo "ok ${got[*]}"
+  }
+  revert() {
+    local t=$1 k ks=() i rc=0 r
+    [[ -n ${APPLIED[$t]:-} ]] || { echo "ok not applied"; return; }
+    if ((!dry)); then
+      for k in $(knobs "$t"); do ks=("${k%%=*}" "${ks[@]}"); done
+      for i in "${ks[@]}"; do r=$(td knob-restore "$i") || { rc=1; echo "err $i: $r"; }; done
+      ((rc == 0)) || return
+    fi
+    unset "APPLIED[$t]"
+    echo "ok reverted"
+  }
+  TRN=''
+  # The helper's trace file is ours, in a directory of root's: empty it, so it holds
+  # no memory in /run, and remove it where we can.
+  drop() { : 2>/dev/null >"$1"; rm -f "$1" 2>/dev/null; }
+  trace_cleanup() { [[ -n $TRN ]] && { f=$(td trace-stop "$TRN") && drop "$f"; }; TRN=''; }
+  restore_all() { local t; for t in "${!APPLIED[@]}"; do revert "$t" >/dev/null; done; trace_cleanup; }
+  trap restore_all EXIT
+  trap 'exit 0' HUP INT TERM PIPE
+  printf 'ready testd\n'
+  while read -r cmd arg rest; do
+    case $cmd in
+      apply) [[ $arg =~ ^[a-z-]+$ ]] && apply "$arg" || echo "err bad tweak" ;;
+      revert) [[ $arg =~ ^[a-z-]+$ ]] && revert "$arg" || echo "err bad tweak" ;;
+      rapl) echo "rapl - -" ;;
+      diag) echo "diag debugfs: not read (g16-testd has no call for it; G16_ROOT=pkexec reads it)"; echo "end" ;;
+      trace)
+        if [[ ! $arg =~ ^[0-9]+$ ]] || ((arg < 1 || arg > 30)); then echo "end"; continue; fi
+        TRN=idle-ab-$$
+        if ! r=$(td trace-start "$TRN" csd/csd_queue_cpu,timer/hrtimer_expire_entry - 8192); then
+          TRN=''; echo "trace: g16-testd trace-start: $r"; echo "end"; continue
+        fi
+        sleep "$arg"
+        if f=$(td trace-stop "$TRN") && [[ -r $f ]]; then
+          awk -v s="$arg" '
+            / csd_queue_cpu: / { k="ipi"; f=$0; sub(/.*func=/, "", f); sub(/ .*/, "", f) }
+            / hrtimer_expire_entry: / { k="timer"; f=$0; sub(/.*function=/, "", f); sub(/ .*/, "", f) }
+            / csd_queue_cpu: | hrtimer_expire_entry: / { c=$1; sub(/-[0-9]+$/, "", c); n[k" "c" "f]++ }
+            END { for (x in n) printf "trace %.1f %s\n", n[x] / s, x }' "$f" 2>/dev/null | sort -k2,2 -rn | head -40
+          drop "$f"
+        else echo "trace: g16-testd trace-stop: $f"
+        fi
+        TRN=''
+        echo "end" ;;
+      quit) exit 0 ;;
+      *) echo "err unknown" ;;
+    esac
+  done
+  exit 0
+fi
+
 # ------------------------------------------------------------------ options
 DRY=0 POST=1 ROUNDS=3 MEASURE='' SETTLE='' INTERVAL=2 ONLY='' SEED='' BOOT='' CMP_A='' CMP_B='' CMP_ISSUE=''
 while (($#)); do
@@ -385,9 +494,15 @@ for b in "$SYS"/class/backlight/amdgpu_bl*; do [[ -r $b/actual_brightness ]] && 
 # ------------------------------------------------------------- root helper
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/g16-idle-ab.XXXXXX")
 REPORT=${G16_AB_REPORT:-$HOME/omarchy-asus-g16-idle-ab-$STAMP.md}
-ROOT=${G16_ROOT:-pkexec}
+ROOT=${G16_ROOT:-auto} TESTD=${G16_TESTD:-g16-testd}
 WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together) for the G16 battery A/B (#$SUMMARY_ISSUE); everything is put back when it ends"
+if [[ $ROOT == auto ]]; then
+  if "$TESTD" available >/dev/null 2>&1; then ROOT=testd; else ROOT=pkexec; fi
+fi
 case $ROOT in
+  testd)
+    "$TESTD" available >/dev/null 2>&1 || die "G16_ROOT=testd, but no g16-testd session is open for you (g16-testd session start)"
+    HELPER_CMD=("$SELF" --testd-helper "$DRY" "$NVME_PRIMARY_MS/$NVME_SECONDARY_MS" "g16-idle-ab: $WHY") ;;
   pkexec)
     if [[ -n ${G16_POLKIT_REASON:-} ]]; then
       HELPER_CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "$SELF" --root-helper "$SYS" "$PROC" "$DRY")
@@ -396,7 +511,7 @@ case $ROOT in
     fi ;;
   sudo) HELPER_CMD=(sudo ${SUDO_ASKPASS:+-A} "$SELF" --root-helper "$SYS" "$PROC" "$DRY") ;;
   none) HELPER_CMD=("$SELF" --root-helper "$SYS" "$PROC" "$DRY") ;;
-  *) die "G16_ROOT must be pkexec, sudo or none" ;;
+  *) die "G16_ROOT must be testd, pkexec, sudo or none" ;;
 esac
 
 STAY_FILE=$HOME/.local/state/omarchy/indicators/stay-awake
@@ -547,12 +662,12 @@ TOTAL_PH=$((ROUNDS * (2 * ${#SEL[@]} + 1)))
 [[ -n $BOOT ]] && TOTAL_PH=$((ROUNDS * 2))
 say "G16 idle A/B$( [[ -n $BOOT ]] && echo " (boot run '$BOOT')" )$( ((DRY)) && echo ', dry run')"
 note "$TOTAL_PH phases, about $(( (SETTLE + MEASURE) * TOTAL_PH / 60 + 2 )) minutes; leave the laptop alone until it says done"
-note "asking for root once"
+if [[ $ROOT == testd ]]; then note "root steps through the open g16-testd session (no dialog)"; else note "asking for root once"; fi
 coproc HELPER { "${HELPER_CMD[@]}" 2>/dev/null; }
 HELPER_PID=$HELPER_PID
 IFS= read -r -t 180 HELLO <&"${HELPER[0]}" || HELLO=''
 [[ $HELLO == ready\ * ]] || die "the root helper did not start (polkit dialog dismissed, or no agent); nothing was changed"
-[[ $ROOT == none || ${HELLO#ready } == 0 ]] || die "the root helper is not root"
+[[ $ROOT == none || $ROOT == testd || ${HELLO#ready } == 0 ]] || die "the root helper is not root"
 
 if ((DRY)); then note "[dry-run] would keep the screen on (stay-awake)"
 elif [[ ! -e $STAY_FILE ]]; then

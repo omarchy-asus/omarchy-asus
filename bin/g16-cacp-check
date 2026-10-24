@@ -1,0 +1,364 @@
+#!/bin/bash
+# g16-cacp-check: does a panel_power_savings write reach the display firmware, and
+# what does CACP save on the G16? (#172; the fix under test is kernel patch 0810)
+# EXPERIMENTAL.
+#
+#   g16-cacp-check                 verify, then 3 rounds of the A/B (about 25 min)
+#   g16-cacp-check --verify-only   only step 1 (about 30 s)
+#   g16-cacp-check --rounds N --measure S --settle S
+#   g16-cacp-check --after UNIT [--after UNIT2] [--wait-file F] [--max-wait H]
+#                              start now (root asked once, up front), wait idle,
+#                              measuring nothing, until every --after user unit has
+#                              run and exited and every --wait-file exists, then run
+#   g16-cacp-check --dry-run       no root, no writes, no DPMS: walk the steps (tests)
+#
+# --after UNIT is done when the user unit is not active/activating and has exited
+# after g16-cacp-check started (or was running when it started). Gives up after
+# --max-wait hours (default 8), changing nothing. Battery and RTX guards are
+# checked when the run starts, not while waiting.
+#
+# Step 1, verify: a kprobe on dmub_cacp_set_level (the 0481 CACP command) logs
+# every level sent to the display firmware. Level 3 is written and 5 s pass; then
+# one DPMS off/on cycle forces a modeset. The verdict says whether the write
+# alone reached the firmware (0810 kernel: yes) or only the modeset did (the bug).
+#
+# Step 2, A/B on battery: rounds of B L3 B L4 B (order of L3/L4 shuffled per
+# round), each phase = write the level, DPMS off/on (so the level is applied on
+# any kernel, and every phase has the same blink), settle, then sample battery
+# watts (current_now x voltage_now) and the SoC socket power (gpu_metrics) every
+# 2 s. A level's delta = its phase minus the mean of the baselines around it.
+#
+# Visible: the screen blinks off for ~2 s at every phase change, and levels 3/4
+# change the contrast. Silent, no windows. The stay-awake indicator is set from
+# the start (waiting included) to the end. Never reads nvidia_0, the RTX's hwmon, sensors or nvidia-smi; only the
+# RTX's runtime_status, and a phase in which the RTX woke is dropped.
+#
+# Exit puts back level 0 (with one DPMS cycle), removes the kprobe and clears
+# stay-awake, Ctrl-C included. Report: ~/omarchy-asus-cacp-check-<date>.md
+# (no host or user names). Run as your normal user in the Hyprland session, on
+# battery, RTX suspended. Root: one root helper started up front; it puts level 0
+# back and removes the kprobe if the script dies. Inside an open g16-testd session
+# (omarchy-asus-g16-testd, #277) the levels go through that helper's
+# panel-power-savings knob, with no dialog; step 1 then reports SKIP, since its
+# kprobe is not on the helper's allowlist (G16_ROOT=pkexec runs it). Otherwise
+# pkexec via the desktop's polkit agent. G16_ROOT=testd or pkexec forces one, sudo
+# is the other. G16_POLKIT_REASON=<wrapper> runs `<wrapper> run REASON -- pkexec ...`
+# so the dialog says why.
+set -uo pipefail
+
+# ------------------------------------------------------------- root helper
+# One command per line on stdin, one answer line on stdout. On EOF it writes 0
+# back and removes the kprobe.
+if [[ ${1:-} == --root-helper ]]; then
+  panel=${2:?} dry=${3:-0}
+  T=/sys/kernel/tracing; [[ -d $T/instances ]] || T=/sys/kernel/debug/tracing
+  I=$T/instances/g16cacp PROBE=0
+  w() { ((dry)) && return 0; printf '%s\n' "$2" 2>/dev/null >"$1"; }
+  probe_off() { ((PROBE)) || return 0; w "$I/events/g16cacp/set/enable" 0; rmdir "$I" 2>/dev/null; printf '%s\n' '-:g16cacp/set' >>"$T/kprobe_events" 2>/dev/null; PROBE=0; }
+  # shellcheck disable=SC2329 # the EXIT trap calls it
+  bye() { w "$panel" 0; probe_off; }
+  trap bye EXIT
+  trap 'exit 0' HUP INT TERM PIPE
+  echo "ready $(id -u)"
+  while read -r cmd arg; do
+    case $cmd in
+      level) if [[ $arg =~ ^[0-4]$ ]] && w "$panel" "$arg"; then echo ok; else echo err; fi ;;
+      probe-on)
+        if ((dry)); then PROBE=0; echo ok
+        elif printf '%s\n' 'p:g16cacp/set dmub_cacp_set_level level=%si:u32' 2>/dev/null >>"$T/kprobe_events" && mkdir "$I" 2>/dev/null &&
+          w "$I/events/g16cacp/set/enable" 1; then PROBE=1; echo ok
+        else echo "err dmub_cacp_set_level could not be probed"; fi ;;
+      hits) ((PROBE)) && grep -o 'level=[0-9]*' "$I/trace" 2>/dev/null | sort | uniq -c | awk '{printf "%s%s x%s", (NR>1?", ":""), $2, $1} END {print ""}' || echo ;;
+      probe-off) probe_off; echo ok ;;
+      dmub) v=$(dmesg 2>/dev/null | grep -o 'DMUB firmware, version: [^ ]*' | tail -1 | sed 's/.*: //'); echo "${v:-?}" ;;
+      ping) echo ok ;;
+      quit) exit 0 ;;
+      *) echo err ;;
+    esac
+  done
+  exit 0
+fi
+
+# --------------------------------------------------------- g16-testd helper
+# The same protocol, run as you inside an open g16-testd session: a level is the
+# helper's knob-set panel-power-savings, and EOF its knob-restore. The kprobe has no
+# helper call, so probe-on answers err and step 1 is skipped.
+if [[ ${1:-} == --testd-helper ]]; then
+  dry=${2:-0} why=${3:-}
+  TD=${G16_TESTD:-g16-testd} SET=0
+  td() { local out rc; out=$("$TD" call "$@" --reason "$why" 2>&1); rc=$?; printf '%s' "${out##*$'\n'}"; return $rc; }
+  # shellcheck disable=SC2329 # the EXIT trap calls it
+  bye() { ((SET)) && td knob-restore panel-power-savings >/dev/null; }
+  # Another test's setting in this session would be undone by the knob-restore.
+  if "$TD" session status 2>/dev/null | grep -q '"panel-power-savings"'; then
+    echo "panel-power-savings is already changed in this g16-testd session"; exit 1
+  fi
+  trap bye EXIT
+  trap 'exit 0' HUP INT TERM PIPE
+  echo "ready testd"
+  while read -r cmd arg; do
+    case $cmd in
+      level)
+        if [[ ! $arg =~ ^[0-4]$ ]]; then echo err
+        elif ((dry)); then echo ok
+        elif SET=1 && td knob-set panel-power-savings "$arg" >/dev/null; then echo ok
+        else echo err; fi ;;
+      probe-on) echo "err the dmub_cacp_set_level kprobe is not on g16-testd's allowlist (G16_ROOT=pkexec runs step 1)" ;;
+      hits) echo ;;
+      probe-off) echo ok ;;
+      dmub) v=$(dmesg 2>/dev/null | grep -o 'DMUB firmware, version: [^ ]*' | tail -1 | sed 's/.*: //'); echo "${v:-?}" ;;
+      ping) "$TD" available >/dev/null 2>&1 && echo ok || echo err ;;
+      quit) exit 0 ;;
+      *) echo err ;;
+    esac
+  done
+  exit 0
+fi
+
+ROUNDS=3 MEASURE=60 SETTLE=20 INTERVAL=2 VERIFY_ONLY=0 DRY=0 MAXWAIT=8 AFTER=() WAITF=()
+while (($#)); do
+  case $1 in
+    --verify-only) VERIFY_ONLY=1 ;;
+    --rounds) ROUNDS=${2:?}; shift ;;
+    --measure) MEASURE=${2:?}; shift ;;
+    --settle) SETTLE=${2:?}; shift ;;
+    --after) AFTER+=("${2:?}"); shift ;;
+    --wait-file) WAITF+=("${2:?}"); shift ;;
+    --max-wait) MAXWAIT=${2:?}; shift ;;
+    --dry-run) DRY=1 ;;
+    -h | --help) sed -n '2,46s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) echo "unknown option $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+for v in ROUNDS MEASURE SETTLE MAXWAIT; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || { echo "$v must be a positive number" >&2; exit 2; }; done
+for u in "${AFTER[@]}"; do [[ $u =~ ^[A-Za-z0-9@._:-]+$ ]] || { echo "bad unit name: $u" >&2; exit 2; }; done
+((DRY)) && { MEASURE=2; SETTLE=0; INTERVAL=1; }
+
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s ==> %s\n' "$(date +%H:%M:%S)" "$*"; }
+rd() { local v=''; read -r v 2>/dev/null <"$1"; printf '%s' "$v"; }
+SYS=${CACP_SYS:-/sys}   # tests only
+SELF=$(readlink -f "$0")
+
+((EUID != 0)) || die "run it as your normal user; it starts its own root helper"
+[[ $(rd "$SYS/class/dmi/id/product_name") == *GA605* || $(rd "$SYS/class/dmi/id/board_name") == *GA605* ]] || ((DRY)) || die "not a GA605"
+if ((!DRY)); then
+  command -v hyprctl >/dev/null && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || die "run it inside the Hyprland session (hyprctl and HYPRLAND_INSTANCE_SIGNATURE needed)"
+fi
+command -v python3 >/dev/null || die "python3 is missing"
+
+PANEL='' OUT=eDP-1
+for c in "$SYS"/class/drm/card*-eDP-*; do
+  [[ $(rd "$c/status") == connected && -f $c/amdgpu/panel_power_savings ]] && { PANEL=$c/amdgpu/panel_power_savings; OUT=eDP-${c##*-eDP-}; break; }
+done
+[[ -n $PANEL ]] || die "no connected eDP with amdgpu/panel_power_savings (needs the 0481 kernel)"
+[[ $(rd "$PANEL") == 0 ]] || die "panel_power_savings is $(rd "$PANEL"), not 0; set it to 0 first"
+BAT='' DGPU='' AMDGPU=''
+for s in "$SYS"/class/power_supply/*; do [[ $(rd "$s/type") == Battery && $(rd "$s/scope") != Device ]] && { BAT=$s; break; }; done
+for d in "$SYS"/bus/pci/devices/*; do [[ $(rd "$d/vendor") == 0x10de && $(rd "$d/class") == 0x03* ]] && { DGPU=$d; break; }; done
+for c in "$SYS"/class/drm/card*; do [[ -e $c/device/gpu_metrics && $(basename "$(readlink -f "$c/device/driver")") == amdgpu ]] && { AMDGPU=$(readlink -f "$c/device"); break; }; done
+dgpu() { if [[ -n $DGPU ]]; then rd "$DGPU/power/runtime_status"; else printf suspended; fi; }
+
+# Root helper, started once, before any waiting.
+ROOT=${G16_ROOT:-auto} TESTD=${G16_TESTD:-g16-testd}
+WHY="CACP panel_power_savings test (#172); level 0 is put back on exit"
+((DRY)) && ROOT=none
+if [[ $ROOT == auto ]]; then
+  if "$TESTD" available >/dev/null 2>&1; then ROOT=testd; else ROOT=pkexec; fi
+fi
+case $ROOT in
+  testd)
+    "$TESTD" available >/dev/null 2>&1 || die "G16_ROOT=testd, but no g16-testd session is open for you (g16-testd session start)"
+    HELPER_CMD=("$SELF" --testd-helper "$DRY" "g16-cacp-check: $WHY") ;;
+  sudo) HELPER_CMD=(sudo ${SUDO_ASKPASS:+-A} "$SELF" --root-helper "$PANEL" "$DRY") ;;
+  pkexec)
+    if [[ -n ${G16_POLKIT_REASON:-} ]]; then
+      HELPER_CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "$SELF" --root-helper "$PANEL" "$DRY")
+    else
+      HELPER_CMD=(systemd-run --user --wait -q -P pkexec --disable-internal-agent "$SELF" --root-helper "$PANEL" "$DRY")
+    fi ;;
+  none) HELPER_CMD=("$SELF" --root-helper "$PANEL" 1) ;;
+  *) die "G16_ROOT must be testd, pkexec or sudo" ;;
+esac
+if [[ $ROOT == testd ]]; then say "panel_power_savings through the open g16-testd session (no dialog)"
+else say "starting the root helper (kprobe and panel_power_savings writes)"; fi
+coproc HELPER { "${HELPER_CMD[@]}"; }
+HELPER_IN=${HELPER[1]} HELPER_OUT=${HELPER[0]}
+IFS= read -r -t 300 line <&"$HELPER_OUT" || die "the root helper did not start"
+[[ $line == ready* ]] || die "the root helper said: $line"
+ask() { local l; printf '%s\n' "$*" 1>&"$HELPER_IN" || return 1; IFS= read -r -t 30 l <&"$HELPER_OUT" || return 1; printf '%s\n' "$l"; }
+
+STAY=$HOME/.local/state/omarchy/indicators/stay-awake STAY_SET=0 DONE=0
+WORK=$(mktemp -d)
+setlevel() { [[ $(ask level "$1") == ok ]]; }
+dpms_cycle() { ((DRY)) && return; hyprctl dispatch dpms off "$OUT" >/dev/null; sleep 2; hyprctl dispatch dpms on "$OUT" >/dev/null; sleep 2; }
+cleanup() {
+  ((DONE)) && return; DONE=1
+  if [[ $(rd "$PANEL") != 0 ]]; then setlevel 0; dpms_cycle; fi
+  ask probe-off >/dev/null
+  printf 'quit\n' 1>&"$HELPER_IN" 2>/dev/null
+  ((STAY_SET)) && { if command -v omarchy-toggle-idle >/dev/null; then omarchy-toggle-idle allow-idle >/dev/null 2>&1; else rm -f "$STAY"; fi; }
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+trap 'echo; say "interrupted: putting level 0 back"; exit 1' INT TERM HUP
+
+# Stay awake from the start, so an idle suspend can't fall between the units
+# waited for and the run.
+if [[ ! -e $STAY ]] && ((!DRY)); then
+  if command -v omarchy-toggle-idle >/dev/null; then omarchy-toggle-idle stay-awake >/dev/null 2>&1; else mkdir -p "${STAY%/*}" && touch "$STAY"; fi
+  STAY_SET=1
+fi
+
+# ------------------------------------------------------------------ wait
+START_US=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)
+declare -A WAS_ACTIVE=()
+for u in "${AFTER[@]}"; do
+  [[ $(systemctl --user show -P LoadState "$u" 2>/dev/null) == loaded ]] || die "--after $u: no such user unit (systemctl --user status $u)"
+done
+for u in "${AFTER[@]}"; do
+  s=$(systemctl --user is-active "$u" 2>/dev/null)
+  [[ $s == active || $s == activating || $s == reloading ]] && WAS_ACTIVE[$u]=1
+done
+unit_done() { # unit -> 0 once it has run and exited (after we started, or it was running then)
+  local s ex
+  s=$(systemctl --user is-active "$1" 2>/dev/null)
+  [[ $s == active || $s == activating || $s == reloading || $s == deactivating ]] && return 1
+  ex=$(systemctl --user show -P ActiveExitTimestampMonotonic "$1" 2>/dev/null)
+  [[ $ex =~ ^[0-9]+$ ]] && ((ex > 0)) || return 1
+  [[ -n ${WAS_ACTIVE[$1]:-} ]] || ((ex > START_US))
+}
+if ((${#AFTER[@]} + ${#WAITF[@]})); then
+  say "waiting (measuring nothing) for: ${AFTER[*]:+units ${AFTER[*]} }${WAITF[*]:+files ${WAITF[*]}}; at most $MAXWAIT h"
+  deadline=$((SECONDS + MAXWAIT * 3600)) poll=${CACP_POLL:-30}
+  while :; do
+    left=()
+    for u in "${AFTER[@]}"; do unit_done "$u" || left+=("$u"); done
+    for f in "${WAITF[@]}"; do [[ -e $f ]] || left+=("$f"); done
+    ((${#left[@]} == 0)) && break
+    ((SECONDS < deadline)) || die "gave up after $MAXWAIT h still waiting for: ${left[*]}; nothing was changed"
+    # keep the helper's pipe alive and check it is still there
+    [[ $(ask ping) == ok ]] || die "the root helper went away while waiting; nothing was changed"
+    sleep "$poll"
+  done
+  say "done waiting; starting"
+fi
+
+if ((!VERIFY_ONLY && !DRY)); then
+  [[ $(rd "$BAT/status") == Discharging ]] || die "not on battery ($(rd "$BAT/status")); nothing was changed"
+  [[ $(dgpu) == suspended ]] || die "the RTX is awake ($(dgpu)); nothing was changed"
+fi
+
+# ------------------------------------------------------------------ step 1
+say "step 1: kprobe on dmub_cacp_set_level"
+VERIFY=''
+r=$(ask probe-on)
+if [[ $r == ok ]] && ((!DRY)); then
+  setlevel 3; sleep 5
+  A=$(ask hits)
+  say "after writing 3 and waiting 5 s: ${A:-no CACP command sent}"
+  dpms_cycle
+  B=$(ask hits)
+  say "after one DPMS off/on: ${B:-no CACP command sent}"
+  setlevel 0; dpms_cycle
+  C=$(ask hits)
+  if [[ $A == *level=3* ]]; then
+    VERIFY="PASS: the write alone reached the firmware (level 3 sent within 5 s). The 0810 behaviour."
+  elif [[ $B == *level=3* ]]; then
+    VERIFY="BUG CONFIRMED: the write did not reach the firmware until the DPMS modeset (level 3 sent only after it). Kernel 0810 fixes this."
+  else
+    VERIFY="NO CACP COMMAND at all, even after a modeset: CACP is not reaching DMUB on this kernel/firmware (check dmesg for cacp)."
+  fi
+  VERIFY+=$'\n'"probe log: after write: ${A:-none}; after DPMS: ${B:-none}; after writing 0 + DPMS: ${C:-none}"
+elif ((DRY)); then
+  setlevel 3; setlevel 0; VERIFY="DRY RUN: no probe, no writes"
+else
+  VERIFY="SKIP: ${r:-the root helper did not answer}"
+fi
+say "$VERIFY"
+
+REPORT=$HOME/omarchy-asus-cacp-check-$(date +%Y%m%d-%H%M).md
+{
+  echo "## CACP check on the G16 (#172)"
+  echo
+  echo "- Kernel: \`$(uname -r)\`, DMUB: $(ask dmub)"
+  echo "- Brightness: $(cat /sys/class/backlight/amdgpu_bl*/brightness 2>/dev/null | head -1) / $(cat /sys/class/backlight/amdgpu_bl*/max_brightness 2>/dev/null | head -1)"
+  echo
+  echo "### Step 1: does a write reach the firmware?"
+  echo
+  echo '```'
+  echo "$VERIFY"
+  echo '```'
+} >"$REPORT"
+if ((VERIFY_ONLY)); then cat "$REPORT"; say "report: ${REPORT/#$HOME/\~}"; exit 0; fi
+
+# ------------------------------------------------------------------ step 2
+measure() { # label level round
+  setlevel "$2"; dpms_cycle; sleep "$SETTLE"
+  [[ $(rd "$BAT/status") == Discharging ]] || die "the charger is back; stopping"
+  printf '%s  round %s  %-4s\n' "$(date +%H:%M:%S)" "$3" "$1"
+  python3 -I - "$BAT" "${AMDGPU:-}" "${DGPU:-}" "$MEASURE" "$INTERVAL" "$1" "$3" >>"$WORK/phases.jsonl" <<'PY'
+import json, struct, sys, time
+bat, amd, dgpu, measure, interval, label, rnd = sys.argv[1:8]
+def rd(p):
+    try:
+        with open(p) as f: return f.read().strip()
+    except OSError: return None
+def watts():
+    p = rd(bat + "/power_now")
+    if p and p.isdigit() and int(p) > 0: return int(p) / 1e6
+    c, v = rd(bat + "/current_now"), rd(bat + "/voltage_now")
+    return int(c) * int(v) / 1e12 if c and v and c.isdigit() and v.isdigit() else None
+def socket():
+    try:
+        with open(amd + "/gpu_metrics", "rb") as f: b = f.read()
+        size, fmt, content = struct.unpack_from("<HBB", b, 0)
+        if fmt == 3 and content == 0 and len(b) >= 172: return struct.unpack_from("<I", b, 112)[0] / 1000
+    except (OSError, struct.error): pass
+    return None
+w, s, woke = [], [], False
+end = time.monotonic() + int(measure)
+while time.monotonic() < end:
+    x = watts(); y = socket() if amd else None
+    if x is not None: w.append(x)
+    if y is not None: s.append(y)
+    if dgpu and rd(dgpu + "/power/runtime_status") not in (None, "suspended"): woke = True
+    time.sleep(int(interval))
+m = lambda a: sum(a) / len(a) if a else None
+print(json.dumps({"label": label, "round": int(rnd), "bat": m(w), "soc": m(s), "n": len(w), "rtx_woke": woke}))
+PY
+}
+say "step 2: $ROUNDS rounds of B L3 B L4 B, ${SETTLE}s settle + ${MEASURE}s per phase; the screen blinks at each change"
+for ((r = 1; r <= ROUNDS; r++)); do
+  order=(3 4); ((RANDOM % 2)) && order=(4 3)
+  measure B 0 "$r"
+  for l in "${order[@]}"; do measure "L$l" "$l" "$r"; measure B 0 "$r"; done
+done
+setlevel 0; dpms_cycle
+
+python3 -I - "$WORK/phases.jsonl" >>"$REPORT" <<'PY'
+import json, statistics as st, sys
+ph = [json.loads(l) for l in open(sys.argv[1])]
+print("\n### Step 2: battery A/B (each level against the baselines either side)\n")
+print("| phase | round | battery W | SoC socket W | RTX woke |\n|---|---|---|---|---|")
+for p in ph:
+    f = lambda v: "-" if v is None else "%.2f" % v
+    print("| %s | %d | %s | %s | %s |" % (p["label"], p["round"], f(p["bat"]), f(p["soc"]), "yes" if p["rtx_woke"] else ""))
+res = {}
+for i, p in enumerate(ph):
+    if p["label"] == "B" or i == 0 or i + 1 >= len(ph): continue
+    a, b = ph[i - 1], ph[i + 1]
+    if p["rtx_woke"] or a["rtx_woke"] or b["rtx_woke"] or None in (p["bat"], a["bat"], b["bat"]): continue
+    d = p["bat"] - (a["bat"] + b["bat"]) / 2
+    ds = None if None in (p["soc"], a["soc"], b["soc"]) else p["soc"] - (a["soc"] + b["soc"]) / 2
+    res.setdefault(p["label"], []).append((d, ds))
+print("\n| level | rounds | battery delta W (mean) | SE | SoC delta W | verdict |\n|---|---|---|---|---|---|")
+for k in sorted(res):
+    ds = [x[0] for x in res[k]]; ss = [x[1] for x in res[k] if x[1] is not None]
+    mean = st.mean(ds); se = st.stdev(ds) / len(ds) ** 0.5 if len(ds) > 1 else float("nan")
+    verdict = "saves" if mean < -0.10 and len(ds) > 1 and mean < -2 * se else "no clear saving"
+    print("| %s | %d | %+.2f | %.2f | %s | %s |" % (k, len(ds), mean, se, "%+.2f" % st.mean(ss) if ss else "-", verdict))
+PY
+cat "$REPORT"
+say "report: ${REPORT/#$HOME/\~}"
