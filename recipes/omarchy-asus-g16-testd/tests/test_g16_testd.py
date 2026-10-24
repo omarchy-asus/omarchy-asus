@@ -626,6 +626,31 @@ class Session(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertNotIn("removal refused", get(self.root, "daemon.log"))
 
+    def test_trace_kprobe_recorded_before_it_goes_in(self):
+        # the daemon killed right after the kprobe write: the next start still removes it
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("g16testd", TOOL)
+        m = module_from_spec(spec_from_loader("g16testd", loader))
+        loader.exec_module(m)
+        put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
+        h = m.Host(self.root)
+        h.state = os.path.join(self.root, "var/lib/omarchy-asus-g16-testd")
+        add = m.tracefs_append
+
+        def killed(path, line):
+            add(path, line)
+            raise SystemExit("killed")
+        m.tracefs_append = killed
+        with self.assertRaises(SystemExit):
+            m.Daemon(h, UID, time.time() + 600, {}).trace_start("x", "timer/hrtimer_start", "pci-set-power-state")
+        m.tracefs_append = add
+        kpe = "sys/kernel/tracing/kprobe_events"
+        self.assertEqual(get(self.root, kpe), "p:g16testd/pci_set_power_state pci_set_power_state")
+        m.Daemon(h, UID, time.time() + 600, {}).recover()
+        self.assertTrue(get(self.root, kpe).endswith("-:g16testd/pci_set_power_state"))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "sys/kernel/tracing/instances/g16-testd-x")))
+
     def test_trace_left_running_removed_at_stop(self):
         put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
         self.start()

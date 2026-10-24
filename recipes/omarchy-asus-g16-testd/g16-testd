@@ -580,7 +580,7 @@ class Daemon:
             fail(f"no tracefs at {base}")
         inst = os.path.join(base, "instances", f"g16-testd-{name}")
         syms = {k: self._kprobe_symbol(k) for k in kp}
-        # "kprobes" lists only the probes actually added, so trace-stop removes no others
+        # "kprobes" lists the probes this trace added, so trace-stop removes no others
         self.rec["traces"][name] = {"started": time.time(), "kprobes": []}
         self.save()
         try:
@@ -592,10 +592,17 @@ class Daemon:
         try:
             wr(f"{inst}/tracing_on", 0)
             wr(f"{inst}/buffer_size_kb", kb)
+            owned = self.rec["traces"][name]["kprobes"]
             for k in kp:
-                self._kprobe_add(base, k, syms[k])
-                self.rec["traces"][name]["kprobes"].append(k)
+                # recorded before it goes in, so a crash in between still gets it removed
+                owned.append(k)
                 self.save()
+                try:
+                    self._kprobe_add(base, k, syms[k])
+                except Refused:
+                    owned.remove(k)
+                    self.save()
+                    raise
             on, missing = [], []
             for e in ev + [f"g16testd/{_kp_event(k)}" for k in kp]:
                 f = f"{inst}/events/{e}/enable"
