@@ -4,7 +4,8 @@
 # SUDO=env stands in for sudo. Each case asserts the exit code, that the usage is printed
 # and that the data dir stays empty (no work-* dir, no stage or log dir):
 #   1. -h and --help: the usage on stdout, exit 0
-#   2. --version, --bogus, a mistyped --chanel rc, --channel with no value: exit 2
+#   2. --version, --bogus, a mistyped --chanel rc, --channel with no value, an empty one
+#      ("") or an unknown one (beta): exit 2
 #   3. no argument at all, or only --channel rc: exit 2
 #   4. a dir without a PKGBUILD (/tmp), or a path that doesn't exist: exit 2
 #   5. a recipe named like an option, after --: built (realpath -- "$1")
@@ -53,6 +54,8 @@ run 2 "--version is an error" --version
 run 2 "--bogus is an error" --bogus
 run 2 "a mistyped --chanel rc is an error" --chanel rc
 run 2 "--channel with no value is an error" --channel
+run 2 "an empty --channel is an error" --channel "" "$W/recipes/omarchy"
+run 2 "an unknown --channel is an error" --channel beta "$W/recipes/omarchy"
 grep -q 'unknown option: --bogus' <("$W/bin/build-pkg" --bogus 2>&1); [[ $? -eq 0 ]] && echo "ok: names the option" || { echo "FAIL: doesn't name the option"; fail=1; }
 
 echo "== 3. no recipe"
