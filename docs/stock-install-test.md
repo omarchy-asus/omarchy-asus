@@ -2,8 +2,8 @@
 
 > [!WARNING]
 > **EXPERIMENTAL.** This test wipes the laptop's disk. Use a G16 (GA605KM) whose data you have
-> backed up or don't need. Nobody has installed these packages on hardware yet; this procedure is
-> how we find out whether they work.
+> backed up or don't need. The packages run day to day on a G16 that was switched over from an older
+> install; this procedure is how we find out whether they work on a fresh one.
 
 This test answers one question: does a **fresh** Omarchy 4.0.5 install on an ASUS ROG Zephyrus G16
 GA605KM, switched to the omarchy-asus repo with `bin/omarchy-asus-setup`, end up with every fix
@@ -56,7 +56,8 @@ Answer the prompts:
 1. **Switch the machine?** yes. Compare the printed key fingerprint with
    `0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88` as given in the README or by the maintainer.
 2. **Upgrade now?** yes. `omarchy update` asks once more, takes a snapshot and installs the
-   patched builds (linux-omarchy and headers, nvidia-open-dkms, hyprland/hyprpm).
+   patched builds (linux-omarchy and headers, nvidia-open-dkms, hyprland/hyprpm,
+   omarchy/omarchy-settings).
 3. **Install the G16 packages and review the fixes?** yes. Then **apply the missing default fixes?**
    yes.
 
@@ -92,16 +93,12 @@ in its output, so the file can go into an issue. It exits 1 if any check FAILs.
 | 1 | node access | PASS for reading and writing (the packaged udev rule's uaccess ACL) |
 | 1 | udev rule, helper, service | PASS: `/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules`, `/usr/bin/g16-winlock`, `g16-winlock.service` active |
 | 1 | `--live` | PASS: `seen: on off` (the patched hid-asus passes the Win-lock report through) |
-| 2 | omarchy-asus-g16-apply lines in hyprland.lua | WARN `present`, expected: applying the default fixes adds them (hybrid-video, hdmi-cursor). They only need to go before the patched omarchy 4.0.5-1.1 is installed |
+| 2 | omarchy-asus-g16-apply lines in hyprland.lua | `clear`: the patched omarchy and omarchy-settings apply hybrid-video and hdmi-cursor through their own migrations and default files, so applying the default fixes adds no lines to hyprland.lua. The section's heading still says "before the patched omarchy 4.0.5-1.1"; the 4.0.6 builds count the same |
 | 2 | every other local workaround | `clear` on a fresh install |
 | 3 | repo order | PASS: `[omarchy-asus]` before `[omarchy]` and `[core]`, SigLevel Required |
 | 3 | key | PASS: in pacman's keyring, validity `f` |
-| 3 | packages | PASS: linux-omarchy(-headers), nvidia-open-dkms, hyprland, hyprpm, omarchy-asus-keyring, omarchy-asus-g16, asus-rog-nkey-winlock, omarchy-asus-g16-apply from `[omarchy-asus]`; no WARN about stock builds or unknown versions |
+| 3 | packages | PASS: linux-omarchy(-headers), nvidia-open-dkms, hyprland, hyprpm, omarchy, omarchy-settings, omarchy-asus-keyring, omarchy-asus-g16, asus-rog-nkey-winlock, omarchy-asus-g16-apply from `[omarchy-asus]`; no WARN about stock builds or unknown versions |
 | 3 | omarchy-asus-g16-apply --check | PASS: every default fix `applied` or `present` |
-
-While `omarchy` and `omarchy-settings` 4.0.5-1.1 are held (`recipes/omarchy/HOLD`), they come
-from `[omarchy]` and are not in the omarchy-asus database, so `g16-check` doesn't list them. That
-is expected.
 
 ### Each fix, by hand
 
