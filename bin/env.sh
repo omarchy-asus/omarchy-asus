@@ -51,6 +51,41 @@ channel_gh_tag() {
         *) return 1 ;;
     esac
 }
+# Promotion rings (#309; not in use yet: nothing calls these, the channels still build from
+# their own branches). A package moves through the rings in this order, source first.
+RINGS=(rc quattro)
+# ring_next <channel>: the ring a package is promoted to next (nothing after the last)
+ring_next() {
+    local i
+    for i in "${!RINGS[@]}"; do
+        [[ ${RINGS[i]} == "$1" ]] || continue
+        [[ -n ${RINGS[i + 1]:-} ]] && echo "${RINGS[i + 1]}"
+        return 0
+    done
+    return 1
+}
+# channel_pins_ref <channel>: the git ref that channel's omarchy + omarchy-settings pins come
+# from (rc: main; quattro: pins/stable, which is main plus one pin commit)
+channel_pins_ref() {
+    case $1 in
+        rc) echo main ;;
+        quattro) echo pins/stable ;;
+        *) return 1 ;;
+    esac
+}
+# fast_ring_packages [conf]: the package names in build/fast-ring.conf (or conf), one per
+# line. Each line is "<pkgname>  <reason>"; blank lines and # comments are skipped. Exit 1,
+# naming the line, when one has no reason, an invalid name or a name listed twice.
+fast_ring_packages() {
+    local conf=${1:-$WORKSPACE/build/fast-ring.conf}
+    awk 'function bad(why) { printf "%s:%d: %s: %s\n", FILENAME, FNR, why, $0 > "/dev/stderr"; err = 1 }
+         /^[[:space:]]*(#|$)/ { next }
+         NF < 2 { bad("no reason (want: <pkgname>  <reason>)"); next }
+         $1 !~ /^[a-z0-9@_+][a-z0-9@._+-]*$/ { bad("invalid package name"); next }
+         $1 in seen { bad("listed twice"); next }
+         { seen[$1] = 1; names[++n] = $1 }
+         END { if (err) exit 1; for (i = 1; i <= n; i++) print names[i] }' "$conf"
+}
 case $CHANNEL in
     quattro)
         CHANNEL_DATA=$DATA                        # sync-pending, release-db.sha256, prune-candidates

@@ -77,6 +77,17 @@ checksums, the personal-information scan, release cohorts, and no regression.
   `/etc/makepkg.conf.d/packager.conf`). `bin/mkchroot [--channel rc]` makes or updates a chroot
   and writes it; rerun it on an older chroot.
 
+### Promotion rings (not in use yet, #309)
+
+`bin/env.sh` also defines where the channels are heading: rings instead of branches. `RINGS`
+is the promotion order, source first (`rc`, then `quattro`); `ring_next <channel>` names the
+next ring, and `channel_pins_ref <channel>` the ref a channel's `omarchy` + `omarchy-settings`
+pins will come from (`main` for rc, `pins/stable` for Quattro; that branch does not exist yet).
+`build/fast-ring.conf` lists the packages that will publish to every channel at once instead
+of being promoted (today only `omarchy-asus-keyring`), one `<pkgname>  <reason>` per line;
+`fast_ring_packages` prints the names and fails on a malformed line. Nothing calls these yet:
+both channels still build and publish from their own branches as described above.
+
 ## Reverse-dependency checks
 
 `build/revdeps.conf` maps a kernel recipe to the DKMS packages that must compile against
