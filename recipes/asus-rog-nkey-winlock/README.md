@@ -31,11 +31,22 @@ exit at once. It waits on the node (no timers, no polling) and turns each
 `5D BF 01 xx` report into the D-Bus signal `LockChanged(b)` on the system bus
 (`io.github.omarchy_asus.WinLock1`). It has two methods and nothing else:
 
-- `Status() -> b`: GetFeature `5D`, or the last reported state.
-- `SetLocked(b)`: SetFeature `5D BF 00 xx` followed by output report `01 01`
-  (the sequence AsusWinKeyActiveGuard uses on Windows). Allowed for root and,
+- `Status() -> b`: GetFeature `5D`, or the last state seen. Before the first
+  Fn+Super or `SetLocked` since the service started it returns
+  `io.github.omarchy_asus.WinLock1.Error.Unknown` (see below).
+- `SetLocked(b)`: SetFeature `5D BF 00 xx`, output report `01 01`, then after
+  100 ms GetFeature `5D` to read the result back (the sequence
+  AsusWinKeyActiveGuard uses on Windows). Allowed for root and,
   through polkit (`io.github.omarchy-asus.winlock.set-locked`, `allow_active`),
   for the user of the active local session.
+
+The keyboard can't be asked for the lock without changing it: feature report
+`0x5D` answers the last command written to it, and after a boot that is
+Aura's, with no `BF` in it. AsusWinKeyActiveGuard has the same limit: it only
+reads the state back after its own `5D BF` write, and starts out assuming the
+key is unlocked. So `Status()` knows the state once a Fn+Super has reported it
+or a `SetLocked` has read it back, and `g16-winlock status` prints
+`locked=unknown` (exit 3) until then.
 
 Raw reports never leave the service, and the node stays `root:root 0600`.
 The service runs with no capabilities, no network, a read-only filesystem and
@@ -48,6 +59,11 @@ hidraw as its only device.
 - `watch --mode=unlock`: shows the OSD and clears the lock straight away
   (`SetLocked(false)`).
 - `lock`, `unlock`, `status`, `toggle`: one-shot control.
+
+In `unlock` mode the watcher also clears the lock when the service starts
+(boot, resume, upgrade), unless the service knows it is already off: a lock
+kept over a reboot sends no report, so Super could otherwise stay locked
+until the next Fn+Super.
 
 The OSD uses `omarchy-osd`, then `omarchy-shell osd show`, and falls back to
 `omarchy-notification-send` or `notify-send`.
@@ -164,7 +180,7 @@ ones above it.
    ls -l /dev/hidraw*                         # the 19b6 nodes: crw------- root root, no +
    systemctl list-units 'g16-winlockd@*'      # one active instance, for the 0x5d node
    journalctl -u 'g16-winlockd@*' -b          # "watching /dev/hidrawN", then Win-lock on/off
-   g16-winlock status                         # locked=True/False from the service
+   g16-winlock status                         # locked=True/False, or locked=unknown before the first Fn+Super
    ```
    No instance: `sudo udevadm trigger --action=add --subsystem-match=hidraw`.
    `lock`/`unlock` refused with `AccessDenied`: polkit allows them only to the
