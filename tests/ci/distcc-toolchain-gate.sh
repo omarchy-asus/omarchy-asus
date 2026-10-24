@@ -106,7 +106,8 @@ if command -v distcc >/dev/null && command -v distccd >/dev/null && [[ -d /usr/l
         case $d in /usr/lib/ccache*|/usr/lib/distcc*|/usr/lib64/ccache*|/usr/lib64/distcc*) ;; *) clean+=${clean:+:}$d ;; esac
     done
     PATH=$clean
-    unset CCACHE_PREFIX _DISTCC_SAFEGUARD $(compgen -e DISTCC_)
+    mapfile -t vars < <(compgen -e DISTCC_)
+    unset CCACHE_PREFIX _DISTCC_SAFEGUARD "${vars[@]}"
     echo 'int twice(int x) { return 2 * x; }' >"$S/a.c"
     real() {  # real <log>: compile a.c through distcc to the ssh host "helper" only
         rm -f "$S/a.o"; mkdir -p "$S/distcc-dir"; rm -rf "$S/distcc-dir"/*
