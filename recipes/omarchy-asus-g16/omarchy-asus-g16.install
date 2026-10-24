@@ -4,7 +4,9 @@
 # GA605KM (omarchy-hw-match "GA605KM"). Nothing is enabled or started here.
 # The one thing written is the Limine entries: the package's alpm hook rebuilds
 # them when its kernel command-line drop-in arrives or changes, and post_remove
-# rebuilds them once the drop-in is gone.
+# rebuilds them once the drop-in is gone. A running NetworkManager is asked to
+# reread its configuration, so the mt7925 drop-in applies (or stops applying)
+# from the next connection attempt, not the next boot.
 
 _omarchy_asus_g16_is_ga605km() {
   local dmi=/sys/class/dmi/id
@@ -20,12 +22,21 @@ _omarchy_asus_g16_check() {
   printf '==> WARNING: This machine does not report GA605KM in its DMI data; remove the package unless you know you need it.\n' >&2
 }
 
+_omarchy_asus_g16_nm_reload() {
+  command -v nmcli >/dev/null 2>&1 || return 0
+  systemctl is-active --quiet NetworkManager.service 2>/dev/null || return 0
+  nmcli general reload conf >/dev/null 2>&1 ||
+    printf '==> WARNING: NetworkManager did not reread its configuration; the mt7925 drop-in applies after its next restart.\n' >&2
+}
+
 post_install() {
   _omarchy_asus_g16_check
+  _omarchy_asus_g16_nm_reload
 }
 
 post_upgrade() {
   _omarchy_asus_g16_check
+  _omarchy_asus_g16_nm_reload
 }
 
 post_remove() {
@@ -34,4 +45,5 @@ post_remove() {
   if command -v limine-update >/dev/null 2>&1; then
     limine-update || printf '==> WARNING: limine-update failed; run it by hand so the next boot drops rcu_nocbs=all.\n' >&2
   fi
+  _omarchy_asus_g16_nm_reload
 }
