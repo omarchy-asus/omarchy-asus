@@ -13,7 +13,7 @@ pkgname='omarchy-settings'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.105
+pkgrel=1.106
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -160,7 +160,8 @@ else
         0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch
         0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch
         0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch
-        general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch)
+        general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch
+        general-0002-Keep-the-sleep-monitor-running-across-suspends.patch)
   sha256sums=('532a3d500a3b96d429ec14a113f577b49406b11071a99105eaaf59506975485f'
               'b86866617b28d01f3c59a963a2c8202802d3960d549a54c9d0cb926b60eb6433'
               'd88f78f5a59dbd031b3a42b5c4cf604e3f14f0b4d237ddae2bad579580f7949e'
@@ -187,7 +188,8 @@ else
               '236fd084a6fca8f6805743069eb5f73121c758002be1d24ac774b621be750489'
               '5c930fa21b4e83a280d04b7d07b19bb739ddce140f01580b5aeca21a8eb2a379'
               '21b75af7231909ce026cf2e4c35333a11cf7af50b9ef91c345c6ef06d0f82b1c'
-              '74b7b6ee369764da1d086bf48bf5580c60dbacaa92a44d435a5973b22334f967')
+              '74b7b6ee369764da1d086bf48bf5580c60dbacaa92a44d435a5973b22334f967'
+              '517940a31b8549c5e8fd454a52b74f1b2817b1865bc3b5e978743653b43b1c44')
 fi
 
 prepare() {
@@ -222,6 +224,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0002-Keep-the-sleep-monitor-running-across-suspends.patch"
 }
 
 # Print the HOOKS that result from sourcing mkinitcpio drop-ins onto a line.

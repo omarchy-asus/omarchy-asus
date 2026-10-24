@@ -41,3 +41,4 @@ patch 0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch prepare om
 # General fixes: Omarchy software fixes that don't help the hardware, carried with the
 # maintainer's approval and kept apart from the ASUS patches above (NOTES.md).
 patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy
+patch general-0002-Keep-the-sleep-monitor-running-across-suspends.patch prepare omarchy
