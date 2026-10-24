@@ -13,7 +13,7 @@ pkgname='omarchy-settings'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.103
+pkgrel=1.104
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -158,7 +158,8 @@ else
         0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch
         0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch
         0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch
-        0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch)
+        0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch
+        general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch)
   sha256sums=('532a3d500a3b96d429ec14a113f577b49406b11071a99105eaaf59506975485f'
               'b86866617b28d01f3c59a963a2c8202802d3960d549a54c9d0cb926b60eb6433'
               'd88f78f5a59dbd031b3a42b5c4cf604e3f14f0b4d237ddae2bad579580f7949e'
@@ -183,7 +184,8 @@ else
               'ae380acd6edee4e028c294e54978a87cd64e5da59bf5b861ab2acdbd03203749'
               'bd5c52f6c42113944ee3486354e816613fb37c1fe78c349f151b00ba74498fd6'
               '236fd084a6fca8f6805743069eb5f73121c758002be1d24ac774b621be750489'
-              '5c930fa21b4e83a280d04b7d07b19bb739ddce140f01580b5aeca21a8eb2a379')
+              '5c930fa21b4e83a280d04b7d07b19bb739ddce140f01580b5aeca21a8eb2a379'
+              '74b7b6ee369764da1d086bf48bf5580c60dbacaa92a44d435a5973b22334f967')
 fi
 
 prepare() {
@@ -216,6 +218,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch"
 }
 
 # Print the HOOKS that result from sourcing mkinitcpio drop-ins onto a line.

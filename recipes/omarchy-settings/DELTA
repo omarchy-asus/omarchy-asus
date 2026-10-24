@@ -37,3 +37,6 @@ patch 0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch prepare om
 patch 0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch prepare omarchy
 patch 0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch prepare omarchy
 patch 0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch prepare omarchy
+# General fixes: Omarchy software fixes that don't help the hardware, carried with the
+# maintainer's approval and kept apart from the ASUS patches above (NOTES.md).
+patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy

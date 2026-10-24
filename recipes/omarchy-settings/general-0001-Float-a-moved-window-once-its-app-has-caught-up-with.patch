@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sat, 24 Oct 2026 00:01:04 -0400
+Subject: [PATCH] Float a moved window once its app has caught up with the move
+
+A window moved onto a floating workspace on a monitor of another scale
+was drawn only in part: the frame took the floating size, but the app
+kept drawing at its old size inside it. The mode floated and sized the
+window 1 ms after the move, while the app was still redrawing at the new
+monitor's scale, and that size was lost.
+
+Wait 100 ms instead. On a 1.6-scale panel below a 1.0-scale monitor, 1 ms
+and 16 ms lose the size every time and 50 ms keeps it; 100 ms leaves room
+for apps slower than foot. The test records each timer's delay and checks
+the move waits at least 50 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ default/hypr/workspace-modes.lua              |  8 ++++--
+ .../hyprland-floating-workspaces-test.sh      | 25 ++++++++++++++++++-
+ 2 files changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/default/hypr/workspace-modes.lua b/default/hypr/workspace-modes.lua
+index a8a30968b..e1c509d79 100644
+--- a/default/hypr/workspace-modes.lua
++++ b/default/hypr/workspace-modes.lua
+@@ -350,11 +350,15 @@ local function watch()
+   end)
+ 
+   -- A move is still being committed when this fires, and changing the window's
+-  -- floating state underneath it loses the move. Let it land first.
++  -- floating state underneath it loses the move. Let it land first. A move to
++  -- a monitor of another scale also has the app redraw at the new scale, and a
++  -- floating size sent before it has done so is lost: the window keeps drawing
++  -- at its old size inside the new frame. 1 ms and 16 ms both lose it; 50 ms
++  -- does not, so wait twice that.
+   hl.on("window.move_to_workspace", function(window, workspace)
+     hl.timer(function()
+       arrange({ window }, workspace)
+-    end, { type = "oneshot", timeout = 1 })
++    end, { type = "oneshot", timeout = 100 })
+   end)
+ 
+   -- A fullscreen window is left as it is, so it is arranged once it comes back
+diff --git a/test/shell.d/hyprland-floating-workspaces-test.sh b/test/shell.d/hyprland-floating-workspaces-test.sh
+index 659f5104f..dd7a9b709 100755
+--- a/test/shell.d/hyprland-floating-workspaces-test.sh
++++ b/test/shell.d/hyprland-floating-workspaces-test.sh
+@@ -223,6 +223,7 @@ local buttons = {}
+ local config = { ["input.follow_mouse"] = 1, ["decoration.shadow.enabled"] = false }
+ local rules = {}
+ local placed = {}
++local timeouts = {}
+ local active = { id = 1 }
+ local titlebars_installed = os.getenv("TITLEBARS_INSTALLED") == "1"
+ 
+@@ -321,7 +322,10 @@ hl = {
+     subscriptions[event] = subscriptions[event] or {}
+     table.insert(subscriptions[event], callback)
+   end,
+-  timer = function(callback) callback() end,
++  timer = function(callback, options)
++    table.insert(timeouts, options and options.timeout)
++    callback()
++  end,
+   get_active_workspace = function() return active end,
+   get_config = function(key) return config[key] end,
+   config = function(values)
+@@ -360,6 +364,7 @@ function state()
+     rules = rules,
+     placed = placed,
+     subscriptions = subscriptions,
++    timeouts = timeouts,
+     active = active,
+   }
+ end
+@@ -583,6 +588,24 @@ assert(not moving.floating, "a window carried to a tiled workspace kept floating
+ fi
+ pass "the mode leaves windows on their way to a special workspace alone"
+ 
++# A window moved to a floating workspace is floated once its app has caught up
++# with the move: a move to a monitor of another scale loses a size sent sooner.
++printf 'o.workspace_mode({ workspace = "1", mode = "floating" })\n' >"$modes_dir/1.lua"
++if ! run_lua '
++local moving = window("0x1", 2)
++require("default.hypr.workspace-layouts")
++local moved = state().subscriptions["window.move_to_workspace"][1]
++local before = #state().timeouts
++
++moved(moving, { id = 1 })
++assert(moving.floating, "a window moved to a floating workspace was not floated")
++local waited = state().timeouts[before + 1]
++assert(waited and waited >= 50, "the move was arranged after " .. tostring(waited) .. " ms, too soon for a change of scale")
++'; then
++  fail "a window moved to a floating workspace is floated after its app catches up"
++fi
++pass "a window moved to a floating workspace is floated after its app catches up"
++
+ # Titlebars: asked for only when installed, and themed once loaded.
+ if ! run_lua '
+ window("0x1", 1)
+-- 
+2.56.0
+
