@@ -8,6 +8,7 @@ GH_REPO=omarchy-asus/omarchy-asus
 PR=${G16_TEST_PR:-$(gh pr view --json number -q .number 2>/dev/null || true)}
 [[ $PR =~ ^[0-9]+$ ]] || PR=8
 TEMPS_ISSUE=42
+RESUME_ISSUE=185
 WORKFLOW=build-pr.yml
 KIT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RECIPE_DIR=$(cd "$KIT_DIR/.." && pwd)
@@ -33,10 +34,44 @@ as_root() {
   local why=$1; shift
   printf '%s[sudo]%s %s\n' "$Y" "$N" "$why" >&2
   printf '       %s%s%s\n' "$D" "$*" "$N" >&2
-  sudo "$@"
+  if [[ ${G16_ROOT:-} == pkexec ]]; then
+    # Through polkit: from the user manager, the desktop session's agent asks.
+    # G16_POLKIT_REASON names a wrapper (`W run REASON -- pkexec CMD`) that shows
+    # the reason in the dialog; without it the dialog shows only the command.
+    if [[ -n ${G16_POLKIT_REASON:-} ]]; then
+      systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$why" -- pkexec "$@"
+    else
+      systemd-run --user --wait -q -P pkexec --disable-internal-agent "$@"
+    fi
+  else
+    sudo "$@"
+  fi
 }
 # Root reads that must not prompt mid-test (sudo -v was done up front).
 root_read() { sudo -n "$@" 2>/dev/null; }
+
+# #185: the EC's fan-table byte (FTBL, EC RAM 0x06) by name.
+ftbl_name() { # raw byte as read by od, spaces allowed
+  local v=${1//[[:space:]]/}
+  case $v in 0) echo balanced ;; 1) echo turbo ;; 2) echo silent ;; '') echo '?' ;; *) echo "raw:$v" ;; esac
+}
+# A step's verdict, given what the EC really runs: an EC that runs another
+# table than the asus-wmi profile's has lost it, whatever the load showed.
+# An unreadable EC (?) leaves the load verdict as it is.
+ec_verdict() { # load-verdict ftbl-name asus-wmi-profile
+  local want
+  case $3 in quiet) want=silent ;; balanced) want=balanced ;; performance) want=turbo ;; *) want='' ;; esac
+  if [[ $2 == '?' || -z $want || $2 == "$want" ]]; then echo "$1"; else echo lost; fi
+}
+
+# CLOCK_MONOTONIC in whole seconds: it stops while the machine sleeps or hibernates.
+mono_s() { python3 -I -c 'import time; print(int(time.monotonic()))'; }
+# Seconds a machine spent asleep between two (wall, monotonic) readings.
+down_seconds() { # wall0 mono0 wall1 mono1
+  local d=$((($3 - $1) - ($4 - $2)))
+  ((d < 0)) && d=0
+  printf '%s\n' "$d"
+}
 
 dmi() { local v=''; read -r v 2>/dev/null <"/sys/class/dmi/id/$1"; printf '%s' "$v"; }
 is_g16() { [[ $(dmi product_name) == *GA605* || $(dmi board_name) == *GA605* ]]; }

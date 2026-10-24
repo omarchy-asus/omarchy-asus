@@ -3,6 +3,8 @@
 #
 #   recipes/linux-omarchy/g16-test/test [--hibernate] [--no-suspend] [--dock] [--yes]
 #   recipes/linux-omarchy/g16-test/test --temps [MIN] [--interval S] [--recovery MIN] [--ab]
+#   recipes/linux-omarchy/g16-test/test --resume-profile [--hibernates N]
+#   recipes/linux-omarchy/g16-test/test --ec-table
 #
 # Default mode: one PASS/FAIL/WARN/SKIP line per check, with evidence:
 #   kernel     uname and package versions
@@ -33,14 +35,30 @@
 # fans, power, clocks and the platform profile every --interval seconds (default
 # 5). --ab repeats the run with the balanced fan table for comparison.
 #
-# Both modes write a report without host or user names to
-# ~/omarchy-asus-g16-test-<kernel>-<date>[-temps].md, show it, and offer to post
-# it on PR #8 (default mode) or issue #42 (--temps).
+# --resume-profile (#185): on battery with the quiet fan table, does the EC keep
+# it across hibernate and s2idle, and does writing the profile again restore it?
+# Each step settles 2 min at idle (fans, Tctl: median of the last 30 s), then
+# runs 60 s of all-core load (peak Tctl, APU power), sampling every second:
+# baseline; hibernate (up to N times, default 3, until the table is lost); write
+# `quiet` again; if still lost, write `balanced` then `quiet`; one s2idle suspend,
+# and the same writes if it lost the table too. Hibernate needs a power-button press.
+# Each step also reads the fan table the EC really runs (FTBL, EC RAM 0x06:
+# 0 balanced, 1 turbo, 2 silent) through ec_sys's read-only debugfs file. With
+# 7.2.8-9.6 (0808) asus-wmi writes its profile back on every hibernate resume,
+# so the EC must read silent after each one.
+#
+# --ec-table (#185): read only, no writes, no load, about 10 s. Prints the
+# asus-wmi profile next to the EC's FTBL byte and the fan speeds, and says
+# whether they agree. Run it whenever the fans seem to spin on a cool idle.
+#
+# All modes write a report without host or user names to
+# ~/omarchy-asus-g16-test-<kernel>-<date>[-temps|-resume].md, show it, and offer to
+# post it on PR #8 (default mode), issue #42 (--temps) or issue #185 (--resume-profile).
 set -uo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
-MODE=checks HIBERNATE=0 SUSPEND=1 DOCK=0 YES=0 TEMPS_MIN=10 INTERVAL=5 RECOVERY=3 AB=0
+MODE=checks HIBERNATE=0 SUSPEND=1 DOCK=0 YES=0 TEMPS_MIN=10 INTERVAL=5 RECOVERY=3 AB=0 HIBERNATES=3
 while (($#)); do
   case $1 in
     --temps) MODE=temps; if [[ ${2:-} =~ ^[0-9]+$ ]]; then TEMPS_MIN=$2; shift; fi ;;
@@ -48,16 +66,21 @@ while (($#)); do
     --interval) INTERVAL=${2:?}; shift ;;
     --recovery) RECOVERY=${2:?}; shift ;;
     --ab) AB=1 ;;
+    --resume-profile) MODE=resume ;;
+    --ec-table) MODE=ectable ;;
+    --hibernates) HIBERNATES=${2:?}; shift ;;
     --hibernate) HIBERNATE=1 ;;
     --no-suspend) SUSPEND=0 ;;
     --dock) DOCK=1 ;;
     --yes | -y) YES=1 ;;
-    -h | --help) sed -n '2,38s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,47s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
 done
-for v in TEMPS_MIN INTERVAL RECOVERY; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || die "$v must be a positive number"; done
+[[ ${G16_ROOT:-} != pkexec || $MODE == resume || $MODE == ectable ]] ||
+  die "G16_ROOT=pkexec covers --resume-profile and --ec-table only; the other modes read root-only files with sudo"
+for v in TEMPS_MIN INTERVAL RECOVERY HIBERNATES; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || die "$v must be a positive number"; done
 ((EUID != 0)) || die "run it as your normal user; it uses sudo where it must"
 is_g16 || die "this is not a GA605; the kit is for the ROG Zephyrus G16 GA605 only"
 have python3 || die "python3 is missing"
@@ -99,6 +122,7 @@ result() { # status check summary [details...]
 }
 
 sudo_up_front() {
+  [[ ${G16_ROOT:-} == pkexec ]] && { note "root steps go through polkit (G16_ROOT=pkexec): one prompt each"; return; }
   say "Some checks need root: $*."
   note "Asking for the sudo password once; nothing is changed except where a check says so."
   sudo -v || note "no sudo: the checks that need root will report SKIP or FAIL with the reason"
@@ -805,4 +829,226 @@ run_temps() {
   offer_post "$f" issue "$TEMPS_ISSUE"
 }
 
-if [[ $MODE == temps ]]; then run_temps; else run_checks; fi
+# =================================================================== resume
+asus_profile_dir() {
+  local d n
+  for d in /sys/class/platform-profile/platform-profile-*; do
+    n=''
+    read -r n 2>/dev/null <"$d/name" || true
+    [[ $n == asus-wmi ]] && { printf '%s\n' "$d"; return 0; }
+  done
+  return 1
+}
+
+write_profile() { # value
+  local d
+  d=$(asus_profile_dir) || die "no asus-wmi platform-profile handler"
+  printf '%s\n' "$1" | as_root "Write $1 to the asus-wmi platform profile for the #185 quiet fan table test" tee "$d/profile" >/dev/null ||
+    die "writing $1 to $d/profile failed"
+}
+
+# The fan table the EC runs: FTBL, EC RAM 0x06 (the DSDT's 0x00120075 handler
+# writes 0 balanced, 1 turbo, 2 silent there). ec_sys's debugfs file is
+# read-only unless loaded with write_support=1, which the kit never does.
+EC_IO=/sys/kernel/debug/ec/ec0/io
+EC_OK=0
+ec_up() {
+  if [[ ${G16_ROOT:-} == pkexec ]]; then
+    as_root "Load ec_sys (read-only) and read the EC fan-table byte for the #185 test" sh -c "modprobe ec_sys write_support=0 && test -r $EC_IO" && EC_OK=1
+  else
+    as_root "Load ec_sys (read-only) to read the EC fan-table byte for the #185 test" modprobe ec_sys write_support=0 &&
+      root_read test -r "$EC_IO" && EC_OK=1
+  fi
+  ((EC_OK)) || note "EC readout unavailable (ec_sys or debugfs missing): judging by fans and load only"
+}
+ec_ftbl() { # prints balanced|turbo|silent|raw value, or ? when unreadable
+  local v
+  ((EC_OK)) || { echo '?'; return; }
+  if [[ ${G16_ROOT:-} == pkexec ]]; then
+    v=$(systemd-run --user --wait -q -P pkexec --disable-internal-agent od -An -tu1 -j6 -N1 "$EC_IO" 2>/dev/null)
+  else
+    v=$(root_read od -An -tu1 -j6 -N1 "$EC_IO")
+  fi
+  ftbl_name "$v"
+}
+
+run_ectable() {
+  local hw a m e i f1 f2 f3 rows='' agree
+  say "EC fan table against the asus-wmi profile (#$RESUME_ISSUE), $KREL"
+  hw=$(hwmon_by_name asus || true)
+  [[ -n $hw ]] || die "no asus hwmon"
+  ec_up
+  ((EC_OK)) || die "cannot read the EC (ec_sys): nothing to compare"
+  a=$(profile_of asus-wmi) m=$(profile_of amd-pmf)
+  for i in 1 2 3; do
+    e=$(ec_ftbl)
+    f1=$(cat "$hw/fan1_input" 2>/dev/null) f2=$(cat "$hw/fan2_input" 2>/dev/null) f3=$(cat "$hw/fan3_input" 2>/dev/null)
+    rows+="| $i | $a | $m | $e | ${f1:-?}/${f2:-?}/${f3:-?} | $(awk '{printf "%.1f", $1/1000}' "$(hwmon_by_name k10temp)/temp1_input" 2>/dev/null) |"$'\n'
+    note "sample $i: asus-wmi $a, amd-pmf $m, EC $e, fans ${f1:-?}/${f2:-?}/${f3:-?}"
+    ((i < 3)) && sleep 5
+  done
+  if [[ $e == '?' ]]; then
+    agree="unknown (EC unreadable)"
+  elif [[ $(ec_verdict quiet "$e" "$a") == quiet ]]; then
+    agree="agree"
+  else
+    agree="**disagree**: the EC runs $e while asus-wmi reports $a"
+  fi
+  local hib f intro
+  hib=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -c 'hibernation exit')
+  f=$HOME/omarchy-asus-g16-test-$KREL-$STAMP-ectable.md
+  intro="$(header_info)"$'\n'"- Hibernate resumes this boot: $hib"$'\n\n'
+  intro+="Profile and EC fan table: $agree"$'\n\n'"| Sample | asus-wmi | amd-pmf | EC FTBL | Fans rpm | Tctl C |"$'\n'"|---|---|---|---|---|---|"$'\n'"$rows"
+  write_report "$f" "EC fan table vs asus-wmi profile (#$RESUME_ISSUE)" "$intro"
+  offer_post "$f" issue "$RESUME_ISSUE"
+}
+
+# One step: 120 s idle, then 60 s load, sampled every second into $RCSV. Adds a
+# report row and sets PROBE to quiet (table in force), lost or unclear.
+RROWS=() PROBE=''
+probe() { # label
+  local label=$1 t=0 phase start=$SECONDS line tc f1 f2 f3 aw ec='?'
+  say "[$label] 120 s idle, then 60 s load"
+  while ((t < 180)); do
+    if ((t < 120)); then phase=idle; else phase=load; ((${#LOAD_PIDS[@]})) || { ec=$(ec_ftbl); start_load 60; }; fi
+    line=$(sample "$t" "$phase")
+    printf '"%s",%s\n' "${label//\"/}" "$line" >>"$RCSV"
+    IFS=, read -r _ _ tc _ _ f1 f2 f3 aw _ <<<"$line"
+    printf '\r    %4ds %-5s Tctl %5sC  fans %s,%s,%s  apu %sW   ' "$t" "$phase" "$tc" "$f1" "$f2" "$f3" "$aw"
+    on_ac && { stop_load; echo; die "charger connected: the run is no longer on battery"; }
+    t=$((t + 1))
+    ((SECONDS < start + t)) && sleep $((start + t - SECONDS))
+  done
+  stop_load
+  echo
+  line=$(python3 -I "$KIT_DIR/probe-verdict.py" "$RCSV" "$label")
+  PROBE=$(ec_verdict "${line%% *}" "$ec" "$(profile_of asus-wmi)")
+  RROWS+=("| $label | ${line#* } | $ec | **$PROBE** |")
+  note "$label: $PROBE, EC table $ec (asus-wmi/amd-pmf | idle fans | idle Tctl | peak Tctl | APU W | MHz: ${line#* })"
+}
+
+do_hibernate() {
+  local since
+  printf '\n%sHibernate: wait until it is fully off (all lights out), press the power button,\n' "$B"
+  printf 'keep the default Limine entry, unlock. The test carries on by itself.%s\n' "$N"
+  ask "Hibernate now?" || return 1
+  since=$(date '+%Y-%m-%d %H:%M:%S')
+  local r0 m0 down
+  r0=$(date +%s) m0=$(mono_s)
+  as_root "Hibernate the laptop for the #185 quiet fan table test; it resumes with one power-button press" systemctl hibernate ||
+    die "systemctl hibernate refused"
+  until journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -q 'PM: hibernation: hibernation exit'; do sleep 1; done
+  # "hibernation exit" is logged on failure paths too. A real cycle powers off:
+  # wall time jumps while CLOCK_MONOTONIC (which stops in S4) barely moves.
+  down=$(down_seconds "$r0" "$m0" "$(date +%s)" "$(mono_s)")
+  ((down >= 10)) || die "the hibernate did not complete (wall and monotonic clocks moved together; down ${down} s): see the kernel log since $since"
+  note "hibernated: powered down about ${down} s"
+  sleep 3
+}
+
+do_suspend() {
+  local s0 f0 t0 t1 i
+  ask "Suspend (s2idle) now for about 30 s? The RTC wakes it; unlock the screen after." || return 1
+  s0=$(cat /sys/power/suspend_stats/success) f0=$(cat /sys/power/suspend_stats/fail)
+  t0=$(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo 0)
+  # One authorization for both: an alarm armed before a slow second prompt
+  # could fire before the suspend, leaving the laptop asleep until a button press.
+  as_root "Suspend the laptop for 30 s for the #185 quiet fan table test; an RTC alarm wakes it" \
+    sh -c 'rtcwake -m no -s 30 >/dev/null && exec systemctl suspend' || die "setting the RTC alarm or suspending was refused"
+  for ((i = 0; i < 300; i++)); do
+    (($(cat /sys/power/suspend_stats/success) > s0 || $(cat /sys/power/suspend_stats/fail) > f0)) && break
+    sleep 1
+  done
+  (($(cat /sys/power/suspend_stats/fail) > f0)) && die "the suspend failed"
+  (($(cat /sys/power/suspend_stats/success) > s0)) || die "no completed suspend within 5 min (suspend_stats success unchanged)"
+  # An immediate wake also counts as a success: require time in hardware sleep (s0i3).
+  t1=$(cat /sys/power/suspend_stats/total_hw_sleep 2>/dev/null || echo 0)
+  ((t1 > t0)) || die "resumed without hardware sleep (total_hw_sleep $t0 -> $t1 us): s0i3 not reached, so this is no s2idle test"
+  sleep 3
+}
+
+# After a resume that lost the table: write quiet again; if that is not enough,
+# go through balanced. Sets FIX to same, via-balanced, neither, or unclear when
+# the last probe can't tell (power capped, readings missing).
+FIX=''
+reassert() { # resume kind
+  write_profile quiet
+  probe "$1: quiet written again"
+  [[ $PROBE == quiet ]] && { FIX=same; return; }
+  write_profile balanced
+  sleep 2
+  write_profile quiet
+  probe "$1: balanced then quiet written"
+  case $PROBE in quiet) FIX=via-balanced ;; lost) FIX=neither ;; *) FIX=unclear ;; esac
+}
+
+run_resume() {
+  local cap can i n=0 hib='' hfix='' sus='' sfix='' since0 table
+  say "Resume and the quiet fan table (#$RESUME_ISSUE), $KREL"
+  on_ac && die "the charger is connected: #$RESUME_ISSUE is about battery. Unplug it and run again."
+  cap=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1)
+  ((${cap:-0} >= 60)) || die "battery at ${cap:-?}%: charge to at least 60% for this run (it uses about 16%; late in a run that went from 41% to 25% the APU was held at 25 W, where the tables look alike)"
+  [[ $(profile_of asus-wmi) == quiet && $(profile_of amd-pmf) == balanced ]] ||
+    die "the quiet fan table is not active (asus-wmi $(profile_of asus-wmi), amd-pmf $(profile_of amd-pmf)); pick the Balanced power profile on battery, then run again"
+  can=$(busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanHibernate 2>/dev/null | awk '{print $2}' | tr -d '"')
+  [[ $can == yes || $can == challenge ]] || die "logind CanHibernate: ${can:-unknown} (no swap/resume set up?)"
+  HW_K10=$(hwmon_by_name k10temp || true) HW_AMDGPU=$(hwmon_by_name amdgpu || true) HW_ASUS=$(hwmon_by_name asus || true)
+  DGPU=$(dgpu_dir || true)
+  [[ -n $HW_K10 && -n $HW_ASUS ]] || die "no k10temp or asus hwmon"
+  INTERVAL=1
+  since0=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -c 'hibernation exit')
+  note "this boot has $since0 hibernate resume(s) so far; the run takes 25-40 min, mostly idle"
+  sudo_up_front "writing the platform profile and setting an RTC alarm"
+  trap 'stop_load' EXIT
+  trap 'stop_load; exit 130' INT TERM
+  RCSV=$STATE_DIR/resume-$STAMP.csv
+  printf 'step,%s\n' "$sample_header" >"$RCSV"
+  table=$(fan_table)
+  ec_up
+
+  probe baseline
+  # A resume can only be blamed for losing the table if it was in force before.
+  [[ $PROBE == quiet ]] || die "the baseline is already $PROBE, before any resume: reboot (no suspend or hibernate) and run again"
+
+  for ((i = 1; i <= HIBERNATES; i++)); do
+    do_hibernate || break
+    n=$i
+    probe "after hibernate $i"
+    [[ $PROBE == quiet ]] || { hib=$PROBE; break; }
+  done
+  ((n)) || hib=skipped
+  : "${hib:=kept}"
+  [[ $hib == lost || $hib == unclear ]] && { reassert "hibernate $n"; hfix=$FIX; }
+
+  if [[ $hfix == neither ]]; then
+    sus="not run (the quiet table could not be restored after hibernate)"
+  elif do_suspend; then
+    probe "after s2idle"
+    sus=$PROBE
+    [[ $sus == quiet ]] && sus=kept
+    [[ $sus == lost || $sus == unclear ]] && { reassert s2idle; sfix=$FIX; }
+  else
+    sus=skipped
+  fi
+  [[ $(profile_of asus-wmi) == quiet ]] || write_profile quiet
+
+  local f=$HOME/omarchy-asus-g16-test-$KREL-$STAMP-resume.md intro
+  intro="$(header_info)"$'\n'"- Load: $LOAD_KIND, 60 s per step after 120 s idle, sampled every second. Idle columns: medians of the last 30 s idle; APU W and MHz: medians of the last 30 s of load"
+  intro+=$'\n'"- Hibernate resumes this boot before the run: $since0"$'\n\n'"### Result"$'\n\n'
+  intro+="- Hibernate: table **$hib** after $n cycle(s)${hfix:+; writing the profile again: **$hfix**}"$'\n'
+  intro+="- s2idle: table **$sus**${sfix:+; writing the profile again: **$sfix**}"$'\n'
+  intro+="- Verdict per step (probe-verdict.py): quiet = at most 35 W (and at least 30 W) with peak Tctl below 90 C; lost = at least 37 W, peak Tctl 90 C or more, fans spinning on an idle below 50 C, or an EC table other than the profile's (silent for quiet); else unclear"$'\n\n'
+  intro+="| Step | asus-wmi/amd-pmf | Idle fans rpm | Idle Tctl C | Peak Tctl C | APU W | MHz | EC table | Verdict |"$'\n'"|---|---|---|---|---|---|---|---|---|"$'\n'
+  intro+=$(printf '%s\n' "${RROWS[@]}")
+  intro+=$'\n\n'"Fan curves reported by asus-wmi at the start:"$'\n\n```\n'"$table"$'\n```\n'
+  write_report "$f" "Quiet fan table across hibernate and s2idle (#$RESUME_ISSUE)" "$intro"
+  note "raw samples: ${RCSV/#$HOME/\~}"
+  offer_post "$f" issue "$RESUME_ISSUE"
+}
+
+case $MODE in
+  temps) run_temps ;;
+  resume) run_resume ;;
+  ectable) run_ectable ;;
+  *) run_checks ;;
+esac

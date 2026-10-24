@@ -43,6 +43,7 @@ while (($#)); do
   shift
 done
 ((EUID != 0)) || die "run it as your normal user; it uses sudo for the steps that need root"
+[[ -z ${G16_ROOT:-} ]] || die "G16_ROOT=$G16_ROOT is for test --resume-profile only; deploy uses sudo"
 FROM=${FROM/#\~/$HOME}
 [[ -n $PKGVER && -n $PKGREL ]] || die "cannot read pkgver/pkgrel from $RECIPE_DIR/PKGBUILD"
 
