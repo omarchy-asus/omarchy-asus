@@ -13,7 +13,11 @@
 #   6. the root helper refuses unknown tweaks and commands;
 #   7. it never reads the nvidia_0 backlight or anything under the RTX but its
 #      runtime_status (a read-only stand-in makes such a read fail loudly);
-#   8. --boot keeps the numbers and --compare reports B against A.
+#   8. --boot keeps the numbers and --compare reports B against A;
+#   9. inside an open g16-testd session (a stand-in that logs its calls) every tweak
+#      is that helper's knob-set and knob-restore, the trace its trace-start and
+#      trace-stop, each call with a reason, and nothing asks for root; with no
+#      session it falls back to pkexec, and G16_ROOT=testd then refuses to start.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -332,5 +336,84 @@ run --boot nocb --rounds 2 --measure 1 --settle 0 --interval 1 >/dev/null 2>&1
 grep -qE '^(stop|iw)' "$ST/log" && bad "--boot changed a setting" || ok "--boot changes no setting"
 out=$(run --compare stock nocb --issue 0 --no-post 2>&1)
 grep -q '| 9.00 | 7.50 | -1.50 |' <<<"$out" && ok "--compare reports B − A" || bad "compare: $out"
+
+# ---------------------------------------------------- 9. through g16-testd
+# A stand-in for g16-testd: a session is open while $STUB/td-open exists; each call
+# is logged, a knob stays marked from knob-set until knob-restore.
+cat >"$B/g16-testd" <<'EOF'
+#!/bin/bash
+case $1 in
+  available) [[ -e $STUB/td-open ]] ;;
+  call)
+    shift; m=$1 r=''; shift; a=()
+    while (($#)); do if [[ $1 == --reason ]]; then r=$2; shift 2; else a+=("$1"); shift; fi; done
+    [[ -n $r ]] || { echo "g16-testd: --reason needed" >&2; exit 2; }
+    [[ -e $STUB/td-open ]] || { echo "g16-testd: no session open" >&2; exit 3; }
+    echo "$m ${a[*]} | $r" >>"$STUB/td.log"
+    case $m in
+      knob-set) [[ -e $STUB/td-fail-${a[0]} ]] && { echo "g16-testd: ${a[0]} absent" >&2; exit 1; }
+        touch "$STUB/td-set-${a[0]}"; echo "${a[1]}" ;;
+      knob-restore) rm -f "$STUB/td-set-${a[0]}"; echo "${a[0]} back" ;;
+      trace-start) touch "$STUB/td-trace-${a[0]}"; printf '{\n "missing": [],\n "on": []\n}\n' ;;
+      trace-stop) rm -f "$STUB/td-trace-${a[0]}"
+        printf '  kworker/1:0-55  [001] d.h1. 10.0: csd_queue_cpu: cpu=2 callsite=x func=do_sync_core csd=0\n' >"$STUB/${a[0]}.trace"
+        echo "$STUB/${a[0]}.trace" ;;
+    esac ;;
+esac
+EOF
+cat >"$B/systemd-run" <<'EOF'
+#!/bin/bash
+echo "systemd-run $*" >>"$STUB/log"; exit 1
+EOF
+chmod +x "$B/g16-testd" "$B/systemd-run"
+run_td() { # like run, with G16_ROOT left to the script
+  env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_TESTD="$B/g16-testd" G16_AB_SYS="$S" G16_AB_PROC="$P" \
+    G16_AB_ISSUE="$B/issue" G16_AB_STATE="$T/home/state" G16_AB_REPORT="$T/home/report.md" "$SCRIPT" "$@"
+}
+reset
+touch "$ST/td-open"
+out=$(run_td "${FAST[@]}" --no-post 2>&1); rc=$?
+((rc == 0)) && ok "testd run exits 0" || bad "testd run exit $rc: $out"
+grep -q 'through the open g16-testd session' <<<"$out" && ok "testd run says it uses the session" || bad "testd run: $out"
+grep -q '^systemd-run' "$ST/log" && bad "testd run asked for root: $(grep systemd-run "$ST/log")" || ok "testd run asks for no root"
+[[ $(orig_state) == "$WANT" ]] && ok "testd run writes no setting itself" || bad "testd run changed: $(orig_state)"
+L=$ST/td.log
+for kv in "nmi-watchdog 0" "nvme-apst 30/500" "sd-reader removed" "kbd-usb-pm auto" "numlock-led 0" "wifi-ps on" "bt-rfkill 1"; do
+  grep -q "^knob-set $kv |" "$L" && ok "testd: knob-set $kv" || bad "testd: no knob-set $kv"
+done
+nset=$(grep -c '^knob-set' "$L") nres=$(grep -c '^knob-restore' "$L")
+((nset > 0 && nset == nres)) && ok "testd: every knob-set has its knob-restore ($nset)" || bad "testd: $nset sets, $nres restores"
+ls "$ST"/td-set-* >/dev/null 2>&1 && bad "testd: left set: $(ls "$ST"/td-set-*)" || ok "testd: nothing left set"
+[[ $(grep -c '^knob-set kbd-usb-pm' "$L") == 4 ]] && ok "testd: kbd-usb and usb-idle each set the keyboard once per round" || bad "testd: kbd-usb-pm $(grep -c '^knob-set kbd-usb-pm' "$L")"
+grep -vq '| g16-idle-ab: ' "$L" && bad "testd: a call without the kit's reason: $(grep -v '| g16-idle-ab: ' "$L" | head -1)" || ok "testd: every call gives the kit's reason"
+grep -q '^trace-start idle-ab-[0-9]* csd/csd_queue_cpu,timer/hrtimer_expire_entry - 8192 |' "$L" && grep -q '^trace-stop idle-ab-' "$L" &&
+  ok "testd: the trace through trace-start and trace-stop" || bad "testd trace: $(grep trace "$L")"
+grep -q 'ipi kworker/1:0 do_sync_core' "$T/home/report.md" && ok "testd: the trace is in the report" || bad "testd: trace not reported"
+ls "$ST"/*.trace >/dev/null 2>&1 && bad "testd: trace file left behind" || ok "testd: trace file removed"
+grep -q 'g16-testd has no call for it' "$T/home/report.md" && ok "testd: diag says it was not read" || bad "testd: diag: $(grep -i debugfs "$T/home/report.md")"
+
+reset
+touch "$ST/td-open" "$ST/td-fail-wifi-ps"
+out=$(run_td --only wifi-ps,nmi "${FAST[@]}" --no-post 2>&1); rc=$?
+grep -q 'wifi-ps not applied: err wifi-ps: g16-testd: wifi-ps absent' <<<"$out" && ok "testd: a refused knob-set skips the phase" || bad "testd refusal: $out"
+grep -qE '^\| [0-9]+ \| [12] \| wifi-ps \|' "$T/home/report.md" && bad "testd: wifi-ps measured though refused" || ok "testd: no phase for a refused tweak"
+((rc == 0)) && ok "testd: the run carries on after a refusal" || bad "testd refusal exit $rc"
+
+reset
+touch "$ST/td-open"
+run_td --only nmi --rounds 50 --measure 2 --settle 0 --interval 1 --no-post >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 50); do [[ -e $ST/td-set-nmi-watchdog ]] && break; sleep 0.2; done
+kill -TERM "$pid"; wait "$pid" 2>/dev/null
+[[ -e $ST/td-set-nmi-watchdog ]] && bad "testd: killed run left nmi-watchdog set" || ok "testd: a killed run restores through the helper"
+
+reset
+out=$(run_td --dry-run "${FAST[@]}" 2>&1)
+grep -q '^systemd-run .*pkexec' "$ST/log" && ok "no session: falls back to pkexec" || bad "no session: $(cat "$ST/log") $out"
+[[ -e $ST/td.log ]] && bad "no session: g16-testd was called" || ok "no session: g16-testd not called"
+reset
+out=$(G16_ROOT=testd run_td --dry-run "${FAST[@]}" 2>&1); rc=$?
+((rc == 1)) && grep -q 'no g16-testd session is open' <<<"$out" && ! grep -q '^systemd-run' "$ST/log" &&
+  ok "G16_ROOT=testd with no session refuses, asks nothing" || bad "G16_ROOT=testd: rc=$rc $out"
 
 ((fails == 0)) && echo "PASS" || { echo "$fails failed"; exit 1; }

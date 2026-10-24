@@ -41,8 +41,11 @@
 # ~/omarchy-asus-g16-wakeups-<label or date>.md, posted through bin/issue next to
 # this script (its denylist scan refuses a hit; without bin/issue nothing is posted).
 #
-# Root: G16_ROOT=pkexec (default, via systemd-run --user), sudo, or none (tests).
-# G16_POLKIT_REASON=<wrapper> runs `<wrapper> run REASON -- pkexec ...`.
+# Root: inside an open g16-testd session (omarchy-asus-g16-testd, #277) the trace
+# goes through that helper, with no dialog (only the events on its allowlist);
+# otherwise pkexec, via systemd-run --user. G16_ROOT=testd or pkexec forces one,
+# sudo or none (tests) are the others. G16_POLKIT_REASON=<wrapper> runs
+# `<wrapper> run REASON -- pkexec ...`.
 # Exit status: 0 done, 1 a problem, 2 bad usage.
 set -uo pipefail
 
@@ -59,6 +62,29 @@ EVENTS=(
   irq/tasklet_entry
   workqueue/workqueue_queue_work workqueue/workqueue_execute_start
 )
+
+# context PROC SYS SECONDS OUTDIR "EVENTS": the bundle's meta and topology files
+# (world-readable, so the root capture and the g16-testd one write the same).
+context() {
+  local proc=$1 sys=$2 out=$4 s c n
+  {
+    echo "seconds=$3"
+    echo "events=$5"
+    echo "kernel=$(cat "$proc/sys/kernel/osrelease" 2>/dev/null)"
+    echo "extra=$(tr ' ' '\n' <"$proc/cmdline" 2>/dev/null | grep -E '^(nmi_watchdog|rcu_nocbs|rcutree|nohz|nohz_full|irqaffinity|isolcpus|workqueue|skew_tick|idle|processor\.|cpuidle|amd_pstate)' | paste -sd' ' -)"
+    echo "governor=$(cat "$sys/devices/system/cpu/cpuidle/current_governor" 2>/dev/null)"
+    echo "nmi_watchdog=$(cat "$proc/sys/kernel/nmi_watchdog" 2>/dev/null)"
+    echo "rcu_lazy=$(cat "$sys/module/rcutree/parameters/enable_rcu_lazy" 2>/dev/null)"
+    for s in "$sys"/class/power_supply/*; do
+      [[ $(cat "$s/type" 2>/dev/null) == Battery && $(cat "$s/scope" 2>/dev/null) != Device ]] && { echo "power=$(cat "$s/status" 2>/dev/null)"; break; }
+    done
+  } >"$out/meta"
+  for c in "$sys"/devices/system/cpu/cpu[0-9]*; do
+    n=${c##*cpu}
+    printf 'cpu=%s l3=%s maxf=%s rank=%s\n' "$n" "$(cat "$c/cache/index3/shared_cpu_list" 2>/dev/null || echo -)" \
+      "$(cat "$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo -)" "$(cat "$c/cpufreq/amd_pstate_prefcore_ranking" 2>/dev/null || echo -)"
+  done >"$out/topology"
+}
 
 # ------------------------------------------------------------- root capture
 # --capture PROC SYS SECONDS OUTDIR UID: record, write the bundle, hand it to
@@ -88,23 +114,7 @@ if [[ ${1:-} == --capture ]]; then
   on=()
   for e in "${EVENTS[@]}"; do [[ -e $TR/events/$e/enable ]] && w "$TR/events/$e/enable" 1 && on+=("$e"); done
   ((${#on[@]})) || { echo "capture: none of the events exist" >&2; exit 1; }
-  {
-    echo "seconds=$secs"
-    echo "events=${on[*]}"
-    echo "kernel=$(cat "$proc/sys/kernel/osrelease" 2>/dev/null)"
-    echo "extra=$(tr ' ' '\n' <"$proc/cmdline" 2>/dev/null | grep -E '^(nmi_watchdog|rcu_nocbs|rcutree|nohz|nohz_full|irqaffinity|isolcpus|workqueue|skew_tick|idle|processor\.|cpuidle|amd_pstate)' | paste -sd' ' -)"
-    echo "governor=$(cat "$sys/devices/system/cpu/cpuidle/current_governor" 2>/dev/null)"
-    echo "nmi_watchdog=$(cat "$proc/sys/kernel/nmi_watchdog" 2>/dev/null)"
-    echo "rcu_lazy=$(cat "$sys/module/rcutree/parameters/enable_rcu_lazy" 2>/dev/null)"
-    for s in "$sys"/class/power_supply/*; do
-      [[ $(cat "$s/type" 2>/dev/null) == Battery && $(cat "$s/scope" 2>/dev/null) != Device ]] && { echo "power=$(cat "$s/status" 2>/dev/null)"; break; }
-    done
-  } >"$out/meta"
-  for c in "$sys"/devices/system/cpu/cpu[0-9]*; do
-    n=${c##*cpu}
-    printf 'cpu=%s l3=%s maxf=%s rank=%s\n' "$n" "$(cat "$c/cache/index3/shared_cpu_list" 2>/dev/null || echo -)" \
-      "$(cat "$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo -)" "$(cat "$c/cpufreq/amd_pstate_prefcore_ranking" 2>/dev/null || echo -)"
-  done >"$out/topology"
+  context "$proc" "$sys" "$secs" "$out" "${on[*]}"
   cat "$proc/interrupts" >"$out/interrupts.0" 2>/dev/null; cat "$proc/softirqs" >"$out/softirqs.0" 2>/dev/null
   w "$TR/tracing_on" 1
   sleep "$secs"
@@ -458,8 +468,12 @@ overruns = sum(int(p[1]) for p in (l.split() for l in rd("overrun").splitlines()
 o = [f"## G16 wakeup attribution{': ' + label if label else ''}\n"]
 o.append(f"- kernel {meta.get('kernel', '?')}, cmdline extras `{meta.get('extra') or '-'}`, cpuidle `{meta.get('governor', '?')}`, "
          f"nmi_watchdog {meta.get('nmi_watchdog', '?')}, rcu lazy {meta.get('rcu_lazy', '?')}, power {meta.get('power', '?')}")
-o.append(f"- window {secs:.0f} s, {nlines} trace events, ring-buffer overruns {overruns}"
-         + (" (**events were lost: shorten --seconds**)" if overruns else ""))
+if meta.get("via") == "g16-testd":
+    o.append(f"- window {secs:.0f} s, {nlines} trace events, recorded through g16-testd (ring-buffer overruns not read)"
+             + (f"; not on its allowlist, so left out: {meta['left_out']}" if meta.get("left_out") else ""))
+else:
+    o.append(f"- window {secs:.0f} s, {nlines} trace events, ring-buffer overruns {overruns}"
+             + (" (**events were lost: shorten --seconds**)" if overruns else ""))
 missing = [e for e in ("power/cpu_idle", "ipi/ipi_send_cpu", "timer/hrtimer_expire_entry", "irq_vectors/local_timer_entry")
            if e not in meta.get("events", "")]
 if missing:
@@ -585,6 +599,31 @@ PY
 fi
 
 # ------------------------------------------------------- capture, then report
+# The capture inside an open g16-testd session (omarchy-asus-g16-testd, #277), as
+# you and with no dialog: the events on the helper's allowlist (g16-testd list), in
+# its own tracefs instance through trace-start and trace-stop.
+TD_TRACE=''
+trap 'rm -rf "$WORK"; [[ -z $TD_TRACE ]] || "$TESTD" call trace-stop "$TD_TRACE" --reason "$WHY" >/dev/null 2>&1' EXIT
+testd_capture() { # SECONDS OUTDIR
+  local secs=$1 out=$2 allowed e ev=() left=() r f
+  allowed=$("$TESTD" list 2>/dev/null | awk '/^trace events/ {on = 1; next} /^[^ ]/ {on = 0} on {print $1}')
+  for e in "${EVENTS[@]}"; do if grep -qxF -- "$e" <<<"$allowed"; then ev+=("$e"); else left+=("$e"); fi; done
+  ((${#ev[@]})) || { echo "capture: g16-testd allows none of the events" >&2; return 1; }
+  cat "$PROC/interrupts" >"$out/interrupts.0" 2>/dev/null; cat "$PROC/softirqs" >"$out/softirqs.0" 2>/dev/null
+  TD_TRACE=wakeups-$$
+  r=$("$TESTD" call trace-start "$TD_TRACE" "$(IFS=,; echo "${ev[*]}")" - 16384 --reason "$WHY" 2>&1) || { TD_TRACE=''; echo "capture: $r" >&2; return 1; }
+  sleep "$secs"
+  f=$("$TESTD" call trace-stop "$TD_TRACE" --reason "$WHY" 2>&1) || { echo "capture: $f" >&2; return 1; }
+  TD_TRACE=''
+  cat "$PROC/interrupts" >"$out/interrupts.1" 2>/dev/null; cat "$PROC/softirqs" >"$out/softirqs.1" 2>/dev/null
+  cp "$f" "$out/trace" 2>/dev/null || { echo "capture: cannot read the trace at $f" >&2; return 1; }
+  rm -f "$f"
+  # trace-start answers {"on": [...], "missing": [...]}: the events this kernel has
+  r=$(python3 -I -c 'import json, sys; print(" ".join(json.load(sys.stdin)["on"]))' <<<"$r") || r="${ev[*]}"
+  context "$PROC" "$SYS" "$secs" "$out" "$r"
+  printf 'via=g16-testd\nleft_out=%s\n' "${left[*]}" >>"$out/meta"
+  : >"$out/overrun"
+}
 NAME=${LABEL:-$STAMP}
 if [[ -n $ANALYZE ]]; then
   [[ -r $ANALYZE/trace && -r $ANALYZE/meta ]] || die "$ANALYZE is not a g16-wakeups bundle (no trace or meta)"
@@ -595,10 +634,16 @@ else
   BUNDLE=$STATE_DIR/$NAME
   [[ -e $BUNDLE ]] && die "${BUNDLE/#$HOME/\~} exists already; pick another --label"
   mkdir -p "$BUNDLE" || die "cannot create ${BUNDLE/#$HOME/\~}"
-  ROOT=${G16_ROOT:-pkexec}
+  ROOT=${G16_ROOT:-auto} TESTD=${G16_TESTD:-g16-testd}
   WHY="Record $SECS s of kernel wakeup events (tracefs, read-only) for the G16 idle-power trace (#239); nothing is changed"
   CAP=("$SELF" --capture "$PROC" "$SYS" "$SECS" "$BUNDLE" "$(id -u)")
+  if [[ $ROOT == auto ]]; then
+    if "$TESTD" available >/dev/null 2>&1; then ROOT=testd; else ROOT=pkexec; fi
+  fi
   case $ROOT in
+    testd)
+      "$TESTD" available >/dev/null 2>&1 || { rm -rf "$BUNDLE"; die "G16_ROOT=testd, but no g16-testd session is open for you (g16-testd session start)"; }
+      CMD=(testd_capture "$SECS" "$BUNDLE") ;;
     pkexec)
       if [[ -n ${G16_POLKIT_REASON:-} ]]; then
         CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "${CAP[@]}")
@@ -607,9 +652,9 @@ else
       fi ;;
     sudo) CMD=(sudo ${SUDO_ASKPASS:+-A} "${CAP[@]}") ;;
     none) CMD=("${CAP[@]}") ;;
-    *) die "G16_ROOT must be pkexec, sudo or none" ;;
+    *) die "G16_ROOT must be testd, pkexec, sudo or none" ;;
   esac
-  say "tracing $SECS s (leave the laptop alone)"
+  say "tracing $SECS s (leave the laptop alone)$( [[ $ROOT == testd ]] && echo ', through the open g16-testd session')"
   "${CMD[@]}" || { rm -rf "$BUNDLE"; die "the trace did not run (root refused, or no tracefs)"; }
   [[ -s $BUNDLE/meta ]] || { rm -rf "$BUNDLE"; die "the trace left no bundle"; }
 fi
