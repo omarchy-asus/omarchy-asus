@@ -19,6 +19,10 @@ post_upgrade() {
 }
 
 pre_remove() {
-  # An open session puts everything back when its unit stops.
+  # End an open session and put back everything a session left, boot drop-ins
+  # included (limine-update runs then): a stopped unit alone keeps the drop-ins,
+  # and the helper that removes them goes with the package.
+  /usr/lib/omarchy-asus-g16-testd/g16-testd cleanup ||
+    printf '==> WARNING: g16-testd cleanup could not put everything back; see above. Drop-ins are /etc/limine-entry-tool.d/omarchy-asus-g16-testd-*.conf (remove them, then run limine-update).\n' >&2
   systemctl stop omarchy-asus-g16-testd.service 2>/dev/null || true
 }

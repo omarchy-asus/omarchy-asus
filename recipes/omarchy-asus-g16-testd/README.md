@@ -65,7 +65,13 @@ reason.
   stay-awake state (`omarchy-toggle-idle status`) and turns it on, so no idle
   dim, lock or suspend cuts into an unattended A/B. At the end, `allow-idle`
   runs only if stay-awake was off before. `session status` shows the state from
-  before the session.
+  before the session. If the helper couldn't run `allow-idle` (a crash, a
+  failure), the session's record stays and the next `session start` puts it
+  back first. If it did, the record is only retired, so a stay-awake you turn on
+  yourself afterwards stays on.
+- **Removing the package** ends an open session and puts back everything any
+  session left, the boot drop-ins included (`g16-testd cleanup` from the
+  package's removal, then `limine-update`).
 - No windows, no sound, nothing outside the allowlists.
 
 ## Testing

@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -42,7 +43,8 @@ class Session(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="g16td")
         self.root = r = self.tmp.name
         self.sock = os.path.join(r, "s")
-        self.env = dict(os.environ, G16_TESTD_SOCKET=self.sock)
+        self.env = dict(os.environ, G16_TESTD_SOCKET=self.sock,
+                        G16_TESTD_STATE=os.path.join(r, "var/lib/omarchy-asus-g16-testd"))
         put(r, "proc/sys/kernel/random/boot_id", "boot-1")
         put(r, "proc/sys/kernel/nmi_watchdog", "1")
         put(r, "sys/module/nvme_core/parameters/apst_primary_timeout_ms", "100")
@@ -78,9 +80,10 @@ class Session(unittest.TestCase):
     def canned(self, d):
         put(self.root, "fake-commands.json", json.dumps(d))
 
-    def start(self, uid=UID, seconds=600, modules=(SHA_A,), stay_awake_before="on"):
+    def start(self, uid=UID, seconds=600, modules=(SHA_A,), stay_awake_before="on", session=""):
         argv = [sys.executable, "-I", TOOL, "daemon", "--uid", str(uid), "--expires",
-                str(time.time() + seconds), "--fake", self.root, "--stay-awake-before", stay_awake_before]
+                str(time.time() + seconds), "--fake", self.root, "--stay-awake-before", stay_awake_before,
+                "--session", session]
         for s in modules:
             argv += ["--module", f"mod_a={s}"]
         if os.path.exists(self.sock):  # left by a killed daemon
@@ -296,11 +299,166 @@ class Session(unittest.TestCase):
                                         capture_output=True, text=True, timeout=30)
         p = run("session", "start")
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(get(self.root, record), "off")
+        self.assertEqual(get(self.root, record).split()[0], "off")
         self.assertEqual(open(calls).read().split(), ["status", "stay-awake"])
         # the session ended without its restore (a crash): the next start puts it back first
         p = run("session", "start")
         self.assertEqual(open(calls).read().split(), ["status", "stay-awake", "allow-idle", "status", "stay-awake"])
+
+    def client(self):
+        """A client env whose pkexec step and omarchy-toggle-idle are stand-ins."""
+        bin_ = os.path.join(self.root, "bin")
+        self.idle_calls = os.path.join(self.root, "idle.log")
+        put(bin_, "omarchy-toggle-idle", f'#!/bin/sh\necho "$1" >>{self.idle_calls}\n'
+            'if [ "$1" = status ]; then echo \'{"enabled":false}\'; fi\n')
+        put(bin_, "systemd-run", "#!/bin/sh\nexit 0\n")
+        for f in ("omarchy-toggle-idle", "systemd-run"):
+            os.chmod(os.path.join(bin_, f), 0o755)
+        env = dict(self.env, PATH=f"{bin_}:{os.environ['PATH']}", XDG_STATE_HOME=os.path.join(self.root, "state"))
+        self.record = os.path.join(self.root, "state/omarchy-asus-g16-testd/stay-awake-before")
+        return lambda *a: subprocess.run([sys.executable, "-I", TOOL, *a], env=env,  # noqa: E731
+                                         capture_output=True, text=True, timeout=30)
+
+    def test_recovery_leaves_the_new_sessions_stay_awake_to_its_stop(self):
+        self.start(stay_awake_before="off")
+        self.g("call", "knob-set", "nmi-watchdog", "0")
+        self.proc.kill()
+        self.proc.wait()
+        self.start(stay_awake_before="off")  # recovers the knob, not stay-awake
+        self.assertEqual(get(self.root, "proc/sys/kernel/nmi_watchdog"), "1")
+        self.assertEqual(self.allow_idle_runs(), [])
+        self.stop()
+        self.assertEqual(len(self.allow_idle_runs()), 1)
+
+    def test_failed_allow_idle_kept_for_retry(self):
+        run = self.client()
+        self.assertEqual(run("session", "start").returncode, 0)
+        sid = get(self.root, self.record).split()[1]
+        self.canned({f"setpriv --reuid={UID} --regid={os.getgid()} --init-groups --reset-env "
+                     "omarchy-toggle-idle allow-idle": {"rc": 1}})
+        self.start(stay_awake_before="off", session=sid)
+        p = run("session", "stop")
+        self.proc.wait(timeout=10)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        # the daemon tried twice (stop, then its exit), and the record stays for a retry
+        self.assertEqual(len(self.allow_idle_runs()), 2)
+        self.assertTrue(os.path.exists(self.record))
+        run("session", "start")
+        self.assertEqual(open(self.idle_calls).read().split()[-3:], ["allow-idle", "status", "stay-awake"])
+
+    def test_expiry_retires_the_idle_record(self):
+        run = self.client()
+        run("session", "start")
+        sid = get(self.root, self.record).split()[1]
+        self.start(seconds=1, stay_awake_before="off", session=sid)
+        self.proc.wait(timeout=10)
+        self.assertEqual(len(self.allow_idle_runs()), 1)
+        # the user turns stay-awake on themselves; the next start must not undo it
+        open(self.idle_calls, "w").close()
+        run("session", "start")
+        self.assertEqual(open(self.idle_calls).read().split(), ["status", "stay-awake"])
+
+    # ---------------------------------------------------------------- robustness
+    def raw(self, payload):
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(self.sock)
+        with c:
+            c.sendall(payload + b"\n")
+            return json.loads(c.makefile().readline())
+
+    def test_bad_requests_answered_and_session_survives(self):
+        self.start()
+        self.g("call", "knob-set", "nmi-watchdog", "0")
+        for payload in (b'{"method": []}', b'{"method": {}}', b'{"method": "status", "args": "x"}',
+                        b'{"method": "knob-set", "args": [1], "reason": "r"}', b'\xff\xfe', b'[]'):
+            r = self.raw(payload)
+            self.assertFalse(r["ok"], payload)
+        self.assertIsNone(self.proc.poll())
+        self.stop()
+        self.assertEqual(get(self.root, "proc/sys/kernel/nmi_watchdog"), "1")
+
+    def test_command_failure_does_not_end_the_session(self):
+        put(self.root, "sys/class/net/wlan0/phy80211", "")
+        self.canned({"iw dev wlan0 get power_save": {"rc": 1}})
+        self.start()
+        self.g("call", "knob-set", "nmi-watchdog", "0")
+        rc, out = self.g("call", "knob-set", "wifi-ps", "on")
+        self.assertEqual(rc, 1)
+        self.assertIsNone(self.proc.poll())
+        self.stop()
+        self.assertEqual(get(self.root, "proc/sys/kernel/nmi_watchdog"), "1")
+
+    def test_fifo_module_path_refused_without_blocking(self):
+        self.start()
+        fifo = os.path.join(self.root, "pipe.ko")
+        os.mkfifo(fifo)
+        t = time.time()
+        rc, out = self.g("call", "module-swap", "mod_a", fifo)
+        self.assertEqual(rc, 1)
+        self.assertIn("not a regular file", out)
+        self.assertLess(time.time() - t, 5)
+
+    def test_numlock_leds_restored_each(self):
+        put(self.root, "sys/class/leds/input9::numlock/brightness", "0")
+        self.start()
+        self.assertEqual(self.g("call", "knob-set", "numlock-led", "1")[0], 0)
+        self.assertEqual(get(self.root, "sys/class/leds/input9::numlock/brightness"), "1")
+        self.stop()
+        self.assertEqual(get(self.root, "sys/class/leds/input3::numlock/brightness"), "1")
+        self.assertEqual(get(self.root, "sys/class/leds/input9::numlock/brightness"), "0")
+
+    def test_scope_frozen_before_stays_frozen(self):
+        f = f"{self.cg}/app-graphical.slice/app-Hyprland-firefox-123.scope/cgroup.freeze"
+        put(self.root, f, "1")
+        self.start()
+        self.assertEqual(self.g("call", "freeze", "app-Hyprland-firefox-123.scope")[0], 0)
+        self.stop()
+        self.assertEqual(get(self.root, f), "1")
+
+    def test_sd_failed_rescan_puts_port_back(self):
+        port = os.path.join(self.root, "sys/devices/pci0000:00/0000:00:02.2")
+        dev = os.path.join(port, "0000:62:00.0")
+        put(self.root, f"{port}/power/control", "auto")
+        put(self.root, f"{dev}/vendor", "0x17a0")
+        put(self.root, f"{dev}/device", "0x9767")
+        os.makedirs(os.path.join(self.root, "sys/bus/pci/devices"))
+        link = os.path.join(self.root, "sys/bus/pci/devices/0000:62:00.0")
+        os.symlink(dev, link)
+        os.makedirs(f"{port}/rescan")  # a write to it fails
+        self.start()
+        self.assertEqual(self.g("call", "knob-set", "sd-reader", "removed")[0], 0)
+        os.unlink(link)
+        for _ in range(2):  # a retry still knows the port's own setting
+            rc, out = self.g("call", "knob-restore", "sd-reader")
+            self.assertEqual(rc, 1)
+            self.assertEqual(get(self.root, f"{port}/power/control"), "auto")
+
+    # ---------------------------------------------------------------- removal
+    def cleanup(self):
+        return subprocess.run([sys.executable, "-I", TOOL, "cleanup", "--fake", self.root], env=self.env,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_cleanup_stops_an_open_session_with_its_dropins(self):
+        self.start()
+        self.g("call", "knob-set", "nmi-watchdog", "0")
+        self.g("call", "boot-dropin", "nmi-watchdog-off", "on")
+        p = self.cleanup()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.proc.wait(timeout=10)
+        self.assertEqual(get(self.root, "proc/sys/kernel/nmi_watchdog"), "1")
+        self.assertEqual(os.listdir(os.path.join(self.root, "etc/limine-entry-tool.d")), [])
+
+    def test_cleanup_removes_dropins_a_stopped_session_left(self):
+        self.start()
+        self.g("call", "boot-dropin", "nmi-watchdog-off", "on")
+        self.proc.send_signal(signal.SIGTERM)
+        self.proc.wait(timeout=10)
+        put(self.root, "proc/sys/kernel/random/boot_id", "boot-2")
+        p = self.cleanup()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(os.listdir(os.path.join(self.root, "etc/limine-entry-tool.d")), [])
+        self.assertEqual(self.commands()[-1], "limine-update")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "var/lib/omarchy-asus-g16-testd/records.json")))
 
     # ---------------------------------------------------------------- modules
     def module_file(self, data):
