@@ -50,7 +50,7 @@ SHAs are the commits of omacom/omarchy#12428, reachable there.
 | 0009 | ALC285 Master at full scale under the soft mixer | #27 | not submitted |
 | 0010-0011, 0022 | rtkit on x86_64; restart the portal, then PipeWire (0022: only for a session that started without rtkit) | #28 | omacom/omarchy#12428 (another contributor's PR, taken as is; 0022 is ours, not on that PR) |
 | 0012-0013, 0021 | no NVIDIA early load in the initramfs on hybrid machines (0021: only an unedited drop-in is removed) | #29 | omacom/omarchy#8263 (another contributor's PR; 0021 is ours, not on that PR) |
-| 0014-0015 | webcam menu guard answered from udev | #30 | omacom/omarchy#15670 |
+| 0014-0015 | webcam menu guard answered from udev | #30 | omacom/omarchy#15910 (replaces #15670) |
 | 0016 | Tailscale panel polls status only while closed | #31 | omacom/omarchy#15671 |
 | 0017 | clamshell state from logind events instead of a 2 s poll | #32 | not submitted |
 | 0018 | launcher icon index rescanned at most once a minute | #33 | not submitted |
