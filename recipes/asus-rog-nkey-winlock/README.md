@@ -1,12 +1,14 @@
-# asus-rog-nkey-winlock (and the transitional asus-zephyrus-g16-control)
+# asus-rog-nkey-winlock
 
-This recipe builds two packages for the ASUS ROG Zephyrus G16 GA605 and its
-ROG N-Key keyboard (USB `0b05:19b6`):
+This recipe builds `asus-rog-nkey-winlock` for the ASUS ROG Zephyrus G16 GA605 and its
+ROG N-Key keyboard (USB `0b05:19b6`): `g16-winlockd` (the root service that owns the
+keyboard's hidraw node) and `g16-winlock` (Win-key lock OSD and auto-unlock, a user unit).
 
-| package | contents |
-|---|---|
-| `asus-rog-nkey-winlock` | `g16-winlockd` (the root service that owns the keyboard's hidraw node) and `g16-winlock` (Win-key lock OSD and auto-unlock, a user unit) |
-| `asus-zephyrus-g16-control` | **transitional**: the G16 Control bar widget is the omarchy-asus plugin now, [omarchy-asus/omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin). This package removes the old packaged copy and its install message says how to switch. |
+It replaces `asus-zephyrus-g16-control`, the transitional package left from when the G16
+Control bar widget was packaged here: `pacman -Syu` removes it. The widget is the omarchy-asus
+plugin now, [omarchy-asus/omarchy-asus-plugin](https://github.com/omarchy-asus/omarchy-asus-plugin),
+and `omarchy-update` finishes the move: the omarchy package's migration (patch 0025, #275)
+swaps the old widget's link (`~/.config/omarchy/plugins/omarchy-asus.g16`) for the plugin.
 
 The omarchy-asus plugin (keyboard and Slash LEDs, per-charger settings, charge limit, the
 Fn+Super switch) installs the Omarchy way:
@@ -94,7 +96,6 @@ one-shot commands work with any kernel.
 | `/usr/share/polkit-1/actions/io.github.omarchy-asus.winlock.policy` | asus-rog-nkey-winlock: `SetLocked` for the active local session |
 | `/usr/bin/g16-winlock` | asus-rog-nkey-winlock (Python 3, standard library and `gdbus`) |
 | `/usr/lib/systemd/user/g16-winlock.service` | asus-rog-nkey-winlock: runs `g16-winlock watch` |
-| `/usr/share/doc/asus-zephyrus-g16-control/README.md` | asus-zephyrus-g16-control (transitional): this file |
 
 ## Setup
 
