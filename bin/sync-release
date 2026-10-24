@@ -74,7 +74,8 @@ while (($#)); do
         -h | --help) usage; exit 0 ;;
         # --channel quattro|rc: the release channel (bin/env.sh); default quattro
         --channel)
-            (($# >= 2)) || { echo "--channel needs quattro or rc" >&2; usage >&2; exit 2; }
+            # checked here: an empty value would read as the default, quattro
+            [[ ${2:-} == @(quattro|rc) ]] || { echo "--channel needs quattro or rc" >&2; usage >&2; exit 2; }
             export OMARCHY_ASUS_CHANNEL=$2; shift 2 ;;
         --dry-run) dry=1; shift ;;
         # the rest are the files to scan

@@ -5,7 +5,8 @@
 # (no lock, journal or prune list: nothing past the argument check):
 #   1. -h and --help: the usage on stdout, exit 0
 #   2. --nonsense, a --scan-only meant as --pii-scan, a mistyped --chanel rc, --channel
-#      with no value, --dry-run followed by a stray word: exit 2
+#      with no value, an empty one ("") or an unknown one, --dry-run followed by a stray
+#      word: exit 2
 #   3. a bare word (a file without --pii-scan): exit 2
 #   4. --pii-scan or --pii-scan-text with no files, or with --dry-run: exit 2
 #   5. --channel rc --pii-scan FILE still scans (exit 0 on a clean file, gh not run)
@@ -53,6 +54,8 @@ run 2 "--nonsense is an error" --nonsense
 run 2 "--scan-only FILE is an error" --scan-only "$S/clean.txt"
 run 2 "a mistyped --chanel rc is an error" --chanel rc
 run 2 "--channel with no value is an error" --channel
+run 2 "--channel with an empty value is an error" --channel ""
+run 2 "--channel with an unknown value is an error" --channel beta
 run 2 "--dry-run with a stray word is an error" --dry-run now
 run 2 "--channel rc --nonsense is an error" --channel rc --nonsense
 grep -q 'unknown option: --nonsense' <("$W/bin/sync-release" --nonsense 2>&1); [[ $? -eq 0 ]] && echo "ok: names the option" || { echo "FAIL: doesn't name the option"; fail=1; }
