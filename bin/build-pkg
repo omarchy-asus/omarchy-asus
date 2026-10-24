@@ -145,11 +145,17 @@ fi
 # Persistent compiler cache (optional): if the cache dir exists, mount it
 # read-write at /ccache; the chroot's /etc/makepkg.conf.d/ccache.conf (local)
 # sets CCACHE_DIR=/ccache and BUILDENV enables ccache. Small-patch kernel
-# rebuilds then reuse almost every object. CCACHE_HOST_DIR= (empty) turns it off.
+# rebuilds then reuse almost every object. CCACHE_HOST_DIR= (empty) turns it off:
+# without the mount, build/no-ccache.conf is mounted over the chroot's makepkg config
+# to take ccache out of BUILDENV, or ccache would fail every compile on the missing
+# /ccache (#237).
 ccache_dir=${CCACHE_HOST_DIR-$DATA/ccache}
 if [[ -n $ccache_dir && -d $ccache_dir ]]; then
     distcc_bind+=(-d "$(realpath "$ccache_dir"):/ccache")
     echo "==> ccache: $ccache_dir mounted at /ccache"
+else
+    distcc_bind+=(-D "$(realpath "$lib/../build/no-ccache.conf"):/etc/makepkg.conf.d/zz-no-ccache.conf")
+    echo "==> ccache: off (no cache dir mounted)"
 fi
 
 # -c: fresh copy of the root chroot; -u: update it first.
