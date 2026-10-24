@@ -242,7 +242,9 @@ case $1 in
     echo "$m ${a[*]} | $r" >>"$STUB/td.log"
     case $m in
       trace-start) printf '{\n "missing": [],\n "on": ["%s"]\n}\n' "${a[1]//,/\", \"}" ;;
-      trace-stop) mkdir -p "$STUB/td-out"; cp "$STUB/fixture.trace" "$STUB/td-out/${a[0]}.trace"; echo "$STUB/td-out/${a[0]}.trace" ;;
+      trace-stop) # the file is the caller's, the directory root's (read-only here)
+        mkdir -p "$STUB/td-out"; chmod 755 "$STUB/td-out"; cp "$STUB/fixture.trace" "$STUB/td-out/${a[0]}.trace"
+        chmod 555 "$STUB/td-out"; echo "$STUB/td-out/${a[0]}.trace" ;;
     esac ;;
 esac
 EOF
@@ -266,7 +268,10 @@ grep -q '^trace-stop wakeups-' "$L" && ok "trace-stop at the end" || bad "no tra
 K=$H/state/viatd
 grep -q '^via=g16-testd' "$K/meta" && grep -q '^left_out=irq_vectors/irq_work_entry$' "$K/meta" && grep -q '^power=Discharging' "$K/meta" &&
   ok "testd meta records the helper and what it left out" || bad "testd meta: $(cat "$K/meta")"
-ls "$T"/td-out/*.trace >/dev/null 2>&1 && bad "the helper's trace file was left behind" || ok "the helper's trace file is removed"
+if ((EUID != 0)); then
+  for f in "$T"/td-out/*.trace; do [[ -s $f ]] && bad "trace data left in the helper's directory" || ok "the helper's trace file is emptied"; done
+fi
+chmod 755 "$T/td-out"
 R=$T/body.239
 grep -qF "Idle exits by cause: 8/s" "$R" && ok "testd trace attributed like a root one" || bad "testd report: $(grep -m1 'Idle exits' "$R")"
 grep -qF "recorded through g16-testd (ring-buffer overruns not read); not on its allowlist, so left out: irq_vectors/irq_work_entry" "$R" &&

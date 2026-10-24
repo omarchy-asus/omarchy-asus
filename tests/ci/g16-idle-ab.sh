@@ -152,6 +152,7 @@ chmod +x "$B"/*
 
 reset() {
   build_fake
+  [[ -d $ST/td-out ]] && chmod 755 "$ST/td-out"
   rm -rf "${ST:?}" "${T:?}/home"
   mkdir -p "$ST/active" "$T/home"
   touch "$ST/active/voxtype.service" "$ST/log"
@@ -344,6 +345,9 @@ cat >"$B/g16-testd" <<'EOF'
 #!/bin/bash
 case $1 in
   available) [[ -e $STUB/td-open ]] ;;
+  session) # status: the knobs changed in the session (td-pre-*: by another test)
+    k=(); for f in "$STUB"/td-set-* "$STUB"/td-pre-*; do [[ -e $f ]] && k+=("\"${f##*/td-???-}\": \"1\""); done
+    (IFS=,; echo "{\"knobs\": {${k[*]}}}") ;;
   call)
     shift; m=$1 r=''; shift; a=()
     while (($#)); do if [[ $1 == --reason ]]; then r=$2; shift 2; else a+=("$1"); shift; fi; done
@@ -356,8 +360,10 @@ case $1 in
       knob-restore) rm -f "$STUB/td-set-${a[0]}"; echo "${a[0]} back" ;;
       trace-start) touch "$STUB/td-trace-${a[0]}"; printf '{\n "missing": [],\n "on": []\n}\n' ;;
       trace-stop) rm -f "$STUB/td-trace-${a[0]}"
-        printf '  kworker/1:0-55  [001] d.h1. 10.0: csd_queue_cpu: cpu=2 callsite=x func=do_sync_core csd=0\n' >"$STUB/${a[0]}.trace"
-        echo "$STUB/${a[0]}.trace" ;;
+        # as the helper does: the file is the caller's, the directory root's (read-only here)
+        mkdir -p "$STUB/td-out"; chmod 755 "$STUB/td-out"
+        printf '  kworker/1:0-55  [001] d.h1. 10.0: csd_queue_cpu: cpu=2 callsite=x func=do_sync_core csd=0\n' >"$STUB/td-out/${a[0]}.trace"
+        chmod 555 "$STUB/td-out"; echo "$STUB/td-out/${a[0]}.trace" ;;
     esac ;;
 esac
 EOF
@@ -389,8 +395,17 @@ grep -vq '| g16-idle-ab: ' "$L" && bad "testd: a call without the kit's reason: 
 grep -q '^trace-start idle-ab-[0-9]* csd/csd_queue_cpu,timer/hrtimer_expire_entry - 8192 |' "$L" && grep -q '^trace-stop idle-ab-' "$L" &&
   ok "testd: the trace through trace-start and trace-stop" || bad "testd trace: $(grep trace "$L")"
 grep -q 'ipi kworker/1:0 do_sync_core' "$T/home/report.md" && ok "testd: the trace is in the report" || bad "testd: trace not reported"
-ls "$ST"/*.trace >/dev/null 2>&1 && bad "testd: trace file left behind" || ok "testd: trace file removed"
+if ((EUID != 0)); then
+  for f in "$ST"/td-out/*.trace; do [[ -s $f ]] && bad "testd: trace data left in the helper's directory" || ok "testd: the helper's trace file is emptied"; done
+fi
 grep -q 'g16-testd has no call for it' "$T/home/report.md" && ok "testd: diag says it was not read" || bad "testd: diag: $(grep -i debugfs "$T/home/report.md")"
+
+reset
+touch "$ST/td-open" "$ST/td-pre-nmi-watchdog"
+out=$(run_td --only nmi,wifi-ps "${FAST[@]}" --no-post 2>&1); rc=$?
+grep -q 'nmi not applied: err already changed in this g16-testd session: nmi-watchdog' <<<"$out" && ok "testd: a knob another test changed is refused" || bad "testd taken knob: $out"
+grep -qE '^knob-(set|restore) nmi-watchdog' "$ST/td.log" && bad "testd: touched the other test's knob: $(grep nmi "$ST/td.log")" || ok "testd: the other test's knob is left alone"
+grep -q '^knob-set wifi-ps on' "$ST/td.log" && ((rc == 0)) && ok "testd: the other tweaks still run" || bad "testd: rc=$rc, $(cat "$ST/td.log")"
 
 reset
 touch "$ST/td-open" "$ST/td-fail-wifi-ps"

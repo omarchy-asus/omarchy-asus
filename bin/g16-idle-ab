@@ -244,8 +244,10 @@ fi
 # (omarchy-asus-g16-testd, #277): each tweak is the helper's knob-set calls and its
 # revert their knob-restore, so no dialog is needed. The trace goes through the
 # helper's trace-start/trace-stop. diag and rapl have no helper call: diag reports
-# that, rapl answers "-". On EOF it reverts every tweak still applied (and the
-# session's stop puts back anything left after that).
+# that, rapl answers "-". A tweak whose knob is already changed in the session (by
+# another test) is refused: its knob-restore would undo that test's setting. On EOF
+# it reverts every tweak still applied (and the session's stop puts back anything
+# left after that).
 if [[ ${1:-} == --testd-helper ]]; then
   dry=${2:-0} nvme=${3:-30/500} why=${4:-}
   TD=${G16_TESTD:-g16-testd}
@@ -268,10 +270,22 @@ if [[ ${1:-} == --testd-helper ]]; then
     printf '%s' "${out##*$'\n'}"
     return $rc
   }
+  # knob... -> those already changed in the session (by another test): their
+  # knob-restore would undo that test's setting, so the tweak is refused instead.
+  taken() {
+    "$TD" session status 2>/dev/null | python3 -I -c '
+import json, sys
+try: knobs = json.load(sys.stdin).get("knobs", {})
+except ValueError: knobs = {}
+print(" ".join(k for k in sys.argv[1:] if k in knobs))' "$@"
+  }
   apply() {
-    local t=$1 kv got=() r
+    local t=$1 kv got=() r busy
     [[ -n ${APPLIED[$t]:-} ]] && { echo "err already applied"; return; }
     kv=$(knobs "$t"); [[ -n $kv ]] || { echo "err unknown tweak"; return; }
+    # shellcheck disable=SC2046,SC2086 # kv: knob=value words, one knob name each
+    busy=$(taken $(printf '%s\n' $kv | cut -d= -f1))
+    [[ -z $busy ]] || { echo "err already changed in this g16-testd session: $busy (knob-restore it, or run in a session of its own)"; return; }
     APPLIED[$t]=1
     ((dry)) && { echo "ok dry"; return; }
     for kv in $kv; do
@@ -292,7 +306,10 @@ if [[ ${1:-} == --testd-helper ]]; then
     echo "ok reverted"
   }
   TRN=''
-  trace_cleanup() { [[ -n $TRN ]] && { f=$(td trace-stop "$TRN") && rm -f "$f"; }; TRN=''; }
+  # The helper's trace file is ours, in a directory of root's: empty it, so it holds
+  # no memory in /run, and remove it where we can.
+  drop() { : 2>/dev/null >"$1"; rm -f "$1" 2>/dev/null; }
+  trace_cleanup() { [[ -n $TRN ]] && { f=$(td trace-stop "$TRN") && drop "$f"; }; TRN=''; }
   restore_all() { local t; for t in "${!APPLIED[@]}"; do revert "$t" >/dev/null; done; trace_cleanup; }
   trap restore_all EXIT
   trap 'exit 0' HUP INT TERM PIPE
@@ -316,7 +333,7 @@ if [[ ${1:-} == --testd-helper ]]; then
             / hrtimer_expire_entry: / { k="timer"; f=$0; sub(/.*function=/, "", f); sub(/ .*/, "", f) }
             / csd_queue_cpu: | hrtimer_expire_entry: / { c=$1; sub(/-[0-9]+$/, "", c); n[k" "c" "f]++ }
             END { for (x in n) printf "trace %.1f %s\n", n[x] / s, x }' "$f" 2>/dev/null | sort -k2,2 -rn | head -40
-          rm -f "$f"
+          drop "$f"
         else echo "trace: g16-testd trace-stop: $f"
         fi
         TRN=''

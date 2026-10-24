@@ -617,7 +617,8 @@ testd_capture() { # SECONDS OUTDIR
   TD_TRACE=''
   cat "$PROC/interrupts" >"$out/interrupts.1" 2>/dev/null; cat "$PROC/softirqs" >"$out/softirqs.1" 2>/dev/null
   cp "$f" "$out/trace" 2>/dev/null || { echo "capture: cannot read the trace at $f" >&2; return 1; }
-  rm -f "$f"
+  # The file is ours, in a directory of root's: emptied, it holds no memory in /run.
+  : 2>/dev/null >"$f"; rm -f "$f" 2>/dev/null
   # trace-start answers {"on": [...], "missing": [...]}: the events this kernel has
   r=$(python3 -I -c 'import json, sys; print(" ".join(json.load(sys.stdin)["on"]))' <<<"$r") || r="${ev[*]}"
   context "$PROC" "$SYS" "$secs" "$out" "$r"
