@@ -33,8 +33,9 @@ keyboards across suspend), Hyprland sends `wl_seat.capabilities` without the key
 keyboard bit, and `updateCapabilities()` updates it first. The focused client never learns it lost
 focus; when the keyboard comes back, it gets `enter` on the same surface. Qt does not re-activate the
 window on that enter (#298), so the lock screen ignores typing after resume until it is clicked (#295).
-The patch sends `leave` to the keyboard (and pointer) resources before the capability is dropped, as
-wlroots does (`wlr_seat_set_capabilities`). Hyprland's own keyboard focus is kept, so a re-added
+The patch sends `leave` to the keyboard resources, and `leave` plus `frame` to the focused pointer resources
+(`frame` is gated on `m_currentCaps` too, hence the `friend class CWLSeatProtocol` in `Seat.hpp`), before the
+capability is dropped, as wlroots does (`wlr_seat_set_capabilities`). Hyprland's own keyboard focus is kept, so a re-added
 keyboard's new `wl_keyboard` gets `enter` on the same surface as before. wl_touch has no leave
 event, and wlroots doesn't cancel touches here either, so touch is unchanged.
 

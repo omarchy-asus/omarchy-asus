@@ -70,7 +70,7 @@ source=("$_archive.tar.gz::$url/releases/download/v$pkgver/source-v$pkgver.tar.g
         seat-leave-on-capability-loss.patch)
 sha256sums=('03ad3f5ef152ff44116ffd56fcf808486211ecabf4f0ba567108ee746ba5cd2e'
             '0c4a315f36f72d08f443887cd4042ff27af6413de20f519a3fb3b402b982171d'
-            'b928daaa3ab3f6a0bc95d23e69eb93cf5e8ef54d6916aa68670817af26fa8e55')
+            '772a13446fc358950a5db0e2be66931d3256c432237b3d9e1d3055308bec25e5')
 
 prepare() {
 	ln -sf hyprland-source "$_archive"

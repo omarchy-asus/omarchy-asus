@@ -1,6 +1,6 @@
 --- a/src/protocols/core/Seat.cpp
 +++ b/src/protocols/core/Seat.cpp
-@@ -584,6 +584,23 @@
+@@ -584,6 +584,28 @@
      if (caps == m_currentCaps)
          return;
  
@@ -17,10 +17,25 @@
 +
 +    if (LOST & eHIDCapabilityType::HID_INPUT_CAPABILITY_POINTER) {
 +        for (auto const& p : m_pointers) {
++            if (!p->m_currentSurface)
++                continue;
++
++            // the leave (and any button releases before it) is one pointer frame
 +            p->sendLeave();
++            p->sendFrame();
 +        }
 +    }
 +
      m_currentCaps = caps;
  
      for (auto const& s : m_seatResources) {
+--- a/src/protocols/core/Seat.hpp
++++ b/src/protocols/core/Seat.hpp
+@@ -110,6 +110,7 @@
+     } m_listeners;
+ 
+     friend class CWLSeatResource;
++    friend class CWLSeatProtocol;
+ };
+ 
+ class CWLKeyboardResource {
