@@ -1,7 +1,7 @@
 #!/bin/bash
 # Mirror $REPO_DIR to the GitHub release that pacman pulls from:
 #   Server = https://github.com/$GH_REPO/releases/download/$GH_TAG
-# Usage: bin/sync-release [--channel quattro|rc] [--dry-run]
+# Usage: bin/sync-release [--channel quattro|rc] [--dry-run]   (anything else: usage, exit 2)
 #   Exit: 0 synced (or would be), 3 withheld (a regression, below), 75 the
 #   publication lock is busy, 1 anything else.
 #   The channel (bin/env.sh, default quattro) picks the local repo and the release: quattro
@@ -65,15 +65,31 @@
 # --pii-scan-text scans files as plain text, never as archives (for PR comments and
 # other posted text; build/pii-allow-packages does not apply).
 set -euo pipefail
-# --channel quattro|rc, first: the release channel (bin/env.sh); default quattro
-if [[ ${1:-} == --channel ]]; then export OMARCHY_ASUS_CHANNEL=${2:?--channel needs quattro or rc}; shift 2; fi
-source "$(dirname "$0")/env.sh"
+usage() { sed -n '4,13s/^# \{0,1\}//p' "$0"; }
+# The arguments are checked before anything else runs (#296): an unknown option, or any
+# argument a sync doesn't take, is exit 2, never a live sync. -h/--help prints the usage.
 dry=0 scan_only=0 as_text=0
-case ${1:-} in
-    --dry-run) dry=1 ;;
-    --pii-scan) scan_only=1; shift ;;
-    --pii-scan-text) scan_only=1 as_text=1; shift ;;
-esac
+while (($#)); do
+    case $1 in
+        -h | --help) usage; exit 0 ;;
+        # --channel quattro|rc: the release channel (bin/env.sh); default quattro
+        --channel)
+            # checked here: an empty value would read as the default, quattro
+            [[ ${2:-} == @(quattro|rc) ]] || { echo "--channel needs quattro or rc" >&2; usage >&2; exit 2; }
+            export OMARCHY_ASUS_CHANNEL=$2; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        # the rest are the files to scan
+        --pii-scan) scan_only=1; shift; break ;;
+        --pii-scan-text) scan_only=1 as_text=1; shift; break ;;
+        -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *) echo "unexpected argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+if ((scan_only)); then
+    ((dry == 0)) || { echo "--dry-run does not go with --pii-scan" >&2; usage >&2; exit 2; }
+    (($#)) || { echo "no files to scan" >&2; usage >&2; exit 2; }
+fi
+source "$(dirname "$0")/env.sh"
 run() { if ((dry)); then echo "would run: $*"; else "$@"; fi; }
 
 up=$(mktemp -d); trap 'rm -rf "$up"' EXIT
