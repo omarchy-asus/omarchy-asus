@@ -5,9 +5,12 @@
 #   g16-idle-ab                  every tweak, 3 rounds (about 75 minutes), then post
 #   g16-idle-ab --list           the tweaks, their issues and what each one changes
 #   g16-idle-ab --only a,b       only these tweaks
+#   g16-idle-ab --design pb12    screen several tweaks per phase (Plackett-Burman, 12
+#                                phases a round, up to 11 tweaks), 2 rounds (about 30 min)
 #   g16-idle-ab --rounds N --measure S --settle S --interval S
-#                                rounds (3), seconds measured per phase (60), settling
-#                                after each change (15), between samples (2)
+#                                rounds (3; pb12: 2), seconds measured per phase (60),
+#                                settling after each change (15), between samples (2)
+#   g16-idle-ab --no-dpms        CACP: the level write alone, no DPMS off/on (0810 kernels)
 #   g16-idle-ab --dry-run        change nothing, post nothing; short phases
 #   g16-idle-ab --no-post        run it, write the report, don't post it
 #   g16-idle-ab --boot LABEL     no tweaks: measure only the baseline, in rounds, and
@@ -23,6 +26,19 @@
 # voltage_now, every 2 s), the SoC's socket, GFX and all-core power from amdgpu's
 # gpu_metrics, interrupt and IPI rates, and the runtime-PM state of the devices the
 # tweaks touch.
+#
+# --design pb12 (#276) runs the 12-row Plackett-Burman matrix instead: each row
+# switches on a different half of the tweaks (one column each; columns no tweak uses
+# are dummies), every phase counts towards every effect, and a round is 12 phases
+# whatever the number of tweaks. Rows run in a shuffled order each round; from one
+# row to the next only the tweaks whose level differs are changed. The main effects
+# (on minus off) are fitted by least squares with a level per round and, when the
+# phases leave room, a linear drift; ±2 SE comes from the residual noise, and the
+# dummy columns are reported as a noise check. It assumes the effects add up (no
+# interactions): a tweak it calls a winner gets a one-at-a-time A/B to confirm.
+# Tweaks that switch the same setting (numlock and kbd-usb, usb-idle and its two
+# parts, cacp3 and cacp4) can't share a pb12 run; the default pb12 set leaves out
+# numlock, usb-idle and cacp4.
 #
 # Guards: it starts only on battery (Discharging) with the RTX runtime-suspended,
 # and stops (putting everything back) if the charger comes back or the RTX stays
@@ -46,7 +62,8 @@
 # desktop's polkit agent via systemd-run --user. G16_ROOT=testd or pkexec forces
 # one, sudo or none (tests only) are the others. G16_POLKIT_REASON=<wrapper> runs
 # `<wrapper> run REASON -- pkexec ...` so the dialog says why. Through g16-testd
-# the debugfs diagnostics are not read.
+# the debugfs diagnostics are not read, a dry run doesn't trace, and usb4 (not on
+# its allowlist) is skipped.
 #
 # Exit status: 0 when the run finished, 1 on a problem or a guard, 2 on bad usage.
 set -uo pipefail
@@ -66,7 +83,43 @@ TWEAKS=(
   "bt-off|234|Bluetooth rfkill soft block (measurement: skipped while a device is connected)"
   "usb-idle|233|kbd-usb and bt-off together, so their shared xHCI controller can suspend (upper bound; skipped while a device is connected)"
   "voxtype|231|voxtype.service stopped (user unit; the ALC285 codec's runtime state is logged)"
+  "usb4|249|USB4/Thunderbolt NHIs and routers left awake (power/control on) -> auto (skipped when none is)"
+  "cacp3|172|OLED CACP: panel_power_savings 0 -> 3, then one DPMS off/on (0810 kernels apply the write alone)"
+  "cacp4|172|OLED CACP: panel_power_savings 0 -> 4, then one DPMS off/on (0810 kernels apply the write alone)"
 )
+# pb12: tweaks that switch the same setting, so can't be columns of one run
+PB12_CONFLICTS=("kbd-usb numlock" "usb-idle kbd-usb" "usb-idle bt-off" "usb-idle numlock" "cacp3 cacp4")
+PB12_DEFAULT_OUT=" numlock usb-idle cacp4 "
+
+# Read by the root helper and the script alike (all world-readable): the USB4 /
+# Thunderbolt NHIs and routers awake with power/control on, as "path=on ...", never
+# anything of the RTX's but its vendor; and the eDP panel's panel_power_savings.
+usb4_awake() { # sys
+  local d v='' x
+  for d in "$1"/bus/pci/devices/*; do
+    x=''; read -r x 2>/dev/null <"$d/vendor"; [[ $x == 0x10de ]] && continue
+    [[ $(readlink -f "$d/driver" 2>/dev/null) == */thunderbolt ]] || continue
+    x=''; read -r x 2>/dev/null <"$d/power/control"; [[ $x == on ]] && v+="$(readlink -f "$d")=on "
+  done
+  for d in "$1"/bus/thunderbolt/devices/*; do
+    x=''; read -r x 2>/dev/null <"$d/power/control"; [[ $x == on ]] && v+="$(readlink -f "$d")=on "
+  done
+  printf '%s' "$v"
+}
+panel_pps() { # sys
+  local c
+  for c in "$1"/class/drm/card*-eDP-*; do [[ -e $c/amdgpu/panel_power_savings ]] && { printf '%s\n' "$c/amdgpu/panel_power_savings"; return 0; }; done
+  return 1
+}
+# IPI (csd) and hrtimer events in a trace file, by function: "trace RATE kind comm func"
+trace_count() { # seconds file
+  # comm-pid [cpu] flags ts: event: fields
+  awk -v s="$1" '
+    / csd_queue_cpu: / { k="ipi"; f=$0; sub(/.*func=/, "", f); sub(/ .*/, "", f) }
+    / hrtimer_expire_entry: / { k="timer"; f=$0; sub(/.*function=/, "", f); sub(/ .*/, "", f) }
+    / csd_queue_cpu: | hrtimer_expire_entry: / { c=$1; sub(/-[0-9]+$/, "", c); n[k" "c" "f]++ }
+    END { for (x in n) printf "trace %.1f %s\n", n[x] / s, x }' "$2" 2>/dev/null | sort -k2,2 -rn | head -40
+}
 NVME_PRIMARY_MS=30 NVME_SECONDARY_MS=500
 
 # ------------------------------------------------------------- root helper
@@ -145,6 +198,17 @@ if [[ ${1:-} == --root-helper ]]; then
         f=$(usb_by_id 0b05 19b6) && v=$(rfkill_bt) || { echo "err absent"; return; }
         ORIG[$t]="$f $(rd "$f/power/control") $v $(rd "$v/soft") $(leds_get)"; APPLIED[$t]=1
         wr "$f/power/control" auto && leds_off && wr "$v/soft" 1 && echo "ok $(rd "$f/power/control"), blocked" || echo "err write refused" ;;
+      usb4)
+        v=$(usb4_awake "$sys"); [[ -n $v ]] || { echo "err none awake"; return; }
+        ORIG[$t]=$v; APPLIED[$t]=1 n=0
+        for f in $v; do wr "${f%=*}/power/control" auto || n=1; done
+        ((n == 0)) && echo "ok auto on $(wc -w <<<"$v")" || echo "err write refused" ;;
+      cacp3 | cacp4)
+        # One knob: the other level must not be applied.
+        [[ -n ${APPLIED[cacp3]:-}${APPLIED[cacp4]:-} ]] && { echo "err the other CACP level is applied"; return; }
+        f=$(panel_pps "$sys") || { echo "err absent"; return; }
+        ORIG[$t]=$(rd "$f"); APPLIED[$t]=1
+        wr "$f" "${t#cacp}" && echo "ok $(rd "$f")" || echo "err write refused" ;;
       *) echo "err unknown tweak" ;;
     esac
   }
@@ -175,6 +239,8 @@ if [[ ${1:-} == --root-helper ]]; then
       numlock) for p in $o; do wr "${p%=*}/brightness" "${p##*=}" || rc=1; done ;;
       bt-off) read -r f v <<<"$o"; wr "$f/soft" "$v" || rc=1 ;;
       usb-idle) read -r f v p n o <<<"$o"; wr "$p/soft" "$n" || rc=1; wr "$f/power/control" "$v" || rc=1; leds_set "$o" || rc=1 ;;
+      usb4) for p in $o; do wr "${p%=*}/power/control" "${p##*=}" || rc=1; done ;;
+      cacp3 | cacp4) f=$(panel_pps "$sys") && wr "$f" "$o" || rc=1 ;;
     esac
     ((rc == 0)) || { echo "err restore write refused"; return; }
     unset "APPLIED[$t]"
@@ -192,8 +258,8 @@ if [[ ${1:-} == --root-helper ]]; then
     case $cmd in
       apply)
         # shellcheck disable=SC2086 # rest: the tweak's numeric arguments, if any
-        if [[ $arg =~ ^[a-z-]+$ && $rest =~ ^[0-9\ ]*$ ]]; then apply "$arg" $rest; else echo "err bad tweak"; fi ;;
-      revert) [[ $arg =~ ^[a-z-]+$ ]] && revert "$arg" || echo "err bad tweak" ;;
+        if [[ $arg =~ ^[a-z0-9-]+$ && $rest =~ ^[0-9\ ]*$ ]]; then apply "$arg" $rest; else echo "err bad tweak"; fi ;;
+      revert) [[ $arg =~ ^[a-z0-9-]+$ ]] && revert "$arg" || echo "err bad tweak" ;;
       rapl)
         if [[ -n $RAPL ]]; then printf 'rapl %s %s\n' "$(rd "$RAPL/energy_uj")" "$(rd "$RAPL/max_energy_range_uj")"; else echo "rapl - -"; fi ;;
       diag)
@@ -224,12 +290,7 @@ if [[ ${1:-} == --root-helper ]]; then
         wr "$TR/tracing_on" 1
         sleep "$arg"
         wr "$TR/tracing_on" 0
-        # comm-pid [cpu] flags ts: event: fields -> "count kind comm func"
-        awk -v s="$arg" '
-          / csd_queue_cpu: / { k="ipi"; f=$0; sub(/.*func=/, "", f); sub(/ .*/, "", f) }
-          / hrtimer_expire_entry: / { k="timer"; f=$0; sub(/.*function=/, "", f); sub(/ .*/, "", f) }
-          / csd_queue_cpu: | hrtimer_expire_entry: / { c=$1; sub(/-[0-9]+$/, "", c); n[k" "c" "f]++ }
-          END { for (x in n) printf "trace %.1f %s\n", n[x] / s, x }' "$TR/trace" 2>/dev/null | sort -k2,2 -rn | head -40
+        trace_count "$arg" "$TR/trace"
         trace_cleanup
         echo "end" ;;
       quit) exit 0 ;;
@@ -262,6 +323,8 @@ if [[ ${1:-} == --testd-helper ]]; then
       numlock) echo numlock-led=0 ;;
       bt-off) echo bt-rfkill=1 ;;
       usb-idle) echo kbd-usb-pm=auto numlock-led=0 bt-rfkill=1 ;;
+      cacp3) echo panel-power-savings=3 ;;
+      cacp4) echo panel-power-savings=4 ;;
     esac
   }
   td() { # call... -> its last line (the error on a failure)
@@ -316,23 +379,20 @@ print(" ".join(k for k in sys.argv[1:] if k in knobs))' "$@"
   printf 'ready testd\n'
   while read -r cmd arg rest; do
     case $cmd in
-      apply) [[ $arg =~ ^[a-z-]+$ ]] && apply "$arg" || echo "err bad tweak" ;;
-      revert) [[ $arg =~ ^[a-z-]+$ ]] && revert "$arg" || echo "err bad tweak" ;;
+      apply) [[ $arg =~ ^[a-z0-9-]+$ ]] && apply "$arg" || echo "err bad tweak" ;;
+      revert) [[ $arg =~ ^[a-z0-9-]+$ ]] && revert "$arg" || echo "err bad tweak" ;;
       rapl) echo "rapl - -" ;;
       diag) echo "diag debugfs: not read (g16-testd has no call for it; G16_ROOT=pkexec reads it)"; echo "end" ;;
       trace)
         if [[ ! $arg =~ ^[0-9]+$ ]] || ((arg < 1 || arg > 30)); then echo "end"; continue; fi
+        ((dry)) && { echo "trace: dry run, no trace"; echo "end"; continue; }
         TRN=idle-ab-$$
         if ! r=$(td trace-start "$TRN" csd/csd_queue_cpu,timer/hrtimer_expire_entry - 8192); then
           TRN=''; echo "trace: g16-testd trace-start: $r"; echo "end"; continue
         fi
         sleep "$arg"
         if f=$(td trace-stop "$TRN") && [[ -r $f ]]; then
-          awk -v s="$arg" '
-            / csd_queue_cpu: / { k="ipi"; f=$0; sub(/.*func=/, "", f); sub(/ .*/, "", f) }
-            / hrtimer_expire_entry: / { k="timer"; f=$0; sub(/.*function=/, "", f); sub(/ .*/, "", f) }
-            / csd_queue_cpu: | hrtimer_expire_entry: / { c=$1; sub(/-[0-9]+$/, "", c); n[k" "c" "f]++ }
-            END { for (x in n) printf "trace %.1f %s\n", n[x] / s, x }' "$f" 2>/dev/null | sort -k2,2 -rn | head -40
+          trace_count "$arg" "$f"
           drop "$f"
         else echo "trace: g16-testd trace-stop: $f"
         fi
@@ -345,8 +405,129 @@ print(" ".join(k for k in sys.argv[1:] if k in knobs))' "$@"
   exit 0
 fi
 
+# --------------------------------------------------- the pb12 design (#276)
+# A python module: the report imports it, and `g16-idle-ab --pb12 rows | plan
+# ROUNDS SEED | fit FILE` runs it (for the tests).
+PB12_PY=$(cat <<'PY'
+"""The 12-run Plackett-Burman screening design and its least-squares fit."""
+import json, math, random, sys
+
+GEN = "++-+++---+-"  # Plackett and Burman's generator row for N = 12
+
+
+def rows():
+    """12 rows x 11 columns of +1/-1: the generator's 11 cyclic shifts, then all -1."""
+    out = [GEN[len(GEN) - i:] + GEN[:len(GEN) - i] for i in range(11)]
+    return [[1 if c == "+" else -1 for c in s] for s in out] + [[-1] * 11]
+
+
+def plan(rounds, seed):
+    """[(round, row)]: every row once a round, in an order shuffled per round."""
+    p = []
+    for r in range(1, rounds + 1):
+        order = list(range(12))
+        random.Random(seed + r).shuffle(order)
+        p += [(r, i) for i in order]
+    return p
+
+
+def _inv(m):
+    n = len(m)
+    a = [row[:] + [1.0 if i == j else 0.0 for j in range(n)] for i, row in enumerate(m)]
+    for c in range(n):
+        piv = max(range(c, n), key=lambda r: abs(a[r][c]))
+        if abs(a[piv][c]) < 1e-9:
+            return None
+        a[c], a[piv] = a[piv], a[c]
+        d = a[c][c]
+        a[c] = [v / d for v in a[c]]
+        for r in range(n):
+            if r != c and a[r][c]:
+                f = a[r][c]
+                a[r] = [v - f * w for v, w in zip(a[r], a[c])]
+    return [row[n:] for row in a]
+
+
+def ols(X, y):
+    """-> (coefficients, standard errors, residual df, residual sd), or None if singular."""
+    n, p = len(y), len(X[0])
+    inv = _inv([[sum(X[k][i] * X[k][j] for k in range(n)) for j in range(p)] for i in range(p)])
+    if inv is None:
+        return None
+    xty = [sum(X[k][i] * y[k] for k in range(n)) for i in range(p)]
+    b = [sum(inv[i][j] * xty[j] for j in range(p)) for i in range(p)]
+    df = n - p
+    rss = sum((y[k] - sum(X[k][i] * b[i] for i in range(p))) ** 2 for k in range(n))
+    s2 = rss / df if df > 0 else None
+    return b, [None if s2 is None else math.sqrt(s2 * inv[i][i]) for i in range(p)], df, None if s2 is None else math.sqrt(s2)
+
+
+def fit(phases, tweaks, key, dummies=()):
+    """Each tweak's main effect (on minus off) on the phases' `key`.
+
+    phases: [{"on": [tweaks on], "round": r, "seq": order in the run, "design": the row's 11
+    signs, key: value or None (left out)}]. The model: the mean, one column per tweak (+1 on,
+    -1 off; a tweak that never changed level is left out), a level per extra round, and a
+    linear drift over the run when that still leaves 2 degrees of freedom for the noise.
+    dummies: design columns no tweak uses, fitted on top as a noise check.
+    -> {"n", "df", "sigma", "trend", "effects": {tweak: [effect, 2 SE] or None},
+        "dummies": [[effect, 2 SE], ...]}"""
+    ph = [p for p in phases if p.get(key) is not None]
+    est = [t for t in tweaks if len({t in p["on"] for p in ph}) == 2]
+    rounds = sorted({p["round"] for p in ph})
+    seq = [p["seq"] for p in ph] or [0]
+    lo, hi = min(seq), max(seq)
+
+    def row(p, trend, dum):
+        r = [1.0] + [1.0 if t in p["on"] else -1.0 for t in est] + [1.0 if p["round"] == q else 0.0 for q in rounds[1:]]
+        if trend:
+            r.append(2.0 * (p["seq"] - lo) / (hi - lo) - 1.0 if hi > lo else 0.0)
+        return r + [float(p["design"][d]) for d in dum]
+
+    y = [p[key] for p in ph]
+    base = len(est) + len(rounds)
+    out = {"n": len(ph), "df": None, "sigma": None, "trend": False, "effects": {t: None for t in tweaks}, "dummies": []}
+    res = None
+    # A drift term only when it leaves 2 degrees of freedom for the noise and room
+    # for the dummies on top (one round of 8 tweaks: no drift, 3 dummies).
+    for trend in ((True, False) if len(ph) - base - 1 >= 2 and len(ph) >= base + 1 + len(dummies) else (False,)):
+        res = ols([row(p, trend, ()) for p in ph], y) if len(ph) > base + trend else None
+        if res:
+            break
+    if not res:
+        return out
+    b, se, df, sigma = res
+    out.update(df=df, sigma=sigma, trend=trend)
+    for i, t in enumerate(est):
+        # effect = 2 b (on is +1, off -1), so its 2 SE is 4 SE(b)
+        out["effects"][t] = [2 * b[1 + i], None if se[1 + i] is None else 4 * se[1 + i]]
+    k = base + trend
+    d = ols([row(p, trend, dummies) for p in ph], y) if dummies and len(ph) >= k + len(dummies) else None
+    if d:
+        out["dummies"] = [[2 * d[0][k + j], None if d[1][k + j] is None else 4 * d[1][k + j]] for j in range(len(dummies))]
+    return out
+
+
+if __name__ == "__main__":
+    signs = lambda r: "".join("+" if v > 0 else "-" for v in r)  # noqa: E731
+    if sys.argv[1] == "rows":
+        print("\n".join(signs(r) for r in rows()))
+    elif sys.argv[1] == "plan":
+        for r, i in plan(int(sys.argv[2]), int(sys.argv[3])):
+            print(r, i, signs(rows()[i]))
+    elif sys.argv[1] == "fit":
+        with open(sys.argv[2]) as f:
+            d = json.load(f)
+        print(json.dumps({k: fit(d["phases"], d["tweaks"], k, d.get("dummies", [])) for k in d.get("keys", ["bat"])}))
+    else:
+        sys.exit(2)
+PY
+)
+pb12() { python3 -I -c "$PB12_PY" "$@"; }
+[[ ${1:-} == --pb12 ]] && { shift; pb12 "$@"; exit; }
+
 # ------------------------------------------------------------------ options
-DRY=0 POST=1 ROUNDS=3 MEASURE='' SETTLE='' INTERVAL=2 ONLY='' SEED='' BOOT='' CMP_A='' CMP_B='' CMP_ISSUE=''
+DRY=0 POST=1 ROUNDS='' DESIGN=ab DPMS=1 MEASURE='' SETTLE='' INTERVAL=2 ONLY='' SEED='' BOOT='' CMP_A='' CMP_B='' CMP_ISSUE=''
 while (($#)); do
   case $1 in
     --dry-run) DRY=1 ;;
@@ -354,6 +535,8 @@ while (($#)); do
     --list) for t in "${TWEAKS[@]}"; do IFS='|' read -r n i d <<<"$t"; printf '%-9s #%-4s %s\n' "$n" "$i" "$d"; done; exit 0 ;;
     --only) ONLY=${2:-}; shift ;;
     --rounds) ROUNDS=${2:-}; shift ;;
+    --design) DESIGN=${2:-}; shift ;;
+    --no-dpms) DPMS=0 ;;
     --measure) MEASURE=${2:-}; shift ;;
     --settle) SETTLE=${2:-}; shift ;;
     --interval) INTERVAL=${2:-}; shift ;;
@@ -361,12 +544,15 @@ while (($#)); do
     --boot) BOOT=${2:-}; shift ;;
     --compare) CMP_A=${2:-}; CMP_B=${3:-}; shift 2 ;;
     --issue) CMP_ISSUE=${2:-}; shift ;;
-    -h | --help) sed -n '2,52s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
 done
 if ((DRY)); then : "${MEASURE:=6}" "${SETTLE:=1}"; POST=0; else : "${MEASURE:=60}" "${SETTLE:=15}"; fi
+[[ $DESIGN == ab || $DESIGN == pb12 ]] || { echo "--design is pb12 (or ab, one tweak at a time, the default)" >&2; exit 2; }
+[[ $DESIGN == pb12 && -n $BOOT ]] && { echo "--boot measures no tweaks; it takes no --design" >&2; exit 2; }
+: "${ROUNDS:=$([[ $DESIGN == pb12 ]] && echo 2 || echo 3)}"
 for v in ROUNDS MEASURE SETTLE INTERVAL; do
   [[ ${!v} =~ ^[0-9]+$ ]] || { echo "--${v,,} needs a whole number" >&2; exit 2; }
 done
@@ -380,7 +566,18 @@ if [[ -n $ONLY ]]; then
   IFS=',' read -ra want <<<"$ONLY"
   for n in "${want[@]}"; do [[ -n ${ISSUE_OF[$n]:-} ]] || { echo "unknown tweak: $n (see --list)" >&2; exit 2; }; SEL+=("$n"); done
 else
-  for t in "${TWEAKS[@]}"; do SEL+=("${t%%|*}"); done
+  for t in "${TWEAKS[@]}"; do
+    [[ $DESIGN == pb12 && $PB12_DEFAULT_OUT == *" ${t%%|*} "* ]] && continue
+    SEL+=("${t%%|*}")
+  done
+fi
+if [[ $DESIGN == pb12 ]]; then
+  ((${#SEL[@]} <= 11)) || { echo "--design pb12 takes at most 11 tweaks (${#SEL[@]} selected)" >&2; exit 2; }
+  for c in "${PB12_CONFLICTS[@]}"; do
+    read -r a b <<<"$c"
+    [[ " ${SEL[*]} " == *" $a "* && " ${SEL[*]} " == *" $b "* ]] &&
+      { echo "--design pb12: $a and $b switch the same setting, so they can't share a run; pick one" >&2; exit 2; }
+  done
 fi
 
 if [[ -t 1 ]]; then B=$'\e[1m' R=$'\e[31m' Y=$'\e[33m' N=$'\e[0m'; else B='' R='' Y='' N=''; fi
@@ -495,7 +692,7 @@ for b in "$SYS"/class/backlight/amdgpu_bl*; do [[ -r $b/actual_brightness ]] && 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/g16-idle-ab.XXXXXX")
 REPORT=${G16_AB_REPORT:-$HOME/omarchy-asus-g16-idle-ab-$STAMP.md}
 ROOT=${G16_ROOT:-auto} TESTD=${G16_TESTD:-g16-testd}
-WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together) for the G16 battery A/B (#$SUMMARY_ISSUE); everything is put back when it ends"
+WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together, USB4 runtime PM, OLED CACP) for the G16 battery A/B (#$SUMMARY_ISSUE); everything is put back when it ends"
 if [[ $ROOT == auto ]]; then
   if "$TESTD" available >/dev/null 2>&1; then ROOT=testd; else ROOT=pkexec; fi
 fi
@@ -515,7 +712,7 @@ case $ROOT in
 esac
 
 STAY_FILE=$HOME/.local/state/omarchy/indicators/stay-awake
-STAY_AWAKE_SET=0 VOX_STOPPED=0 RESTORED=0 BT_CHECK=0 BT_POWERED=0
+STAY_AWAKE_SET=0 VOX_STOPPED=0 RESTORED=0 BT_CHECK=0 BT_POWERED=0 CACP_TOUCHED=0
 have bluetoothctl && bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && BT_POWERED=1
 restore() {
   ((RESTORED)) && return
@@ -526,6 +723,12 @@ restore() {
     local fd=${HELPER[1]:-}
     if [[ -n $fd ]]; then printf 'quit\n' 1>&"$fd" 2>/dev/null; exec {fd}>&-; fi
     wait "$HELPER_PID" 2>/dev/null
+  fi
+  # The helper put the CACP level back; one more DPMS cycle applies it (pre-0810) and
+  # turns the panel on if the run stopped between off and on.
+  if ((CACP_TOUCHED)) && ! dpms_cycle; then
+    have hyprctl && hyprctl dispatch dpms on >/dev/null 2>&1
+    note "${R}the panel's CACP level is back, but the DPMS cycle failed: hyprctl dispatch dpms off, then on${N}"; left=1
   fi
   # bluez powers the adapter again on unblock (AutoEnable); make sure.
   if ((BT_CHECK && BT_POWERED)) && have bluetoothctl && ! bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then bluetoothctl power on >/dev/null 2>&1; fi
@@ -555,12 +758,12 @@ ask_root_lines() { # command -> lines until "end"
 # One phase: settle, guard, then a python sampler for MEASURE seconds that
 # writes the samples and the counter differences as JSON.
 PHASES=()
-measure() { # name tweak round
-  local name=$1 tweak=$2 round=$3 n out waited=0
+measure() { # name tweak round [design row signs]
+  local name=$1 tweak=$2 round=$3 design=${4:-} n out waited=0
   n=$(printf '%03d' "${#PHASES[@]}")
   out=$WORK/$n.json
   PHASES+=("$out")
-  printf '%s  round %s  %-10s settle %ss, measure %ss\n' "$(date +%H:%M)" "$round" "$name" "$SETTLE" "$MEASURE"
+  printf '%s  round %s  %-10s settle %ss, measure %ss%s\n' "$(date +%H:%M)" "$round" "$name" "$SETTLE" "$MEASURE" "${design:+  on: ${tweak//,/ }}"
   sleep "$SETTLE"
   if ((DRY == 0)); then
     [[ $(bat_status) == Discharging ]] || die "the charger is back ($(bat_status)); stopping the run"
@@ -570,9 +773,9 @@ measure() { # name tweak round
       sleep 5; waited=$((waited + 5))
     done
   fi
-  python3 -I - "$SYS" "$PROC" "${AMDGPU:-}" "$BAT" "${DGPU:-}" "${BACKLIGHT:-}" "$MEASURE" "$INTERVAL" "$name" "$tweak" "$round" >"$out" <<'PY'
+  python3 -I - "$SYS" "$PROC" "${AMDGPU:-}" "$BAT" "${DGPU:-}" "${BACKLIGHT:-}" "$MEASURE" "$INTERVAL" "$name" "$tweak" "$round" "$design" >"$out" <<'PY'
 import glob, json, os, struct, sys, time
-sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd = sys.argv[1:12]
+sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd, design = sys.argv[1:13]
 measure, interval = int(measure), int(interval)
 def rd(p, d=None):
     try:
@@ -650,7 +853,7 @@ c1 = counters()
 dt = c1["mono"] - c0["mono"]
 rate = {k: (c1["irq"][k] - c0["irq"].get(k, 0)) / dt for k in c1["irq"]} if dt > 0 else {}
 def keep(k): return k in ("LOC", "CAL", "RES", "TLB") or any(s in k for s in ("amdgpu", "nvme", "mt7925", "xhci", "AMDI0010", "sdhci", "mmc", "snd", "ASUF"))
-json.dump({"name": name, "tweak": tweak, "round": int(rnd), "dt": dt, "samples": samples, "states": states,
+json.dump({"name": name, "tweak": tweak, "round": int(rnd), "design": design, "dt": dt, "samples": samples, "states": states,
            "irq": {k: v for k, v in rate.items() if keep(k) and v >= 0.05},
            "intr": (c1.get("intr", 0) - c0.get("intr", 0)) / dt if dt > 0 else None,
            "ctxt": (c1.get("ctxt", 0) - c0.get("ctxt", 0)) / dt if dt > 0 else None}, sys.stdout)
@@ -659,6 +862,7 @@ PY
 
 # ------------------------------------------------------------------- start
 TOTAL_PH=$((ROUNDS * (2 * ${#SEL[@]} + 1)))
+[[ $DESIGN == pb12 ]] && TOTAL_PH=$((ROUNDS * 12))
 [[ -n $BOOT ]] && TOTAL_PH=$((ROUNDS * 2))
 say "G16 idle A/B$( [[ -n $BOOT ]] && echo " (boot run '$BOOT')" )$( ((DRY)) && echo ', dry run')"
 note "$TOTAL_PH phases, about $(( (SETTLE + MEASURE) * TOTAL_PH / 60 + 2 )) minutes; leave the laptop alone until it says done"
@@ -707,6 +911,15 @@ for t in "${SEL[@]}"; do
     bt-off | usb-idle)
       if have bluetoothctl && (( $(bluetoothctl devices Connected 2>/dev/null | grep -c '^Device') > 0 )); then SKIP+=("$t: a Bluetooth device is connected")
       else RUN+=("$t"); fi ;;
+    usb4)
+      if [[ $ROOT == testd ]]; then SKIP+=("$t: not on g16-testd's allowlist (G16_ROOT=pkexec runs it)")
+      elif [[ -z $(usb4_awake "$SYS") ]]; then SKIP+=("$t: no USB4/Thunderbolt NHI or router is awake with power/control on")
+      else RUN+=("$t"); fi ;;
+    cacp3 | cacp4)
+      if ! PPS=$(panel_pps "$SYS"); then SKIP+=("$t: no panel_power_savings on the eDP panel")
+      elif [[ $(cat "$PPS" 2>/dev/null) != 0 ]]; then SKIP+=("$t: panel_power_savings is $(cat "$PPS" 2>/dev/null), not 0")
+      elif ((DPMS && DRY == 0)) && ! { have hyprctl && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; }; then SKIP+=("$t: no Hyprland session for the DPMS cycle (--no-dpms on 0810 kernels)")
+      else RUN+=("$t"); fi ;;
     *) RUN+=("$t") ;;
   esac
 done
@@ -714,6 +927,21 @@ done
 for s in "${SKIP[@]}"; do note "skipped: $s"; printf '%s\n' "$s" >>"$WORK/skipped"; done
 [[ -n $BOOT ]] || ((${#RUN[@]})) || die "no tweak can run here"
 
+# CACP: before 0810, a panel_power_savings write reaches the panel only at the next
+# modeset; one DPMS off/on of the panel forces one (cacp-check, #172).
+# Returns 1 when the cycle didn't happen (no hyprctl, a dispatch refused); the panel
+# is always asked to come back on.
+dpms_cycle() {
+  local out rc=0
+  ((DRY == 0 && DPMS)) || return 0
+  have hyprctl && out=$(panel_pps "$SYS") || return 1
+  out=${out%/amdgpu/*}; out=eDP-${out##*-eDP-}
+  [[ $(hyprctl dispatch dpms off "$out" 2>&1) == ok ]] || rc=1
+  sleep "${G16_AB_DPMS_WAIT:-2}"
+  [[ $(hyprctl dispatch dpms on "$out" 2>&1) == ok ]] || rc=1
+  sleep "${G16_AB_DPMS_WAIT:-2}"
+  return $rc
+}
 apply_t() { # tweak -> 0 when applied
   local r
   if [[ $1 == voxtype ]]; then
@@ -728,6 +956,11 @@ apply_t() { # tweak -> 0 when applied
   printf '%s %s\n' "$1" "$r" >>"$WORK/applied"
   [[ $r == ok* ]] || { note "${R}$1 not applied: $r${N}"; return 1; }
   [[ $1 == bt-off || $1 == usb-idle ]] && ((DRY == 0)) && BT_CHECK=1
+  if [[ $1 == cacp* ]]; then
+    CACP_TOUCHED=1
+    # Before 0810 the level reaches the panel only through the modeset.
+    dpms_cycle || { printf '%s err the DPMS cycle failed\n' "$1" >>"$WORK/applied"; note "${R}$1: the DPMS cycle failed; phase skipped (--no-dpms on 0810 kernels)${N}"; return 1; }
+  fi
   return 0
 }
 revert_t() { # tweak; a revert that fails stops the run
@@ -739,6 +972,10 @@ revert_t() { # tweak; a revert that fails stops the run
   fi
   r=$(ask_root "revert $1")
   [[ $r == ok* ]] || die "$1 could not be put back ($r); stopping the run"
+  if [[ $1 == cacp* && $r != "ok not applied" ]]; then
+    dpms_cycle || die "$1: the level is back but the DPMS cycle that applies it failed; stopping the run"
+    CACP_TOUCHED=0
+  fi
   if [[ $1 == bt-off || $1 == usb-idle ]] && ((BT_POWERED && DRY == 0)) && have bluetoothctl; then
     sleep 2; bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' || bluetoothctl power on >/dev/null 2>&1
   fi
@@ -747,7 +984,33 @@ shuffle() { # seed items... -> items, shuffled reproducibly
   python3 -I -c 'import random, sys; r = random.Random(int(sys.argv[1])); x = sys.argv[2:]; r.shuffle(x); print("\n".join(x))' "$@"
 }
 SEED=${SEED:-$((RANDOM * 32768 + RANDOM))}
-for ((round = 1; round <= ROUNDS; round++)); do
+if [[ $DESIGN == pb12 ]]; then
+  ((${#RUN[@]} <= 11)) || die "pb12 takes at most 11 tweaks"
+  # The matrix: tweak j is column j; the columns past the last tweak are dummies.
+  {
+    printf 'row  %s\n' "$(for ((j = 0; j < 11; j++)); do printf '%-3s' "$((j + 1))"; done)"
+    i=0; while read -r r; do i=$((i + 1)); printf '%-4s %s\n' "$i" "$(sed 's/./&  /g' <<<"$r")"; done < <(pb12 rows)
+    for ((j = 0; j < 11; j++)); do printf 'column %s: %s\n' "$((j + 1))" "${RUN[j]:-dummy}"; done
+  } >"$WORK/matrix"
+  say "Plackett-Burman design, 12 phases a round, ${#RUN[@]} tweaks, $((11 - ${#RUN[@]})) dummy columns"
+  sed 's/^/    /' "$WORK/matrix"
+  printf '%s\n' "${RUN[@]}" >"$WORK/run"
+  declare -A ON=()
+  while read -r round row signs; do
+    want_on=" "
+    for ((j = 0; j < ${#RUN[@]}; j++)); do [[ ${signs:j:1} == + ]] && want_on+="${RUN[j]} "; done
+    for t in "${RUN[@]}"; do [[ -n ${ON[$t]:-} && $want_on != *" $t "* ]] && { revert_t "$t"; unset "ON[$t]"; }; done
+    for t in "${RUN[@]}"; do
+      [[ -z ${ON[$t]:-} && $want_on == *" $t "* ]] || continue
+      if apply_t "$t"; then ON[$t]=1; else revert_t "$t"; fi
+    done
+    on=''; for t in "${RUN[@]}"; do [[ -n ${ON[$t]:-} ]] && on+=${on:+,}$t; done
+    measure "row $((row + 1))" "${on:--}" "$round" "$signs"
+  done < <(pb12 plan "$ROUNDS" "$SEED")
+  for t in "${RUN[@]}"; do [[ -n ${ON[$t]:-} ]] && { revert_t "$t"; unset "ON[$t]"; }; done
+fi
+AB_ROUNDS=$ROUNDS; [[ $DESIGN == pb12 ]] && AB_ROUNDS=0
+for ((round = 1; round <= AB_ROUNDS; round++)); do
   if [[ -n $BOOT ]]; then measure baseline - "$round"; measure baseline - "$round"; continue; fi
   mapfile -t order < <(shuffle $((SEED + round)) "${RUN[@]}")
   measure baseline - "$round"
@@ -762,9 +1025,10 @@ done
 say "putting everything back"
 printf '%s\n' "${PHASES[@]}" >"$WORK/phases"
 printf '%s\n' "${TWEAKS[@]}" >"$WORK/tweaks"
-python3 -I - "$WORK" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$ROUNDS" "$SEED" "$DRY" "${BOOT:--}" "$SUMMARY_ISSUE" >"$WORK/report.md" <<'PY' || die "the report failed"
+printf '%s\n' "$PB12_PY" >"$WORK/g16pb.py"
+python3 -I - "$WORK" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$ROUNDS" "$SEED" "$DRY" "${BOOT:--}" "$SUMMARY_ISSUE" "$DESIGN" "$ROOT" >"$WORK/report.md" <<'PY' || die "the report failed"
 import json, math, os, statistics as st, sys
-work, rev, settle, measure, interval, rounds, seed, dry, boot, summary = sys.argv[1:11]
+work, rev, settle, measure, interval, rounds, seed, dry, boot, summary, design, root = sys.argv[1:13]
 def load(p):
     try:
         with open(p) as f: return f.read()
@@ -801,16 +1065,29 @@ if boot != "-":
     with open(work + "/boot.json", "w") as fh: json.dump(rec, fh)
 o.append(f"## G16 idle A/B{' (dry run, not a measurement)' if dry == '1' else ''}{' — boot run ' + boot if boot != '-' else ''}\n")
 o.append(load(work + "/context").rstrip())
-o.append(f"- method: {rounds} rounds; each round runs every tweak once in a shuffled order (seed {seed}), each between two baseline phases "
-         f"(B T1 B T2 … B). Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. A tweak's delta "
-         "in a round is its phase minus the mean of the two baselines around it. ±2 SE is twice the standard error of the mean delta "
-         "over the rounds. Phases with the charger in, the RTX awake or the brightness changed are left out.")
-o.append("- verdict: **saves** when the mean delta is below −0.10 W and below −2 SE; **costs** the mirror; otherwise **no effect beyond noise**.\n")
+o.append(f"- root steps: {'the G16 test session helper (g16-testd)' if root == 'testd' else root}")
+if design == "pb12":
+    o.append(f"- method: Plackett-Burman screening (#276), {rounds} round{'' if rounds == '1' else 's'} of the 12-row matrix, each round in a shuffled order "
+             f"(seed {seed}). Each row switches on a different half of the tweaks; from one row to the next only the tweaks "
+             f"whose level differs change. Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. "
+             "Δ is a tweak's main effect, on minus off, fitted by least squares over every valid phase with a level per round "
+             "(and a linear drift over the run when the phases leave room for it); ±2 SE is from the residual noise. "
+             "Columns no tweak uses (dummies) are fitted on top and should read as noise. Phases with the charger in, the RTX "
+             "awake or the brightness changed are left out.")
+    o.append("- assumes the effects add up (no interactions): an interaction, such as kbd-usb with bt-off (they share an xHCI "
+             "controller), spreads over the other columns. A tweak this screen calls a winner gets a one-at-a-time A/B "
+             "(`g16-idle-ab --only T`) to confirm it.")
+else:
+    o.append(f"- method: {rounds} rounds; each round runs every tweak once in a shuffled order (seed {seed}), each between two baseline phases "
+             f"(B T1 B T2 … B). Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. A tweak's delta "
+             "in a round is its phase minus the mean of the two baselines around it. ±2 SE is twice the standard error of the mean delta "
+             "over the rounds. Phases with the charger in, the RTX awake or the brightness changed are left out.")
+o.append(f"- verdict: **saves** when the {'effect' if design == 'pb12' else 'mean delta'} is below −0.10 W and below −2 SE; **costs** the mirror; otherwise **no effect beyond noise**.\n")
 skipped = load(work + "/skipped").strip()
 if skipped: o.append("Skipped: " + "; ".join(skipped.splitlines()) + "\n")
 rows, per = [], {}
 for i, p in enumerate(phases):
-    if p["tweak"] == "-": continue
+    if design == "pb12" or p["tweak"] == "-": continue
     before = next((q for q in reversed(phases[:i]) if q["tweak"] == "-"), None)
     after = next((q for q in phases[i + 1:] if q["tweak"] == "-"), None)
     # Both baselines around it must be valid, or drift doesn't cancel.
@@ -825,6 +1102,37 @@ if len(base) > 2:
     diffs = [b["bat"] - a["bat"] for a, b in zip(base, base[1:])]
     noise = st.pstdev(diffs) if len(diffs) > 1 else None
 verdicts = {}
+def verdict(mean, se2):
+    if mean is None: return "no valid rounds" if design != "pb12" else "not estimable"
+    if se2 is not None and mean < -0.10 and mean < -se2: return "saves"
+    if se2 is not None and mean > 0.10 and mean > se2: return "costs"
+    return "no effect beyond noise" if se2 is not None else "no noise estimate"
+if design == "pb12":
+    sys.path.insert(0, work)
+    import g16pb
+    run = load(work + "/run").split()
+    pts = [{"on": [] if p["tweak"] == "-" else p["tweak"].split(","), "round": p["round"], "seq": i,
+            "design": [1 if c == "+" else -1 for c in p.get("design", "")],
+            "bat": p["bat"] if p["valid"] else None, "sock": p["sock"] if p["valid"] else None} for i, p in enumerate(phases)]
+    fb = g16pb.fit(pts, run, "bat", list(range(len(run), 11)))
+    fs = g16pb.fit(pts, run, "sock")
+    pm = lambda e: "–" if e is None else f"{e[0]:+.2f}"  # noqa: E731
+    pe = lambda e: "–" if e is None or e[1] is None else f"{e[1]:.2f}"  # noqa: E731
+    o.append("| tweak | issue | phases on / off | Δ battery W | ±2 SE | Δ SoC W | ±2 SE | verdict |")
+    o.append("|---|---|---|---|---|---|---|---|")
+    valid = [q for q in pts if q["bat"] is not None]
+    for t in run:
+        e = fb["effects"].get(t)
+        v = verdict(e and e[0], e and e[1])
+        verdicts[t] = (v, e and e[0], e and e[1])
+        non = sum(t in q["on"] for q in valid)
+        o.append(f"| {t} | #{issues.get(t, '?')} | {non} / {len(valid) - non} | {pm(e)} | {pe(e)} | {pm(fs['effects'].get(t))} | {pe(fs['effects'].get(t))} | **{v}** |")
+    for j, e in enumerate(fb["dummies"]):
+        o.append(f"| (dummy, column {len(run) + j + 1}) | – | – | {pm(e)} | {pe(e)} | – | – | noise check |")
+    o.append(f"\nFit: {fb['n']} valid phases, residual noise (sd of one phase) "
+             + ("–" if fb["sigma"] is None else f"{fb['sigma']:.2f} W") + f" on {fb['df'] if fb['df'] is not None else 0} degrees of freedom"
+             + (", with a linear drift term" if fb["trend"] else ", no drift term") + ".")
+    o.append("\n<details><summary>The design matrix (+ on, − off)</summary>\n\n```\n" + load(work + "/matrix").rstrip() + "\n```\n</details>")
 if per:
     o.append("| tweak | issue | rounds | Δ battery W (mean) | ±2 SE | per round | Δ SoC W | verdict |")
     o.append("|---|---|---|---|---|---|---|---|")
@@ -834,16 +1142,14 @@ if per:
         ds_ = [d[1] for d in good if d[1] is not None]
         mean = st.mean(dv) if dv else None
         se2 = 2 * st.stdev(dv) / math.sqrt(len(dv)) if len(dv) > 1 else None
-        if mean is None: v = "no valid rounds"
-        elif se2 is not None and mean < -0.10 and mean < -se2: v = "saves"
-        elif se2 is not None and mean > 0.10 and mean > se2: v = "costs"
-        else: v = "no effect beyond noise"
+        v = verdict(mean, se2)
+        if v == "no noise estimate": v = "no effect beyond noise"
         verdicts[t] = (v, mean, se2)
         pr = ", ".join("left out" if d is None else f"{d[0]:+.2f}" for d in ds)
         o.append(f"| {t} | #{issues.get(t, '?')} | {len(dv)}/{len(ds)} | {f(mean, 2) if mean is None else f'{mean:+.2f}'} | {f(se2)} | {pr} | "
                  f"{'–' if not ds_ else f'{st.mean(ds_):+.2f}'} | **{v}** |")
 if base:
-    o.append(f"\nBaseline over the run: battery {st.mean(b['bat'] for b in base):.2f} W (min phase {min(b['bat'] for b in base):.2f}, "
+    o.append(f"\nBaseline{' (the phases with every tweak off)' if design == 'pb12' else ''} over the run: battery {st.mean(b['bat'] for b in base):.2f} W (min phase {min(b['bat'] for b in base):.2f}, "
              f"max {max(b['bat'] for b in base):.2f}), SoC {f(st.mean([b['sock'] for b in base if b['sock'] is not None]) if any(b['sock'] is not None for b in base) else None)} W"
              + (f", baseline-to-baseline noise (sd) {noise:.2f} W" if noise is not None else "") + ".")
     gf = [b["gfx"] for b in base if b["gfx"] is not None]; cf = [b["core"] for b in base if b["core"] is not None]
@@ -856,7 +1162,7 @@ def irq(p, key):
     return sum(v for k, v in p["irq"].items() if key in k)
 for i, p in enumerate(phases):
     stt = "; ".join(f"{k} " + "/".join(f"{v}" for v in sorted(c)) for k, c in sorted(p["devstates"].items()))
-    o.append(f"| {i} | {p['round']} | {p['name']} | {f(p['bat'])} | {f(p['sock'])} | {f(p['gfx'])} | {f(p['core'])} | {stt} | "
+    o.append(f"| {i} | {p['round']} | {p['name'] + (' (' + p['tweak'] + ')' if design == 'pb12' else '')} | {f(p['bat'])} | {f(p['sock'])} | {f(p['gfx'])} | {f(p['core'])} | {stt} | "
              f"{irq(p, 'CAL'):.0f}, {irq(p, 'LOC'):.0f}, {irq(p, 'amdgpu'):.0f}, {irq(p, 'nvme'):.1f}, {irq(p, 'mt7925'):.0f}, {irq(p, 'xhci'):.1f} | {', '.join(p['bad'])} |")
 o.append("\n</details>\n")
 applied = load(work + "/applied").strip()
@@ -870,8 +1176,8 @@ print("\n".join(o))
 # Each tweak's own issue gets its row, the context and the method.
 head = [l for l in o if l.startswith("| tweak |") or l.startswith("|---|---|---|---|---|---|---|---|")][:2]
 ctxl = [l for l in load(work + "/context").splitlines() if l.split(":")[0] in ("- kernel", "- power profile", "- brightness", "- display")]
-basel = [l for l in o if l.startswith("Baseline over the run") or l.startswith("SoC split")]
-meth = [l for l in o if l.startswith("- method:") or l.startswith("- verdict:")]
+basel = [l for l in o if l.startswith("Baseline") or l.startswith("SoC split") or l.startswith("\nFit: ")]
+meth = [l for l in o if l.startswith("- method:") or l.startswith("- verdict:") or l.startswith("- assumes")]
 for t, (v, mean, se2) in verdicts.items():
     row = [l for l in o if l.startswith(f"| {t} |")]
     txt = [f"## A/B on the G16: {t}\n", descs.get(t, ""), ""] + head + row + [""] + ctxl + meth + [""] + basel
