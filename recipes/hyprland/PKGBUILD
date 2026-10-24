@@ -5,7 +5,7 @@
 
 pkgname=(hyprland hyprpm)
 pkgver=0.56.2
-pkgrel=4.101
+pkgrel=4.102
 pkgdesc='a highly customizable dynamic tiling Wayland compositor (omarchy-asus build)'
 arch=(x86_64 aarch64)
 url="https://github.com/hyprwm/${pkgname^}"
@@ -66,9 +66,11 @@ optdepends=('hyprpm: build and install plugins'
 provides=(wayland-compositor)
 _archive="${pkgname^}-$pkgver"
 source=("$_archive.tar.gz::$url/releases/download/v$pkgver/source-v$pkgver.tar.gz"
-        reconnect-render-offset.patch)
+        reconnect-render-offset.patch
+        seat-leave-on-capability-loss.patch)
 sha256sums=('03ad3f5ef152ff44116ffd56fcf808486211ecabf4f0ba567108ee746ba5cd2e'
-            '0c4a315f36f72d08f443887cd4042ff27af6413de20f519a3fb3b402b982171d')
+            '0c4a315f36f72d08f443887cd4042ff27af6413de20f519a3fb3b402b982171d'
+            'b928daaa3ab3f6a0bc95d23e69eb93cf5e8ef54d6916aa68670817af26fa8e55')
 
 prepare() {
 	ln -sf hyprland-source "$_archive"
@@ -76,6 +78,7 @@ prepare() {
 	sed -i -e '/^release:/{n;s/-D/-DCMAKE_SKIP_RPATH=ON -D/}' Makefile
 	sed -i -e '/find_package.glaze/s/7...<8 //' {.,hyprpm,start}/CMakeLists.txt
 	patch -Np1 -i "$srcdir/reconnect-render-offset.patch"
+	patch -Np1 -i "$srcdir/seat-leave-on-capability-loss.patch"
 }
 
 build() {
