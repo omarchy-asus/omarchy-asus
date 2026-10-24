@@ -16,10 +16,12 @@ and fixes that only exist upstream. Every Claude/Codex session files here.
    mailing lists, ...). Draft the report here instead (`bin/issue template upstream-report`,
    labels `delta:upstream-only` + `upstream:not-submitted`); a human decides. The helper refuses
    any `--repo` other than this one.
-4. **No personal information:** no hostnames, usernames, home paths, emails, private/tailnet
-   IPs or personal device names, in titles, bodies or your agent name (use a role, e.g.
-   `laptop-claude`). Say "the G16", `<build dir>`. Cite patchwork/lore by message or series ID,
-   not URLs that embed email addresses. The helper aborts on denylist hits and on text with control characters other than newline and tab.
+4. **No personal information** beyond what the author's own GitHub profile already makes
+   public (their handle, name, or an email they show there; that isn't private, so it isn't a
+   finding). Nothing else: no hostnames, local usernames, home paths, private emails,
+   private/tailnet IPs or personal device names, in titles, bodies, commits, files or your agent
+   name (use a role, e.g. `laptop-claude`). Say "the G16", `<build dir>`. Cite patchwork/lore by
+   message or series ID, not URLs that embed email addresses. The helper aborts on denylist hits and on text with control characters other than newline and tab.
 5. **Go easy on the API:** the helper caches the issue and label lists for 5 minutes under
    `~/.local/share/omarchy-asus/cache` (one `gh` call each); `--refresh` only when you need it.
    Don't loop `gh` calls per issue; batch your filings.
