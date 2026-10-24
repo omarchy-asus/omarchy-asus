@@ -997,11 +997,11 @@ if [[ $DESIGN == pb12 ]]; then
   printf '%s\n' "${RUN[@]}" >"$WORK/run"
   declare -A ON=()
   while read -r round row signs; do
-    want=" "
-    for ((j = 0; j < ${#RUN[@]}; j++)); do [[ ${signs:j:1} == + ]] && want+="${RUN[j]} "; done
-    for t in "${RUN[@]}"; do [[ -n ${ON[$t]:-} && $want != *" $t "* ]] && { revert_t "$t"; unset "ON[$t]"; }; done
+    want_on=" "
+    for ((j = 0; j < ${#RUN[@]}; j++)); do [[ ${signs:j:1} == + ]] && want_on+="${RUN[j]} "; done
+    for t in "${RUN[@]}"; do [[ -n ${ON[$t]:-} && $want_on != *" $t "* ]] && { revert_t "$t"; unset "ON[$t]"; }; done
     for t in "${RUN[@]}"; do
-      [[ -z ${ON[$t]:-} && $want == *" $t "* ]] || continue
+      [[ -z ${ON[$t]:-} && $want_on == *" $t "* ]] || continue
       if apply_t "$t"; then ON[$t]=1; else revert_t "$t"; fi
     done
     on=''; for t in "${RUN[@]}"; do [[ -n ${ON[$t]:-} ]] && on+=${on:+,}$t; done
