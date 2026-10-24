@@ -6,8 +6,10 @@
 #   OMARCHY_ASUS_CHROOT     the channel's chroot parent dir (default /var/lib/omarchy-asus/chroot,
 #                           chroot-rc for rc; the offline tests point it at a temp dir)
 #   OMARCHY_ASUS_CHANNEL    release channel (default quattro; the scripts' --channel sets it):
-#     quattro  the x86_64 release, built from main against Omarchy's stable channel
-#     rc       the rc-x86_64 release, built from next/omarchy-4.5 against Omarchy's rc channel
+#     quattro  the x86_64 release, built against Omarchy's stable channel; frozen on what it
+#              serves until the Omarchy 4.5 stable switch (#309): quattro_frozen, below
+#     rc       the rc-x86_64 release, built against Omarchy's rc channel from main, the RC
+#              channel's trunk (next/omarchy-4.5 was its branch before #309)
 #   A channel has its own chroot, pacman.conf, stage dir, local repo and release, and its own
 #   sync journal and publisher record ($CHANNEL_DATA): nothing built or staged for one
 #   reaches the other.
@@ -59,7 +61,7 @@ case $CHANNEL in
         PACMAN_CONF=$WORKSPACE/build/pacman.conf  # chroot package sources
         OMARCHY_CHANNEL=stable                    # Omarchy's channel this one is built against
         GH_TAG=x86_64                             # Server = .../releases/download/$arch
-        GH_BRANCH=main
+        GH_BRANCH=main                            # frozen (#309): nothing builds or publishes here
         SUBREL=1                                  # first pkgrel subrelease (.1 to .99; bin/rebase-recipe)
         RELEASE_NOTES=$WORKSPACE/build/release-notes.md
         ;;
@@ -70,7 +72,7 @@ case $CHANNEL in
         PACMAN_CONF=$WORKSPACE/build/pacman-rc.conf
         OMARCHY_CHANNEL=rc
         GH_TAG=rc-x86_64                          # Server = .../releases/download/rc-$arch
-        GH_BRANCH=next/omarchy-4.5
+        GH_BRANCH=main                            # main is the RC channel's trunk (#309)
         SUBREL=101                                # .101 and up: never a Quattro filename (#201)
         RELEASE_NOTES=$WORKSPACE/build/release-notes-rc.md
         ;;
@@ -79,6 +81,16 @@ case $CHANNEL in
         return 1
         ;;
 esac
+# quattro_frozen <what>: exit 1 when the channel is Quattro, which is frozen on what it serves
+# until the Omarchy 4.5 stable switch (#309): bin/build-pkg, bin/publish, bin/unpublish and a
+# live bin/sync-release call it (bin/rebase-recipe checks the same). OMARCHY_ASUS_ALLOW_QUATTRO=1
+# overrides it.
+QUATTRO_FROZEN_MSG="the Quattro channel is frozen until the Omarchy 4.5 stable switch (#309); OMARCHY_ASUS_ALLOW_QUATTRO=1 overrides"
+quattro_frozen() {
+    [[ $CHANNEL == quattro && ${OMARCHY_ASUS_ALLOW_QUATTRO:-} != 1 ]] || return 0
+    echo "$1: $QUATTRO_FROZEN_MSG" >&2
+    exit 1
+}
 # The packager every chroot build is signed off as: bin/mkchroot writes it into each channel's
 # chroot (#201: the RC chroot had none, so its packages said "Unknown Packager").
 PACKAGER_FILE=etc/makepkg.conf.d/packager.conf

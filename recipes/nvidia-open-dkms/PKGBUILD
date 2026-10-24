@@ -9,6 +9,10 @@
 #        callback record when RM reports the waiter already signalled. Under
 #        explicit sync that is nearly every composited frame, so the 40-byte
 #        kmalloc-64 leak reached GBs of unreclaimable slab over days.
+#   0004 ours, not yet submitted (#213): nvidia-drm reports an HDMI connector
+#        disconnected when RM says connected but no EDID can be read. After
+#        hibernate resume the RTX's empty HDMI port kept a stale connect state,
+#        so Hyprland lit a phantom output and the dGPU never runtime-suspended.
 # Trimmed from Arch's nvidia-utils 615.78.08-1 PKGBUILD (pkgbase nvidia-utils):
 # only the nvidia-open-dkms split, only the kernel-module-source tarball.
 #
@@ -21,8 +25,8 @@
 
 pkgname=nvidia-open-dkms
 pkgver=615.78.08
-pkgrel=1.3
-pkgdesc="NVIDIA open kernel modules - module sources (PR #1412 hibernate power-off hang, PR #1299 NVPCF wake defer, PR #1368 nvkms semaphore leak) (omarchy-asus build)"
+pkgrel=1.102
+pkgdesc="NVIDIA open kernel modules - module sources (PR #1412 hibernate power-off hang, PR #1299 NVPCF wake defer, PR #1368 nvkms semaphore leak, HDMI phantom connect after hibernate) (omarchy-asus build)"
 arch=('x86_64')
 url="https://github.com/NVIDIA/open-gpu-kernel-modules/pull/1412"
 license=('MIT AND GPL-2.0-only')
@@ -35,17 +39,20 @@ _pkg_open="NVIDIA-kernel-module-source-${pkgver}"
 source=("https://download.nvidia.com/XFree86/NVIDIA-kernel-module-source/${_pkg_open}.tar.xz"
         '0001-nvidia-skip-teardown-in-nv_pci_shutdown-while-hibernate-suspended.patch'
         '0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.patch'
-        '0003-nvidia-modeset-free-semaphore-surface-callback-when-already-signalled.patch')
+        '0003-nvidia-modeset-free-semaphore-surface-callback-when-already-signalled.patch'
+        '0004-nvidia-drm-report-HDMI-without-EDID-as-disconnected.patch')
 sha512sums=('5ced2c7e3e9df21f8494ea439ac2103307fcbcb295a3f11e5fdf4f1dbeda3f0b13800a06f8147ebd064f98897c24e92f5de82023a8ca43a582694d951c9620c9'
             'ea0134078b7903355fe9c252918746ea48ce3276d1a198b71401642a6f3b5b99fcd9fb27b9bb198b52df652f3b7461da0f1f5584ce2df5607471171e83379d6e'
             '7a7592ea919f53656ef2891f6d8b299957abdbd2207396729ba5ba7651118083a3cb420111c9ea8d301339541db59fd830951f76286747c2a94ed6595bde18c2'
-            'a191ae3dac1c85e608f38eefbbc9e00b4b6ed7423682e11f79d585a233e7fc372ca54aff20f11feedacff89d08438253ae6c6369a58614d4e12b6e90bc50f275')
+            'a191ae3dac1c85e608f38eefbbc9e00b4b6ed7423682e11f79d585a233e7fc372ca54aff20f11feedacff89d08438253ae6c6369a58614d4e12b6e90bc50f275'
+            '14b8bd7c8b3fae5b5ad8be843de7c7ea45b964a15b2273354623e8c0cbca7e0cb3b0607f97c8c9876fb8b648a844d1b78f6975292ac96583d668c55924a4de21')
 
 prepare() {
     cd "${_pkg_open}"
     patch -Np1 -i "${srcdir}/0001-nvidia-skip-teardown-in-nv_pci_shutdown-while-hibernate-suspended.patch"
     patch -Np1 -i "${srcdir}/0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.patch"
     patch -Np1 -i "${srcdir}/0003-nvidia-modeset-free-semaphore-surface-callback-when-already-signalled.patch"
+    patch -Np1 -i "${srcdir}/0004-nvidia-drm-report-HDMI-without-EDID-as-disconnected.patch"
 
     # Attempt to make builds reproducible (as Arch does)
     sed -i "s/^  HOSTNAME.*/  HOSTNAME = echo archlinux/" utils.mk

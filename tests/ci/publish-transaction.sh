@@ -46,6 +46,8 @@ mkdir -p "$S/ws/build" && printf '# test: no cohorts\n' >"$S/ws/build/cohorts.co
 mkdir -m 0700 "$S/data/gnupg"
 export OMARCHY_ASUS_WORKSPACE=$S/ws OMARCHY_ASUS_DATA=$S/data GNUPGHOME=$S/data/gnupg
 unset OMARCHY_ASUS_PUBLISH_LOCKED PUBLISH_LOCK_WAIT STUB_SIGN OMARCHY_ASUS_CHANNEL
+# Quattro is frozen (#309); this test runs the default (quattro) channel's code, so it overrides
+export OMARCHY_ASUS_ALLOW_QUATTRO=1
 REPO=$S/data/repo/x86_64
 DB=$REPO/omarchy-asus.db.tar.gz
 fail=0

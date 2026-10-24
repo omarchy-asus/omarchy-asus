@@ -1,0 +1,51 @@
+From 57fbb232dc26dcfa2ba0a14522e19fa3f0f82065 Mon Sep 17 00:00:00 2001
+From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 16:59:08 -0400
+Subject: [PATCH] winex11: Only expect a ConfigureNotify for
+ _NET_WM_FULLSCREEN_MONITORS when the WM supports it.
+
+Since "winex11: Serialize _NET_WM_FULLSCREEN_MONITORS changes by expecting
+a ConfigureNotify.", moving a fullscreen window to another monitor sets
+configure_serial and waits for the window manager to resize the window.
+Window managers that don't list _NET_WM_FULLSCREEN_MONITORS in
+_NET_SUPPORTED (Hyprland, sway and other wlroots XWayland WMs) ignore the
+message and never send that ConfigureNotify. configure_serial then stays
+set: the config request for the new rect is delayed forever, and
+window_update_client_config() ignores every later ConfigureNotify, so the
+Win32 window rect no longer follows the X11 window.
+
+With emulated display modes this breaks input. A game that switches to
+exclusive fullscreen on display 1 while the compositor keeps its window
+on display 2 gets pointer positions mapped through display 1's scaling
+(offset by the letterbox), and a ClipCursor() on its window rect pins the
+pointer to the edge of display 1.
+
+Only wait for the ConfigureNotify when the window manager supports
+_NET_WM_FULLSCREEN_MONITORS. Otherwise the config request goes out, the
+window manager answers it with the rect it actually keeps, and the Win32
+rect follows.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/winex11.drv/window.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index cc3b6185..0f8af34b 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1403,7 +1403,10 @@ static void window_set_monitors( struct x11drv_win_data *data, const struct moni
+         XSendEvent( data->display, DefaultRootWindow( data->display ), False,
+                     SubstructureRedirectMask | SubstructureNotifyMask, &xev );
+ 
+-        if (is_fullscreen)
++        /* a window manager that doesn't support _NET_WM_FULLSCREEN_MONITORS ignores the request and
++         * will never send the ConfigureNotify we would be waiting for, blocking any further config
++         * change. Let the config request go through instead, the window manager will answer it. */
++        if (is_fullscreen && is_net_supported( x11drv_atom(_NET_WM_FULLSCREEN_MONITORS) ))
+         {
+             data->configure_serial = data->monitors_serial;
+             data->pending_state.rect = data->rects.visible;
+-- 
+2.56.0
+

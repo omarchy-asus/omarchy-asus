@@ -26,6 +26,8 @@ mkdir -p "$C/root/etc"
 cp "$W/build/pacman.conf" "$C/root/etc/pacman.conf"
 export PATH=$S/bin:$PATH SUDO=env OMARCHY_ASUS_DATA=$S/data OMARCHY_ASUS_CHROOT=$C
 unset DISTCC_KEY_DIR CCACHE_HOST_DIR OMARCHY_ASUS_CHANNEL OMARCHY_ASUS_WORKSPACE
+# Quattro is frozen (#309); this test runs the default (quattro) channel's code, so it overrides
+export OMARCHY_ASUS_ALLOW_QUATTRO=1
 fail=0
 # run <want exit> <what> [build-pkg args]: exit code, usage shown, nothing created
 run() {

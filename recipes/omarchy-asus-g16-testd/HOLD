@@ -1,0 +1,2 @@
+G16 test-session root helper: waits for the maintainer's yes to install it on the G16 and for its G16 test (#277)
+# Remove in its own PR once both are in; until then CI builds it, nothing publishes it.

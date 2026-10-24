@@ -1,7 +1,7 @@
 # How recipes/omarchy-settings differs from upstream; bin/rebase-recipe re-applies it to each new
 # upstream release (see its --help for the format, NOTES.md for the why).
 # The patches are the omarchy-asus fork's fixes backported onto the pinned release
-# (fork branch asus/v4-0-5). recipes/omarchy and recipes/omarchy-settings carry the
+# (fork branch asus/v4-5-0-rc1). recipes/omarchy and recipes/omarchy-settings carry the
 # SAME patch list: both packages build from the same source tree, and omarchy pins
 # omarchy-settings=$pkgver-$pkgrel, and the pair is one release cohort (build/cohorts.conf):
 # built, published and withdrawn together. Keep the two DELTA files in lockstep.
@@ -19,7 +19,7 @@ patch 0003-Let-another-power-manager-own-the-profile-on-plug-an.patch prepare om
 patch 0004-Stop-the-idle-fans-on-battery-on-the-ROG-Zephyrus-G1.patch prepare omarchy
 patch 0005-Use-a-software-cursor-while-a-monitor-on-the-NVIDIA-.patch prepare omarchy
 patch 0006-Add-omarchy-hw-igpu-render-node-for-hybrid-NVIDIA-la.patch prepare omarchy
-patch 0007-Decode-video-on-the-iGPU-when-it-is-a-non-VGA-displa.patch prepare omarchy
+patch 0007-Keep-video-decode-and-GLX-on-the-iGPU-when-it-is-a-n.patch prepare omarchy
 patch 0008-Keep-mpv-and-Chromium-video-decode-on-the-iGPU-of-hy.patch prepare omarchy
 patch 0009-Set-the-ASUS-ROG-ALC285-Master-to-full-scale-under-t.patch prepare omarchy
 patch 0010-Install-rtkit-so-PipeWire-gets-realtime-priority.patch prepare omarchy
@@ -28,12 +28,18 @@ patch 0012-Stop-early-loading-the-NVIDIA-driver-on-hybrid-GPU-m.patch prepare om
 patch 0013-Restore-the-drop-in-when-the-initramfs-rebuild-fails.patch prepare omarchy
 patch 0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch prepare omarchy
 patch 0015-Read-every-udev-record-before-asking-the-webcams.patch prepare omarchy
-patch 0016-Poll-only-Tailscale-status-while-its-panel-is-closed.patch prepare omarchy
+patch 0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch prepare omarchy
 patch 0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch prepare omarchy
-patch 0018-Rescan-the-launcher-icon-index-at-most-once-a-minute.patch prepare omarchy
 patch 0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch prepare omarchy
 patch 0020-Repin-only-the-video-decode-pins-Omarchy-wrote.patch prepare omarchy
 patch 0021-Remove-the-NVIDIA-drop-in-only-when-it-is-the-one-Om.patch prepare omarchy
 patch 0022-Restart-the-portal-and-PipeWire-only-for-a-session-t.patch prepare omarchy
 patch 0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch prepare omarchy
 patch 0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch prepare omarchy
+patch 0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch prepare omarchy
+patch 0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch prepare omarchy
+# General fixes: Omarchy software fixes that don't help the hardware, carried with the
+# maintainer's approval and kept apart from the ASUS patches above (NOTES.md).
+patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy
+patch general-0002-Keep-the-sleep-monitor-running-across-suspends.patch prepare omarchy
+patch general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch prepare omarchy

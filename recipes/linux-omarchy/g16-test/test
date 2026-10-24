@@ -1,9 +1,10 @@
 #!/bin/bash
 # Test the PR #8 kernel on the G16 after `deploy` and a reboot, then report.
 #
-#   recipes/linux-omarchy/g16-test/test [--hibernate] [--no-suspend] [--yes]
+#   recipes/linux-omarchy/g16-test/test [--hibernate] [--no-suspend] [--dock] [--yes]
 #   recipes/linux-omarchy/g16-test/test --temps [MIN] [--interval S] [--recovery MIN] [--ab]
 #   recipes/linux-omarchy/g16-test/test --resume-profile [--hibernates N]
+#   recipes/linux-omarchy/g16-test/test --ec-table
 #
 # Default mode: one PASS/FAIL/WARN/SKIP line per check, with evidence:
 #   kernel     uname and package versions
@@ -13,13 +14,20 @@
 #   0807       asus-armoury GA605KM limits present and correct; PPT writes refused
 #              without a custom fan curve (writes the current value back, no change)
 #   0481       panel_power_savings exists, reads 0, nothing enables CACP
+#   0810       a panel_power_savings write reaches the display firmware at once
+#              (kprobe on dmub_cacp_set_level; level 1 for 3 s, then back to 0)
 #   0773       gpiolib-acpi ignores GPIO 16 wakeups (the quirk, not a command-line option)
+#   0482       amdgpu replays DMUB HPDs skipped during resume (#205): the module has it,
+#              and no USB4 DP tunnel was torn down as "not active" this boot. With --dock
+#              it walks you through #205's dock scenario (unplug the dock with the lid
+#              closed, replug it while suspended, resume) and checks the monitors return
 #   suspend    one s2idle cycle (RTC wakes it after 30 s): at least 10 s of s0i3
 #   hibernate  only with --hibernate: hibernate, power-off, resume (needs a button press)
 #   9900       Zen 5c soft park knobs all at their defaults (off)
 #   nvidia     module, dkms, nvidia-smi, runtime PM back to suspended
 # --no-suspend skips the suspend cycle; --yes answers the yes/no prompts with yes
-# (the Fn+Super and touchpad steps still wait for you).
+# (the Fn+Super and touchpad steps still wait for you). --dock adds the 0482 dock
+# scenario (needs the USB4 dock with its DP monitors).
 #
 # --temps (#42): on battery with the quiet fan table (asus-wmi quiet, amd-pmf
 # balanced), 1 min idle, MIN minutes (default 10) of all-core load (stress-ng, or
@@ -34,6 +42,14 @@
 # baseline; hibernate (up to N times, default 3, until the table is lost); write
 # `quiet` again; if still lost, write `balanced` then `quiet`; one s2idle suspend,
 # and the same writes if it lost the table too. Hibernate needs a power-button press.
+# Each step also reads the fan table the EC really runs (FTBL, EC RAM 0x06:
+# 0 balanced, 1 turbo, 2 silent) through ec_sys's read-only debugfs file. With
+# 7.2.8-9.6 (0808) asus-wmi writes its profile back on every hibernate resume,
+# so the EC must read silent after each one.
+#
+# --ec-table (#185): read only, no writes, no load, about 10 s. Prints the
+# asus-wmi profile next to the EC's FTBL byte and the fan speeds, and says
+# whether they agree. Run it whenever the fans seem to spin on a cool idle.
 #
 # All modes write a report without host or user names to
 # ~/omarchy-asus-g16-test-<kernel>-<date>[-temps|-resume].md, show it, and offer to
@@ -42,7 +58,7 @@ set -uo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "$(readlink -f "$0")")/lib.sh"
 
-MODE=checks HIBERNATE=0 SUSPEND=1 YES=0 TEMPS_MIN=10 INTERVAL=5 RECOVERY=3 AB=0 HIBERNATES=3
+MODE=checks HIBERNATE=0 SUSPEND=1 DOCK=0 YES=0 TEMPS_MIN=10 INTERVAL=5 RECOVERY=3 AB=0 HIBERNATES=3
 while (($#)); do
   case $1 in
     --temps) MODE=temps; if [[ ${2:-} =~ ^[0-9]+$ ]]; then TEMPS_MIN=$2; shift; fi ;;
@@ -51,17 +67,19 @@ while (($#)); do
     --recovery) RECOVERY=${2:?}; shift ;;
     --ab) AB=1 ;;
     --resume-profile) MODE=resume ;;
+    --ec-table) MODE=ectable ;;
     --hibernates) HIBERNATES=${2:?}; shift ;;
     --hibernate) HIBERNATE=1 ;;
     --no-suspend) SUSPEND=0 ;;
+    --dock) DOCK=1 ;;
     --yes | -y) YES=1 ;;
-    -h | --help) sed -n '2,41s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,47s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
 done
-[[ ${G16_ROOT:-} != pkexec || $MODE == resume ]] ||
-  die "G16_ROOT=pkexec covers --resume-profile only; the other modes read root-only files with sudo"
+[[ ${G16_ROOT:-} != pkexec || $MODE == resume || $MODE == ectable ]] ||
+  die "G16_ROOT=pkexec covers --resume-profile and --ec-table only; the other modes read root-only files with sudo"
 for v in TEMPS_MIN INTERVAL RECOVERY HIBERNATES; do [[ ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ]] || die "$v must be a positive number"; done
 ((EUID != 0)) || die "run it as your normal user; it uses sudo where it must"
 is_g16 || die "this is not a GA605; the kit is for the ROG Zephyrus G16 GA605 only"
@@ -329,6 +347,42 @@ check_panel() {
   result "$st" 0481 "panel_power_savings exists and reads $v; nothing in the config enables CACP" "${det[@]}"
 }
 
+# 0810: the level must reach DMUB when it is written, not at the next modeset.
+# A kprobe on dmub_cacp_set_level (0481) records the level sent; level 1 is held
+# for 3 s (a slight contrast change), then 0 is written back. A check that cannot
+# run is a FAIL, not a SKIP: the PR's gate is this check passing.
+check_cacp_apply() {
+  local p out st det=()
+  p=$(panel_power_path)
+  [[ -n $p ]] || { result FAIL 0810 "could not run: no panel_power_savings (see 0481)"; return; }
+  [[ $(cat "$p" 2>/dev/null) == 0 ]] || { result FAIL 0810 "could not run: panel_power_savings is not 0; write 0 to it and run the test again"; return; }
+  printf '%s[sudo]%s panel_power_savings 1 for 3 s, then 0, watching dmub_cacp_set_level\n' "$Y" "$N"
+  out=$(sudo -n bash -s "$p" 2>&1 <<'ROOT'
+p=$1 T=/sys/kernel/tracing
+[[ -d $T/instances ]] || T=/sys/kernel/debug/tracing
+I=$T/instances/g16cacp
+cleanup() { echo 0 >"$p" 2>/dev/null; [[ -d $I ]] && { echo 0 >"$I/events/g16cacp/enable" 2>/dev/null; rmdir "$I" 2>/dev/null; }; echo '-:g16cacp/set' >>"$T/kprobe_events" 2>/dev/null; }
+trap cleanup EXIT
+echo 'p:g16cacp/set dmub_cacp_set_level level=%si:u32' >>"$T/kprobe_events" 2>/dev/null || { echo "kprobe: dmub_cacp_set_level not probeable"; exit 3; }
+mkdir "$I" 2>/dev/null || { echo "kprobe: no trace instance"; exit 3; }
+echo 1 >"$I/events/g16cacp/set/enable"
+echo 1 >"$p"; sleep 3
+echo "after write 1: $(grep -c 'level=1' "$I/trace")"
+echo 0 >"$p"; sleep 1
+echo "after write 0: $(grep -o 'level=[0-9]*' "$I/trace" | sort | uniq -c | tr -s ' ' | paste -sd, -)"
+ROOT
+)
+  case $? in
+    0) ;;
+    3) result FAIL 0810 "could not run: ${out:-kprobe unavailable}" "the 0810 gate needs this check to PASS"; return ;;
+    *) result FAIL 0810 "could not run (no sudo, or the probe failed): ${out:-?}" "the 0810 gate needs this check to PASS"; return ;;
+  esac
+  det+=("$out" "panel_power_savings now: $(cat "$p" 2>&1)")
+  if [[ $out =~ after\ write\ 1:\ ([0-9]+) ]] && ((BASH_REMATCH[1] > 0)); then st=PASS
+  else st=FAIL; det+=("level 1 never reached dmub_cacp_set_level: the write waits for the next modeset (the bug 0810 fixes)"); fi
+  result "$st" 0810 "panel_power_savings write $([[ $st == PASS ]] && echo 'reached the firmware at once' || echo 'did not reach the firmware')" "${det[@]}"
+}
+
 # 0773: the DMI quirk logs this at boot. The G16 carried the same as a kernel
 # command-line option before (#151); with that still set the check proves nothing.
 check_gpio16() {
@@ -341,6 +395,84 @@ check_gpio16() {
   [[ -n $msg ]] || { result FAIL 0773 "no 'Ignoring wakeup on pin 16' in this boot's kernel log" "${det[@]}"; return; }
   det+=("$msg")
   result "$st" 0773 "GPIO 16 wakeups ignored (AMDI0030:00@16); suspend with HDMI connected should now sleep" "${det[@]}"
+}
+
+# 0482 (#205): DP connectors of the amdgpu card, one "name status [link_settings]"
+# line each. link_settings (debugfs, root) shows Current vs Verified link rates.
+dp_links() {
+  local c dev pci ls
+  for c in /sys/class/drm/card*-DP-*; do
+    [[ -e $c/status ]] || continue
+    dev=$(readlink -f "${c%-DP-*}/device")
+    [[ $(basename "$(readlink "$dev/driver" 2>/dev/null)") == amdgpu ]] || continue
+    pci=${dev##*/}
+    ls=$(root_read cat "/sys/kernel/debug/dri/$pci/DP-${c##*-DP-}/link_settings" | tr -s ' \n' ' ')
+    printf '%s %s%s\n' "${c##*/}" "$(cat "$c/status")" "${ls:+ [$ls]}"
+  done
+}
+
+# A connected link trained below its verified rate is #205's second failure
+# (RBR after resume); 0482 does not address it, so it is a WARN with the evidence.
+dp_low_rate() {
+  local l cur ver
+  while read -r l; do
+    [[ $l == *" connected "* ]] || continue
+    cur=$(sed -n 's/.*Current: *[0-9]* *\(0x[0-9a-fA-F]*\).*/\1/p' <<<"$l")
+    ver=$(sed -n 's/.*Verified: *[0-9]* *\(0x[0-9a-fA-F]*\).*/\1/p' <<<"$l")
+    [[ -n $cur && -n $ver ]] && ((cur > 0 && cur < ver)) && printf '%s\n' "${l%% *}"
+  done
+}
+
+check_dock() {
+  local f n st=PASS det=() since s0 s1 teardown skipped replayed links before n0 n1 low
+  f=$(modinfo -F filename amdgpu 2>/dev/null)
+  # grep -c reads the whole stream: with -q the decompressor dies on the closed
+  # pipe and pipefail turns a match into a failure
+  case $f in
+    *.zst) have zstdcat && n=$(zstdcat "$f" 2>/dev/null | grep -ac 'Replay DMUB HPD skipped') ;;
+    *.xz) n=$(xzcat "$f" 2>/dev/null | grep -ac 'Replay DMUB HPD skipped') ;;
+    ?*) n=$(grep -ac 'Replay DMUB HPD skipped' "$f") ;;
+  esac
+  ((${n:-0} > 0)) || { result FAIL 0482 "the amdgpu module (${f:-not found}) has no HPD replay: not this kernel's build?"; return; }
+  det+=("amdgpu module: ${f##*/} has the HPD replay")
+  teardown=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -E '\(DP\): not active, tearing down')
+  [[ -z $teardown ]] || { st=FAIL; det+=("DP tunnels torn down as not active earlier in this boot:" "$teardown"); }
+  if ((!DOCK)); then
+    det+=("dock scenario not run (--dock)" "DP connectors now:" "$(dp_links)")
+    result "$st" 0482 "module has the HPD replay; $([[ $st == PASS ]] && echo 'no DP tunnel torn down this boot' || echo 'a DP tunnel was torn down this boot'); dock scenario: --dock" "${det[@]}"
+    return
+  fi
+  ((INTERACTIVE)) || { result SKIP 0482 "--dock needs a terminal to wait for you" "${det[@]}"; return; }
+  printf '\n%s0482 dock scenario (#205).%s Have the G16 on the USB4 dock with its DP monitors on\n' "$B" "$N"
+  printf 'and lit. Then: close the lid, unplug the dock, wait until the laptop has suspended,\n'
+  printf 'plug the dock back in, open the lid and unlock. Come back here and press Enter.\n'
+  ask "Ready (dock connected, monitors lit)?" || { result SKIP 0482 "declined" "${det[@]}"; return; }
+  # Connector names can change across a dock replug, so compare how many are connected.
+  before=$(dp_links) n0=$(grep -c ' connected' <<<"$before")
+  ((n0 > 0)) || { result SKIP 0482 "no DP connector is connected: dock the G16 with its monitors on first" "${det[@]}"; return; }
+  since=$(date '+%Y-%m-%d %H:%M:%S') s0=$(cat /sys/power/suspend_stats/success)
+  read -r -p "Press Enter after the resume, with the lid open and the session unlocked... " _ || true
+  note "waiting 20 s: a failed DP tunnel is torn down 12 s after it is set up"
+  sleep 20
+  s1=$(cat /sys/power/suspend_stats/success)
+  skipped=$(journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -c 'Skip DMUB HPD IRQ callback')
+  replayed=$(journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep 'Replay DMUB HPD skipped')
+  teardown=$(journalctl -k --since "$since" -o cat --no-pager 2>/dev/null | grep -E '\(DP\): not active, tearing down')
+  links=$(dp_links) n1=$(grep -c ' connected' <<<"$links")
+  low=$(dp_low_rate <<<"$links")
+  det+=("suspend_stats success $s0 -> $s1" "HPDs skipped during the resume: $skipped" "replayed:" "${replayed:-none}"
+    "DP connectors before ($n0 connected):" "$before" "DP connectors after the resume ($n1 connected):" "$links")
+  if ((s1 == s0)); then
+    result FAIL 0482 "no suspend happened between the prompts (did logind suspend after the unplug?)" "${det[@]}"
+  elif [[ -n $teardown ]]; then
+    result FAIL 0482 "DP tunnels torn down as not active after the resume (#205 not fixed)" "${det[@]}" "$teardown"
+  elif ((n1 < n0)); then
+    result FAIL 0482 "only $n1 of $n0 DP monitors came back connected after the resume" "${det[@]}"
+  elif [[ -n $low ]]; then
+    result WARN 0482 "monitors back; link below its verified rate on: ${low//$'\n'/ } (#205 failure 2, not covered by 0482)" "${det[@]}"
+  else
+    result "$st" 0482 "all $n0 DP monitors back after the dock was replugged in suspend; $skipped HPD(s) skipped, $(grep -c . <<<"$replayed") replayed" "${det[@]}"
+  fi
 }
 
 check_hfi() {
@@ -459,7 +591,7 @@ check_hibernate() {
 run_checks() {
   say "G16 test: $EXPECT_KREL (PR #$PR), running $KREL"
   [[ -f $BASE ]] || note "no baseline from deploy: comparisons are skipped"
-  sudo_up_front "dmesg fallback, amd_pmc counters, reading the touchpad device, the asus-armoury write check, the RTC alarm"
+  sudo_up_front "dmesg fallback, amd_pmc counters, reading the touchpad device, the asus-armoury write check, the CACP kprobe, the RTC alarm"
   echo
   local booted=1
   check_kernel || booted=0
@@ -469,7 +601,9 @@ run_checks() {
     check_touchpad
     check_armoury
     check_panel
+    check_cacp_apply
     check_gpio16
+    check_dock
     check_hfi
     check_nvidia
     check_suspend
@@ -713,14 +847,70 @@ write_profile() { # value
     die "writing $1 to $d/profile failed"
 }
 
+# The fan table the EC runs: FTBL, EC RAM 0x06 (the DSDT's 0x00120075 handler
+# writes 0 balanced, 1 turbo, 2 silent there). ec_sys's debugfs file is
+# read-only unless loaded with write_support=1, which the kit never does.
+EC_IO=/sys/kernel/debug/ec/ec0/io
+EC_OK=0
+ec_up() {
+  if [[ ${G16_ROOT:-} == pkexec ]]; then
+    as_root "Load ec_sys (read-only) and read the EC fan-table byte for the #185 test" sh -c "modprobe ec_sys write_support=0 && test -r $EC_IO" && EC_OK=1
+  else
+    as_root "Load ec_sys (read-only) to read the EC fan-table byte for the #185 test" modprobe ec_sys write_support=0 &&
+      root_read test -r "$EC_IO" && EC_OK=1
+  fi
+  ((EC_OK)) || note "EC readout unavailable (ec_sys or debugfs missing): judging by fans and load only"
+}
+ec_ftbl() { # prints balanced|turbo|silent|raw value, or ? when unreadable
+  local v
+  ((EC_OK)) || { echo '?'; return; }
+  if [[ ${G16_ROOT:-} == pkexec ]]; then
+    v=$(systemd-run --user --wait -q -P pkexec --disable-internal-agent od -An -tu1 -j6 -N1 "$EC_IO" 2>/dev/null)
+  else
+    v=$(root_read od -An -tu1 -j6 -N1 "$EC_IO")
+  fi
+  ftbl_name "$v"
+}
+
+run_ectable() {
+  local hw a m e i f1 f2 f3 rows='' agree
+  say "EC fan table against the asus-wmi profile (#$RESUME_ISSUE), $KREL"
+  hw=$(hwmon_by_name asus || true)
+  [[ -n $hw ]] || die "no asus hwmon"
+  ec_up
+  ((EC_OK)) || die "cannot read the EC (ec_sys): nothing to compare"
+  a=$(profile_of asus-wmi) m=$(profile_of amd-pmf)
+  for i in 1 2 3; do
+    e=$(ec_ftbl)
+    f1=$(cat "$hw/fan1_input" 2>/dev/null) f2=$(cat "$hw/fan2_input" 2>/dev/null) f3=$(cat "$hw/fan3_input" 2>/dev/null)
+    rows+="| $i | $a | $m | $e | ${f1:-?}/${f2:-?}/${f3:-?} | $(awk '{printf "%.1f", $1/1000}' "$(hwmon_by_name k10temp)/temp1_input" 2>/dev/null) |"$'\n'
+    note "sample $i: asus-wmi $a, amd-pmf $m, EC $e, fans ${f1:-?}/${f2:-?}/${f3:-?}"
+    ((i < 3)) && sleep 5
+  done
+  if [[ $e == '?' ]]; then
+    agree="unknown (EC unreadable)"
+  elif [[ $(ec_verdict quiet "$e" "$a") == quiet ]]; then
+    agree="agree"
+  else
+    agree="**disagree**: the EC runs $e while asus-wmi reports $a"
+  fi
+  local hib f intro
+  hib=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -c 'hibernation exit')
+  f=$HOME/omarchy-asus-g16-test-$KREL-$STAMP-ectable.md
+  intro="$(header_info)"$'\n'"- Hibernate resumes this boot: $hib"$'\n\n'
+  intro+="Profile and EC fan table: $agree"$'\n\n'"| Sample | asus-wmi | amd-pmf | EC FTBL | Fans rpm | Tctl C |"$'\n'"|---|---|---|---|---|---|"$'\n'"$rows"
+  write_report "$f" "EC fan table vs asus-wmi profile (#$RESUME_ISSUE)" "$intro"
+  offer_post "$f" issue "$RESUME_ISSUE"
+}
+
 # One step: 120 s idle, then 60 s load, sampled every second into $RCSV. Adds a
 # report row and sets PROBE to quiet (table in force), lost or unclear.
 RROWS=() PROBE=''
 probe() { # label
-  local label=$1 t=0 phase start=$SECONDS line tc f1 f2 f3 aw
+  local label=$1 t=0 phase start=$SECONDS line tc f1 f2 f3 aw ec='?'
   say "[$label] 120 s idle, then 60 s load"
   while ((t < 180)); do
-    if ((t < 120)); then phase=idle; else phase=load; ((${#LOAD_PIDS[@]})) || start_load 60; fi
+    if ((t < 120)); then phase=idle; else phase=load; ((${#LOAD_PIDS[@]})) || { ec=$(ec_ftbl); start_load 60; }; fi
     line=$(sample "$t" "$phase")
     printf '"%s",%s\n' "${label//\"/}" "$line" >>"$RCSV"
     IFS=, read -r _ _ tc _ _ f1 f2 f3 aw _ <<<"$line"
@@ -732,9 +922,9 @@ probe() { # label
   stop_load
   echo
   line=$(python3 -I "$KIT_DIR/probe-verdict.py" "$RCSV" "$label")
-  PROBE=${line%% *}
-  RROWS+=("| $label | ${line#* } | **$PROBE** |")
-  note "$label: $PROBE (asus-wmi/amd-pmf | idle fans | idle Tctl | peak Tctl | APU W | MHz: ${line#* })"
+  PROBE=$(ec_verdict "${line%% *}" "$ec" "$(profile_of asus-wmi)")
+  RROWS+=("| $label | ${line#* } | $ec | **$PROBE** |")
+  note "$label: $PROBE, EC table $ec (asus-wmi/amd-pmf | idle fans | idle Tctl | peak Tctl | APU W | MHz: ${line#* })"
 }
 
 do_hibernate() {
@@ -814,6 +1004,7 @@ run_resume() {
   RCSV=$STATE_DIR/resume-$STAMP.csv
   printf 'step,%s\n' "$sample_header" >"$RCSV"
   table=$(fan_table)
+  ec_up
 
   probe baseline
   # A resume can only be blamed for losing the table if it was in force before.
@@ -846,8 +1037,8 @@ run_resume() {
   intro+=$'\n'"- Hibernate resumes this boot before the run: $since0"$'\n\n'"### Result"$'\n\n'
   intro+="- Hibernate: table **$hib** after $n cycle(s)${hfix:+; writing the profile again: **$hfix**}"$'\n'
   intro+="- s2idle: table **$sus**${sfix:+; writing the profile again: **$sfix**}"$'\n'
-  intro+="- Verdict per step (probe-verdict.py): quiet = at most 35 W (and at least 30 W) with peak Tctl below 90 C; lost = at least 37 W, peak Tctl 90 C or more, or fans spinning on an idle below 50 C; else unclear"$'\n\n'
-  intro+="| Step | asus-wmi/amd-pmf | Idle fans rpm | Idle Tctl C | Peak Tctl C | APU W | MHz | Verdict |"$'\n'"|---|---|---|---|---|---|---|---|"$'\n'
+  intro+="- Verdict per step (probe-verdict.py): quiet = at most 35 W (and at least 30 W) with peak Tctl below 90 C; lost = at least 37 W, peak Tctl 90 C or more, fans spinning on an idle below 50 C, or an EC table other than the profile's (silent for quiet); else unclear"$'\n\n'
+  intro+="| Step | asus-wmi/amd-pmf | Idle fans rpm | Idle Tctl C | Peak Tctl C | APU W | MHz | EC table | Verdict |"$'\n'"|---|---|---|---|---|---|---|---|---|"$'\n'
   intro+=$(printf '%s\n' "${RROWS[@]}")
   intro+=$'\n\n'"Fan curves reported by asus-wmi at the start:"$'\n\n```\n'"$table"$'\n```\n'
   write_report "$f" "Quiet fan table across hibernate and s2idle (#$RESUME_ISSUE)" "$intro"
@@ -858,5 +1049,6 @@ run_resume() {
 case $MODE in
   temps) run_temps ;;
   resume) run_resume ;;
+  ectable) run_ectable ;;
   *) run_checks ;;
 esac

@@ -1,7 +1,7 @@
-From 7ce59936ea833a5c28bee729c487ed12d376c302 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 04:55:57 -0400
-Subject: [PATCH 23/23] Leave mpv alone when the user sets hwdec or
+Subject: [PATCH 23/24] Leave mpv alone when the user sets hwdec or
  vaapi-device anywhere
 
 The hybrid video decode pin skipped only mpv options set at the top level
@@ -179,6 +179,3 @@ index 156d2ad0..2b0021ef 100755
  
  # Machines where the pin does not apply are left exactly as they were.
  for description in "AMD only" "NVIDIA drives the display" "No device claims boot_vga"; do
--- 
-2.55.0
-

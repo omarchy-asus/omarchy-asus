@@ -7,6 +7,12 @@ Rebase onto upstream workflow, scheduled once per channel:
 - **RC**: `next/omarchy-4.5`, built against Omarchy rc in its own chroot, published to the
   `rc-x86_64` release.
 
+**Moving to one trunk (#309):** `main` is now the RC channel's trunk, so the RC run builds from
+`main`. Quattro is frozen on what it serves until the Omarchy 4.5 stable switch: nothing is
+rebuilt or published to `x86_64`, and the build and publish scripts refuse the quattro channel
+unless `OMARCHY_ASUS_ALLOW_QUATTRO=1` (`bin/sync-release --dry-run` still reads it). The rest of
+this page still describes the two-branch layout until it is rewritten.
+
 On each channel, Arch packages come through that channel's Omarchy mirror, and `linux-omarchy`
 comes from its `[omarchy]`.
 

@@ -1,7 +1,7 @@
-From 84f62c5ff1925d917c367121df416ff6ccaa6cea Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:26:59 -0400
-Subject: [PATCH 06/18] Add omarchy-hw-igpu-render-node for hybrid NVIDIA
+Subject: [PATCH 06/24] Add omarchy-hw-igpu-render-node for hybrid NVIDIA
  laptops
 
 Prints the stable /dev/dri/by-path render node of the iGPU that drives
@@ -159,6 +159,3 @@ index 00000000..3e07b26d
 +
 +[[ ! -e $tmp_dir/lspci.log ]] || fail "the render node comes from sysfs, never lspci"
 +pass "the render node comes from sysfs, never lspci"
--- 
-2.55.0
-

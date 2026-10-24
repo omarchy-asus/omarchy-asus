@@ -3,8 +3,10 @@
 upstream arch hyprland
 mode overlay
 take PKGBUILD LICENSE
-keep NOTES.md NO_DISTCC
+keep NOTES.md
 pkgbuild-patch pkgbuild-pkgdesc-label.diff
 patch reconnect-render-offset.patch prepare
+# not on Hyprland main yet (checked 2026-10-24); drop it once a release sends leave on capability loss
+patch seat-leave-on-capability-loss.patch prepare
 # main has the same fix (e9e2f64c, #16140); flag the first release that contains it
 fixed-upstream hyprwm/Hyprland e9e2f64c v{pkgver}

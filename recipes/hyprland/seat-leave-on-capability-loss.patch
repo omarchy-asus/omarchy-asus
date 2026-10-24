@@ -1,0 +1,41 @@
+--- a/src/protocols/core/Seat.cpp
++++ b/src/protocols/core/Seat.cpp
+@@ -584,6 +584,28 @@
+     if (caps == m_currentCaps)
+         return;
+ 
++    // A lost capability takes its focus with it: send leave first, as wlroots does. sendLeave() is a no-op once
++    // m_currentCaps lacks the bit, and a client that never gets leave keeps treating its surface as focused, so it
++    // never re-activates on the enter it gets when the device comes back (e.g. keyboards removed across suspend).
++    const uint32_t LOST = m_currentCaps & ~caps;
++
++    if (LOST & eHIDCapabilityType::HID_INPUT_CAPABILITY_KEYBOARD) {
++        for (auto const& k : m_keyboards) {
++            k->sendLeave();
++        }
++    }
++
++    if (LOST & eHIDCapabilityType::HID_INPUT_CAPABILITY_POINTER) {
++        for (auto const& p : m_pointers) {
++            if (!p->m_currentSurface)
++                continue;
++
++            // the leave (and any button releases before it) is one pointer frame
++            p->sendLeave();
++            p->sendFrame();
++        }
++    }
++
+     m_currentCaps = caps;
+ 
+     for (auto const& s : m_seatResources) {
+--- a/src/protocols/core/Seat.hpp
++++ b/src/protocols/core/Seat.hpp
+@@ -110,6 +110,7 @@
+     } m_listeners;
+ 
+     friend class CWLSeatResource;
++    friend class CWLSeatProtocol;
+ };
+ 
+ class CWLKeyboardResource {

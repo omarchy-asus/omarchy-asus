@@ -1,7 +1,7 @@
-From 20f7ec56da1a684ac9bcced8d88bdc789d1df7df Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:26:17 -0400
-Subject: [PATCH 04/18] Stop the idle fans on battery on the ROG Zephyrus G16
+Subject: [PATCH 04/24] Stop the idle fans on battery on the ROG Zephyrus G16
  GA605KM
 
 In balanced its fans spin at 2000-3800 rpm even idle and cool. On battery
@@ -10,10 +10,9 @@ amd-pmf on balanced: the fans stop (~0.8 W saved) and the CPU still
 boosts fully. A helper with a two-argument sudoers grant does the write,
 only when the state changes, since each write wakes the dGPU for ~20 s.
 
-Backport to v4.0.5: v4.0.5's omarchy-powerprofiles-set does not refresh the
-shell's battery service after a set (no `omarchy-shell -q battery
-refreshPowerProfile`, which is quattro-only), so the quiet-fans call goes right
-after powerprofilesctl set without that line.
+Backport to v4.5.0-rc1: as on quattro; the quiet-fans call follows the
+shell's `omarchy-shell -q battery refreshPowerProfile` after powerprofilesctl
+set.
 
 Co-Authored-By: Claude Opus 5.5
 Backport-of: c55ffe2b0b6ad1a81bd012dc5130294b36544556
@@ -155,12 +154,12 @@ index 00000000..cf83bba2
 +
 +printf '%s\n' "$target" >"$asus/profile"
 diff --git a/bin/omarchy-powerprofiles-set b/bin/omarchy-powerprofiles-set
-index 5d67f819..e06e05b1 100755
+index a6afc2ad..4099295b 100755
 --- a/bin/omarchy-powerprofiles-set
 +++ b/bin/omarchy-powerprofiles-set
-@@ -78,6 +78,16 @@ fi
- 
+@@ -79,6 +79,16 @@ fi
  powerprofilesctl set "$profile" || exit
+ omarchy-shell -q battery refreshPowerProfile >/dev/null 2>&1 || true
  
 +# The G16 GA605KM's fans run at idle in balanced; on battery they can stop
 +# without slowing the CPU. Leaving battery or balanced undoes it.
@@ -346,6 +345,3 @@ index 00000000..07cc797f
 +[[ $(set_profile battery power-saver) == "off" ]] || fail "power-saver on battery turns quiet fans off"
 +[[ $(STUB_PRODUCT=GA403UV set_profile battery balanced) == "" ]] || fail "other machines never call the helper"
 +pass "omarchy-powerprofiles-set turns quiet fans on only for balanced on battery on the GA605KM"
--- 
-2.55.0
-

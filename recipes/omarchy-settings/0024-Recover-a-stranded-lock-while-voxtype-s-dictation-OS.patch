@@ -1,12 +1,12 @@
-From f0833bface2f4147e030f0f86033a8b8f3956b64 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Thu, 22 Oct 2026 03:04:35 -0400
 Subject: [PATCH 24/24] Recover a stranded lock while voxtype's dictation OSD
  is running
 
-Backport-of: omacom/omarchy#15912 (ab447851), applies to v4.0.5 unchanged
+Backport-of: omacom/omarchy#15912 (ab447851), applies to v4.5.0-rc1 unchanged
 but for the test's locker paths, which sit under /data instead of a home
-directory. Fork commits 763f4182 and c29f0bdd on asus/v4-0-5, squashed.
+directory. Fork commits f87801d1 and d528fca1 on asus/v4-5-0-rc1, squashed.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

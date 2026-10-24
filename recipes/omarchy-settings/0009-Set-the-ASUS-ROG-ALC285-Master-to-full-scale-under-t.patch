@@ -1,7 +1,7 @@
-From 73f831c275f56db8df30f325167637d53c663fd3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:28:04 -0400
-Subject: [PATCH 09/18] Set the ASUS ROG ALC285 Master to full scale under the
+Subject: [PATCH 09/24] Set the ASUS ROG ALC285 Master to full scale under the
  soft mixer
 
 The ASUS ROG audio setup moves volume into software (api.alsa.soft-mixer)
@@ -168,6 +168,3 @@ index 00000000..3002b55e
 +run "$migration" || fail "migration succeeds without the soft mixer"
 +! grep -q -e '^amixer .*set Master' -e '^notify' "$calls" || fail "migration is silent when PipeWire drives Master" "$(cat "$calls")"
 +pass "migration only acts while the soft mixer is in use"
--- 
-2.55.0
-
