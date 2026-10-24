@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
-Date: Sat, 24 Oct 2026 04:27:00 -0400
+Date: Sat, 24 Oct 2026 05:13:03 -0400
 Subject: [PATCH] Keep the sleep monitor running across suspends
 
 omarchy-sleep-lock.service exited after every lock and was restarted by
@@ -19,29 +19,29 @@ comes. On PrepareForSleep(true) it locks, then releases the inhibitor; on
 PrepareForSleep(false), when logind accepts inhibitors again, it takes a
 new one. An "already running" rejection (a monitor started
 mid-transition) is retried briefly and then left to the next
-PrepareForSleep(false). A holder that dies on its own is replaced at
-once. Other rejections and a lost event stream still exit 1.
+PrepareForSleep(false); a suspend in that time still gets the lock. A
+holder that dies on its own is replaced at once. Other rejections and a lost event stream still exit 1.
 
 The holder lasts until its stdin closes and the monitor holds the other
 end, so release and the monitor's own end, a SIGKILL included, both end
 the inhibitor without polling. The FIFO is unlinked as soon as it is
 opened, so nothing is left in the runtime directory.
 
-Fork commits ddd356eef + 3410746c3 on asus/v4-5-0-rc1, squashed. Same
-problem as omacom/omarchy#13782, which retries the rejected restart;
-this removes the restart instead.
+Fork commits ddd356eef + 3410746c3 + fbfcc3028 on asus/v4-5-0-rc1,
+squashed. Same problem as omacom/omarchy#13782, which retries the
+rejected restart; this removes the restart instead.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- bin/omarchy-system-sleep-monitor   | 198 ++++++++++++++------
- test/shell.d/sleep-monitor-test.sh | 281 +++++++++++++++++++++++------
- 2 files changed, 374 insertions(+), 105 deletions(-)
+ bin/omarchy-system-sleep-monitor   | 203 ++++++++++++++------
+ test/shell.d/sleep-monitor-test.sh | 286 +++++++++++++++++++++++------
+ 2 files changed, 384 insertions(+), 105 deletions(-)
 
 diff --git a/bin/omarchy-system-sleep-monitor b/bin/omarchy-system-sleep-monitor
-index 2100ceebf..e5d4603ac 100755
+index 2100ceebf..8b09bffc2 100755
 --- a/bin/omarchy-system-sleep-monitor
 +++ b/bin/omarchy-system-sleep-monitor
-@@ -4,58 +4,152 @@
+@@ -4,58 +4,157 @@
  # omarchy:group=system
  # omarchy:hidden=true
  
@@ -223,7 +223,12 @@ index 2100ceebf..e5d4603ac 100755
 +  case $line in
 +    *"boolean true"*)
 +      # Without the holder's pipe: the inhibitor must end with the monitor.
-+      "$sleep_lock" {hold_fd}>&-
++      # Lock all the same when there is none (logind is mid-transition).
++      if [[ -n $hold_fd ]]; then
++        "$sleep_lock" {hold_fd}>&-
++      else
++        "$sleep_lock"
++      fi
 +      release_inhibitor
 +      ;;
 +    *"boolean false"*)
@@ -247,7 +252,7 @@ index 2100ceebf..e5d4603ac 100755
 +
 +exit 1
 diff --git a/test/shell.d/sleep-monitor-test.sh b/test/shell.d/sleep-monitor-test.sh
-index 20850d4b6..afc612a0a 100755
+index 20850d4b6..849d75c75 100755
 --- a/test/shell.d/sleep-monitor-test.sh
 +++ b/test/shell.d/sleep-monitor-test.sh
 @@ -6,14 +6,28 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
@@ -319,7 +324,7 @@ index 20850d4b6..afc612a0a 100755
  SH
  
  chmod +x \
-@@ -44,63 +71,211 @@ chmod +x \
+@@ -44,63 +71,216 @@ chmod +x \
    "$mock_omarchy/bin/omarchy-system-sleep-lock"
  ln -s "$sleep_monitor" "$mock_omarchy/bin/omarchy-system-sleep-monitor"
  
@@ -527,6 +532,11 @@ index 20850d4b6..afc612a0a 100755
 +running "$monitor_pid" ||
 +  fail "sleep monitor keeps running when logind is mid-transition" "$(<"$tmpdir/monitor-stderr")"
 +inhibitor_count_is 0 || fail "sleep monitor holds no inhibitor logind rejected"
++send_event true
++wait_for lock_count_is 1 || fail "sleep monitor locks for a sleep event while it holds no inhibitor"
++running "$monitor_pid" ||
++  fail "sleep monitor keeps running after locking without an inhibitor" "$(<"$tmpdir/monitor-stderr")"
++pass "sleep monitor locks for a sleep event while it holds no inhibitor"
 +rm -f "$inhibit_reject"
 +send_event false
 +wait_for holding || fail "sleep monitor takes the inhibitor once the transition ends"
