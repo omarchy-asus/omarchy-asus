@@ -180,6 +180,16 @@ def wr(path, value):
         fail(f"write {value!r} to {path} refused: {e.strerror}")
 
 
+def tracefs_append(path, line):
+    """One command to a tracefs control file such as kprobe_events. Not open(path, "a"):
+    Python seeks to the end on open, and tracefs refuses that with EINVAL."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    try:
+        os.write(fd, line.encode())
+    finally:
+        os.close(fd)
+
+
 def glob_dirs(base, test):
     try:
         names = sorted(os.listdir(base))
@@ -569,7 +579,9 @@ class Daemon:
         if not os.path.isdir(os.path.join(base, "instances")):
             fail(f"no tracefs at {base}")
         inst = os.path.join(base, "instances", f"g16-testd-{name}")
-        self.rec["traces"][name] = {"started": time.time(), "kprobes": kp}
+        syms = {k: self._kprobe_symbol(k) for k in kp}
+        # "kprobes" lists only the probes actually added, so trace-stop removes no others
+        self.rec["traces"][name] = {"started": time.time(), "kprobes": []}
         self.save()
         try:
             self.h.mkinstance(inst)
@@ -577,31 +589,58 @@ class Daemon:
             del self.rec["traces"][name]
             self.save()
             fail(f"cannot create the tracefs instance: {e.strerror}")
-        wr(f"{inst}/tracing_on", 0)
-        wr(f"{inst}/buffer_size_kb", kb)
-        for k in kp:
-            self._kprobe_add(base, k)
-        on, missing = [], []
-        for e in ev + [f"g16testd/{_kp_event(k)}" for k in kp]:
-            f = f"{inst}/events/{e}/enable"
-            if os.path.exists(f):
-                wr(f, 1)
-                on.append(e)
-            else:
-                missing.append(e)
-        if not on:
-            self.trace_stop(name, False)
-            fail("none of the events exist in this kernel")
-        wr(f"{inst}/tracing_on", 1)
+        try:
+            wr(f"{inst}/tracing_on", 0)
+            wr(f"{inst}/buffer_size_kb", kb)
+            for k in kp:
+                self._kprobe_add(base, k, syms[k])
+                self.rec["traces"][name]["kprobes"].append(k)
+                self.save()
+            on, missing = [], []
+            for e in ev + [f"g16testd/{_kp_event(k)}" for k in kp]:
+                f = f"{inst}/events/{e}/enable"
+                if os.path.exists(f):
+                    wr(f, 1)
+                    on.append(e)
+                else:
+                    missing.append(e)
+            if not on:
+                fail("none of the events exist in this kernel")
+            wr(f"{inst}/tracing_on", 1)
+        except (Refused, OSError) as e:
+            # never leave a half-started instance that records nothing (G16 test #18)
+            try:
+                self.trace_stop(name, False)
+            except (Refused, OSError) as e2:
+                log(f"trace {name}: clean-up after a failed start: {e2}")
+            if isinstance(e, Refused):
+                raise
+            fail(f"trace {name}: {e.strerror or e}")
         return {"on": on, "missing": missing}
 
-    def _kprobe_add(self, base, k):
-        line = f"p:g16testd/{_kp_event(k)} {KPROBES[k]}\n"
+    def _kprobe_symbol(self, k):
+        """KPROBES[k] if it names exactly one function in this kernel; the kernel
+        refuses a name it has more than once."""
+        sym = KPROBES[k]
         try:
-            with open(os.path.join(base, "kprobe_events"), "a") as f:
-                f.write(line)
+            with open(os.path.join(self.h.proc, "kallsyms")) as f:
+                hits = [ln.split() for ln in f if f" {sym}" in ln]
+        except OSError:
+            return sym  # the kernel still checks the name itself
+        hits = [h for h in hits if len(h) >= 3 and h[2] == sym and h[1] in "tTwW"]
+        if not hits:
+            fail(f"kprobe {k}: no function {sym} in this kernel")
+        if len(hits) > 1:
+            fail(f"kprobe {k}: {sym} names {len(hits)} functions in this kernel ("
+                 + ", ".join(f"{h[0]}{' ' + h[3] if len(h) > 3 else ''}" for h in hits) + ")")
+        return sym
+
+    def _kprobe_add(self, base, k, sym):
+        try:
+            tracefs_append(os.path.join(base, "kprobe_events"), f"p:g16testd/{_kp_event(k)} {sym}\n")
         except OSError as e:
-            fail(f"kprobe {k} ({KPROBES[k]}) refused: {e.strerror}")
+            why = rd(os.path.join(base, "error_log")).splitlines()[-2:]
+            fail(f"kprobe {k} ({sym}) refused: {e.strerror}" + (f" ({' / '.join(why)})" if why else ""))
 
     def trace_stop(self, name, keep=True):
         t = self.rec["traces"].get(name) or fail(f"no trace {name} running")
@@ -624,8 +663,7 @@ class Daemon:
         for k in t["kprobes"]:
             if k not in in_use:
                 try:
-                    with open(os.path.join(base, "kprobe_events"), "a") as f:
-                        f.write(f"-:g16testd/{_kp_event(k)}\n")
+                    tracefs_append(os.path.join(base, "kprobe_events"), f"-:g16testd/{_kp_event(k)}\n")
                 except OSError as e:
                     log(f"kprobe {k} removal refused: {e.strerror}")
         del self.rec["traces"][name]

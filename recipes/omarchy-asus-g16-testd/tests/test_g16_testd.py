@@ -574,6 +574,58 @@ class Session(unittest.TestCase):
         self.assertFalse(os.path.exists(inst))
         self.assertTrue(get(self.root, "sys/kernel/tracing/kprobe_events").endswith("-:g16testd/pci_set_power_state"))
 
+    def test_trace_kprobe_symbol_must_be_unique(self):
+        put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
+        put(self.root, "proc/kallsyms", "\n".join([
+            "ffffffff81000010 t pci_set_power_state.cold",
+            "ffffffff81000020 T pci_set_power_state",
+            "ffffffff81000030 T __pm_runtime_resume",
+            "ffffffff81000040 t __pm_runtime_resume\t[fake_mod]",
+            "ffffffff81000050 r __ksymtab_pci_set_power_state"]))
+        self.start()
+        inst = os.path.join(self.root, "sys/kernel/tracing/instances/g16-testd-x")
+        rc, out = self.g("call", "trace-start", "x", "timer/hrtimer_start", "pm-runtime-resume")
+        self.assertEqual(rc, 1)
+        self.assertIn("__pm_runtime_resume names 2 functions", out)
+        self.assertIn("ffffffff81000040 [fake_mod]", out)
+        rc, out = self.g("call", "trace-start", "x", "timer/hrtimer_start", "asus-wmi-set-devstate")
+        self.assertEqual(rc, 1)
+        self.assertIn("no function asus_wmi_set_devstate", out)
+        self.assertFalse(os.path.exists(inst))
+        self.assertEqual(get(self.root, "sys/kernel/tracing/kprobe_events"), "")
+        # one text symbol of that name, besides .cold and __ksymtab_: probed by name
+        rc, out = self.g("call", "trace-start", "x", "timer/hrtimer_start", "pci-set-power-state")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(get(inst, "tracing_on"), "1")
+        self.assertEqual(get(self.root, "sys/kernel/tracing/kprobe_events"),
+                         "p:g16testd/pci_set_power_state pci_set_power_state")
+        self.stop()
+
+    def test_trace_kprobe_refused_leaves_nothing(self):
+        # G16 test #18: the kprobe write failed, trace-start stopped half way and left an
+        # instance with tracing_on 0 and no events; trace-stop then removed a probe never added
+        put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
+        kpe = os.path.join(self.root, "sys/kernel/tracing/kprobe_events")
+        os.unlink(kpe)
+        os.mkdir(kpe)  # any write to it fails
+        put(self.root, "sys/kernel/tracing/error_log", "[ 1.0] trace_kprobe: error: Invalid argument")
+        self.start()
+        inst = os.path.join(self.root, "sys/kernel/tracing/instances/g16-testd-x")
+        rc, out = self.g("call", "trace-start", "x", "timer/hrtimer_start", "pci-set-power-state")
+        self.assertEqual(rc, 1)
+        self.assertIn("kprobe pci-set-power-state (pci_set_power_state) refused", out)
+        self.assertIn("trace_kprobe: error", out)
+        self.assertFalse(os.path.exists(inst))
+        rc, out = self.g("call", "trace-stop", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("no trace x running", out)
+        self.assertEqual(self.g("call", "trace-start", "x", "timer/hrtimer_start")[0], 0)
+        self.assertEqual(get(inst, "events/timer/hrtimer_start/enable"), "1")
+        self.assertEqual(get(inst, "tracing_on"), "1")
+        rc, out = self.stop()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("removal refused", get(self.root, "daemon.log"))
+
     def test_trace_left_running_removed_at_stop(self):
         put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
         self.start()
