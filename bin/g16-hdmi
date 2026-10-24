@@ -1,0 +1,250 @@
+#!/bin/bash
+# g16-hdmi: why the G16's HDMI port (wired to the RTX) sometimes isn't detected (#158).
+# EXPERIMENTAL.
+#
+#   g16-hdmi [snapshot]          the state now: the RTX's connectors (status, EDID),
+#                                its runtime PM, the hotplug GPIO interrupt counts, and
+#                                this boot's nvidia display warnings
+#   g16-hdmi watch [--hours N] [--interval S]
+#                                log one line (journal tag g16-hdmi, and a file) each
+#                                time any of that changes: a hotplug uevent, the RTX
+#                                sleeping or waking, a hotplug GPIO edge, a resume.
+#                                Default 24 h (at most 72), polled every 5 s (1-60)
+#   g16-hdmi log [--boot B]      the watch lines and the kernel's display and suspend
+#                                lines for boot B (default 0, this boot; -1 the last)
+#   g16-hdmi trace start|stop    the RTX's runtime PM transitions and the system
+#                                suspend phases, in a tracefs instance of a g16-testd
+#                                session (#277); stop writes the timeline
+#
+# How HDMI hotplug reaches the RTX (decoded from the G16's SSDT "CPMGPIO0"): the
+# HDMI port's hotplug line is AMD GPIO 16, an _AEI event on both edges. Its _EVT
+# does Notify(\_SB.PCI0.GPP9.PEGP, 0x81), and nvidia's ACPI handler
+# (RmHandleDisplayChange) wakes the RTX to re-detect, but only while the RTX is
+# powered down (GC6/GCOFF). GPIO 5 notifies the RTX the same way for its other
+# display output. So a GPIO 16 edge that doesn't end in a connector change, or a
+# connector change with no GPIO 16 edge, says which side lost the hotplug.
+#
+# Read-only, no root (trace goes through the testd session's helper). It wakes
+# nothing: connector status and EDID are sysfs reads of the driver's cached
+# state, the RTX's power state comes from sysfs and /proc/driver/nvidia (no
+# nvidia-smi), and it never forces a re-probe (on 615.x a forced detect can
+# deadlock nvkms, NVIDIA/open-gpu-kernel-modules#1371). No window, no sound.
+# Output has the host and user names and $HOME scrubbed; a monitor's name is kept,
+# its serial number is never read.
+#
+# Files: ~/.local/state/omarchy-asus/hdmi/ (watch-*.log, trace-*.txt).
+# Exit status: 0 done, 1 a problem, 2 bad usage, 3 no g16-testd session (trace).
+set -uo pipefail
+
+SYS=${G16_HDMI_SYS:-/sys}     # the overrides are for tests only
+PROC=${G16_HDMI_PROC:-/proc}
+STATE=${G16_HDMI_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-asus/hdmi}
+TESTD=${G16_HDMI_TESTD:-g16-testd}
+TESTD_OUT=${G16_HDMI_TESTD_OUT:-/run/omarchy-asus-g16-testd/out}  # where testd keeps a stopped trace
+HPD_PIN=16 OTHER_PIN=5
+# nvidia's display warnings (and 0004's, #213) that matter here
+KPAT='Flip event timeout|Unable to read EDID|FRL link training failed|D-Notifier|No EDID on connected HDMI|NVRM: Xid|nvidia-modeset: (ERROR|WARNING)'
+
+die() { echo "g16-hdmi: $*" >&2; exit 1; }
+usage() { echo "g16-hdmi: $* (see --help)" >&2; exit 2; }
+scrub() {
+  local h; h=$(cat "$PROC/sys/kernel/hostname" 2>/dev/null || hostname 2>/dev/null)
+  sed -e "s|$HOME|~|g" ${h:+-e "s/\\b$h\\b/<host>/g"} ${USER:+-e "s/\\b$USER\\b/<user>/g"}
+}
+
+# ------------------------------------------------------------------ readings
+nv_card() {
+  local c
+  for c in "$SYS"/class/drm/card[0-9]*; do
+    [[ $c == *-* ]] && continue
+    [[ $(basename "$(readlink -f "$c/device/driver" 2>/dev/null)") == nvidia ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+gpio_count() {  # interrupts on an amd_gpio ACPI event pin, all CPUs
+  awk -v pin="$1" '{ for (i = 2; i <= NF; i++) if ($i == "amd_gpio" && $(i+1) == pin && $(i+2) == "ACPI:Event") {
+    s = 0; for (j = 2; j < i; j++) s += $j; print s; exit } }' "$PROC/interrupts" 2>/dev/null
+}
+edid_name() {  # the EDID's monitor-name descriptor (0xFC), never the serial
+  local -a b
+  read -ra b <<<"$(od -An -v -tx1 "$1" 2>/dev/null | tr -s ' \n' ' ')"
+  ((${#b[@]} >= 128)) || return 0
+  local d i s=''
+  for d in 54 72 90 108; do
+    [[ ${b[d]} == 00 && ${b[d+1]} == 00 && ${b[d+3]} == fc ]] || continue
+    for ((i = d + 5; i < d + 18; i++)); do
+      [[ ${b[i]} == 0a ]] && break
+      s+=$(printf "\\x${b[i]}")
+    done
+    printf '%s' "${s% }"
+    return 0
+  done
+}
+nv_power() { sed -n "s/^$1: *//p" "$PROC/driver/nvidia/gpus/$2/power" 2>/dev/null | head -1; }
+suspends() { cat "$SYS/power/suspend_stats/success" 2>/dev/null || echo '?'; }
+
+CARD='' DEV='' BDF=''
+find_rtx() {
+  CARD=$(nv_card) || die "no DRM card driven by nvidia (is the RTX's driver loaded?)"
+  DEV=$(readlink -f "$CARD/device")
+  BDF=${DEV##*/}
+}
+# One line, the state the watch compares: connector=status,enabled,edidN ...
+state_line() {
+  local c n out=''
+  for c in "$CARD"-*; do
+    [[ -e $c/status ]] || continue
+    n=${c##*/}; n=${n#*-}
+    out+="$n=$(cat "$c/status" 2>/dev/null),$(cat "$c/enabled" 2>/dev/null),edid$(wc -c 2>/dev/null <"$c/edid" || echo 0) "
+  done
+  printf '%srtx=%s gpio%s=%s gpio%s=%s suspends=%s\n' "$out" "$(cat "$DEV/power/runtime_status" 2>/dev/null || echo '?')" \
+    "$HPD_PIN" "$(gpio_count $HPD_PIN || true)" "$OTHER_PIN" "$(gpio_count $OTHER_PIN || true)" "$(suspends)"
+}
+klines() { journalctl -k -b "${1:-0}" -o short-precise --no-pager -q 2>/dev/null || dmesg 2>/dev/null; }
+
+# ------------------------------------------------------------------ snapshot
+snapshot() {
+  find_rtx
+  local c n st edid name k
+  echo "g16-hdmi snapshot $(date -Iseconds)"
+  echo "kernel $(cat "$PROC/sys/kernel/osrelease" 2>/dev/null), nvidia $(cat "$SYS/module/nvidia/version" 2>/dev/null || echo '?')"
+  echo "RTX $BDF: runtime $(cat "$DEV/power/runtime_status" 2>/dev/null) (control $(cat "$DEV/power/control" 2>/dev/null)), runtime D3 $(nv_power 'Runtime D3 status' "$BDF"), video memory $(nv_power 'Video Memory' "$BDF")"
+  echo "connectors (${CARD##*/}, nvidia):"
+  for c in "$CARD"-*; do
+    [[ -e $c/status ]] || continue
+    n=${c##*/}; n=${n#*-}
+    st=$(cat "$c/status" 2>/dev/null)
+    edid=$(wc -c 2>/dev/null <"$c/edid" || echo 0)
+    name=''; ((edid)) && name=$(edid_name "$c/edid")
+    printf '  %-9s %-12s %-8s dpms %-3s EDID %s bytes%s\n' "$n" "$st" "$(cat "$c/enabled" 2>/dev/null)" \
+      "$(cat "$c/dpms" 2>/dev/null)" "$edid" "${name:+ ($name)}"
+    [[ $n == HDMI-* && $st == connected ]] && ((edid == 0)) &&
+      echo "            connected without an EDID: a stale connect state (#213)"
+  done
+  echo "hotplug GPIO interrupts this boot: pin $HPD_PIN (HDMI) $(gpio_count $HPD_PIN || echo '?'), pin $OTHER_PIN $(gpio_count $OTHER_PIN || echo '?')"
+  echo "suspends this boot: $(suspends)"
+  echo "gpiolib_acpi on the command line: $(tr ' ' '\n' <"$PROC/cmdline" 2>/dev/null | grep '^gpiolib_acpi' | paste -sd' ' - | grep . || echo none)"
+  local kl; kl=$(klines | grep -E "$KPAT")
+  echo "nvidia display warnings this boot:"
+  local -a ks=('Flip event timeout' 'flip event timeouts (#1361)'
+    'Unable to read EDID for display device [^(]*\(HDMI' 'HDMI EDID read failures'
+    'FRL link training failed' 'HDMI FRL link training failures'
+    'D-Notifier' 'ACPI D-Notifier failures'
+    'No EDID on connected HDMI' 'connected HDMI without an EDID (0004)'
+    'NVRM: Xid' 'Xid errors')
+  for ((k = 0; k < ${#ks[@]}; k += 2)); do
+    printf '  %-38s %s\n' "${ks[k+1]}" "$(grep -cE "${ks[k]}" <<<"$kl")"
+  done
+  if [[ -n $kl ]]; then
+    echo "  last ones:"
+    tail -5 <<<"$kl" | cut -c1-200 | sed 's/^/    /'
+  fi
+}
+
+# ------------------------------------------------------------------ watch
+watch() {
+  local hours=24 interval=5
+  while (($#)); do
+    case $1 in
+      --hours) [[ ${2:-} =~ ^[0-9]+$ ]] && (($2 >= 1 && $2 <= 72)) || usage "--hours needs 1 to 72"; hours=$2; shift ;;
+      --interval) [[ ${2:-} =~ ^[0-9]+$ ]] && (($2 >= 1 && $2 <= 60)) || usage "--interval needs 1 to 60"; interval=$2; shift ;;
+      *) usage "unknown watch option $1" ;;
+    esac
+    shift
+  done
+  find_rtx
+  mkdir -p "$STATE" || die "cannot create $STATE"
+  local file; file=$STATE/watch-$(date +%Y%m%d-%H%M%S).log
+  emit() {
+    local line; line="$(date -Iseconds) $*"
+    echo "$line" | tee -a "$file"
+    command -v logger >/dev/null && logger -t g16-hdmi -- "$*"
+  }
+  local end=$((SECONDS + hours * 3600)) last cur why susp line ev=0 ufd=''
+  # Hotplug uevents end a poll early; without udevadm it just polls. The fd is
+  # copied at once: bash unsets UDEV when the coprocess exits.
+  if command -v udevadm >/dev/null; then
+    coproc UDEV { exec udevadm monitor --kernel --subsystem-match=drm 2>/dev/null; }
+    ufd=${UDEV[0]:-}
+    [[ -n $ufd ]] && exec {ufd}<&"$ufd" && ev=1
+  fi
+  trap 'emit "watch stopped"; [[ -n ${UDEV_PID:-} ]] && kill "$UDEV_PID" 2>/dev/null; exit 0' INT TERM HUP
+  last=$(state_line) susp=$(suspends)
+  emit "watch started (${hours} h, every ${interval} s, file ${file/#$HOME/\~}): $last"
+  while ((SECONDS < end)); do
+    why=poll
+    if ((ev)); then
+      if read -r -t "$interval" -u "$ufd" line; then
+        [[ $line == KERNEL\[* ]] || continue
+        why=uevent; sleep 0.5
+      elif (($? <= 128)); then
+        ev=0  # udevadm went away: poll from here on
+        sleep "$interval"
+      fi
+    else
+      sleep "$interval"
+    fi
+    cur=$(state_line)
+    [[ $(suspends) != "$susp" ]] && { why=resume; susp=$(suspends); }
+    [[ $cur == "$last" && $why != resume ]] && continue
+    emit "$why: $cur"
+    last=$cur
+  done
+  emit "watch ended after ${hours} h"
+}
+
+# ------------------------------------------------------------------ log
+show_log() {
+  local boot=0
+  while (($#)); do
+    case $1 in
+      --boot) [[ ${2:-} =~ ^-?[0-9]+$ ]] || usage "--boot needs a number (0, -1, ...)"; boot=$2; shift ;;
+      *) usage "unknown log option $1" ;;
+    esac
+    shift
+  done
+  journalctl -b "$boot" -o short-precise --no-pager -q -t g16-hdmi -t kernel 2>/dev/null |
+    grep -E "g16-hdmi|$KPAT|PM: suspend (entry|exit)|hibernation (entry|exit)|nvidia .*: Enabling HDA" | scrub
+}
+
+# ------------------------------------------------------------------ trace
+trace() {
+  local events=rpm/rpm_suspend,rpm/rpm_resume,rpm/rpm_return_int,power/suspend_resume
+  local session=1
+  command -v "$TESTD" >/dev/null || { echo "g16-hdmi: g16-testd is not installed (omarchy-asus-g16-testd)" >&2; exit 3; }
+  "$TESTD" available || session=0
+  case ${1:-} in
+    start)
+      ((session)) || { echo "g16-hdmi: no g16-testd session open: run g16-testd session start" >&2; exit 3; }
+      "$TESTD" call trace-start hdmi "$events" - 32768 --reason "#158: the RTX's runtime PM around HDMI hotplug" >/dev/null ||
+        die "trace-start failed"
+      echo "tracing the RTX's runtime PM and the suspend phases (the session stops it after 30 min); g16-hdmi trace stop to finish" ;;
+    stop)
+      find_rtx
+      local out='' tl
+      ((session)) && out=$("$TESTD" call trace-stop hdmi --reason "#158: HDMI hotplug trace done" 2>/dev/null)
+      if [[ -z $out || ! -r $out ]]; then
+        # testd's 30-minute watchdog (or the session's end) already stopped it and kept the file.
+        out=$TESTD_OUT/hdmi.trace
+        [[ -r $out ]] || { echo "g16-hdmi: no trace to collect (none running, none kept in $TESTD_OUT)" >&2; exit 3; }
+        echo "the trace had already been stopped (testd stops a trace after 30 min); collecting the kept file"
+      fi
+      mkdir -p "$STATE" || die "cannot create $STATE"
+      tl=$STATE/trace-$(date +%Y%m%d-%H%M%S).txt
+      # The RTX (and its HDA function) and the system suspend phases, nothing else.
+      grep -E "rpm_(suspend|resume|return_int): .*${BDF%.*}\.[01]|suspend_resume:" "$out" |
+        sed -E 's/^ *(.*[^ ]) +\[[0-9]+\] [^ ]+ +([0-9.]+): /\2 \1 /' | scrub >"$tl"
+      echo "timeline: ${tl/#$HOME/\~}"
+      echo "  RTX runtime resumes $(grep -c "rpm_resume: $BDF" "$tl"), suspends $(grep -c "rpm_suspend: $BDF" "$tl"), system suspend entries $(grep -c 'suspend_enter\[[0-9]*\] begin' "$tl")" ;;
+    *) usage "trace needs start or stop" ;;
+  esac
+}
+
+case ${1:-snapshot} in
+  snapshot) shift $(($# ? 1 : 0)); (($#)) && usage "snapshot takes no options"; snapshot | scrub ;;
+  watch) shift; watch "$@" ;;
+  log) shift; show_log "$@" ;;
+  trace) shift; trace "$@" ;;
+  -h | --help) sed -n '2,37s/^# \{0,1\}//p' "$0" ;;
+  *) usage "unknown command $1" ;;
+esac
