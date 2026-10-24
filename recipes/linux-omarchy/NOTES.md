@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.101**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.102**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,10 +14,10 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.101` (kernel release string becomes `7.2.8-9.101-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.102` (kernel release string becomes `7.2.8-9.102-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
-   range (.101 and up, so no file shares a name with Quattro's; #201).
+   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -35,6 +35,8 @@ Compared with upstream, only:
    `0772-...` (GA605KM: ignore GPIO 16 wakeups; see "0773" below).
 8. New patch `0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch` after
    `0481-...` (USB4 dock monitors after a replug in suspend; see "0482" below).
+9. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
+   `0807-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
 7. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
@@ -268,9 +270,9 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 9900).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
-   0807 after the last `080x` patch (renumber if upstream took the number),
+   0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
    9900 last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
@@ -316,6 +318,28 @@ for upstream**.
   against 7.2.8-9 without offsets).
 - Remove it if the battery A/B testing shows no win, or move it to a
   separate `-experimental` kernel package.
+
+## 0810: panel_power_savings applies when written (#172)
+
+`0810-drm-amd-display-panel-power-savings-apply-now.patch` (ours, not upstream).
+`panel_power_savings_store()` only updates the connector state and sends a
+hotplug uevent; the level reaches the stream at the next commit that includes the
+connector. aquamarine 0.15 (Hyprland) leaves the connector out of page flips and
+only rescans connectors on a hotplug, so on the G16 a write (by hand or by
+power-profiles-daemon's `amdgpu_panel_power` action) took effect only at the next
+modeset: a DPMS cycle, a refresh-rate change or a resume. The first CACP
+measurement in #172 wrote the levels that way, so it most likely measured
+level 0 throughout.
+
+The patch commits the connector and its CRTC unchanged right after the write (not
+while the CRTC is off or during suspend). The connector state is the one just
+written, so there is no modeset; the CRTC takes the new level and DC gets it as a
+fast stream update. Mainline (7.4-rc1) has the same store function, so the patch
+stays until upstream changes it.
+
+Test: the g16-test kit's `0810` check puts a kprobe on `dmub_cacp_set_level`,
+writes 1, and expects the probe to fire within 3 s (then writes 0 back). A check
+that cannot run is a FAIL: the merge gate is this check passing.
 
 ## 0481: display power backports (dev build, default off)
 
