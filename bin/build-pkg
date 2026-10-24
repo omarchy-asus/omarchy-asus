@@ -5,7 +5,8 @@
 # chroot (Omarchy's rc packages, bin/mkchroot --channel rc) and lands in the rc stage dir,
 # so bin/publish for the other channel refuses it. A chroot whose pacman.conf does not
 # match the channel's (build/pacman.conf, build/pacman-rc.conf) is refused before anything
-# is built.
+# is built. The work dir ($DATA/work-<name>.XXXX) is removed however it exits;
+# KEEP_WORK=1 keeps it for debugging and prints its path.
 #
 # Run as a normal user: makechrootpkg is started through sudo (SUDO="sudo -S"
 # reads the password from stdin). Run as root:
@@ -50,7 +51,29 @@ channel_conf_ok "$CHROOT/root/etc/pacman.conf" || {
 }
 echo "==> channel $CHANNEL: chroot $CHROOT, Omarchy $OMARCHY_CHANNEL, stage $STAGE_DIR"
 as_user mkdir -p "$STAGE_DIR" "$LOG_DIR"
-work=$(as_user mktemp -d "$DATA/work-$name.XXXX")
+# The work dir goes however build-pkg exits (a failed verify or build, a missing package,
+# Ctrl-C), or failed trees pile up in $DATA (#300). makechrootpkg runs as root in it, so
+# what the build user can't remove is removed as root, after checking the path is the
+# work-<name>.XXXX dir made here. KEEP_WORK=1 keeps it and prints its path.
+work=
+remove_work() {
+    [[ -n $work && -d $work ]] || return 0
+    if [[ ${KEEP_WORK:-} == 1 ]]; then echo "==> work dir kept (KEEP_WORK=1): $work" >&2; return 0; fi
+    cd /
+    as_user rm -rf -- "$work" 2>/dev/null || true
+    [[ -e $work ]] || return 0
+    if [[ -L $work || $(realpath "$(dirname "$work")") != "$data_dir" || $(basename "$work") != "work-$name".???? ]]; then
+        echo "not removing $work: not a work-$name.XXXX dir in $DATA" >&2
+        return 0
+    fi
+    as_root rm -rf -- "$work" || echo "could not remove the work dir $work" >&2
+}
+trap remove_work EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+data_dir=$(realpath "$DATA")
+work=$(as_user mktemp -d "$data_dir/work-$name.XXXX")
 log=$LOG_DIR/$name-$(date +%Y%m%d-%H%M%S).log
 # Copy and verify as the user: root never reads the recipe tree itself.
 # Recipes with keys/pgp (validpgpkeys): download and verify sources here, with
@@ -118,5 +141,5 @@ fi
 cd "$work"
 as_root nice -n 19 ionice -c 3 makechrootpkg -c -u -r "$CHROOT" "${chroot_user[@]}" "${distcc_bind[@]}" "$@" "${makepkg_args[@]}" 2>&1 |
     as_user tee "$log"
-as_user bash -c 'mv -v "$1"/*.pkg.tar.zst "$2"/ && rm -rf "$1"' _ "$work" "$STAGE_DIR"
+as_user bash -c 'mv -v "$1"/*.pkg.tar.zst "$2"/' _ "$work" "$STAGE_DIR"
 echo "log: $log"
