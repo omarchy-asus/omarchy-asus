@@ -40,6 +40,7 @@ SYS=${G16_HDMI_SYS:-/sys}     # the overrides are for tests only
 PROC=${G16_HDMI_PROC:-/proc}
 STATE=${G16_HDMI_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-asus/hdmi}
 TESTD=${G16_HDMI_TESTD:-g16-testd}
+TESTD_OUT=${G16_HDMI_TESTD_OUT:-/run/omarchy-asus-g16-testd/out}  # where testd keeps a stopped trace
 HPD_PIN=16 OTHER_PIN=5
 # nvidia's display warnings (and 0004's, #213) that matter here
 KPAT='Flip event timeout|Unable to read EDID|FRL link training failed|D-Notifier|No EDID on connected HDMI|NVRM: Xid|nvidia-modeset: (ERROR|WARNING)'
@@ -159,11 +160,13 @@ watch() {
     echo "$line" | tee -a "$file"
     command -v logger >/dev/null && logger -t g16-hdmi -- "$*"
   }
-  local end=$((SECONDS + hours * 3600)) last cur why susp line ev=0
-  # Hotplug uevents end a poll early; without udevadm it just polls.
+  local end=$((SECONDS + hours * 3600)) last cur why susp line ev=0 ufd=''
+  # Hotplug uevents end a poll early; without udevadm it just polls. The fd is
+  # copied at once: bash unsets UDEV when the coprocess exits.
   if command -v udevadm >/dev/null; then
     coproc UDEV { exec udevadm monitor --kernel --subsystem-match=drm 2>/dev/null; }
-    ev=1
+    ufd=${UDEV[0]:-}
+    [[ -n $ufd ]] && exec {ufd}<&"$ufd" && ev=1
   fi
   trap 'emit "watch stopped"; [[ -n ${UDEV_PID:-} ]] && kill "$UDEV_PID" 2>/dev/null; exit 0' INT TERM HUP
   last=$(state_line) susp=$(suspends)
@@ -171,11 +174,12 @@ watch() {
   while ((SECONDS < end)); do
     why=poll
     if ((ev)); then
-      if read -r -t "$interval" -u "${UDEV[0]}" line; then
+      if read -r -t "$interval" -u "$ufd" line; then
         [[ $line == KERNEL\[* ]] || continue
         why=uevent; sleep 0.5
       elif (($? <= 128)); then
         ev=0  # udevadm went away: poll from here on
+        sleep "$interval"
       fi
     else
       sleep "$interval"
@@ -206,17 +210,25 @@ show_log() {
 # ------------------------------------------------------------------ trace
 trace() {
   local events=rpm/rpm_suspend,rpm/rpm_resume,rpm/rpm_return_int,power/suspend_resume
+  local session=1
   command -v "$TESTD" >/dev/null || { echo "g16-hdmi: g16-testd is not installed (omarchy-asus-g16-testd)" >&2; exit 3; }
-  "$TESTD" available || { echo "g16-hdmi: no g16-testd session open: run g16-testd session start" >&2; exit 3; }
+  "$TESTD" available || session=0
   case ${1:-} in
     start)
+      ((session)) || { echo "g16-hdmi: no g16-testd session open: run g16-testd session start" >&2; exit 3; }
       "$TESTD" call trace-start hdmi "$events" - 32768 --reason "#158: the RTX's runtime PM around HDMI hotplug" >/dev/null ||
         die "trace-start failed"
       echo "tracing the RTX's runtime PM and the suspend phases (the session stops it after 30 min); g16-hdmi trace stop to finish" ;;
     stop)
       find_rtx
-      local out tl; out=$("$TESTD" call trace-stop hdmi --reason "#158: HDMI hotplug trace done") || die "trace-stop failed"
-      [[ -r $out ]] || die "no trace file from g16-testd ($out)"
+      local out='' tl
+      ((session)) && out=$("$TESTD" call trace-stop hdmi --reason "#158: HDMI hotplug trace done" 2>/dev/null)
+      if [[ -z $out || ! -r $out ]]; then
+        # testd's 30-minute watchdog (or the session's end) already stopped it and kept the file.
+        out=$TESTD_OUT/hdmi.trace
+        [[ -r $out ]] || { echo "g16-hdmi: no trace to collect (none running, none kept in $TESTD_OUT)" >&2; exit 3; }
+        echo "the trace had already been stopped (testd stops a trace after 30 min); collecting the kept file"
+      fi
       mkdir -p "$STATE" || die "cannot create $STATE"
       tl=$STATE/trace-$(date +%Y%m%d-%H%M%S).txt
       # The RTX (and its HDA function) and the system suspend phases, nothing else.
