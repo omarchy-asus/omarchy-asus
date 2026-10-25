@@ -4,8 +4,9 @@
 #   1. --dry-run walks the steps and writes nothing;
 #   2. inside an open g16-testd session every level is the helper's knob-set
 #      panel-power-savings with the kit's reason, the exit is its knob-restore, step 1
-#      is reported as skipped (its kprobe isn't a helper call), step 2's table is
-#      written, and nothing asks for root;
+#      runs through the helper's dmub-cacp-set-level trace (the handed-over trace files
+#      are removed), step 2's table is written, and nothing asks for root; with a
+#      helper whose allowlist lacks that kprobe, step 1 is reported as skipped;
 #   3. a panel-power-savings another test changed in the session is refused, untouched;
 #   4. with no session it falls back to pkexec, and G16_ROOT=testd refuses.
 set -u
@@ -31,11 +32,18 @@ cat >"$B/g16-testd" <<'STUB'
 case $1 in
   available) [[ -e $STUB/td-open ]] ;;
   session) [[ -e $STUB/td-pre ]] && echo '{"knobs": {"panel-power-savings": "0"}}' || echo '{"knobs": {}}' ;;
+  list) [[ -e $STUB/td-old ]] || printf 'kprobes (trace-start):\n  dmub-cacp-set-level    dmub_cacp_set_level level=%%si:u32\n' ;;
   call)
     shift; m=$1 r=''; shift; a=()
     while (($#)); do if [[ $1 == --reason ]]; then r=$2; shift 2; else a+=("$1"); shift; fi; done
     [[ -n $r && -e $STUB/td-open ]] || exit 3
-    echo "$m ${a[*]} | $r" >>"$STUB/td.log"; echo ok ;;
+    echo "$m ${a[*]} | $r" >>"$STUB/td.log"
+    if [[ $m == trace-stop ]]; then
+      # the levels written since the trace started reach the firmware at once
+      f=$STUB/trace-$(wc -l <"$STUB/td.log")
+      tac "$STUB/td.log" | awk '/^trace-start / {exit} /^knob-set panel-power-savings/ {print "  <idle>-0 [000] g16testd/dmub_cacp_set_level: (dmub_cacp_set_level+0x0/0x80) level=" $3}' >"$f"
+      echo "$f"
+    else echo ok; fi ;;
 esac
 STUB
 cat >"$B/hyprctl" <<'STUB'
@@ -82,8 +90,20 @@ L=$ST/td.log
 for v in 3 4 0; do grep -q "^knob-set panel-power-savings $v | g16-cacp-check: " "$L" && ok "testd: level $v through knob-set" || bad "testd: no level $v: $(cat "$L")"; done
 [[ $(tail -n1 "$L") == "knob-restore panel-power-savings | g16-cacp-check: "* ]] && ok "testd: knob-restore at the exit" || bad "testd: last call $(tail -n1 "$L")"
 R=$(ls "$T"/home/omarchy-asus-cacp-check-*.md 2>/dev/null | head -1)
-grep -q "SKIP: err the dmub_cacp_set_level kprobe is not on g16-testd's allowlist" "${R:-/dev/null}" && ok "testd: step 1 reported as skipped" || bad "testd step 1: $(grep -A2 'Step 1' "${R:-/dev/null}")"
+grep -q "^trace-start cacp-[0-9]* - dmub-cacp-set-level 1024 | g16-cacp-check: " "$L" && ok "testd: step 1 through the dmub-cacp-set-level kprobe" || bad "testd: no kprobe trace: $(cat "$L")"
+grep -q "PASS: the write alone reached the firmware" "${R:-/dev/null}" && grep -q 'after write: level=3 x1;' "$R" &&
+  ok "testd: step 1 verdict from the helper's trace" || bad "testd step 1: $(grep -A4 'Step 1' "${R:-/dev/null}")"
+[[ $(grep -c '^trace-start ' "$L") == "$(grep -c '^trace-stop ' "$L")" ]] && ok "testd: every trace stopped" || bad "testd: traces left: $(grep '^trace-' "$L")"
+compgen -G "$ST/trace-*" >/dev/null && bad "testd: trace files left: $(ls "$ST"/trace-*)" || ok "testd: handed-over traces removed"
 grep -qE '^\| L3 \| 1 \|' "${R:-/dev/null}" && grep -qE '^\| L4 \| 1 \|' "$R" && ok "testd: step 2 measured L3 and L4" || bad "testd step 2: $(cat "${R:-/dev/null}")"
+
+# 2b. a helper without the kprobe: step 1 skipped, step 2 still runs
+reset
+touch "$ST/td-open" "$ST/td-old"
+out=$(run --rounds 1 --measure 1 --settle 1 2>&1); rc=$?
+R=$(ls -t "$T"/home/omarchy-asus-cacp-check-*.md 2>/dev/null | head -1)
+((rc == 0)) && grep -q "SKIP: err the dmub_cacp_set_level kprobe is not on this g16-testd's allowlist" "${R:-/dev/null}" &&
+  ! grep -q '^trace-' "$ST/td.log" && ok "old helper: step 1 reported as skipped" || bad "old helper: rc=$rc $(grep -A2 'Step 1' "${R:-/dev/null}")"
 
 # 3. another test's setting
 reset
