@@ -8,7 +8,10 @@
 #      attestations only in the attest job, which runs no recipe code; the attest action
 #      pinned by commit; nothing signs, publishes or uploads to a release
 #   3. ci/release-check on fake packages, with gh stubbed: manifest, pkgrel range, release
-#      cohorts, one file per name
+#      cohorts, one file per name; the single-artifact download layout (extracted straight
+#      into the directory), several artifacts, and an empty download
+#   4. the attest job's own check, run from the workflow on the same layouts: one directory
+#      per artifact either way, and an empty download fails
 # Usage: tests/ci/release-workflow.sh [keep]
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -204,6 +207,60 @@ reset; mkpkg release-rc-omarchy omarchy 3-101; manifest release-rc-omarchy
 mkpkg release-rc-omarchy-settings omarchy-settings 3-101; manifest release-rc-omarchy-settings
 out=$(rcheck); rc=$?
 check "omarchy and omarchy-settings built together: passes" test "$rc" = 0
+
+# download-artifact with pattern: one match is extracted straight into the path, several
+# go in a directory each (run 40167680853 failed on the single-match layout).
+flat() { mv "$P/$1"/* "$P/"; rmdir "$P/$1"; }
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; flat release-rc-a
+out=$(rcheck); rc=$?
+check "one artifact extracted straight into the dir: passes" test "$rc" = 0
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; printf 'x' >>"$P/release-rc-a/a-1-101-any.pkg.tar.zst"; flat release-rc-a
+out=$(rcheck); rc=$?
+check "one artifact, straight into the dir, changed after the manifest: fails" test "$rc" = 1
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; mkpkg release-rc-b b 1-101; manifest release-rc-b
+out=$(rcheck); rc=$?
+check "two artifacts, a directory each: passes" test "$rc" = 0
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; mkpkg release-rc-b b 1-101
+out=$(rcheck); rc=$?
+check "two artifacts, one without SHA256SUMS: fails" test "$rc" = 1
+reset
+out=$(rcheck); rc=$?
+check "an empty download: fails" test "$rc" = 1
+check "empty: says no packages" has "no packages under" "$out"
+
+echo "== 4. the attest job's check of the download"
+# The step's run block, as the workflow has it.
+attest_run=$(job attest | awk '
+    /^      - name: One directory per artifact/ { s = 1; next }
+    s && /^      - / { exit }
+    s && /^        run: \|/ { r = 1; next }
+    s && r { sub(/^          /, ""); print }')
+check "attest: has the per-artifact check step" test -n "$attest_run"
+check "attest: subjects are pkgs/<artifact>/*.pkg.tar.zst" grep -qF 'subject-path: pkgs/*/*.pkg.tar.zst' <<<"$(job attest)"
+arun() { # recipes-json: run the step in $S (its pkgs is $P)
+    (cd "$S" && CHANNEL=rc RECIPES=$1 bash -c "$attest_run" 2>&1)
+}
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; flat release-rc-a
+out=$(arun '["a"]'); rc=$?
+check "attest, one artifact straight into pkgs: passes" test "$rc" = 0
+check "attest, one artifact: moved to pkgs/release-rc-a/" test -f "$P/release-rc-a/SHA256SUMS" -a -f "$P/release-rc-a/a-1-101-any.pkg.tar.zst"
+check "attest, one artifact: nothing left loose in pkgs" bash -c '! ls "$1"/*.pkg.tar.zst "$1"/SHA256SUMS >/dev/null 2>&1' _ "$P"
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; mkpkg release-rc-b b 1-101; manifest release-rc-b
+out=$(arun '["a", "b"]'); rc=$?
+check "attest, two artifacts, a directory each: passes" test "$rc" = 0
+reset
+out=$(arun '["a"]'); rc=$?
+check "attest, an empty download: fails" test "$rc" = 1
+check "attest, empty: says no SHA256SUMS" has "no SHA256SUMS under pkgs" "$out"
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; mkpkg release-rc-b b 1-101; manifest release-rc-b
+out=$(arun '["a", "b", "c"]'); rc=$?
+check "attest, an artifact missing: fails" test "$rc" = 1
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; mkpkg release-rc-a a2 1-101
+out=$(arun '["a"]'); rc=$?
+check "attest, a package not in SHA256SUMS: fails" test "$rc" = 1
+reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; printf 'x' >>"$P/release-rc-a/a-1-101-any.pkg.tar.zst"; flat release-rc-a
+out=$(arun '["a"]'); rc=$?
+check "attest, one artifact changed after the manifest: fails" test "$rc" = 1
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"
