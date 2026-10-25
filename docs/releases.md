@@ -110,16 +110,16 @@ carries, and the train's tag and release notes are cut from it, not from the db 
 - `bin/release-train notes` prints the notes from the open issue (on the release and changes,
   without the waiting list); `find` prints its number; `render --db DB` prints a body offline.
 
-## Release builds on GitHub (#258, nothing publishes from them yet)
+## Release builds on GitHub (#258)
 
 Release builds are moving off the build host's chroots onto the same `ci/build-recipe`
 container the PR check uses (#258). The first piece is `.github/workflows/release.yml`: it builds
 and records, and **publishes nothing**. No signing key, secret or release upload is anywhere in
 it. The second is the signer on the build host, `bin/release-sign` (below), which checks a run's
 record with GitHub before it hands the packages to `bin/publish`. The daily rebase onto upstream
-runs it only for the recipes `build/release-path.conf` lists, and it lists none yet, so the chroot
-path (`bin/build-pkg`, then `bin/publish`) stays the live publisher (below, "Switching a recipe to
-the release path").
+runs it only for the recipes `build/release-path.conf` lists: so far `omarchy-asus-keyring` alone,
+on the rc channel. For every other recipe the chroot path (`bin/build-pkg`, then `bin/publish`)
+stays the live publisher (below, "Switching a recipe to the release path").
 
 ```
 release workflow (GitHub)  ->  bin/release-sign (build host)  ->  bin/publish  ->  bin/sync-release
@@ -225,7 +225,7 @@ error, a missing or malformed field, no attestation) is a refusal.
 `build/release-path.conf` is the switch: one recipe per line. A recipe listed there is no longer
 built in the chroot by the daily rebase onto upstream; after its merge the release workflow builds
 it on `main` and `bin/release-sign` checks that run and publishes it. It holds only on the rc
-channel from `main`. With the file empty (as committed: comments only) or missing, every recipe
+channel from `main`. A recipe it doesn't list (or every recipe, with the file empty or missing)
 builds in the chroot as before. A release cohort (`build/cohorts.conf`) is listed whole or not at
 all.
 
