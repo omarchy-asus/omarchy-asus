@@ -220,17 +220,18 @@ def usb_by_id(h, vendor, product):
 # Each knob: check(value) raises on a value outside its range; get() reads the current
 # value as a string; set(value) writes it. The original is what get() said before the
 # first set in a session, plus whatever save() records, and restore is load(original):
-# set(original value) unless the knob needs more than one value back.
+# set(original value) unless the knob needs more than one value back. doc: what `list`
+# says for values read from the machine.
 class Knob:
-    def __init__(self, what, values, get, set_, save=None, load=None):
-        self.what, self.values, self.get, self.set = what, values, get, set_
+    def __init__(self, what, values, get, set_, save=None, load=None, doc=None):
+        self.what, self.values, self.get, self.set, self.doc = what, values, get, set_, doc
         self.save = save or (lambda h: {})
         self.load = load or (lambda h, orig: set_(h, orig["value"]))
 
     def check(self, h, v):
         allowed = self.values(h) if callable(self.values) else self.values
         if isinstance(allowed, range):
-            if not re.fullmatch(r"[0-9]{1,6}", v) or int(v) not in allowed:
+            if not re.fullmatch(r"[0-9]{1,9}", v) or int(v) not in allowed:
                 fail(f"value {v!r} out of range {allowed.start}..{allowed.stop - 1}")
         elif isinstance(allowed, re.Pattern):
             if not allowed.fullmatch(v):
@@ -398,6 +399,78 @@ def _file_knob(path_of):
     return (lambda h: rd(path_of(h))), (lambda h, v: wr(path_of(h), v))
 
 
+# The Zen 5c-first knobs of kernel patch 9900 (#10): amd_hfi's attributes on its
+# platform device. ranking reads "[performance] efficiency inverted"; the others
+# read their value alone.
+def _hfi(name):
+    def path(h):
+        d = glob_dirs(os.path.join(h.sys, "bus/platform/devices"),
+                      lambda p: os.path.basename(p).startswith("AMDI0104:") and os.path.exists(f"{p}/ranking"))
+        if not d:
+            fail("no amd_hfi Zen 5c-first knobs (AMDI0104 ranking: a kernel without patch 9900)")
+        return _need(f"{d[0]}/{name}", f"amd_hfi {name}")
+    return path
+
+
+def _bracketed(v):
+    m = re.search(r"\[([a-z]+)\]", v)
+    return m.group(1) if m else v
+
+
+# cpufreq, for the boost and clock tweaks (#328): every policy alike, each put back
+# to its own value.
+def _policies(h):
+    base = os.path.join(h.sys, "devices/system/cpu/cpufreq")
+    d = glob_dirs(base, lambda p: re.fullmatch(r"policy[0-9]+", os.path.basename(p)) is not None)
+    if not d:
+        fail("no cpufreq policies")
+    return sorted(d, key=lambda p: int(os.path.basename(p)[6:]))
+
+
+def _per_policy(name):
+    def get(h):
+        v = [rd(f"{p}/{name}") for p in _policies(h)]
+        return v[0] if len(set(v)) == 1 else ",".join(v)
+
+    def set_(h, v):
+        for p in _policies(h):
+            wr(f"{p}/{name}", v)
+
+    def save(h):
+        return {"policies": {p: rd(f"{p}/{name}") for p in _policies(h)}}
+
+    def load(h, orig):
+        for p, v in orig["policies"].items():
+            if os.path.exists(p):
+                wr(f"{p}/{name}", v)
+    return get, set_, save, load
+
+
+def _epp_choices(h):
+    sets = [set(rd(f"{p}/energy_performance_available_preferences").split()) for p in _policies(h)]
+    return set.intersection(*sets)
+
+
+def _max_freq_range(h):
+    # a value every policy accepts: from the highest cpuinfo_min_freq to the highest
+    # cpuinfo_max_freq (a policy whose own maximum is lower stays at its maximum)
+    ps = _policies(h)
+    lo = max(int(rd(f"{p}/cpuinfo_min_freq") or 0) for p in ps)
+    hi = max(int(rd(f"{p}/cpuinfo_max_freq") or 0) for p in ps)
+    return range(lo, hi + 1)
+
+
+def _pmf_profile(h):
+    d = glob_dirs(os.path.join(h.sys, "class/platform-profile"), lambda p: rd(f"{p}/name") == "amd-pmf")
+    if not d:
+        fail("no amd-pmf platform profile")
+    return f"{d[0]}/profile"
+
+
+def _pmf_choices(h):
+    return set(rd(os.path.join(os.path.dirname(_pmf_profile(h)), "choices")).split())
+
+
 _sd_dev = lambda h: pci_by_id(h, *SD_ID)  # noqa: E731
 _kbd_dev = lambda h: usb_by_id(h, "0b05", "19b6")  # noqa: E731
 
@@ -418,7 +491,24 @@ KNOBS = {
     "wifi-ps": Knob("Wi-Fi power save, iw (#227)", {"on", "off"}, _wifi_get, _wifi_set),
     "bt-rfkill": Knob("Bluetooth rfkill soft block (#234)", {"0", "1"}, *_file_knob(_rfkill_bt)),
     "panel-power-savings": Knob("OLED CACP, amdgpu panel_power_savings (#172)", range(0, 5), *_file_knob(_panel)),
-    "platform-profile": Knob("ACPI platform_profile", _profile_choices, *_file_knob(_profile)),
+    "platform-profile": Knob("ACPI platform_profile (every handler)", _profile_choices, *_file_knob(_profile),
+                             doc="from platform_profile_choices"),
+    "amd-pmf-profile": Knob("amd-pmf's own platform profile, /sys/class/platform-profile (#328)", _pmf_choices,
+                            *_file_knob(_pmf_profile), doc="from its choices"),
+    "hfi-ranking": Knob("amd_hfi ITMT ranking, Zen 5c-first patch 9900 (#10)", {"performance", "efficiency", "inverted"},
+                        lambda h: _bracketed(rd(_hfi("ranking")(h))), lambda h, v: wr(_hfi("ranking")(h), v)),
+    "hfi-wake-preferred": Knob("amd_hfi soft wakeup preference, patch 9900 (#10); class reads the workload-class MSR",
+                               {"off", "all", "class"}, *_file_knob(_hfi("wake_preferred"))),
+    "hfi-wake-pack": Knob("amd_hfi SMT packing inside the preferred CPUs, patch 9900 (#10)", {"0", "1"},
+                          *_file_knob(_hfi("wake_pack"))),
+    "hfi-wlc-track": Knob("amd_hfi workload-class tracking (an MSR read per switch), patch 9900 (#10)", {"0", "1"},
+                          *_file_knob(_hfi("wlc_track"))),
+    "cpu-boost": Knob("cpufreq boost (#328)", {"0", "1"},
+                      *_file_knob(lambda h: _need(os.path.join(h.sys, "devices/system/cpu/cpufreq/boost"), "cpufreq boost"))),
+    "cpu-epp": Knob("energy_performance_preference, every policy (#328)", _epp_choices,
+                    *_per_policy("energy_performance_preference"), doc="from energy_performance_available_preferences"),
+    "cpu-max-freq": Knob("scaling_max_freq in kHz, every policy (#328)", _max_freq_range,
+                         *_per_policy("scaling_max_freq"), doc="kHz, cpuinfo_min_freq..cpuinfo_max_freq"),
 }
 
 
@@ -475,7 +565,8 @@ class Daemon:
             self._try(errs, self.trace_stop, name, False)
         for name in list(self.rec["modules"]):
             self._try(errs, self.module_restore, name)
-        for name in list(self.rec["knobs"]):
+        # last set, first back (zen5c: wake_pack, wake_preferred, then ranking)
+        for name in reversed(list(self.rec["knobs"])):
             self._try(errs, self.knob_restore, name)
         if self.rec["ec_loaded"]:
             self._try(errs, self.ec_unload)
@@ -1279,7 +1370,7 @@ def cmd_list(_a):
     print("knobs (knob-set NAME VALUE):")
     for n, k in KNOBS.items():
         v = k.values
-        vs = ("from platform_profile_choices" if callable(v) else f"{v.start}..{v.stop - 1}" if isinstance(v, range)
+        vs = (k.doc or "from the machine" if callable(v) else f"{v.start}..{v.stop - 1}" if isinstance(v, range)
               else v.pattern if isinstance(v, re.Pattern) else "|".join(sorted(v)))
         print(f"  {n:20} {vs:22} {k.what}")
     print("trace events (trace-start):\n  " + "\n  ".join(sorted(EVENTS)))

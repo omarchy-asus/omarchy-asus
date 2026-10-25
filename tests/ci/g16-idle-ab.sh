@@ -29,6 +29,16 @@
 #  13. pb12 verdicts come from the fit alone; a failed DPMS cycle fails the CACP
 #      apply; a run killed with a CACP level on puts it back and cycles the panel
 #      on; a testd dry run doesn't trace, and a killed testd helper stops its trace.
+#  14. the Zen 5c-first tweaks (#10): listed under #10; skipped without patch 9900's
+#      knobs or when one is off its stock value; applied between baselines and put
+#      back (zen5c-all sets ranking, wake_preferred, wake_pack and g16-testd restores
+#      them in reverse); one tweak per knob; wake-class and wlc-track only by name with
+#      --unverified-msr, never in a default set; pb12 takes at most one of them.
+#  15. --load light: the workload starts once (bursts, browser-like, a VA-API decode on
+#      the amdgpu render node only), the report has the latency, Zen 5c share, clock and
+#      spike columns, the keyboard LED is forced off and put back, every workload stops
+#      and its run dir goes, even when the run is killed; without VA-API decode the
+#      report says so and nothing decodes.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -232,8 +242,8 @@ grep -qE '\| bt active; codec|bt active;.*kbd active;.*xhci D0' "$r" && ok "phas
 [[ -e $ST/posted-198 ]] && grep -q '^## G16 idle A/B' "$ST/posted-198" && ok "report posted to #198" || bad "not posted to #198"
 grep -qF "$T/home" "$ST"/posted-* && bad "home path in a post" || ok "posts have no home path"
 nposts=$(ls "$ST"/posted-* | wc -l)
-# Each tweak with an issue number gets its own post, plus #198.
-want_posts=$(( 1 + $("$SCRIPT" --list | awk '$2 != "#0" {print $2}' | sort -u | wc -l) ))
+# Each tweak that ran gets its own post, plus #198 (the Zen 5c tweaks are skipped: no patch 9900 here).
+want_posts=$(( 1 + $(for t in "${ALL[@]}"; do "$SCRIPT" --list | awk -v t="$t" '$1 == t {print $2}'; done | sort -u | wc -l) ))
 ((nposts == want_posts)) && ok "one post per tweak issue plus #198 ($nposts)" || bad "$nposts posts, want $want_posts"
 for f in "$ST"/posted-*; do
   [[ $f == */posted-198 ]] && continue
@@ -595,5 +605,168 @@ pid=$!
 for _ in $(seq 1 50); do grep -q '^trace-start' "$ST/td.log" 2>/dev/null && break; sleep 0.1; done
 kill -TERM "$pid"; wait "$pid" 2>/dev/null
 grep -q '^trace-stop idle-ab-' "$ST/td.log" && ok "testd helper killed mid-trace stops the trace" || bad "testd trace left on: $(cat "$ST/td.log")"
+
+# --------------------------------------------- 14. the Zen 5c-first tweaks (#10)
+hfi_fake() { # the knobs of kernel patch 9900 on amd_hfi's platform device, at stock
+  H=$S/devices/platform/AMDI0104:00
+  mkdir -p "$H" "$S/bus/platform/devices"
+  ln -sfn "$H" "$S/bus/platform/devices/AMDI0104:00"
+  echo "[performance] efficiency inverted" >"$H/ranking"
+  echo off >"$H/wake_preferred"; echo 0 >"$H/wake_pack"; echo 0 >"$H/wlc_track"
+}
+hfi_state() { printf '%s|%s|%s|%s' "$(sed -E 's/.*\[([a-z]+)\].*/\1/' "$H/ranking")" "$(cat "$H/wake_preferred")" "$(cat "$H/wake_pack")" "$(cat "$H/wlc_track")"; }
+HFI_WANT="performance|off|0|0"
+ZEN=(hfi-eff hfi-inv wake-all wake-pack zen5c-all)
+out=$("$SCRIPT" --list)
+for t in "${ZEN[@]}" wake-class wlc-track; do grep -qE "^$t +#10 " <<<"$out" && ok "--list: $t under #10" || bad "--list: no $t"; done
+grep -q '^wake-pack .*null control' <<<"$out" && ok "--list: wake-pack is the null control" || bad "--list wake-pack: $(grep wake-pack <<<"$out")"
+grep -q '^wake-class .*only with --unverified-msr' <<<"$out" && ok "--list: wake-class needs --unverified-msr" || bad "--list wake-class: $(grep wake-class <<<"$out")"
+
+# a kernel without 9900: each Zen 5c tweak skipped with its reason, the rest still runs
+reset
+out=$(run --dry-run --only nmi,hfi-eff,zen5c-all "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && grep -q 'skipped: hfi-eff: no ranking under /sys/bus/platform/devices/AMDI0104:\* (a kernel without the Zen 5c-first patch 9900)' <<<"$out" &&
+  grep -q 'skipped: zen5c-all: no ranking, wake_preferred, wake_pack under' <<<"$out" && grep -q '^| nmi |' "$T/home/report.md" &&
+  ok "no patch 9900: the Zen 5c tweaks are skipped, the rest runs" || bad "no 9900: rc=$rc $out"
+# a knob not at its stock value: no stock baseline, skipped
+reset; hfi_fake; echo all >"$H/wake_preferred"
+out=$(run --dry-run --only hfi-eff,nmi "${FAST[@]}" 2>&1)
+grep -q 'skipped: hfi-eff: the Zen 5c-first knobs are not at their stock values (wake_preferred is all, not off)' <<<"$out" &&
+  ok "a Zen 5c knob off its stock value skips the tweak" || bad "non-stock: $out"
+
+# a real run through the root helper: each tweak applied between baselines, all back
+reset; hfi_fake
+out=$(run --only "$(IFS=,; echo "${ZEN[*]}")" "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && ok "Zen 5c run exits 0" || bad "Zen 5c run exit $rc: $out"
+[[ $(hfi_state) == "$HFI_WANT" ]] && ok "Zen 5c knobs back at stock" || bad "Zen 5c left: $(hfi_state)"
+for t in "${ZEN[@]}"; do
+  grep -qE "^\| $t \| #10 \| 2/2 \|" "$T/home/report.md" && ok "$t measured in both rounds" || bad "$t row: $(grep "^| $t |" "$T/home/report.md")"
+done
+grep -q '^zen5c-all ok ranking=efficiency wake_preferred=all wake_pack=1' "$T/home/report.md" && ok "zen5c-all sets all three" || bad "zen5c-all apply: $(grep zen5c-all "$T/home/report.md")"
+grep -qE '^## A/B on the G16: (hfi-eff|hfi-inv|wake-all|wake-pack|zen5c-all)$' "$ST/posted-10" && ok "the Zen 5c tweaks' rows posted to #10" || bad "no post to #10"
+# the root helper itself: one tweak per file, the MSR tweaks only when allowed, all back on EOF
+reset; hfi_fake
+reply=$(printf 'apply zen5c-all\napply wake-all\napply hfi-inv\napply wake-class\napply wlc-track\n' | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n +2)
+[[ $reply == $'ok ranking=efficiency wake_preferred=all wake_pack=1\nerr zen5c-all is applied (wake_preferred)\nerr zen5c-all is applied (ranking)\nerr wake-class reads the workload-class MSR (layout unverified): only with --unverified-msr\nerr wlc-track reads the workload-class MSR (layout unverified): only with --unverified-msr' ]] &&
+  ok "root helper: one tweak per knob, no MSR tweak without --unverified-msr" || bad "root helper replies: $reply"
+[[ $(hfi_state) == "$HFI_WANT" ]] && ok "root helper: Zen 5c knobs back on EOF" || bad "root helper left: $(hfi_state)"
+reply=$(printf 'apply wake-class\napply wlc-track\n' | "$SCRIPT" --root-helper "$S" "$P" 0 1 | tail -n +2)
+[[ $reply == $'ok wake_preferred=class\nok wlc_track=1' && $(hfi_state) == "$HFI_WANT" ]] && ok "root helper: MSR tweaks with unverified 1, then back" || bad "unverified: $reply / $(hfi_state)"
+# the MSR tweaks: refused by name without the flag, never in a default set
+reset; hfi_fake
+out=$(run --dry-run --only wake-class "${FAST[@]}" 2>&1); rc=$?
+((rc == 2)) && grep -q 'wake-class reads MSR_AMD_WORKLOAD_CLASS_ID on every context switch' <<<"$out" && ok "wake-class refused without --unverified-msr" || bad "wake-class: rc=$rc $out"
+run --dry-run --unverified-msr "${FAST[@]}" >/dev/null 2>&1
+grep -qE '^\| (wake-class|wlc-track) \|' "$T/home/report.md" && bad "an MSR tweak in the default set" || ok "MSR tweaks not in the default set, even with --unverified-msr"
+grep -q '^| zen5c-all |' "$T/home/report.md" && ok "the other Zen 5c tweaks are in the default set" || bad "zen5c-all not in the default set"
+run --dry-run --design pb12 "${FAST[@]}" >/dev/null 2>&1
+grep -qE '^\| (hfi-eff|hfi-inv|wake-all|wake-pack|zen5c-all|wake-class|wlc-track) \|' "$T/home/report.md" && bad "a Zen 5c tweak in the default pb12 set" || ok "no Zen 5c tweak in the default pb12 set"
+out=$(run --dry-run --unverified-msr --only wlc-track,nmi "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && grep -q '^| wlc-track |' "$T/home/report.md" && ok "wlc-track runs by name with --unverified-msr" || bad "wlc-track: rc=$rc $out"
+out=$(run --dry-run --design pb12 --only nmi,hfi-eff,wake-all "${FAST[@]}" 2>&1); rc=$?
+((rc == 2)) && grep -q 'interact by design' <<<"$out" && ok "pb12 refuses two Zen 5c tweaks" || bad "pb12 zen5c: rc=$rc $out"
+# through g16-testd: its hfi knobs, set in order and put back in reverse
+reset; hfi_fake
+touch "$ST/td-open"
+out=$(run_td --only zen5c-all,wake-pack --rounds 1 --measure 1 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+L=$ST/td.log
+seq=$(grep -E '^knob-(set|restore) hfi-' "$L" | awk '{print $1, $2, $3}' | paste -sd';')
+[[ $seq == *"knob-set hfi-ranking efficiency;knob-set hfi-wake-preferred all;knob-set hfi-wake-pack 1;knob-restore hfi-wake-pack |;knob-restore hfi-wake-preferred |;knob-restore hfi-ranking |"* ]] &&
+  ok "testd: zen5c-all sets ranking, wake_preferred, wake_pack and restores them in reverse" || bad "testd zen5c-all: $seq"
+grep -q '^knob-set hfi-wake-pack 1 |' "$L" && ((rc == 0)) && ok "testd: wake-pack through hfi-wake-pack" || bad "testd wake-pack: rc=$rc $(cat "$L")"
+[[ $(hfi_state) == "$HFI_WANT" ]] && ok "testd: the kit wrote no Zen 5c knob itself" || bad "testd wrote: $(hfi_state)"
+reset; hfi_fake
+touch "$ST/td-open"
+out=$(printf 'apply wake-class\n' | G16_TESTD="$B/g16-testd" STUB="$ST" "$SCRIPT" --testd-helper 0 30/500 test | tail -n +2)
+[[ $out == "err wake-class reads the workload-class MSR (layout unverified): only with --unverified-msr" && ! -e $ST/td.log ]] &&
+  ok "testd helper: no MSR tweak without --unverified-msr" || bad "testd wake-class: $out"
+
+# ------------------------------------------------------ 15. --load light
+cat >"$B/ffmpeg" <<'EOF'
+#!/bin/bash
+# the clip (lavfi in), the VA-API probe (-frames:v), the looped real-time decode; the
+# workloads run under env -i, so the stub finds the state next to itself
+STUB=$(dirname "$0")/../state
+echo "ffmpeg $*" >>"$STUB/ffmpeg.log"
+case " $* " in
+  *" lavfi "*) : >"${!#}" ;;
+  *" -frames:v "*) [[ -e $STUB/no-vaapi ]] && { echo "No VA display found for device" >&2; exit 1; }; exit 0 ;;
+  *" -stream_loop "*) echo $$ >"$STUB/decode.pid"; exec sleep 600 ;;
+esac
+EOF
+cat >"$B/brightnessctl" <<'EOF'
+#!/bin/bash
+# brightnessctl -q -d NAME set N, on the fake sysfs
+echo "brightnessctl $*" >>"$STUB/log"
+echo "$5" >"$G16_AB_SYS/class/leds/$3/brightness"
+EOF
+chmod +x "$B/ffmpeg" "$B/brightnessctl"
+light_fake() { # two core types (even CPUs Zen 5, odd Zen 5c), the iGPU's and the RTX's render nodes, a lit keyboard
+  local c
+  printf 'cpu  1 2 3 4\n' >"$P/stat"
+  for c in 0 1 2 3; do
+    mkdir -p "$S/devices/system/cpu/cpu$c/cpufreq"
+    if ((c % 2)); then echo 3506494 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq"; echo 2000000 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_avg_freq"
+    else echo 5090910 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq"; echo 4500000 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_avg_freq"; fi
+    printf 'cpu%s 10 0 10 100 0 0 0 0 0 0\n' "$c" >>"$P/stat"
+  done
+  printf 'intr 1000 0\nctxt 5000\n' >>"$P/stat"
+  mkdir -p "$S/class/drm/renderD128" "$S/class/drm/renderD129"
+  ln -s "$S/devices/pci0000:00/0000:00:08.1/0000:65:00.0" "$S/class/drm/renderD128/device"
+  ln -s "$S/devices/pci0000:00/0000:00:01.1/0000:64:00.0" "$S/class/drm/renderD129/device"
+  mkdir -p "$S/class/leds/asus::kbd_backlight"; echo 2 >"$S/class/leds/asus::kbd_backlight/brightness"
+}
+leftover() { pgrep -f "$T/tmp" >/dev/null || { [[ -e $ST/decode.pid ]] && kill -0 "$(cat "$ST/decode.pid")" 2>/dev/null; }; }
+run_light() { TMPDIR=$T/tmp run "$@"; }
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+LIGHT=(--rounds 2 --measure 3 --settle 0 --interval 1 --seed 7)
+out=$(run_light --load light --dry-run --only nmi "${LIGHT[@]}" 2>&1); rc=$?
+r=$T/home/report.md
+((rc == 0)) && ok "light dry run exits 0" || bad "light dry run exit $rc: $out"
+grep -q '^## G16 A/B under a light load (dry run' "$r" && ok "light: the report says light load" || bad "light title: $(head -1 "$r")"
+grep -q -- '- light load: bursts at about 8 Hz .*video decode: x264 1080p30 clip decoded in real time through VA-API on renderD128' "$r" && ok "light: decode through VA-API on the iGPU" || bad "light decode: $(grep -- '- light load' "$r")"
+grep -q -- '- core types: Zen 5 CPUs 0,2; Zen 5c CPUs 1,3 (by cpuinfo_max_freq)' "$r" && ok "light: core types from cpuinfo_max_freq" || bad "light types: $(grep -- '- core types' "$r")"
+grep -q -- '-stream_loop -1 -re -i .*-f null -' "$ST/ffmpeg.log" && grep -q -- '-hwaccel vaapi -hwaccel_device /dev/dri/renderD128' "$ST/ffmpeg.log" && ! grep -q renderD129 "$ST/ffmpeg.log" &&
+  ok "light: ffmpeg decodes looped, in real time, on renderD128 only" || bad "light ffmpeg: $(cat "$ST/ffmpeg.log")"
+grep -q '^| tweak | issue | rounds | Δ battery W | ±2 SE | Δ SoC W | Δ p95 response ms | Δ p95 % | Δ Zen 5c share pp | Δ spikes >4 GHz pp | verdict |' "$r" &&
+  grep -q '^| nmi | #225 | 2/2 |' "$r" && grep -q '^| baseline noise (sd, B to B) |' "$r" && ok "light: the tweak table with latency, Zen 5c share, spikes and noise" || bad "light table: $(grep -A3 '^| tweak' "$r")"
+row=$(grep -E '^\| 0 \| 1 \| baseline \| 9\.00 \|' "$r" | tail -n1)
+IFS='|' read -r _ _ _ _ _ _ _ _ nb _ lat _ p95 g5 g5c sp _ <<<"$row"
+((${nb// /} > 0)) && [[ $lat == */*/* && ${p95// /} != – ]] && ok "light: bursts and their latency per phase ($nb)" || bad "light bursts: $row"
+[[ ${g5// /} == 4.50 && ${g5c// /} == 2.00 && ${sp// /} == 50.0 ]] && ok "light: clocks per core type and the spike share" || bad "light clocks: $row"
+grep -qx -- '- keyboard backlight: 1 LED(s), forced off before every phase (dry run: left as it is)' "$r" && [[ $(cat "$S/class/leds/asus::kbd_backlight/brightness") == 2 ]] && ! grep -q brightnessctl "$ST/log" &&
+  ok "light dry run: the keyboard LED left alone" || bad "light dry kbd: $(grep -- '- keyboard' "$r") $(grep brightnessctl "$ST/log")"
+sleep 1.5
+leftover && bad "light: a workload left running: $(pgrep -af "$T/tmp")" || ok "light: every workload stopped at the end"
+[[ -z $(ls -A "$T/tmp") ]] && ok "light: the run dir is removed" || bad "light: left in TMPDIR: $(ls -A "$T/tmp")"
+
+# a real (short) light run: the keyboard LED forced off for the phases, then put back
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+out=$(run_light --load light --only nmi --rounds 1 --measure 2 --settle 0 --interval 1 --seed 3 --no-post 2>&1); rc=$?
+((rc == 0)) && ok "light run exits 0" || bad "light run exit $rc: $out"
+grep -q '^brightnessctl -q -d asus::kbd_backlight set 0' "$ST/log" && [[ $(grep '^brightnessctl' "$ST/log" | tail -n1) == "brightnessctl -q -d asus::kbd_backlight set 2" ]] &&
+  [[ $(cat "$S/class/leds/asus::kbd_backlight/brightness") == 2 ]] && ok "light: keyboard LED off for the run, back to 2 after" || bad "light kbd: $(grep brightnessctl "$ST/log")"
+[[ $(orig_state) == "$WANT" ]] && ok "light: every setting back" || bad "light left: $(orig_state)"
+sleep 1.5
+leftover && bad "light run: a workload left running" || ok "light run: every workload stopped"
+
+# no VA-API decode: said in the report, no decode at all (never a CPU decode)
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"; touch "$ST/no-vaapi"
+out=$(run_light --load light --dry-run --only nmi "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && grep -q 'video decode: not available (VA-API decode failed on renderD128: No VA display found for device): the load runs without video decode' "$T/home/report.md" &&
+  ! grep -q -- '-stream_loop' "$ST/ffmpeg.log" && ok "light without VA-API: said so, and no decode runs" || bad "no vaapi: rc=$rc $(grep -i decode "$T/home/report.md") $(cat "$ST/ffmpeg.log")"
+
+# killed outright mid-run: the workloads stop on their own
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+TMPDIR=$T/tmp run --load light --only nmi --rounds 5 --measure 5 --settle 0 --interval 1 --no-post >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 100); do [[ -e $ST/decode.pid ]] && pgrep -f "$T/tmp.*bursts.log" >/dev/null && break; sleep 0.1; done
+# the script itself (run's env execs it below the backgrounded subshell), not its watchers
+main=$(pgrep -P "$pid" | head -n1)
+[[ -n $main ]] && kill -KILL "$main"; wait "$pid" 2>/dev/null
+for _ in $(seq 1 100); do leftover || break; sleep 0.1; done
+leftover && bad "killed light run: a workload outlived it: $(pgrep -af "$T/tmp")" || ok "killed light run: the workloads stopped on their own"
+out=$(run --load light --design pb12 --dry-run "${FAST[@]}" 2>&1); rc=$?
+((rc == 2)) && ok "--load light refuses --design pb12" || bad "light pb12: rc=$rc"
 
 ((fails == 0)) && echo "PASS" || { echo "$fails failed"; exit 1; }

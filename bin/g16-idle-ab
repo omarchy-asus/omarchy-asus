@@ -11,6 +11,10 @@
 #                                rounds (3; pb12: 2), seconds measured per phase (60),
 #                                settling after each change (15), between samples (2)
 #   g16-idle-ab --no-dpms        CACP: the level write alone, no DPMS off/on (0810 kernels)
+#   g16-idle-ab --load light     under a light, repeatable load instead of idle (below);
+#                                phases 30 s measured after 10 s settling
+#   g16-idle-ab --unverified-msr allow wake-class and wlc-track (--only), which read the
+#                                workload-class MSR on every context switch (#10)
 #   g16-idle-ab --dry-run        change nothing, post nothing; short phases
 #   g16-idle-ab --no-post        run it, write the report, don't post it
 #   g16-idle-ab --boot LABEL     no tweaks: measure only the baseline, in rounds, and
@@ -40,15 +44,51 @@
 # parts, cacp3 and cacp4) can't share a pb12 run; the default pb12 set leaves out
 # numlock, usb-idle and cacp4.
 #
+# The Zen 5c-first tweaks (#10) need a kernel with patch 9900 (its knobs under
+# /sys/bus/platform/devices/AMDI0104:00; without them they are skipped, and so are
+# they when a knob is not at its stock value). wake_preferred=all prefers the upper
+# half of the current ranking, so hfi-eff with wake-all puts wakeups on the Zen 5c
+# cores; wake-pack alone changes nothing (it acts only inside a wake preference) and
+# is the null control. wake-class and wlc-track read MSR_AMD_WORKLOAD_CLASS_ID on every
+# context switch, and its layout is unverified: they run only by name (--only) with
+# --unverified-msr, never in a default set. pb12 takes at most one Zen 5c tweak, as
+# they interact by design. Each goes back in reverse order: wake_pack, wake_preferred,
+# then ranking.
+#
+# --load light: the same B T B T ... interleave and guards, with a workload started once
+# for the run and running through every phase, baseline and tweak alike. Silent and
+# headless (no window, no sound, no network), with its own HOME and TMP in a per-run
+# directory that is removed at the end:
+#   bursts        python: wakes on an absolute schedule at about 8 Hz, jittered from a
+#                 fixed seed (typing, a redraw), and does a fixed amount of work each
+#                 time; per burst the wake lateness (actual minus scheduled), the
+#                 completion time, and the CPU at its start and end (sched_getcpu)
+#   browser-like  python: timer work (JSON, regex, small allocations) and short 60 Hz
+#                 frame-tick episodes like a scroll, fixed seed (synthetic: no browser,
+#                 which can wake the RTX)
+#   video decode  ffmpeg decoding a 10 s 1080p clip (made at the start, testsrc2) in
+#                 real time, looped, through VA-API on the amdgpu render node, to null;
+#                 without VA-API decode the report says so and the load runs without it
+#                 (never a CPU decode)
+# Per phase it adds: busy time per CPU (/proc/stat) summed into Zen 5 and Zen 5c and the
+# Zen 5c share, the bursts' CPU placement, the latency percentiles (p50/p95/p99), and the
+# clocks from cpuinfo_avg_freq at about 5 Hz: the mean per core type and the share of
+# samples above 4.0 GHz (clock spikes). Core types come from cpuinfo_max_freq, never the
+# CPU number. Each tweak gets its delta in watts, p95 response, Zen 5c share and spike
+# share against the baseline-to-baseline noise; a watt saving that costs more than 10%
+# in p95 response is flagged.
+#
 # Guards: it starts only on battery (Discharging) with the RTX runtime-suspended,
 # and stops (putting everything back) if the charger comes back or the RTX stays
 # awake. A phase in which the RTX woke is left out. It never reads the nvidia_0
 # backlight, the RTX's hwmon, `sensors` or nvidia-smi, which wake the RTX (#216):
 # only the RTX's runtime_status, vendor and class files.
 #
-# Silent and headless: no sound, no windows. The only visible change is Omarchy's
+# Silent and headless: no sound, no windows. The only visible changes are Omarchy's
 # stay-awake indicator, set for the run so the screensaver and lock don't start
-# (and cleared at the end). Brightness is left alone.
+# (and cleared at the end), and the keyboard backlight, forced off before every phase
+# and logged with every sample (a phase with it lit is left out), then put back.
+# Screen brightness is left alone.
 #
 # Every setting it changes is put back on exit, Ctrl-C included: the root helper
 # restores its settings when the script goes away, and the script restarts any user
@@ -86,10 +126,21 @@ TWEAKS=(
   "usb4|249|USB4/Thunderbolt NHIs and routers left awake (power/control on) -> auto (skipped when none is)"
   "cacp3|172|OLED CACP: panel_power_savings 0 -> 3, then one DPMS off/on (0810 kernels apply the write alone)"
   "cacp4|172|OLED CACP: panel_power_savings 0 -> 4, then one DPMS off/on (0810 kernels apply the write alone)"
+  "hfi-eff|10|Zen 5c first: amd_hfi ranking performance -> efficiency (asym packing and the NOHZ idle balancer prefer the Zen 5c cores; patch 9900)"
+  "hfi-inv|10|amd_hfi ranking performance -> inverted (patch 9900)"
+  "wake-all|10|amd_hfi wake_preferred off -> all: soft wakeup preference for the upper half of the current ranking (patch 9900)"
+  "wake-pack|10|amd_hfi wake_pack 0 -> 1: a no-op without wake_preferred, the null control (patch 9900)"
+  "zen5c-all|10|ranking efficiency + wake_preferred all + wake_pack 1 together (patch 9900)"
+  "wake-class|10|amd_hfi wake_preferred off -> class: reads the workload-class MSR on every switch, layout unverified (only with --unverified-msr)"
+  "wlc-track|10|amd_hfi wlc_track 0 -> 1: the workload-class MSR read on every switch, layout unverified (only with --unverified-msr)"
 )
 # pb12: tweaks that switch the same setting, so can't be columns of one run
 PB12_CONFLICTS=("kbd-usb numlock" "usb-idle kbd-usb" "usb-idle bt-off" "usb-idle numlock" "cacp3 cacp4")
-PB12_DEFAULT_OUT=" numlock usb-idle cacp4 "
+PB12_DEFAULT_OUT=" numlock usb-idle cacp4 hfi-eff hfi-inv wake-all wake-pack zen5c-all wake-class wlc-track "
+# The Zen 5c-first tweaks (#10): one at most in a pb12 run (they interact by design);
+# the MSR ones run only by name, with --unverified-msr.
+ZEN5C=" hfi-eff hfi-inv wake-all wake-pack zen5c-all wake-class wlc-track "
+MSR_TWEAKS=" wake-class wlc-track "
 
 # Read by the root helper and the script alike (all world-readable): the USB4 /
 # Thunderbolt NHIs and routers awake with power/control on, as "path=on ...", never
@@ -121,18 +172,46 @@ trace_count() { # seconds file
     END { for (x in n) printf "trace %.1f %s\n", n[x] / s, x }' "$2" 2>/dev/null | sort -k2,2 -rn | head -40
 }
 NVME_PRIMARY_MS=30 NVME_SECONDARY_MS=500
+# The Zen 5c-first knobs of kernel patch 9900 (#10) on amd_hfi's platform device
+# (world-readable, root to write). A tweak is "file=value ..." in the order they are
+# set; they go back in the reverse order (wake_pack, wake_preferred, then ranking).
+hfi_dir() { # sys
+  local d
+  for d in "$1"/bus/platform/devices/AMDI0104:*; do [[ -e $d/ranking ]] && { printf '%s\n' "$d"; return 0; }; done
+  return 1
+}
+hfi_knobs() { # tweak -> "file=value ..."
+  case $1 in
+    hfi-eff) echo ranking=efficiency ;;
+    hfi-inv) echo ranking=inverted ;;
+    wake-all) echo wake_preferred=all ;;
+    wake-pack) echo wake_pack=1 ;;
+    zen5c-all) echo ranking=efficiency wake_preferred=all wake_pack=1 ;;
+    wake-class) echo wake_preferred=class ;;
+    wlc-track) echo wlc_track=1 ;;
+    *) return 1 ;;
+  esac
+}
+hfi_get() { # file -> its value ("[performance] efficiency inverted" -> performance)
+  local v=''
+  read -r v 2>/dev/null <"$1"
+  [[ $v =~ \[([a-z]+)\] ]] && v=${BASH_REMATCH[1]}
+  printf '%s' "$v"
+}
+HFI_STOCK="ranking=performance wake_preferred=off wake_pack=0 wlc_track=0"
 
 # ------------------------------------------------------------- root helper
 # Runs as root for the whole run, started once. One command per line on stdin,
 # one answer per line on stdout (multi-line answers end with "end"):
 #   apply T / revert T   change tweak T / put it back -> "ok ..." or "err ..."
+#                        (wake-class and wlc-track only when started with unverified 1)
 #   rapl                 -> "rapl PKG_UJ PKG_MAX" (- when absent)
 #   diag                 amdgpu PSR/Replay/IPS state and amd_pmc's idle mask, then "end"
 #   trace S              S seconds (<= 30) of IPI (csd) and hrtimer events, by
 #                        function, then "end"
 # On EOF (the script exited or died) it reverts every tweak still applied.
 if [[ ${1:-} == --root-helper ]]; then
-  sys=${2:?} proc=${3:?} dry=${4:-0}
+  sys=${2:?} proc=${3:?} dry=${4:-0} unverified=${5:-0}
   declare -A ORIG=() APPLIED=()
   rd() { local v=''; read -r v 2>/dev/null <"$1"; printf '%s' "$v"; }
   wr() { ((dry)) && return 0; printf '%s\n' "$2" 2>/dev/null >"$1"; }
@@ -152,7 +231,7 @@ if [[ ${1:-} == --root-helper ]]; then
   leds_off() { local f r=0; for f in "$sys"/class/leds/*::numlock; do [[ -e $f/brightness ]] && { wr "$f/brightness" 0 || r=1; }; done; return $r; }
   leds_set() { local p r=0; for p in $1; do wr "${p%=*}/brightness" "${p##*=}" || r=1; done; return $r; }
   apply() { # tweak -> ok/err line; records the original first
-    local t=$1 f v
+    local t=$1 f v d kv x o r
     [[ -n ${APPLIED[$t]:-} ]] && { echo "err already applied"; return; }
     case $t in
       nmi)
@@ -209,11 +288,24 @@ if [[ ${1:-} == --root-helper ]]; then
         f=$(panel_pps "$sys") || { echo "err absent"; return; }
         ORIG[$t]=$(rd "$f"); APPLIED[$t]=1
         wr "$f" "${t#cacp}" && echo "ok $(rd "$f")" || echo "err write refused" ;;
+      hfi-eff | hfi-inv | wake-all | wake-pack | zen5c-all | wake-class | wlc-track)
+        [[ $MSR_TWEAKS == *" $t "* && $unverified != 1 ]] && { echo "err $t reads the workload-class MSR (layout unverified): only with --unverified-msr"; return; }
+        d=$(hfi_dir "$sys") || { echo "err absent"; return; }
+        kv=$(hfi_knobs "$t")
+        # One tweak per file: another one's revert would undo this one's setting.
+        for o in "${!APPLIED[@]}"; do
+          for x in $(hfi_knobs "$o"); do [[ " $kv " == *" ${x%%=*}="* ]] && { echo "err $o is applied (${x%%=*})"; return; }; done
+        done
+        v=''
+        for x in $kv; do [[ -e $d/${x%%=*} ]] || { echo "err absent: ${x%%=*}"; return; }; v+=" ${x%%=*}=$(hfi_get "$d/${x%%=*}")"; done
+        ORIG[$t]="$d$v"; APPLIED[$t]=1 r=0
+        for x in $kv; do wr "$d/${x%%=*}" "${x#*=}" || { r=1; break; }; done
+        ((r == 0)) && echo "ok$(for x in $kv; do printf ' %s=%s' "${x%%=*}" "$(hfi_get "$d/${x%%=*}")"; done)" || echo "err write refused" ;;
       *) echo "err unknown tweak" ;;
     esac
   }
   revert() { # tweak -> ok/err line
-    local t=$1 f v o p n rc=0
+    local t=$1 f v o p n i rc=0 kv=()
     [[ -n ${APPLIED[$t]:-} ]] || { echo "ok not applied"; return; }
     o=${ORIG[$t]}
     # A write that fails leaves the tweak marked applied: the caller stops the
@@ -241,6 +333,10 @@ if [[ ${1:-} == --root-helper ]]; then
       usb-idle) read -r f v p n o <<<"$o"; wr "$p/soft" "$n" || rc=1; wr "$f/power/control" "$v" || rc=1; leds_set "$o" || rc=1 ;;
       usb4) for p in $o; do wr "${p%=*}/power/control" "${p##*=}" || rc=1; done ;;
       cacp3 | cacp4) f=$(panel_pps "$sys") && wr "$f" "$o" || rc=1 ;;
+      hfi-eff | hfi-inv | wake-all | wake-pack | zen5c-all | wake-class | wlc-track)
+        # last set, first back: wake_pack, wake_preferred, then ranking
+        read -r f p <<<"$o"; read -ra kv <<<"$p"
+        for ((i = ${#kv[@]} - 1; i >= 0; i--)); do wr "$f/${kv[i]%%=*}" "${kv[i]#*=}" || rc=1; done ;;
     esac
     ((rc == 0)) || { echo "err restore write refused"; return; }
     unset "APPLIED[$t]"
@@ -310,7 +406,7 @@ fi
 # it reverts every tweak still applied (and the session's stop puts back anything
 # left after that).
 if [[ ${1:-} == --testd-helper ]]; then
-  dry=${2:-0} nvme=${3:-30/500} why=${4:-}
+  dry=${2:-0} nvme=${3:-30/500} why=${4:-} unverified=${5:-0}
   TD=${G16_TESTD:-g16-testd}
   declare -A APPLIED=()
   knobs() { # tweak -> "knob=value ..." in the order they are set
@@ -325,6 +421,13 @@ if [[ ${1:-} == --testd-helper ]]; then
       usb-idle) echo kbd-usb-pm=auto numlock-led=0 bt-rfkill=1 ;;
       cacp3) echo panel-power-savings=3 ;;
       cacp4) echo panel-power-savings=4 ;;
+      hfi-eff) echo hfi-ranking=efficiency ;;
+      hfi-inv) echo hfi-ranking=inverted ;;
+      wake-all) echo hfi-wake-preferred=all ;;
+      wake-pack) echo hfi-wake-pack=1 ;;
+      zen5c-all) echo hfi-ranking=efficiency hfi-wake-preferred=all hfi-wake-pack=1 ;;
+      wake-class) echo hfi-wake-preferred=class ;;
+      wlc-track) echo hfi-wlc-track=1 ;;
     esac
   }
   td() { # call... -> its last line (the error on a failure)
@@ -345,6 +448,7 @@ print(" ".join(k for k in sys.argv[1:] if k in knobs))' "$@"
   apply() {
     local t=$1 kv got=() r busy
     [[ -n ${APPLIED[$t]:-} ]] && { echo "err already applied"; return; }
+    [[ $MSR_TWEAKS == *" $t "* && $unverified != 1 ]] && { echo "err $t reads the workload-class MSR (layout unverified): only with --unverified-msr"; return; }
     kv=$(knobs "$t"); [[ -n $kv ]] || { echo "err unknown tweak"; return; }
     # shellcheck disable=SC2046,SC2086 # kv: knob=value words, one knob name each
     busy=$(taken $(printf '%s\n' $kv | cut -d= -f1))
@@ -528,15 +632,18 @@ pb12() { python3 -I -c "$PB12_PY" "$@"; }
 
 # ------------------------------------------------------------------ options
 DRY=0 POST=1 ROUNDS='' DESIGN=ab DPMS=1 MEASURE='' SETTLE='' INTERVAL=2 ONLY='' SEED='' BOOT='' CMP_A='' CMP_B='' CMP_ISSUE=''
+LOAD=idle UNVERIFIED=0
 while (($#)); do
   case $1 in
     --dry-run) DRY=1 ;;
     --no-post) POST=0 ;;
-    --list) for t in "${TWEAKS[@]}"; do IFS='|' read -r n i d <<<"$t"; printf '%-9s #%-4s %s\n' "$n" "$i" "$d"; done; exit 0 ;;
+    --list) for t in "${TWEAKS[@]}"; do IFS='|' read -r n i d <<<"$t"; printf '%-10s #%-4s %s\n' "$n" "$i" "$d"; done; exit 0 ;;
     --only) ONLY=${2:-}; shift ;;
     --rounds) ROUNDS=${2:-}; shift ;;
     --design) DESIGN=${2:-}; shift ;;
     --no-dpms) DPMS=0 ;;
+    --load) LOAD=${2:-}; shift ;;
+    --unverified-msr) UNVERIFIED=1 ;;
     --measure) MEASURE=${2:-}; shift ;;
     --settle) SETTLE=${2:-}; shift ;;
     --interval) INTERVAL=${2:-}; shift ;;
@@ -549,8 +656,12 @@ while (($#)); do
   esac
   shift
 done
-if ((DRY)); then : "${MEASURE:=6}" "${SETTLE:=1}"; POST=0; else : "${MEASURE:=60}" "${SETTLE:=15}"; fi
+[[ $LOAD == idle || $LOAD == light ]] || { echo "--load is light (or idle, the default)" >&2; exit 2; }
+if ((DRY)); then : "${MEASURE:=6}" "${SETTLE:=1}"; POST=0
+elif [[ $LOAD == light ]]; then : "${MEASURE:=30}" "${SETTLE:=10}"
+else : "${MEASURE:=60}" "${SETTLE:=15}"; fi
 [[ $DESIGN == ab || $DESIGN == pb12 ]] || { echo "--design is pb12 (or ab, one tweak at a time, the default)" >&2; exit 2; }
+[[ $DESIGN == pb12 && $LOAD == light ]] && { echo "--load light runs one tweak at a time; it takes no --design pb12" >&2; exit 2; }
 [[ $DESIGN == pb12 && -n $BOOT ]] && { echo "--boot measures no tweaks; it takes no --design" >&2; exit 2; }
 : "${ROUNDS:=$([[ $DESIGN == pb12 ]] && echo 2 || echo 3)}"
 for v in ROUNDS MEASURE SETTLE INTERVAL; do
@@ -564,9 +675,15 @@ declare -A ISSUE_OF=()
 for t in "${TWEAKS[@]}"; do IFS="|" read -r n i _ <<<"$t"; ISSUE_OF[$n]=$i; done
 if [[ -n $ONLY ]]; then
   IFS=',' read -ra want <<<"$ONLY"
-  for n in "${want[@]}"; do [[ -n ${ISSUE_OF[$n]:-} ]] || { echo "unknown tweak: $n (see --list)" >&2; exit 2; }; SEL+=("$n"); done
+  for n in "${want[@]}"; do
+    [[ -n ${ISSUE_OF[$n]:-} ]] || { echo "unknown tweak: $n (see --list)" >&2; exit 2; }
+    [[ $MSR_TWEAKS == *" $n "* ]] && ((!UNVERIFIED)) &&
+      { echo "$n reads MSR_AMD_WORKLOAD_CLASS_ID on every context switch, and its layout is unverified (#10): it runs only with --unverified-msr" >&2; exit 2; }
+    SEL+=("$n")
+  done
 else
   for t in "${TWEAKS[@]}"; do
+    [[ $MSR_TWEAKS == *" ${t%%|*} "* ]] && continue
     [[ $DESIGN == pb12 && $PB12_DEFAULT_OUT == *" ${t%%|*} "* ]] && continue
     SEL+=("${t%%|*}")
   done
@@ -578,6 +695,8 @@ if [[ $DESIGN == pb12 ]]; then
     [[ " ${SEL[*]} " == *" $a "* && " ${SEL[*]} " == *" $b "* ]] &&
       { echo "--design pb12: $a and $b switch the same setting, so they can't share a run; pick one" >&2; exit 2; }
   done
+  z=(); for t in "${SEL[@]}"; do [[ $ZEN5C == *" $t "* ]] && z+=("$t"); done
+  ((${#z[@]} <= 1)) || { echo "--design pb12: ${z[*]} are Zen 5c-first tweaks, which interact by design (wake_preferred follows the ranking); one per run, or one at a time without --design" >&2; exit 2; }
 fi
 
 if [[ -t 1 ]]; then B=$'\e[1m' R=$'\e[31m' Y=$'\e[33m' N=$'\e[0m'; else B='' R='' Y='' N=''; fi
@@ -692,24 +811,174 @@ for b in "$SYS"/class/backlight/amdgpu_bl*; do [[ -r $b/actual_brightness ]] && 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/g16-idle-ab.XXXXXX")
 REPORT=${G16_AB_REPORT:-$HOME/omarchy-asus-g16-idle-ab-$STAMP.md}
 ROOT=${G16_ROOT:-auto} TESTD=${G16_TESTD:-g16-testd}
-WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together, USB4 runtime PM, OLED CACP) for the G16 battery A/B (#$SUMMARY_ISSUE); everything is put back when it ends"
+WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together, USB4 runtime PM, OLED CACP, the Zen 5c-first scheduler knobs) for the G16 battery A/B (#$SUMMARY_ISSUE, #10); everything is put back when it ends"
 if [[ $ROOT == auto ]]; then
   if "$TESTD" available >/dev/null 2>&1; then ROOT=testd; else ROOT=pkexec; fi
 fi
 case $ROOT in
   testd)
     "$TESTD" available >/dev/null 2>&1 || die "G16_ROOT=testd, but no g16-testd session is open for you (g16-testd session start)"
-    HELPER_CMD=("$SELF" --testd-helper "$DRY" "$NVME_PRIMARY_MS/$NVME_SECONDARY_MS" "g16-idle-ab: $WHY") ;;
+    HELPER_CMD=("$SELF" --testd-helper "$DRY" "$NVME_PRIMARY_MS/$NVME_SECONDARY_MS" "g16-idle-ab: $WHY" "$UNVERIFIED") ;;
   pkexec)
     if [[ -n ${G16_POLKIT_REASON:-} ]]; then
-      HELPER_CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "$SELF" --root-helper "$SYS" "$PROC" "$DRY")
+      HELPER_CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "$SELF" --root-helper "$SYS" "$PROC" "$DRY" "$UNVERIFIED")
     else
-      HELPER_CMD=(systemd-run --user --wait -q -P pkexec --disable-internal-agent "$SELF" --root-helper "$SYS" "$PROC" "$DRY")
+      HELPER_CMD=(systemd-run --user --wait -q -P pkexec --disable-internal-agent "$SELF" --root-helper "$SYS" "$PROC" "$DRY" "$UNVERIFIED")
     fi ;;
-  sudo) HELPER_CMD=(sudo ${SUDO_ASKPASS:+-A} "$SELF" --root-helper "$SYS" "$PROC" "$DRY") ;;
-  none) HELPER_CMD=("$SELF" --root-helper "$SYS" "$PROC" "$DRY") ;;
+  sudo) HELPER_CMD=(sudo ${SUDO_ASKPASS:+-A} "$SELF" --root-helper "$SYS" "$PROC" "$DRY" "$UNVERIFIED") ;;
+  none) HELPER_CMD=("$SELF" --root-helper "$SYS" "$PROC" "$DRY" "$UNVERIFIED") ;;
   *) die "G16_ROOT must be testd, pkexec, sudo or none" ;;
 esac
+
+# The keyboard backlight: forced off before every phase (asusd can bring it back), its
+# level logged with every sample, and put back at the end. As the user: brightnessctl
+# (through logind), else asusctl. A dry run only logs it.
+KBD_LEDS=()
+for l in "$SYS"/class/leds/*::kbd_backlight*; do [[ -e $l/brightness ]] && KBD_LEDS+=("$l/brightness"); done
+declare -A KBD_ORIG=()
+KBD_LEVELS=(off low med high)
+kbd_off() { # -> 1 when a keyboard LED is still lit
+  local f v r=0
+  for f in "${KBD_LEDS[@]}"; do
+    v=''; read -r v 2>/dev/null <"$f"
+    [[ $v == 0 ]] && continue
+    [[ -n ${KBD_ORIG[$f]:-} ]] || KBD_ORIG[$f]=$v
+    ((DRY)) && continue
+    if have brightnessctl; then brightnessctl -q -d "$(basename "${f%/brightness}")" set 0 >/dev/null 2>&1
+    elif have asusctl; then asusctl leds set off >/dev/null 2>&1; fi
+    v=''; read -r v 2>/dev/null <"$f"; [[ $v == 0 ]] || r=1
+  done
+  return $r
+}
+kbd_restore() {
+  local f v r=0
+  ((DRY)) && return 0
+  for f in "${!KBD_ORIG[@]}"; do
+    v=${KBD_ORIG[$f]}
+    if have brightnessctl; then brightnessctl -q -d "$(basename "${f%/brightness}")" set "$v" >/dev/null 2>&1 || r=1
+    elif have asusctl; then asusctl leds set "${KBD_LEVELS[v]:-high}" >/dev/null 2>&1 || r=1; fi
+    unset "KBD_ORIG[$f]"
+  done
+  return $r
+}
+
+# The light load (--load light): three workloads, each under a watcher that stops it
+# when this script goes away (even killed), with their own HOME and TMP in $LOAD_DIR.
+BURSTS_PY=$(cat <<'PY'
+"""Bursts: an absolute schedule at about 8 Hz, jitter from a fixed seed, fixed work per
+burst. One line per burst: scheduled, woke, done (CLOCK_MONOTONIC s), CPU at start, end."""
+import ctypes, random, signal, sys, time
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+getcpu = ctypes.CDLL(None, use_errno=True).sched_getcpu  # Python's os has no sched_getcpu
+rng = random.Random(10)
+PERIOD, JITTER, WORK = 0.125, 0.025, 30000
+with open(sys.argv[1], "w") as f:
+    nxt = time.monotonic() + PERIOD
+    flushed = nxt
+    while True:
+        d = nxt - time.monotonic()
+        if d > 0:
+            time.sleep(d)
+        w = time.monotonic()
+        c0 = getcpu()
+        x = 1
+        for _ in range(WORK):
+            x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+        e = time.monotonic()
+        f.write(f"{nxt:.6f} {w:.6f} {e:.6f} {c0} {getcpu()}\n")
+        if e - flushed >= 1:
+            f.flush()
+            flushed = e
+        nxt += PERIOD + rng.uniform(-JITTER, JITTER)
+        if e - nxt > 1:  # a stall of more than a second: the schedule starts again
+            nxt = e + PERIOD
+PY
+)
+BROWSER_PY=$(cat <<'PY'
+"""Browser-like: 4 Hz timer work (JSON parse and serialise, a regex, small allocations)
+and, every 3-8 s, a scroll: 60 Hz frame ticks for 0.4-1.2 s. Fixed seed."""
+import json, random, re, signal, sys, time
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+rng = random.Random(11)
+doc = {"items": [{"id": i, "title": f"item {i}", "tags": ["news", "mail", "chat"][: i % 3 + 1], "score": i / 2} for i in range(200)]}
+text = json.dumps(doc)
+title = re.compile(r'"title": "item (\d+)"')
+TIMER, FRAME = 0.25, 1 / 60
+nxt_timer = time.monotonic() + TIMER
+nxt_scroll = time.monotonic() + rng.uniform(3, 8)
+while True:
+    now = time.monotonic()
+    if now >= nxt_scroll:
+        t = now
+        for _ in range(int(60 * rng.uniform(0.4, 1.2))):
+            rows = [f"{i}:{(i * 7919) % 997}" for i in range(300)]
+            sum(len(r) for r in rows)
+            t += FRAME
+            time.sleep(max(0, t - time.monotonic()))
+        nxt_scroll = time.monotonic() + rng.uniform(3, 8)
+        continue
+    if now >= nxt_timer:
+        d = json.loads(text)
+        d["items"][rng.randrange(200)]["score"] += 1
+        text = json.dumps(d)
+        len(title.findall(text))
+        [bytearray(64) for _ in range(200)]
+        while nxt_timer <= time.monotonic():
+            nxt_timer += TIMER
+    time.sleep(max(0, min(nxt_timer, nxt_scroll) - time.monotonic()))
+PY
+)
+LOAD_DIR='' LOAD_PIDS=() DECODE='' RENDER=''
+load_watch() { # main-pid command...: run it until it ends, the run goes away, or TERM
+  local main=$1 c
+  shift
+  "$@" & c=$!
+  trap 'kill "$c" 2>/dev/null; wait "$c" 2>/dev/null; exit 0' TERM
+  while kill -0 "$main" 2>/dev/null && kill -0 "$c" 2>/dev/null; do sleep 1 & wait $!; done
+  kill "$c" 2>/dev/null; wait "$c" 2>/dev/null
+  exit 3
+}
+load_start() {
+  LOAD_DIR=$WORK/load
+  mkdir -p "$LOAD_DIR/home" "$LOAD_DIR/tmp" || return 1
+  local r v enc ok=0
+  # No display, no sound server, no session bus: a bare environment; nothing opens a socket.
+  local E=(env -i PATH="$PATH" HOME="$LOAD_DIR/home" TMPDIR="$LOAD_DIR/tmp" LANG=C.UTF-8)
+  # The iGPU's render node, by vendor (never the RTX's).
+  for r in "$SYS"/class/drm/renderD*; do v=''; read -r v 2>/dev/null <"$r/device/vendor"; [[ $v == 0x1002 ]] && { RENDER=/dev/dri/${r##*/}; break; }; done
+  if ! have ffmpeg; then DECODE="not available (ffmpeg is not installed): the load runs without video decode"
+  elif [[ -z $RENDER ]]; then DECODE="not available (no amdgpu render node): the load runs without video decode"
+  else
+    for enc in libx264 libx265; do
+      "${E[@]}" ffmpeg -nostdin -hide_banner -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=30 -t 10 \
+        -c:v "$enc" -preset veryfast -pix_fmt yuv420p -g 60 "$LOAD_DIR/clip.mp4" >"$LOAD_DIR/ffmpeg.log" 2>&1 && { ok=1; break; }
+    done
+    if ((!ok)); then DECODE="not available (no H.264 or HEVC encoder for the test clip): the load runs without video decode"
+    # hwaccel_output_format vaapi: a decode VA-API can't do fails, never falls back to the CPU
+    elif ! "${E[@]}" LIBVA_DRIVER_NAME=radeonsi ffmpeg -nostdin -hide_banner -loglevel error -hwaccel vaapi -hwaccel_device "$RENDER" \
+        -hwaccel_output_format vaapi -i "$LOAD_DIR/clip.mp4" -frames:v 30 -an -f null - >"$LOAD_DIR/ffmpeg.log" 2>&1; then
+      DECODE="not available (VA-API decode failed on ${RENDER##*/}: $(tail -n1 "$LOAD_DIR/ffmpeg.log" | cut -c1-120)): the load runs without video decode"
+    else DECODE="${enc#lib} 1080p30 clip decoded in real time through VA-API on ${RENDER##*/}"
+    fi
+  fi
+  load_watch $$ "${E[@]}" python3 -I -c "$BURSTS_PY" "$LOAD_DIR/bursts.log" >>"$LOAD_DIR/load.log" 2>&1 &
+  LOAD_PIDS+=($!)
+  load_watch $$ "${E[@]}" python3 -I -c "$BROWSER_PY" "$LOAD_DIR" >>"$LOAD_DIR/load.log" 2>&1 &
+  LOAD_PIDS+=($!)
+  if [[ $DECODE == *"through VA-API"* ]]; then
+    load_watch $$ "${E[@]}" LIBVA_DRIVER_NAME=radeonsi ffmpeg -nostdin -hide_banner -loglevel error -hwaccel vaapi -hwaccel_device "$RENDER" \
+      -hwaccel_output_format vaapi -stream_loop -1 -re -i "$LOAD_DIR/clip.mp4" -an -f null - >>"$LOAD_DIR/load.log" 2>&1 &
+    LOAD_PIDS+=($!)
+  fi
+}
+load_alive() { local p; for p in "${LOAD_PIDS[@]}"; do kill -0 "$p" 2>/dev/null || return 1; done; }
+load_stop() {
+  local p
+  ((${#LOAD_PIDS[@]})) || return 0
+  for p in "${LOAD_PIDS[@]}"; do kill -TERM "$p" 2>/dev/null; done
+  for p in "${LOAD_PIDS[@]}"; do wait "$p" 2>/dev/null; done
+  LOAD_PIDS=()
+}
 
 STAY_FILE=$HOME/.local/state/omarchy/indicators/stay-awake
 STAY_AWAKE_SET=0 VOX_STOPPED=0 RESTORED=0 BT_CHECK=0 BT_POWERED=0 CACP_TOUCHED=0
@@ -718,6 +987,8 @@ restore() {
   ((RESTORED)) && return
   RESTORED=1
   local left=0
+  load_stop
+  kbd_restore || { note "${R}the keyboard backlight did not go back on: brightnessctl -d <its LED> set <level>${N}"; left=1; }
   if ((VOX_STOPPED)); then systemctl --user start voxtype.service 2>/dev/null && VOX_STOPPED=0 || { note "${R}voxtype did not start again: systemctl --user start voxtype${N}"; left=1; }; fi
   if [[ -n ${HELPER_PID:-} ]]; then
     local fd=${HELPER[1]:-}
@@ -764,6 +1035,8 @@ measure() { # name tweak round [design row signs]
   out=$WORK/$n.json
   PHASES+=("$out")
   printf '%s  round %s  %-10s settle %ss, measure %ss%s\n' "$(date +%H:%M)" "$round" "$name" "$SETTLE" "$MEASURE" "${design:+  on: ${tweak//,/ }}"
+  kbd_off || note "${Y}a keyboard LED is still lit; this phase will be left out${N}"
+  if [[ $LOAD == light ]] && ! load_alive; then die "the light load stopped ($(tail -n2 "$LOAD_DIR/load.log" 2>/dev/null | tr '\n' ' ')); stopping the run"; fi
   sleep "$SETTLE"
   if ((DRY == 0)); then
     [[ $(bat_status) == Discharging ]] || die "the charger is back ($(bat_status)); stopping the run"
@@ -773,10 +1046,20 @@ measure() { # name tweak round [design row signs]
       sleep 5; waited=$((waited + 5))
     done
   fi
-  python3 -I - "$SYS" "$PROC" "${AMDGPU:-}" "$BAT" "${DGPU:-}" "${BACKLIGHT:-}" "$MEASURE" "$INTERVAL" "$name" "$tweak" "$round" "$design" >"$out" <<'PY'
+  python3 -I - "$SYS" "$PROC" "${AMDGPU:-}" "$BAT" "${DGPU:-}" "${BACKLIGHT:-}" "$MEASURE" "$INTERVAL" "$name" "$tweak" "$round" "$design" \
+    "$LOAD" "$(printf '%s\n' "${KBD_LEDS[@]}")" "$WORK/cpus.json" >"$out" <<'PY'
 import glob, json, os, struct, sys, time
-sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd, design = sys.argv[1:13]
+sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd, design, load, kbd, cpuf = sys.argv[1:16]
 measure, interval = int(measure), int(interval)
+kbd = [k for k in kbd.split("\n") if k]
+# Light load: each CPU's clock (APERF/MPERF over the last tick) at about 5 Hz.
+cpus = {}
+if load == "light":
+    try:
+        with open(cpuf) as f: cpus = json.load(f)
+    except (OSError, ValueError): pass
+avgf = [(c, f"{sysfs}/devices/system/cpu/cpu{c}/cpufreq/cpuinfo_avg_freq") for c in cpus]
+freq = {c: [0, 0, 0, 0] for c in cpus}  # samples with a reading, their kHz sum, above 4.0 GHz, without a reading
 def rd(p, d=None):
     try:
         with open(p) as f: return f.read().strip()
@@ -795,9 +1078,14 @@ def metrics():
     return None, None, None
 def counters():
     c = {"mono": time.monotonic()}
+    c["cpu"] = {}
     for line in (rd(proc + "/stat", "") or "").splitlines():
         f = line.split()
         if f and f[0] in ("ctxt", "intr"): c[f[0]] = int(f[1])
+        elif f and f[0][:3] == "cpu" and f[0][3:].isdigit():
+            # busy = everything but idle and iowait, in clock ticks
+            v = [int(x) for x in f[1:9] if x.isdigit()]
+            c["cpu"][f[0][3:]] = sum(v) - sum(v[3:5])
     lines = (rd(proc + "/interrupts", "") or "").splitlines()
     ncols = len(lines[0].split()) if lines else 0
     irq = {}
@@ -832,6 +1120,16 @@ def devstate():
         if "Realtek" in (rd(d + "/vendor_name") or ""): s["codec"] = rd(d + "/power/runtime_status") or "?"
     s["dgpu"] = rd(dgpu + "/power/runtime_status") if dgpu else "-"
     return s
+def kbd_level():
+    v = [rd(k) for k in kbd]
+    v = [int(x) for x in v if x and x.isdigit()]
+    return max(v) if v else None
+def clocks():
+    for c, p in avgf:
+        v = rd(p)
+        if v and v.isdigit() and int(v) > 0:
+            freq[c][0] += 1; freq[c][1] += int(v); freq[c][2] += int(v) > 4000000
+        else: freq[c][3] += 1
 c0 = counters()
 samples, states = [], []
 end = time.monotonic() + measure
@@ -845,15 +1143,26 @@ while True:
     sock, gfx, core = metrics()
     st = devstate()
     samples.append({"t": t, "bat": w, "sock": sock, "gfx": gfx, "core": core, "status": rd(bat + "/status"),
-                    "bl": rd(bl + "/actual_brightness") if bl else None})
+                    "bl": rd(bl + "/actual_brightness") if bl else None, "kbd": kbd_level()})
     states.append(st)
-    if t + interval > end: break
+    if t + interval > end:
+        # under load the clocks cover the whole phase, and so does its burst window
+        while avgf and time.monotonic() < end:
+            clocks()
+            time.sleep(max(0, min(0.2, end - time.monotonic())))
+        break
+    if avgf:
+        while time.monotonic() < t + interval - 0.2:
+            clocks()
+            time.sleep(0.2)
     time.sleep(max(0, interval - (time.monotonic() - t)))
 c1 = counters()
 dt = c1["mono"] - c0["mono"]
 rate = {k: (c1["irq"][k] - c0["irq"].get(k, 0)) / dt for k in c1["irq"]} if dt > 0 else {}
 def keep(k): return k in ("LOC", "CAL", "RES", "TLB") or any(s in k for s in ("amdgpu", "nvme", "mt7925", "xhci", "AMDI0010", "sdhci", "mmc", "snd", "ASUF"))
 json.dump({"name": name, "tweak": tweak, "round": int(rnd), "design": design, "dt": dt, "samples": samples, "states": states,
+           "t0": c0["mono"], "t1": c1["mono"], "freq": freq,
+           "busy": {k: v - c0["cpu"].get(k, v) for k, v in c1["cpu"].items()},
            "irq": {k: v for k, v in rate.items() if keep(k) and v >= 0.05},
            "intr": (c1.get("intr", 0) - c0.get("intr", 0)) / dt if dt > 0 else None,
            "ctxt": (c1.get("ctxt", 0) - c0.get("ctxt", 0)) / dt if dt > 0 else None}, sys.stdout)
@@ -864,7 +1173,7 @@ PY
 TOTAL_PH=$((ROUNDS * (2 * ${#SEL[@]} + 1)))
 [[ $DESIGN == pb12 ]] && TOTAL_PH=$((ROUNDS * 12))
 [[ -n $BOOT ]] && TOTAL_PH=$((ROUNDS * 2))
-say "G16 idle A/B$( [[ -n $BOOT ]] && echo " (boot run '$BOOT')" )$( ((DRY)) && echo ', dry run')"
+say "G16 idle A/B$( [[ $LOAD == light ]] && echo ' under a light load' )$( [[ -n $BOOT ]] && echo " (boot run '$BOOT')" )$( ((DRY)) && echo ', dry run')"
 note "$TOTAL_PH phases, about $(( (SETTLE + MEASURE) * TOTAL_PH / 60 + 2 )) minutes; leave the laptop alone until it says done"
 if [[ $ROOT == testd ]]; then note "root steps through the open g16-testd session (no dialog)"; else note "asking for root once"; fi
 coproc HELPER { "${HELPER_CMD[@]}" 2>/dev/null; }
@@ -898,13 +1207,49 @@ ctx display "$(hyprctl monitors -j 2>/dev/null | python3 -I -c 'import json,sys
 try: print("; ".join("%s %sx%s@%.0fHz vrr=%s" % (m["name"], m["width"], m["height"], m["refreshRate"], m.get("vrr")) for m in json.load(sys.stdin)))
 except Exception: print("?")')"
 ctx "battery sensor" "$( [[ -r $BAT/power_now ]] && echo power_now || echo current_now×voltage_now); SoC: $( [[ -n $AMDGPU ]] && echo 'amdgpu gpu_metrics' || echo none)"
+# The core types, by each CPU's cpuinfo_max_freq (never its number): two clusters, split
+# halfway, when the fastest is more than 15% above the slowest.
+python3 -I - "$SYS" >"$WORK/cpus.json" <<'PY'
+import glob, json, os, sys
+m = {}
+for d in glob.glob(sys.argv[1] + "/devices/system/cpu/cpu[0-9]*"):
+    try:
+        with open(d + "/cpufreq/cpuinfo_max_freq") as f: m[os.path.basename(d)[3:]] = int(f.read())
+    except (OSError, ValueError): pass
+hi, lo = (max(m.values()), min(m.values())) if m else (0, 0)
+json.dump({c: "zen5c" if hi > 1.15 * lo and 2 * v < hi + lo else "zen5" for c, v in sorted(m.items(), key=lambda x: int(x[0]))}, sys.stdout)
+PY
+if [[ $LOAD == light ]]; then
+  ctx "core types" "$(python3 -I -c 'import json, sys
+t = json.load(open(sys.argv[1]))
+print("; ".join(n + " CPUs " + ",".join(c for c in t if t[c] == k) for k, n in (("zen5", "Zen 5"), ("zen5c", "Zen 5c")) if k in t.values()) or "?")' "$WORK/cpus.json") (by cpuinfo_max_freq)"
+  ctx "clock source" "$( [[ -r $SYS/devices/system/cpu/cpu0/cpufreq/cpuinfo_avg_freq ]] && echo 'cpuinfo_avg_freq (APERF/MPERF), about 5 Hz' || echo 'none: no cpuinfo_avg_freq')"
+fi
+ctx "keyboard backlight" "$( ((${#KBD_LEDS[@]})) && echo "${#KBD_LEDS[@]} LED(s), forced off before every phase$( ((DRY)) && echo ' (dry run: left as it is)')" || echo 'none found')"
 ctx "Bluetooth" "$(have bluetoothctl && { bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && echo powered || echo 'not powered'; } || echo '?'), $(have bluetoothctl && { bluetoothctl devices Connected 2>/dev/null | grep -c '^Device' || true; } || echo '?') connected"
+if [[ $LOAD == light ]]; then
+  say "starting the light load (bursts, browser-like timers, video decode)"
+  load_start || die "the light load did not start"
+  sleep 1
+  load_alive || die "the light load did not start: $(tail -n3 "$LOAD_DIR/load.log" 2>/dev/null | tr '\n' ' ')"
+  note "video decode: $DECODE"
+  ctx "light load" "bursts at about 8 Hz with fixed work (python, seed 10); browser-like timers and 60 Hz scroll episodes (python, seed 11); video decode: $DECODE. Started once, running through every phase"
+fi
 ask_root_lines diag >"$WORK/diag" || true
 say "20 s IPI and timer trace (before any change)"
 ask_root_lines "trace 20" >"$WORK/trace" || true
 
 # Which tweaks can run here.
 RUN=() SKIP=()
+# The Zen 5c-first knobs: every one present must be at its stock value, or the
+# baseline isn't stock.
+HFI_NOTE=''
+if HD=$(hfi_dir "$SYS"); then
+  for x in $HFI_STOCK; do
+    [[ -e $HD/${x%%=*} ]] || continue
+    v=$(hfi_get "$HD/${x%%=*}"); [[ $v == "${x#*=}" ]] || HFI_NOTE+="${HFI_NOTE:+, }${x%%=*} is $v, not ${x#*=}"
+  done
+fi
 for t in "${SEL[@]}"; do
   case $t in
     voxtype) systemctl --user is-active -q voxtype.service 2>/dev/null && RUN+=("$t") || SKIP+=("$t: voxtype.service not running") ;;
@@ -919,6 +1264,11 @@ for t in "${SEL[@]}"; do
       if ! PPS=$(panel_pps "$SYS"); then SKIP+=("$t: no panel_power_savings on the eDP panel")
       elif [[ $(cat "$PPS" 2>/dev/null) != 0 ]]; then SKIP+=("$t: panel_power_savings is $(cat "$PPS" 2>/dev/null), not 0")
       elif ((DPMS && DRY == 0)) && ! { have hyprctl && [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; }; then SKIP+=("$t: no Hyprland session for the DPMS cycle (--no-dpms on 0810 kernels)")
+      else RUN+=("$t"); fi ;;
+    hfi-eff | hfi-inv | wake-all | wake-pack | zen5c-all | wake-class | wlc-track)
+      miss=''; for x in $(hfi_knobs "$t"); do [[ -n $HD && -e $HD/${x%%=*} ]] || miss+="${miss:+, }${x%%=*}"; done
+      if [[ -n $miss ]]; then SKIP+=("$t: no $miss under /sys/bus/platform/devices/AMDI0104:* (a kernel without the Zen 5c-first patch 9900)")
+      elif [[ -n $HFI_NOTE ]]; then SKIP+=("$t: the Zen 5c-first knobs are not at their stock values ($HFI_NOTE)")
       else RUN+=("$t"); fi ;;
     *) RUN+=("$t") ;;
   esac
@@ -1023,12 +1373,15 @@ done
 
 # ------------------------------------------------------------------ report
 say "putting everything back"
+load_stop
+[[ $LOAD == light ]] && cp "$LOAD_DIR/bursts.log" "$WORK/bursts" 2>/dev/null
 printf '%s\n' "${PHASES[@]}" >"$WORK/phases"
 printf '%s\n' "${TWEAKS[@]}" >"$WORK/tweaks"
 printf '%s\n' "$PB12_PY" >"$WORK/g16pb.py"
-python3 -I - "$WORK" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$ROUNDS" "$SEED" "$DRY" "${BOOT:--}" "$SUMMARY_ISSUE" "$DESIGN" "$ROOT" >"$WORK/report.md" <<'PY' || die "the report failed"
+python3 -I - "$WORK" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$ROUNDS" "$SEED" "$DRY" "${BOOT:--}" "$SUMMARY_ISSUE" "$DESIGN" "$ROOT" "$LOAD" >"$WORK/report.md" <<'PY' || die "the report failed"
 import json, math, os, statistics as st, sys
-work, rev, settle, measure, interval, rounds, seed, dry, boot, summary, design, root = sys.argv[1:13]
+work, rev, settle, measure, interval, rounds, seed, dry, boot, summary, design, root, mode = sys.argv[1:14]
+light = mode == "light"
 def load(p):
     try:
         with open(p) as f: return f.read()
@@ -1037,6 +1390,41 @@ issues, descs = {}, {}
 for line in load(work + "/tweaks").splitlines():
     n, i, d = line.split("|", 2); issues[n], descs[n] = i, d
 phases = [json.loads(load(p)) for p in load(work + "/phases").split()]
+types = json.loads(load(work + "/cpus.json") or "{}")
+bursts = []  # (scheduled, woke, done, CPU at start, CPU at end)
+for line in load(work + "/bursts").splitlines():
+    x = line.split()
+    try:
+        if len(x) == 5: bursts.append((float(x[0]), float(x[1]), float(x[2]), x[3], x[4]))
+    except ValueError: pass
+def pct(v, q):
+    if not v: return None
+    v = sorted(v)
+    return v[min(len(v) - 1, max(0, math.ceil(q / 100 * len(v)) - 1))]
+HZ = os.sysconf("SC_CLK_TCK")
+def light_metrics(p):
+    """The light load's columns, kept as phase keys so other tweaks (#328) reuse them:
+    lat/comp [p50, p95, p99] ms, p95 (response: scheduled wake to done) ms, burst5c %,
+    busy5/busy5c (CPUs busy on average), share5c %, ghz5/ghz5c, spike % (above 4.0 GHz)."""
+    b = [x for x in bursts if p.get("t0", 0) <= x[0] < p.get("t1", 0)]
+    p["bursts"] = len(b)
+    p["lat"] = [pct([(w - s0) * 1000 for s0, w, e, c0, c1 in b], q) for q in (50, 95, 99)]
+    p["comp"] = [pct([(e - w) * 1000 for s0, w, e, c0, c1 in b], q) for q in (50, 95, 99)]
+    p["p95"] = pct([(e - s0) * 1000 for s0, w, e, c0, c1 in b], 95)
+    on = [types.get(c) == "zen5c" for x in b for c in x[3:5]]
+    p["burst5c"] = 100 * sum(on) / len(on) if on else None
+    busy, dt = p.get("busy", {}), p.get("dt") or 0
+    z = {k: sum(v for c, v in busy.items() if types.get(c) == k) / HZ / dt if dt else None for k in ("zen5", "zen5c")}
+    p["busy5"], p["busy5c"] = z["zen5"], z["zen5c"]
+    tot = (z["zen5"] or 0) + (z["zen5c"] or 0)
+    p["share5c"] = 100 * z["zen5c"] / tot if tot > 0 else None
+    fr = p.get("freq", {})
+    def ghz(k):
+        n = sum(v[0] for c, v in fr.items() if types.get(c) == k)
+        return sum(v[1] for c, v in fr.items() if types.get(c) == k) / n / 1e6 if n else None
+    p["ghz5"], p["ghz5c"] = ghz("zen5"), ghz("zen5c")
+    n = sum(v[0] for v in fr.values())
+    p["spike"] = 100 * sum(v[2] for v in fr.values()) / n if n else None
 def summarize(p):
     s = p["samples"]
     def m(k):
@@ -1047,11 +1435,13 @@ def summarize(p):
     if any(z.get("dgpu") not in ("suspended", "-", None) for z in p["states"]): bad.append("RTX awake")
     bls = {x.get("bl") for x in s}
     if len(bls) > 1: bad.append("brightness changed")
+    if dry != "1" and any(x.get("kbd") not in (None, 0) for x in s): bad.append("keyboard LED on")
     stt = {}
     for z in p["states"]:
         for k, v in z.items(): stt.setdefault(k, {}).setdefault(v, 0); stt[k][v] += 1
     p.update(bat=m("bat"), sock=None if m("sock") is None else m("sock") / 1000, gfx=None if m("gfx") is None else m("gfx") / 1000,
              core=None if m("core") is None else m("core") / 1000, bad=bad, valid=not bad, devstates=stt)
+    if light: light_metrics(p)
     return p
 for p in phases: summarize(p)
 f = lambda v, n=2: "–" if v is None else f"{v:.{n}f}"
@@ -1063,7 +1453,7 @@ if boot != "-":
            "settle": settle, "measure": measure, "interval": interval,
            "phases": [{k: p[k] for k in ("bat", "sock", "valid")} for p in phases]}
     with open(work + "/boot.json", "w") as fh: json.dump(rec, fh)
-o.append(f"## G16 idle A/B{' (dry run, not a measurement)' if dry == '1' else ''}{' — boot run ' + boot if boot != '-' else ''}\n")
+o.append(f"## G16 {'A/B under a light load' if light else 'idle A/B'}{' (dry run, not a measurement)' if dry == '1' else ''}{' — boot run ' + boot if boot != '-' else ''}\n")
 o.append(load(work + "/context").rstrip())
 o.append(f"- root steps: {'the G16 test session helper (g16-testd)' if root == 'testd' else root}")
 if design == "pb12":
@@ -1081,7 +1471,14 @@ else:
     o.append(f"- method: {rounds} rounds; each round runs every tweak once in a shuffled order (seed {seed}), each between two baseline phases "
              f"(B T1 B T2 … B). Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. A tweak's delta "
              "in a round is its phase minus the mean of the two baselines around it. ±2 SE is twice the standard error of the mean delta "
-             "over the rounds. Phases with the charger in, the RTX awake or the brightness changed are left out.")
+             "over the rounds. Phases with the charger in, the RTX awake, the brightness changed or a keyboard LED lit are left out.")
+if light:
+    o.append("- light load: started once and running through every phase, baseline and tweak alike. Latency comes from the bursts "
+             "scheduled in a phase's measured window: wake lateness (actual minus scheduled wake), completion (the burst's fixed "
+             "work), and p95 response (scheduled wake to done). Zen 5c share: the Zen 5c cores' part of all CPU busy time "
+             "(/proc/stat). Spikes: the share of cpuinfo_avg_freq samples above 4.0 GHz. A tweak's Δ is its phase minus the mean "
+             "of the baselines around it; noise is the sd of one baseline minus the next. **flagged**: a watt saving with p95 "
+             "response more than 10% worse.")
 o.append(f"- verdict: **saves** when the {'effect' if design == 'pb12' else 'mean delta'} is below −0.10 W and below −2 SE; **costs** the mirror; otherwise **no effect beyond noise**.\n")
 skipped = load(work + "/skipped").strip()
 if skipped: o.append("Skipped: " + "; ".join(skipped.splitlines()) + "\n")
@@ -1095,7 +1492,7 @@ for i, p in enumerate(phases):
     if not p["valid"] or p["bat"] is None or len(bases) < 2: per.setdefault(p["tweak"], []).append(None); continue
     bb = st.mean(q["bat"] for q in bases)
     bs = [q["sock"] for q in bases if q["sock"] is not None]
-    per.setdefault(p["tweak"], []).append((p["bat"] - bb, (p["sock"] - st.mean(bs)) if bs and p["sock"] is not None else None, p))
+    per.setdefault(p["tweak"], []).append((p["bat"] - bb, (p["sock"] - st.mean(bs)) if bs and p["sock"] is not None else None, p, bases))
 base = [p for p in phases if p["tweak"] == "-" and p["valid"] and p["bat"] is not None]
 noise = None
 if len(base) > 2:
@@ -1133,7 +1530,40 @@ if design == "pb12":
              + ("–" if fb["sigma"] is None else f"{fb['sigma']:.2f} W") + f" on {fb['df'] if fb['df'] is not None else 0} degrees of freedom"
              + (", with a linear drift term" if fb["trend"] else ", no drift term") + ".")
     o.append("\n<details><summary>The design matrix (+ on, − off)</summary>\n\n```\n" + load(work + "/matrix").rstrip() + "\n```\n</details>")
-if per:
+def bnoise(k):
+    v = [b[k] for b in base if b.get(k) is not None]
+    d = [y - x for x, y in zip(v, v[1:])]
+    return st.pstdev(d) if len(d) > 1 else None
+def dkey(d, k):
+    p, bases = d[2], d[3]
+    bv = [q[k] for q in bases if q.get(k) is not None]
+    return None if p.get(k) is None or len(bv) < 2 else p[k] - st.mean(bv)
+def mean_or_none(v):
+    v = [x for x in v if x is not None]
+    return st.mean(v) if v else None
+sg = lambda v, n=2: "–" if v is None else f"{v:+.{n}f}"  # noqa: E731
+if light and per:
+    o.append("| tweak | issue | rounds | Δ battery W | ±2 SE | Δ SoC W | Δ p95 response ms | Δ p95 % | Δ Zen 5c share pp | Δ spikes >4 GHz pp | verdict |")
+    o.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for t, ds in per.items():
+        good = [d for d in ds if d]
+        dv = [d[0] for d in good]
+        mean = st.mean(dv) if dv else None
+        se2 = 2 * st.stdev(dv) / math.sqrt(len(dv)) if len(dv) > 1 else None
+        v = verdict(mean, se2)
+        if v == "no noise estimate": v = "no effect beyond noise"
+        dl = mean_or_none([dkey(d, "p95") for d in good])
+        bl95 = mean_or_none([q["p95"] for d in good for q in d[3] if q.get("p95") is not None])
+        rel = 100 * dl / bl95 if dl is not None and bl95 else None
+        flag = mean is not None and mean < 0 and rel is not None and rel > 10
+        verdicts[t] = (v + (f", flagged: p95 {rel:+.0f}%" if flag else ""), mean, se2)
+        o.append(f"| {t} | #{issues.get(t, '?')} | {len(dv)}/{len(ds)} | {sg(mean)} | {f(se2)} | {sg(mean_or_none([d[1] for d in good]))} | "
+                 f"{sg(dl, 1)} | {sg(rel, 0)} | {sg(mean_or_none([dkey(d, 'share5c') for d in good]), 1)} | "
+                 f"{sg(mean_or_none([dkey(d, 'spike') for d in good]), 1)} | **{v}**{f' · **flagged**: p95 {rel:+.0f}%' if flag else ''} |")
+    nz = {k: bnoise(k) for k in ("bat", "sock", "p95", "share5c", "spike")}
+    o.append(f"| baseline noise (sd, B to B) | – | {len(base)} | {f(nz['bat'])} | – | {f(nz['sock'])} | {f(nz['p95'], 1)} | – | "
+             f"{f(nz['share5c'], 1)} | {f(nz['spike'], 1)} | – |")
+elif per:
     o.append("| tweak | issue | rounds | Δ battery W (mean) | ±2 SE | per round | Δ SoC W | verdict |")
     o.append("|---|---|---|---|---|---|---|---|")
     for t, ds in per.items():
@@ -1165,6 +1595,17 @@ for i, p in enumerate(phases):
     o.append(f"| {i} | {p['round']} | {p['name'] + (' (' + p['tweak'] + ')' if design == 'pb12' else '')} | {f(p['bat'])} | {f(p['sock'])} | {f(p['gfx'])} | {f(p['core'])} | {stt} | "
              f"{irq(p, 'CAL'):.0f}, {irq(p, 'LOC'):.0f}, {irq(p, 'amdgpu'):.0f}, {irq(p, 'nvme'):.1f}, {irq(p, 'mt7925'):.0f}, {irq(p, 'xhci'):.1f} | {', '.join(p['bad'])} |")
 o.append("\n</details>\n")
+if light:
+    o.append("<details><summary>Per phase under the light load: CPU time by core type, burst placement, latency, clocks</summary>\n")
+    o.append("| # | round | phase | battery W | Zen 5 busy CPUs | Zen 5c busy CPUs | Zen 5c share % | bursts | bursts on Zen 5c % | "
+             "wake lateness p50/p95/p99 ms | completion p50/p95/p99 ms | p95 response ms | Zen 5 GHz | Zen 5c GHz | spikes >4 GHz % | note |")
+    o.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    trio = lambda v: "/".join(f(x, 1) for x in v)  # noqa: E731
+    for i, p in enumerate(phases):
+        o.append(f"| {i} | {p['round']} | {p['name']} | {f(p['bat'])} | {f(p.get('busy5'))} | {f(p.get('busy5c'))} | {f(p.get('share5c'), 1)} | "
+                 f"{p.get('bursts', 0)} | {f(p.get('burst5c'), 1)} | {trio(p.get('lat', []))} | {trio(p.get('comp', []))} | {f(p.get('p95'), 1)} | "
+                 f"{f(p.get('ghz5'))} | {f(p.get('ghz5c'))} | {f(p.get('spike'), 1)} | {', '.join(p['bad'])} |")
+    o.append("\n</details>\n")
 applied = load(work + "/applied").strip()
 if applied: o.append("<details><summary>What each apply reported</summary>\n\n```\n" + "\n".join(sorted(set(applied.splitlines()))) + "\n```\n</details>\n")
 diag = load(work + "/diag").strip()
@@ -1174,13 +1615,15 @@ if tr: o.append("<details><summary>20 s trace at the start: IPIs (who sends them
 o.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
 print("\n".join(o))
 # Each tweak's own issue gets its row, the context and the method.
-head = [l for l in o if l.startswith("| tweak |") or l.startswith("|---|---|---|---|---|---|---|---|")][:2]
-ctxl = [l for l in load(work + "/context").splitlines() if l.split(":")[0] in ("- kernel", "- power profile", "- brightness", "- display")]
+hi = next((i for i, l in enumerate(o) if l.startswith("| tweak |")), None)
+head = o[hi:hi + 2] if hi is not None else []
+noisel = [l for l in o if l.startswith("| baseline noise")]
+ctxl = [l for l in load(work + "/context").splitlines() if l.split(":")[0] in ("- kernel", "- power profile", "- brightness", "- display", "- light load", "- core types")]
 basel = [l for l in o if l.startswith("Baseline") or l.startswith("SoC split") or l.startswith("\nFit: ")]
-meth = [l for l in o if l.startswith("- method:") or l.startswith("- verdict:") or l.startswith("- assumes")]
+meth = [l for l in o if l.startswith("- method:") or l.startswith("- verdict:") or l.startswith("- assumes") or l.startswith("- light load: started")]
 for t, (v, mean, se2) in verdicts.items():
     row = [l for l in o if l.startswith(f"| {t} |")]
-    txt = [f"## A/B on the G16: {t}\n", descs.get(t, ""), ""] + head + row + [""] + ctxl + meth + [""] + basel
+    txt = [f"## A/B on the G16{' under a light load' if light else ''}: {t}\n", descs.get(t, ""), ""] + head + row + noisel + [""] + ctxl + meth + [""] + basel
     txt.append(f"\nVerdict: **{v}** ({'?' if mean is None else f'{mean:+.2f}'} W, ±2 SE {'?' if se2 is None else f'{se2:.2f}'} W). "
                f"The full report, with every phase, the device states and the interrupt rates, is on #{summary}.")
     txt.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
