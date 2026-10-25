@@ -141,13 +141,15 @@ the distcc key at. What keeps the rest of the build host out of reach:
   external contributors").
 - Its distcc key is its own (not the chroot release builds' key), limited on
   the helper the same way, so it can be revoked on its own.
-- The release registration runs main's code only, but under the same account
-  as PR jobs, at the same time while it waits for the lock. Its token can
-  cancel and re-run runs while its job lasts; a PR job's own steps run as the
-  same account and could read it. That is the trust level above (this
-  repository's own branches only), and the token can't push code, sign or
-  publish. The compiler cache and distcc key are shared the same way. The
-  packages it builds are not trusted for being on the build host:
+- The release registration shares the runner account, its compiler cache
+  and its distcc key with the PR registration, as #258 decided: everything on
+  the runner runs as one account, PR jobs included, and once the chroots are
+  retired the runner's cache is the only one and there is one distcc key. It
+  runs main's code only, but while it waits for the lock a PR job's own steps
+  run as the same account and could read its token. That token can cancel and
+  re-run runs while the job lasts; it can't push code, sign or publish, and
+  only this repository's own branches run here (the trust level above). This
+  is why the packages it builds are not trusted for being on the build host:
   `bin/release-sign` checks GitHub's record of the run before signing
   (docs/releases.md).
 
@@ -305,7 +307,9 @@ gh variable set RELEASE_RUNNER -R omarchy-asus/omarchy-asus --body '["omarchy-as
 ```
 
 Keep the two `.env` files the same when one changes, and restart both
-services. Try it with a release dispatch (nothing publishes from the release
+services. Re-install the job-started hook (the `install` line in Setup) too:
+the release registration needs the copy that lets release.yml's kernel job
+through. Try it with a release dispatch (nothing publishes from the release
 workflow): `gh workflow run release.yml --ref main -f channel=rc -f recipes=linux-omarchy`.
 The kernel job's log says `kernel runner: workflow_dispatch on ... accepted`,
 `kernel lock: release queue taken`, `kernel lock: held by this job (release run ...)`,
