@@ -7,8 +7,9 @@
 #   1. the same: identical but for build date, packager, contents and a size within the
 #      threshold: exit 0
 #   2. differences, exit 1 with the diff: a dropped file, a changed dependency, a changed
-#      scriptlet, a changed mode, a size beyond the threshold, a package only the new path
-#      builds, a package only the release serves
+#      scriptlet, a changed mode, a size beyond the threshold, a same-size change to a config
+#      file (accepted only with --allow-content), a file that is no longer compiled, a hardlink
+#      to another file, a package only the new path builds, a package only the release serves
 #   3. a version mismatch: said first, and the rest still compared
 #   4. cannot compare, exit 3: the quattro channel, a run off main, a failed run, no artifact
 #      for the recipe, an artifact whose digest doesn't match, a release package whose
@@ -48,6 +49,8 @@ unset OMARCHY_ASUS_CHANNEL GH_TOKEN
 fail=0
 R=omarchy-asus/omarchy-asus SHA=$(printf 'a%.0s' {1..40})
 
+# elf <size> <source>: an ELF file of that size, the rest from source
+elf() { { printf '\177ELF'; head -c $(($1 - 4)) "$2"; }; }
 # tree <dir> <pkgname> <pkgver>: a package's tree, as the chroot builds it
 tree() {
     local d=$1 n=$2 v=$3
@@ -74,10 +77,12 @@ replaces = old-$n
 backup = etc/$n.conf
 EOF
     printf 'post_install() {\n    echo installed\n}\n' >"$d/.INSTALL"
-    head -c 4000 /dev/zero >"$d/usr/bin/$n"
+    elf 4000 /dev/zero >"$d/usr/bin/$n"
     chmod 755 "$d/usr/bin/$n"
     echo "setting=1" >"$d/etc/$n.conf"
     echo "data" >"$d/usr/share/$n/data"
+    echo "first" >"$d/usr/share/$n/a"; echo "other" >"$d/usr/share/$n/b"
+    ln "$d/usr/share/$n/a" "$d/usr/share/$n/c"; ln "$d/usr/share/$n/a" "$d/usr/share/$n/a copy"
     ln -s "$n" "$d/usr/bin/$n-link"
 }
 # pack <tree> <out file>
@@ -122,7 +127,7 @@ new() {
     tree "$S/new/foo" foo "$1"; tree "$S/new/foo-docs" foo-docs "$1"
     # what every build changes: date, packager, compiled contents, a few bytes of size
     sed -i 's/^builddate = .*/builddate = 1800000000/; s/^packager = .*/packager = someone else/' "$S"/new/*/.PKGINFO
-    head -c 4010 /dev/urandom >"$S/new/foo/usr/bin/foo"
+    elf 4010 /dev/urandom >"$S/new/foo/usr/bin/foo"
 }
 run_json() {
     jq -n --arg r "$R" --arg sha "$SHA" --arg br "${1:-main}" --arg c "${2:-success}" \
@@ -134,7 +139,8 @@ run_json() {
 # check <name> <want exit> [text that must appear...]
 check() {
     local name=$1 want=$2 got; shift 2
-    out=$("$S/bin/compare-build-paths" --channel "${CH:-rc}" foo 900 2>&1); got=$?
+    # shellcheck disable=SC2086 # ARGS: extra options, split on purpose
+    out=$("$S/bin/compare-build-paths" --channel "${CH:-rc}" ${ARGS:-} foo 900 2>&1); got=$?
     [[ -z ${SHOW:-} ]] || { echo "--- $name"; echo "$out"; }
     if [[ $got != "$want" ]]; then
         echo "FAIL: $name: exit $got, want $want"; echo "$out" | sed 's/^/    /'; fail=1; return
@@ -158,7 +164,7 @@ grep -q '^  bar' <<<"$out" && { echo "FAIL: bar, another recipe's package, was c
 
 # 2. differences
 new 1.0-1.101; rm "$S/new/foo/usr/share/foo/data"; artifact
-check "a dropped file" 1 "files (type, mode, owner, link)" "- ./usr/share/foo/data type=file" "DIFFERS"
+check "a dropped file" 1 "files (type, mode, owner, link, hardlink)" "- ./usr/share/foo/data type=file" "DIFFERS"
 
 new 1.0-1.101; sed -i 's/^depend = bash$/depend = zsh/' "$S/new/foo/.PKGINFO"; artifact
 check "a changed dependency" 1 ".PKGINFO fields" "- depend = bash" "+ depend = zsh"
@@ -172,8 +178,25 @@ check "a dropped scriptlet" 1 "install scriptlet" "+ (no install scriptlet)"
 new 1.0-1.101; chmod 4755 "$S/new/foo/usr/bin/foo"; artifact
 check "a changed mode" 1 "- ./usr/bin/foo type=file mode=755" "+ ./usr/bin/foo type=file mode=4755"
 
-new 1.0-1.101; head -c 9000 /dev/urandom >"$S/new/foo/usr/bin/foo"; artifact
+new 1.0-1.101; elf 9000 /dev/urandom >"$S/new/foo/usr/bin/foo"; artifact
 check "a size beyond the threshold" 1 "file sizes beyond the threshold" "./usr/bin/foo: 4000 -> 9000 bytes (+5000)"
+
+new 1.0-1.101; echo "setting=0" >"$S/new/foo/etc/foo.conf"; artifact
+check "a same-size change to a config file" 1 "contents differ" "./etc/foo.conf:" "-setting=1" "+setting=0"
+ARGS="--allow-content ./etc/foo.conf" check "the same, accepted with --allow-content" 0 \
+    "accepted with --allow-content: ./etc/foo.conf"
+
+new 1.0-1.101; printf '#!/bin/sh\nrm -rf ~\n' >"$S/new/foo-docs/usr/bin/foo-docs"; artifact
+check "a script in place of a compiled file" 1 "./usr/bin/foo-docs: binary contents differ"
+
+new 1.0-1.101; rm "$S/new/foo/usr/share/foo/c"; ln "$S/new/foo/usr/share/foo/b" "$S/new/foo/usr/share/foo/c"; artifact
+check "a hardlink to another file" 1 "- ./usr/share/foo/c type=file mode=644 owner=root(0):root(0) hardlink=./usr/share/foo/a" \
+    "+ ./usr/share/foo/c type=file mode=644 owner=root(0):root(0) hardlink=./usr/share/foo/b"
+
+new 1.0-1.101; rm "$S/new/foo/usr/share/foo/a copy"; cp "$S/new/foo/usr/share/foo/a" "$S/new/foo/usr/share/foo/a copy"; artifact
+check "a hardlink (with a space in its name) made a copy" 1 \
+    "- ./usr/share/foo/a copy type=file mode=644 owner=root(0):root(0) hardlink=./usr/share/foo/a" \
+    "+ ./usr/share/foo/a copy type=file mode=644 owner=root(0):root(0)"
 
 new 1.0-1.101; tree "$S/new/foo-extra" foo-extra 1.0-1.101; artifact
 check "a package only the new path builds" 1 "foo-extra: built by the new path only"

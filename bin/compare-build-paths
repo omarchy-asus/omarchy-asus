@@ -16,18 +16,21 @@
 #
 # Then, per package (matched by pkgname): the version (epoch:pkgver-pkgrel) first, then the
 # .PKGINFO fields (dependencies, optdepends, provides, conflicts, replaces, backup and the rest),
-# the file list with type, mode, owner and link target (from the archive's own headers, the
-# entries .MTREE records), the install scriptlet (.INSTALL), and file sizes: a file whose size
-# differs by more than --size-bytes and --size-percent of the release's size is a difference;
-# below that it is reproducibility noise, counted but not failed. A package only one side has
-# is a difference.
+# the file list with type, mode, owner, link target and hardlink group (from the archive's own
+# headers, the entries .MTREE records), the install scriptlet (.INSTALL), file sizes and file
+# contents. A file whose size differs by more than --size-bytes and --size-percent of the
+# release's size is a difference; below that it is reproducibility noise, counted but not
+# failed. A file whose contents differ is a difference (shown as a diff when both are text),
+# unless it is a compiled file (ELF, a compressed kernel module, the kernel image, Python
+# bytecode: build ID notes and embedded dates change them every build; they are listed) or
+# matches an --allow-content glob. A package only one side has is a difference.
 #
-# Expected to differ, and not compared: builddate, packager and size in .PKGINFO, .BUILDINFO,
-# timestamps and file contents (build ID notes and embedded dates change compiled files; the
-# files whose contents differ are listed, for information).
+# Expected to differ, and not compared: builddate, packager and size in .PKGINFO, .BUILDINFO
+# and timestamps.
 #
-# It only reads: the archives with bsdtar, never extracted to disk beyond the packages
-# themselves; no makepkg, no PKGBUILD, no scriptlet or other file from them is ever run. It
+# It only reads: the archives with bsdtar, extracted into its private temp dir with bsdtar's
+# safeguards (no absolute paths, no .., nothing written through a link) and without owners or
+# setuid bits; no makepkg, no PKGBUILD, no scriptlet or other file from them is ever run. It
 # changes nothing, here or on GitHub.
 #
 # Usage: bin/compare-build-paths --channel rc [options] RECIPE RUN_ID
@@ -35,6 +38,9 @@
 #   --size-bytes N      a size difference up to N bytes is noise (default 64)
 #   --size-percent P    a size difference up to P% of the release's size is noise (default 1);
 #                       a file is flagged only when it is over both
+#   --allow-content GLOB  a file matching GLOB (e.g. './usr/lib/modules/*/build/include/generated/compile.h')
+#                       may differ in content: for a difference already read and understood;
+#                       repeatable, and named in the pull request that switches the recipe
 #   --full              print every line of each difference (default: 100 per section)
 # Exit: 0 only expected differences, 1 differences (printed), 2 usage, 3 could not compare.
 set -Eeuo pipefail
@@ -43,12 +49,13 @@ die() { echo "compare-build-paths: cannot compare: $*" >&2; exit 3; }
 # anything else that fails is a comparison that couldn't be made, never "differs"
 trap 'echo "compare-build-paths: cannot compare: unexpected failure at line $LINENO" >&2; exit 3' ERR
 
-channel='' recipe='' run_id='' size_bytes=64 size_pct=1 full=0
+channel='' recipe='' run_id='' size_bytes=64 size_pct=1 full=0 allow=()
 while (($#)); do
     case $1 in
         --channel) (($# >= 2)) || usage; channel=$2; shift 2 ;;
         --size-bytes) (($# >= 2)) || usage; size_bytes=$2; shift 2 ;;
         --size-percent) (($# >= 2)) || usage; size_pct=$2; shift 2 ;;
+        --allow-content) (($# >= 2)) || usage; allow+=("$2"); shift 2 ;;
         --full) full=1; shift ;;
         -h|--help) usage ;;
         -*) usage ;;
@@ -76,7 +83,7 @@ ART=release-$channel-$recipe
 T=$(mktemp -d "${TMPDIR:-/tmp}/compare-build-paths.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 chmod 700 "$T"
-mkdir -m 700 "$T/new" "$T/old" "$T/list" "$T/a" "$T/b"
+mkdir -m 700 "$T/new" "$T/old" "$T/list" "$T/a" "$T/b" "$T/x"
 
 api() {
     local out
@@ -193,27 +200,63 @@ fields() {
     bsdtar -xOf "$1" .PKGINFO 2>/dev/null |
         { grep -Ev '^(#|$|(builddate|packager|size|pkgver) = )' || true; } | LC_ALL=C sort
 }
-# entries <package> <listing> <sizes> <digests>: one line per file from the archive's headers
-# (the package's own metadata files left out): "path type mode owner link" in the listing,
-# "path size" for regular files, "path sha256" for regular files
+# entries <package> <dir> <listing> <sizes> <sums>: the package's files (its own metadata files
+# left out). The listing, "path type mode owner [link] [hardlink]", comes from the archive's
+# headers; sizes, contents and hardlink groups from the package extracted into <dir>, where
+# "path<tab>size" and "path<tab>sha256" are written for regular files
+META='^[.]/[.](PKGINFO|MTREE|BUILDINFO|INSTALL|Changelog)$'
 entries() {
-    bsdtar -cf - --format=mtree --options='!all,type,mode,uid,gid,uname,gname,size,link,sha256,!use-set' "@$1" \
-        >"$T/mtree" 2>/dev/null || die "cannot list the files of ${1##*/}"
-    : >"$2"; : >"$3"; : >"$4"
-    awk -v L="$2" -v S="$3" -v D="$4" '
-            /^#/ || NF == 0 { next }
-            {
-                p = $1
-                if (p ~ /^\.\/\.(PKGINFO|MTREE|BUILDINFO|INSTALL|Changelog)$/) next
-                delete k
-                for (i = 2; i <= NF; i++) { split($i, kv, "="); k[kv[1]] = substr($i, length(kv[1]) + 2) }
-                line = p " type=" k["type"] " mode=" k["mode"] " owner=" k["uname"] "(" k["uid"] "):" k["gname"] "(" k["gid"] ")"
-                if (k["type"] == "link") line = line " link=" k["link"]
-                print line > L
-                if (k["type"] == "file") { print p, k["size"] > S; print p, k["sha256digest"] > D }
-            }' "$T/mtree"
-    for f in "$2" "$3" "$4"; do LC_ALL=C sort -o "$f" "$f"; done
+    local pkg=$1 d=$2
+    bsdtar -cf - --format=mtree --options='!all,type,mode,uid,gid,uname,gname,link,!use-set' "@$pkg" \
+        >"$T/mtree" 2>/dev/null || die "cannot list the files of ${pkg##*/}"
+    rm -rf "$d"; mkdir -m 700 "$d"
+    # bsdtar's own safeguards apply (no absolute paths, no .., nothing written through a
+    # link); no owners, no setuid bits; then made readable to us, links not followed
+    bsdtar -xf "$pkg" -C "$d" --no-same-owner --no-same-permissions 2>/dev/null || die "cannot extract ${pkg##*/}"
+    chmod -R u+rwX "$d"
+    [[ -z $(find "$d" -name $'*\n*' -o -name $'*\t*') ]] || die "${pkg##*/} has a file name with a newline or tab"
+    find "$d" -type f -printf './%P\t%s\n' | { grep -Ev "${META%\$}"$'\t' || true; } | LC_ALL=C sort >"$4"
+    (cd "$d" && find . -type f -print0 | xargs -0 -r sha256sum --zero) | tr '\0' '\n' |
+        sed -E 's/^([0-9a-f]{64})  (.*)$/\2\t\1/' | { grep -Ev "${META%\$}"$'\t' || true; } | LC_ALL=C sort >"$5"
+    # hardlink groups: every member but the first (by name) points at the first
+    find "$d" -type f -links +1 -printf '%i\t./%P\n' | LC_ALL=C sort -t $'\t' -k1,1 -k2,2 |
+        awk -F'\t' '$1 != i { i = $1; first = $2; next } { print $2 "\t" first }' >"$T/hard"
+    LC_ALL=C awk -v H="$T/hard" -v M="$META" '
+        function unesc(s,   r, i, c, o) {
+            r = ""
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (c == "\\" && substr(s, i + 1, 3) ~ /^[0-7][0-7][0-7]$/) {
+                    o = substr(s, i + 1, 3); r = r sprintf("%c", substr(o, 1, 1) * 64 + substr(o, 2, 1) * 8 + substr(o, 3, 1)); i += 3
+                } else r = r c
+            }
+            return r
+        }
+        BEGIN { FS = "\t"; while ((getline l < H) > 0) { split(l, h, "\t"); hard[h[1]] = h[2] }; FS = " " }
+        /^#/ || NF == 0 { next }
+        {
+            p = unesc($1)
+            if (p ~ M) next
+            delete k
+            for (i = 2; i <= NF; i++) { split($i, kv, "="); k[kv[1]] = substr($i, length(kv[1]) + 2) }
+            line = p " type=" k["type"] " mode=" k["mode"] " owner=" k["uname"] "(" k["uid"] "):" k["gname"] "(" k["gid"] ")"
+            if (k["type"] == "link") line = line " link=" unesc(k["link"])
+            if (p in hard) line = line " hardlink=" hard[p]
+            print line
+        }' "$T/mtree" | LC_ALL=C sort >"$3"
 }
+# compiled <path> <release copy> <new copy>: a file whose bytes every build changes (build ID
+# notes, embedded dates): a compressed kernel module, the kernel image, Python bytecode, or an
+# ELF file on both sides (a script in place of a binary is a difference)
+compiled() {
+    case $1 in *.ko.zst|*.ko.xz|*.ko.gz|*.pyc|*/vmlinuz) return 0 ;; esac
+    local f
+    for f in "$2" "$3"; do
+        [[ $(head -c4 "$f" | od -An -tx1 | tr -d ' \n') == 7f454c46 ]] || return 1
+    done
+}
+# text <file>: empty, or no NUL bytes
+text() { [[ ! -s $1 ]] || LC_ALL=C grep -qI . "$1"; }
 
 mismatch=()
 mapfile -t names < <(printf '%s\n' "${!new_pkg[@]}" "${!old_pkg[@]}" | LC_ALL=C sort -u)
@@ -233,14 +276,14 @@ for n in "${names[@]}"; do
     fi
     fields "$o" >"$T/a/fields"; fields "$w" >"$T/b/fields"
     section ".PKGINFO fields" "$T/a/fields" "$T/b/fields"
-    entries "$o" "$T/a/files" "$T/a/sizes" "$T/a/sums"
-    entries "$w" "$T/b/files" "$T/b/sizes" "$T/b/sums"
-    section "files (type, mode, owner, link)" "$T/a/files" "$T/b/files"
+    entries "$o" "$T/x/a" "$T/a/files" "$T/a/sizes" "$T/a/sums"
+    entries "$w" "$T/x/b" "$T/b/files" "$T/b/sizes" "$T/b/sums"
+    section "files (type, mode, owner, link, hardlink)" "$T/a/files" "$T/b/files"
     { bsdtar -xOf "$o" .INSTALL 2>/dev/null || echo "(no install scriptlet)"; } >"$T/a/install"
     { bsdtar -xOf "$w" .INSTALL 2>/dev/null || echo "(no install scriptlet)"; } >"$T/b/install"
     section "install scriptlet" "$T/a/install" "$T/b/install"
     # sizes of the files both have
-    LC_ALL=C join "$T/a/sizes" "$T/b/sizes" | awk -v B="$size_bytes" -v P="$size_pct" -v F="$T/sizes-flagged" '
+    LC_ALL=C join -t $'\t' "$T/a/sizes" "$T/b/sizes" | awk -F'\t' -v B="$size_bytes" -v P="$size_pct" -v F="$T/sizes-flagged" '
         { d = $3 - $2; a = d < 0 ? -d : d }
         a > B && a * 100 > $2 * P { printf "      %s: %d -> %d bytes (%+d)\n", $1, $2, $3, d > F; next }
         a > 0 { noise++ }
@@ -252,11 +295,40 @@ for n in "${names[@]}"; do
         rm -f "$T/sizes-flagged"
     fi
     noise=$(cat "$T/noise")
-    mapfile -t changed < <(LC_ALL=C join "$T/a/sums" "$T/b/sums" | awk '$2 != $3 { print $1 }')
-    if ((${#changed[@]} || noise)); then
-        note "    expected: $noise file(s) differ in size within the threshold; ${#changed[@]} file(s) differ in content (not compared):"
-        ((${#changed[@]} == 0)) || printf '      %s\n' "${changed[@]:0:20}" >>"$out"
-        ((${#changed[@]} <= 20)) || note "      ... and $((${#changed[@]} - 20)) more"
+    # contents of the files both have: only compiled files and the --allow-content paths may differ
+    expected=()
+    allowed=()
+    : >"$T/contents"
+    while IFS=$'\t' read -r p _ _; do
+        ac=$T/x/a/${p#./} bc=$T/x/b/${p#./}
+        ok=''
+        for g in "${allow[@]}"; do
+            # shellcheck disable=SC2053 # a glob, by design
+            [[ $p == $g ]] && { ok=1; break; }
+        done
+        if [[ -n $ok ]]; then allowed+=("$p")
+        elif compiled "$p" "$ac" "$bc"; then expected+=("$p")
+        elif text "$ac" && text "$bc"; then
+            { echo "$p:"; diff -u "$ac" "$bc" | tail -n +3 | head -40 || true; } >>"$T/contents"
+        else
+            echo "$p: binary contents differ" >>"$T/contents"
+        fi
+    done < <(LC_ALL=C join -t $'\t' "$T/a/sums" "$T/b/sums" | awk -F'\t' '$2 != $3')
+    if [[ -s $T/contents ]]; then
+        fail=1
+        note "    contents differ (files that aren't compiled; - release, + new path):"
+        if ((!full)) && (($(wc -l <"$T/contents") > 100)); then
+            head -100 "$T/contents" | sed 's/^/      /' >>"$out"
+            note "      ... and $(($(wc -l <"$T/contents") - 100)) more lines (--full prints them all)"
+        else
+            sed 's/^/      /' "$T/contents" >>"$out"
+        fi
+    fi
+    if ((${#expected[@]} || ${#allowed[@]} || noise)); then
+        note "    expected: $noise file(s) differ in size within the threshold; ${#expected[@]} compiled file(s) differ in content:"
+        ((${#expected[@]} == 0)) || printf '      %s\n' "${expected[@]:0:20}" >>"$out"
+        ((${#expected[@]} <= 20)) || note "      ... and $((${#expected[@]} - 20)) more"
+        ((${#allowed[@]} == 0)) || note "    accepted with --allow-content: ${allowed[*]}"
     fi
 done
 
@@ -270,4 +342,4 @@ if ((fail)); then
     echo "compare-build-paths: $recipe DIFFERS between the two paths (above): do not switch it"
     exit 1
 fi
-echo "compare-build-paths: $recipe: the same packages, only expected differences (build date, packager, contents, sizes within the threshold)"
+echo "compare-build-paths: $recipe: the same packages, only expected differences (build date, packager, compiled files, sizes within the threshold)"
