@@ -115,8 +115,14 @@ carries, and the train's tag and release notes are cut from it, not from the db 
 Release builds are moving off the build host's chroots onto the same `ci/build-recipe`
 container the PR check uses (#258). The first piece is `.github/workflows/release.yml`: it builds
 and records, and **publishes nothing**. No signing key, secret or release upload is anywhere in
-it, and no daily run or other tool reads its artifacts yet; a signer on the build host that
-checks a run's record with GitHub before signing comes later.
+it. The second is the signer on the build host, `bin/release-sign` (below), which checks a run's
+record with GitHub before it hands the packages to `bin/publish`. Nothing runs it yet: the
+chroot path (`bin/build-pkg`, then `bin/publish`) stays the live publisher.
+
+```
+release workflow (GitHub)  ->  bin/release-sign (build host)  ->  bin/publish  ->  bin/sync-release
+builds, records, attests       checks the run, stages             signs, repo db    the release
+```
 
 ```bash
 gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-keyring"
@@ -151,6 +157,51 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   file by the same name. `nvidia-open-dkms` also gets its reverse-dependency check against the
   published `linux-omarchy-headers` (`ci/nvidia-compat`). The regression check (`bin/sync-release`)
   stays at publish time: it needs the local db.
+
+### The signer: `bin/release-sign`
+
+```bash
+bin/release-sign --channel rc --dry-run <run ID>   # every check, then list the files
+bin/release-sign --channel rc <run ID>             # the same, then bin/publish --channel rc
+bin/sync-release --channel rc --dry-run            # the caller's next step, as after any publish
+```
+
+The runner that builds also runs PR jobs under one account, so a package on its own proves
+nothing. The signer believes only GitHub's record of the run, read through the API, and refuses
+(exit 1, nothing staged or published) unless every check passes. A check it can't make (an API
+error, a missing or malformed field, no attestation) is a refusal.
+
+- **Who:** the build user. Never root, never the runner account. The runner account's name is
+  local configuration, never in the repo: `OMARCHY_ASUS_RUNNER_USER`, or the first line of
+  `~/.local/share/omarchy-asus/runner-user` (`RUNNER_USER`, `bin/env.sh`). With neither set it
+  refuses.
+- **Channel:** `rc` only. Quattro is refused (frozen, #309), with no override.
+- **The run:** in `omarchy-asus/omarchy-asus`, head repository too (a fork's run is refused);
+  workflow path exactly `.github/workflows/release.yml`; event `workflow_dispatch` (a run from
+  `pull_request`, `pull_request_target`, `push` or anything else is refused); head branch
+  `main`, and its commit is on `main` (`compare/main...<sha>` is `identical` or `behind`, so a
+  commit off `main` is refused whatever the branch name says); completed, conclusion `success`.
+- **Jobs:** `attest`, `result` and the `build (<recipe>)` job of every artifact it uses
+  concluded `success` (latest attempt).
+- **Artifacts:** every artifact of the run is `release-rc-<recipe>` (any other name, another
+  channel's included, is refused), not expired, and from this run, commit and repository. The
+  downloaded zip's SHA-256 is the digest GitHub recorded. Its entries are regular files with
+  plain names (no directories, links or path components): `SHA256SUMS` and exactly the
+  `*.pkg.tar.zst` files it lists, no more, no fewer, each with the SHA-256 it lists, and no file
+  in two artifacts. `SHA256SUMS` lines are `<sha256>  <name>`, nothing else.
+- **Attestations:** `gh attestation verify` for every file with `--signer-workflow
+  omarchy-asus/omarchy-asus/.github/workflows/release.yml --source-ref refs/heads/main
+  --source-digest <the run's commit> --signer-digest <the same>`, and its answer must name this
+  run (one of its attempts), that workflow at `refs/heads/main`, the commit, and the file by name
+  and digest.
+- **Then** it copies the files into the channel's stage dir (`stage-rc`; a file already there
+  with other bytes is refused) and runs `bin/publish --channel rc` on exactly those files. The
+  signing is `bin/publish`'s: the signer never signs or reads the key itself.
+- **Runs no recipe or artifact code:** no `makepkg`, no PKGBUILD, no install scriptlets. The only
+  archive it opens is the artifact zip, read with `bsdtar` into a private temp dir that is
+  removed on exit. It is a command, run once per release: no unit, timer or cron job.
+
+`tests/ci/release-sign.sh` covers every refusal and the hand-off, offline, with `gh` stubbed.
 
 ## Reverse-dependency checks
 

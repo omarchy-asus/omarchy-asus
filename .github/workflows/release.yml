@@ -1,9 +1,10 @@
 name: Release build
 
 # Build release packages on GitHub-hosted runners, record what was built, and publish
-# nothing (#258, step 1). A signer on the build host will later check GitHub's record of
-# a run (this workflow, on main, succeeded, the files' SHA-256 match the attestations)
-# before it signs and publishes; until then nothing reads these artifacts.
+# nothing (#258, step 1). The signer on the build host, bin/release-sign (step 2), checks
+# GitHub's record of a run (this workflow, dispatched on main, succeeded, the artifacts'
+# digests, SHA256SUMS and attestations) before it hands the files to bin/publish; nothing
+# runs it yet, so nothing reads these artifacts.
 #
 #   plan     ci/release-plan: main only, the rc channel only (Quattro is frozen, #309),
 #            no linux-omarchy (its release build will run on the build host's runner),
