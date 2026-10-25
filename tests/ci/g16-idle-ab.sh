@@ -48,6 +48,10 @@
 #      (the tweak's, a baseline's, asus-wmi's under pmf-low-power) drops the phase,
 #      and a baseline that drops takes its deltas with it; through g16-testd each is
 #      its knob; tweaks that share an issue share one post.
+#  17. the early stop: on the fake's steady battery every verdict is settled after
+#      round 2, so a 3-round A/B, pb12 or --load light run stops there and says so
+#      (and so in the posts); --no-early-stop runs all 3; the start line gives both
+#      lengths. Settled vs ambiguous data: tests/test_g16_idle_ab_pb12.py.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -878,11 +882,11 @@ miss=''; for t in "${CPU[@]}"; do grep -q "^| $t |" "$T/home/report.md" || miss+
 [[ -z $miss ]] && ok "--load light: the CPU tweaks are in the default set" || bad "--load light default lacks:$miss"
 out=$(run --load heavy --dry-run 2>&1); rc=$?
 ((rc == 2)) && ok "an unknown --load is refused" || bad "--load heavy: exit $rc"
-# The documented #328 command: 3 rounds of 30 s phases, about 30 minutes.
+# The documented #328 command: up to 3 rounds of 30 s phases, about 28 minutes.
 reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
 out=$(timeout 8 env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" TMPDIR="$T/tmp" G16_ROOT=none G16_AB_SYS="$S" G16_AB_PROC="$P" G16_AB_ISSUE="$B/issue" \
   G16_AB_REPORT="$T/home/report.md" "$SCRIPT" --only "$(IFS=,; echo "${CPU[*]}")" --load light --no-post 2>&1)
-grep -q '39 phases, about 28 minutes' <<<"$out" && ok "the #328 run: 39 phases of 10 + 30 s, about 30 minutes" || bad "#328 run length: $(grep phases <<<"$out")"
+grep -q 'at most 39 phases, about 28 minutes, 19 when every verdict is settled after round 2' <<<"$out" && ok "the #328 run: at most 39 phases of 10 + 30 s, about 28 minutes, 19 if it stops early" || bad "#328 run length: $(grep phases <<<"$out")"
 sleep 1.5
 [[ $(cpu_state) == "$CPU_WANT" ]] && ok "the #328 run stopped early: CPU settings back" || bad "stopped early, left: $(cpu_state)"
 leftover && bad "the #328 run stopped early: a workload left running" || ok "the #328 run stopped early: every workload stopped"
@@ -999,5 +1003,33 @@ done
 nset=$(grep -c '^knob-set' "$ST/td.log") nres=$(grep -c '^knob-restore' "$ST/td.log")
 ((nset == 6 && nres == 6)) && ok "testd: every CPU knob-set has its knob-restore" || bad "testd CPU: $nset sets, $nres restores"
 [[ $(cpu_state) == "$CPU_WANT" ]] && ok "testd: nothing changed behind g16-testd's back" || bad "testd changed: $(cpu_state)"
+
+# ------------------------------------------------------------ 17. early stop
+reset
+out=$(run --only nmi,wifi-ps --rounds 3 --measure 1 --settle 0 --interval 1 --seed 7 2>&1); rc=$?
+r=$T/home/report.md
+((rc == 0)) && ok "early stop: the run exits 0" || bad "early stop exit $rc: $out"
+grep -q 'stopped after round 2 of 3: every verdict settled' <<<"$out" && ok "early stop: said on the console" || bad "early stop console: $out"
+grep -q -- '^- stopped after round 2 of 3: every verdict settled' "$r" && grep -q -- '^- method: 2 rounds' "$r" &&
+  ok "early stop: the report says it stopped after round 2 of 3" || bad "early stop report: $(grep -E -- '^- (stopped|method)' "$r")"
+[[ $(grep -cE '^\| [0-9]+ \| 3 \|' "$r") == 0 ]] && grep -qE '^\| nmi \| #[0-9]+ \| 2/2 \|' "$r" && ok "early stop: no round 3 phases" || bad "early stop phases: $(grep -cE '^\| [0-9]+ \| 3 \|' "$r") in round 3"
+grep -l 'stopped after round 2 of 3' "$ST"/posted-* >/dev/null 2>&1 && ok "early stop: the posts say so too" || bad "early stop: not in the posts"
+[[ $(orig_state) == "$WANT" ]] && ok "early stop: every setting back" || bad "early stop left: $(orig_state)"
+reset
+out=$(run --only nmi,wifi-ps --rounds 3 --measure 1 --settle 0 --interval 1 --seed 7 --no-early-stop --no-post 2>&1)
+grep -q '^- method: 3 rounds' "$T/home/report.md" && ! grep -q 'stopped after' "$T/home/report.md" && grep -qE '^\| nmi \| #[0-9]+ \| 3/3 \|' "$T/home/report.md" &&
+  ok "--no-early-stop runs every round" || bad "--no-early-stop: $(grep -E -- '^- (stopped|method)|^\| nmi \|' "$T/home/report.md")"
+grep -q ' 15 phases, about' <<<"$out" && ! grep -q 'at most' <<<"$out" && ok "--no-early-stop: one length on the start line" || bad "no-early-stop start: $(grep phases <<<"$out")"
+reset
+out=$(run --design pb12 --only nmi,wifi-ps --rounds 3 --measure 1 --settle 0 --interval 1 --seed 5 --no-post 2>&1); rc=$?
+r=$T/home/report.md
+((rc == 0)) && grep -q -- '^- stopped after round 2 of 3: every verdict settled' "$r" && [[ $(pb_phases "$r" | wc -l) == 24 ]] &&
+  ok "early stop: pb12 stops after 24 of 36 phases" || bad "pb12 early stop: rc=$rc $(pb_phases "$r" | wc -l) phases $(grep -- '^- stopped' "$r")"
+[[ $(orig_state) == "$WANT" ]] && ok "early stop: pb12 puts everything back" || bad "pb12 early stop left: $(orig_state)"
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+out=$(run_light --load light --only nmi --rounds 3 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+((rc == 0)) && grep -q -- '^- stopped after round 2 of 3: every verdict settled' "$T/home/report.md" && grep -qE '^\| nmi \| #[0-9]+ \| 2/2 \|' "$T/home/report.md" &&
+  ok "early stop: --load light stops after round 2" || bad "light early stop: rc=$rc $(grep -E -- '^- stopped|^\| nmi \|' "$T/home/report.md")"
+leftover && bad "light early stop: a workload left running" || ok "light early stop: every workload stopped"
 
 ((fails == 0)) && echo "PASS" || { echo "$fails failed"; exit 1; }

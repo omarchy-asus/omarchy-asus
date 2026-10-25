@@ -2,20 +2,22 @@
 # g16-idle-ab: interleaved A/B of small idle-power tweaks on the G16, on battery,
 # each against the running configuration (the baseline). EXPERIMENTAL.
 #
-#   g16-idle-ab                  every tweak, 3 rounds (about 75 minutes), then post
+#   g16-idle-ab                  every tweak, up to 3 rounds, then post: about 50 minutes for
+#                                the 12 that run without patch 9900, 35 when it stops early
 #   g16-idle-ab --list           the tweaks, their issues and what each one changes
 #   g16-idle-ab --only a,b       only these tweaks
 #   g16-idle-ab --design pb12    screen several tweaks per phase (Plackett-Burman, 12
-#                                phases a round, up to 11 tweaks), 2 rounds (about 30 min)
+#                                phases a round, up to 11 tweaks), 2 rounds (about 18 min)
 #   g16-idle-ab --rounds N --measure S --settle S --interval S
-#                                rounds (3; pb12: 2), seconds measured per phase (60),
-#                                settling after each change (15), between samples (2)
+#                                at most N rounds (3; pb12: 2), seconds measured per
+#                                phase (30), settling after each change (10), between
+#                                samples (2)
+#   g16-idle-ab --no-early-stop  run every round, even once every verdict is settled
 #   g16-idle-ab --no-dpms        CACP: the level write alone, no DPMS off/on (0810 kernels)
-#   g16-idle-ab --load light     under a light, repeatable load instead of idle (below);
-#                                phases 30 s measured after 10 s settling
+#   g16-idle-ab --load light     under a light, repeatable load instead of idle (below)
 #   g16-idle-ab --only boost-off,epp-power,max-3500,max-3000,epp-dynamic,pmf-low-power --load light
-#                                the CPU boost / EPP / cap run for #328: 3 rounds of
-#                                30 s phases, about 30 minutes
+#                                the CPU boost / EPP / cap run for #328: up to 3 rounds
+#                                of 30 s phases, about 28 minutes, 19 when it stops early
 #   g16-idle-ab --unverified-msr allow wake-class and wlc-track (--only), which read the
 #                                workload-class MSR on every context switch (#10)
 #   g16-idle-ab --dry-run        change nothing, post nothing; short phases
@@ -33,6 +35,13 @@
 # voltage_now, every 2 s), the SoC's socket, GFX and all-core power from amdgpu's
 # gpu_metrics, interrupt and IPI rates, and the runtime-PM state of the devices the
 # tweaks touch.
+#
+# Early stop: from round 2 on, after each round, when every tweak's verdict is
+# already settled (it saves: mean below -0.10 W and below -2 SE; or it clearly
+# doesn't: the whole mean ± 2 SE interval is above -0.10 W), the rounds left are
+# skipped and the report says so ("stopped after round N of M"). --rounds is the
+# cap; --no-early-stop runs every round. The same holds for the pb12 effects and
+# --load light (on the battery watts).
 #
 # --design pb12 (#276) runs the 12-row Plackett-Burman matrix instead: each row
 # switches on a different half of the tweaks (one column each; columns no tweak uses
@@ -742,9 +751,316 @@ PY
 pb12() { python3 -I -c "$PB12_PY" "$@"; }
 [[ ${1:-} == --pb12 ]] && { shift; pb12 "$@"; exit; }
 
+# ------------------------------------------------------------------ report
+# The report, from the phases in WORK: `report_py WORK REV SETTLE MEASURE INTERVAL
+# ROUNDS SEED DRY BOOT SUMMARY DESIGN ROOT LOAD STOP`. STOP is empty, "N of M" (the
+# run stopped early after round N of M), or check: print only whether every verdict
+# is settled ("settled", or "open" and the tweaks that aren't), for the early stop.
+# `g16-idle-ab --settled WORK DESIGN LOAD ROUND` runs the check (for the tests).
+report_inputs() {
+  printf '%s\n' "${PHASES[@]}" >"$WORK/phases"
+  printf '%s\n' "${TWEAKS[@]}" >"$WORK/tweaks"
+  printf '%s\n' "$PB12_PY" >"$WORK/g16pb.py"
+}
+report_py() {
+python3 -I - "$@" <<'PY'
+import json, math, os, statistics as st, sys
+work, rev, settle, measure, interval, rounds, seed, dry, boot, summary, design, root, mode, stop = sys.argv[1:15]
+light = mode == "light"
+def load(p):
+    try:
+        with open(p) as f: return f.read()
+    except OSError: return ""
+issues, descs = {}, {}
+for line in load(work + "/tweaks").splitlines():
+    n, i, d = line.split("|", 2); issues[n], descs[n] = i, d
+phases = [json.loads(load(p)) for p in load(work + "/phases").split()]
+stopped = set(load(work + "/load-stopped").split())
+for p, path in zip(phases, load(work + "/phases").split()):
+    p["load_stopped"] = path in stopped
+types = json.loads(load(work + "/cpus.json") or "{}")
+bursts = []  # (scheduled, woke, done, CPU at start, CPU at end)
+for line in load(work + "/bursts").splitlines():
+    x = line.split()
+    try:
+        if len(x) == 5: bursts.append((float(x[0]), float(x[1]), float(x[2]), x[3], x[4]))
+    except ValueError: pass
+def pct(v, q):
+    if not v: return None
+    v = sorted(v)
+    return v[min(len(v) - 1, max(0, math.ceil(q / 100 * len(v)) - 1))]
+HZ = os.sysconf("SC_CLK_TCK")
+def light_metrics(p):
+    """The light load's columns, kept as phase keys so other tweaks (#328) reuse them:
+    lat/comp [p50, p95, p99] ms, p95 (response: scheduled wake to done) ms, burst5c %,
+    busy5/busy5c (CPUs busy on average), share5c %, ghz5/ghz5c, spike % (above 4.0 GHz)."""
+    b = [x for x in bursts if p.get("t0", 0) <= x[0] < p.get("t1", 0)]
+    p["bursts"] = len(b)
+    p["lat"] = [pct([(w - s0) * 1000 for s0, w, e, c0, c1 in b], q) for q in (50, 95, 99)]
+    p["comp"] = [pct([(e - w) * 1000 for s0, w, e, c0, c1 in b], q) for q in (50, 95, 99)]
+    p["p95"] = pct([(e - s0) * 1000 for s0, w, e, c0, c1 in b], 95)
+    on = [types.get(c) == "zen5c" for x in b for c in x[3:5]]
+    p["burst5c"] = 100 * sum(on) / len(on) if on else None
+    busy, dt = p.get("busy", {}), p.get("dt") or 0
+    z = {k: sum(v for c, v in busy.items() if types.get(c) == k) / HZ / dt if dt else None for k in ("zen5", "zen5c")}
+    p["busy5"], p["busy5c"] = z["zen5"], z["zen5c"]
+    tot = (z["zen5"] or 0) + (z["zen5c"] or 0)
+    p["share5c"] = 100 * z["zen5c"] / tot if tot > 0 else None
+    fr = p.get("freq", {})
+    def ghz(k):
+        n = sum(v[0] for c, v in fr.items() if types.get(c) == k)
+        return sum(v[1] for c, v in fr.items() if types.get(c) == k) / n / 1e6 if n else None
+    p["ghz5"], p["ghz5c"] = ghz("zen5"), ghz("zen5c")
+    n = sum(v[0] for v in fr.values())
+    p["spike"] = 100 * sum(v[2] for v in fr.values()) / n if n else None
+def summarize(p):
+    s = p["samples"]
+    def m(k):
+        v = [x[k] for x in s if x.get(k) is not None]
+        return st.mean(v) if v else None
+    bad = []
+    if any(x.get("status") not in ("Discharging", None) for x in s): bad.append("on the charger")
+    if any(z.get("dgpu") not in ("suspended", "-", None) for z in p["states"]): bad.append("RTX awake")
+    bls = {x.get("bl") for x in s}
+    if len(bls) > 1: bad.append("brightness changed")
+    if dry != "1" and any(x.get("kbd") not in (None, 0) for x in s): bad.append("keyboard LED on")
+    # A CPU setting that did not hold (power-profiles-daemon wrote it back): left out.
+    off = sorted({f"{k} {v}" for x in s for k, v in (x.get("off") or {}).items()})
+    if off: bad.append("setting did not hold (" + ", ".join(off[:3]) + (", …" if len(off) > 3 else "") + ")")
+    if p.get("load_stopped"): bad.append("light load stopped")
+    stt = {}
+    for z in p["states"]:
+        for k, v in z.items(): stt.setdefault(k, {}).setdefault(v, 0); stt[k][v] += 1
+    p.update(bat=m("bat"), sock=None if m("sock") is None else m("sock") / 1000, gfx=None if m("gfx") is None else m("gfx") / 1000,
+             core=None if m("core") is None else m("core") / 1000, bad=bad, valid=not bad, devstates=stt)
+    if light: light_metrics(p)
+    return p
+for p in phases: summarize(p)
+f = lambda v, n=2: "–" if v is None else f"{v:.{n}f}"
+o = []
+if boot != "-":
+    # Boot runs: keep the numbers, report baselines only.
+    rec = {"label": boot, "when": os.popen("date -Iminutes").read().strip(), "kernel": os.uname().release,
+           "extra": " ".join(w for w in load("/proc/cmdline").split() if w.split("=")[0] in ("nmi_watchdog", "rcu_nocbs", "rcutree.enable_rcu_lazy", "workqueue.power_efficient", "nvme_core.default_ps_max_latency_us", "amdgpu.dcdebugmask", "amdgpu.dcfeaturemask")),
+           "settle": settle, "measure": measure, "interval": interval,
+           "phases": [{k: p[k] for k in ("bat", "sock", "valid")} for p in phases]}
+    with open(work + "/boot.json", "w") as fh: json.dump(rec, fh)
+o.append(f"## G16 {'A/B under a light load' if light else 'idle A/B'}{' (dry run, not a measurement)' if dry == '1' else ''}{' — boot run ' + boot if boot != '-' else ''}\n")
+o.append(load(work + "/context").rstrip())
+o.append(f"- root steps: {'the G16 test session helper (g16-testd)' if root == 'testd' else root}")
+if design == "pb12":
+    o.append(f"- method: Plackett-Burman screening (#276), {rounds} round{'' if rounds == '1' else 's'} of the 12-row matrix, each round in a shuffled order "
+             f"(seed {seed}). Each row switches on a different half of the tweaks; from one row to the next only the tweaks "
+             f"whose level differs change. Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. "
+             "Δ is a tweak's main effect, on minus off, fitted by least squares over every valid phase with a level per round "
+             "(and a linear drift over the run when the phases leave room for it); ±2 SE is from the residual noise. "
+             "Columns no tweak uses (dummies) are fitted on top and should read as noise. Phases with the charger in, the RTX "
+             "awake or the brightness changed are left out.")
+    o.append("- assumes the effects add up (no interactions): an interaction, such as kbd-usb with bt-off (they share an xHCI "
+             "controller), spreads over the other columns. A tweak this screen calls a winner gets a one-at-a-time A/B "
+             "(`g16-idle-ab --only T`) to confirm it.")
+else:
+    o.append(f"- method: {rounds} rounds; each round runs every tweak once in a shuffled order (seed {seed}), each between two baseline phases "
+             f"(B T1 B T2 … B). Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. A tweak's delta "
+             "in a round is its phase minus the mean of the two baselines around it. ±2 SE is twice the standard error of the mean delta "
+             "over the rounds. Phases with the charger in, the RTX awake, the brightness changed or a keyboard LED lit are left out.")
+if light:
+    o.append("- light load: started once and running through every phase, baseline and tweak alike. Latency comes from the bursts "
+             "scheduled in a phase's measured window: wake lateness (actual minus scheduled wake), completion (the burst's fixed "
+             "work), and p95 response (scheduled wake to done). Zen 5c share: the Zen 5c cores' part of all CPU busy time "
+             "(/proc/stat). Spikes: the share of cpuinfo_avg_freq samples above 4.0 GHz. A tweak's Δ is its phase minus the mean "
+             "of the baselines around it; noise is the sd of one baseline minus the next. **flagged**: a watt saving with p95 "
+             "response more than 10% worse.")
+if stop not in ("", "check"):
+    o.append(f"- stopped after round {stop}: every verdict settled (each tweak saves, or its whole ±2 SE interval is above −0.10 W), "
+             "so the rounds left were skipped; `--no-early-stop` runs them all.")
+o.append(f"- verdict: **saves** when the {'effect' if design == 'pb12' else 'mean delta'} is below −0.10 W and below −2 SE; **costs** the mirror; otherwise **no effect beyond noise**.\n")
+skipped = load(work + "/skipped").strip()
+if skipped: o.append("Skipped: " + "; ".join(skipped.splitlines()) + "\n")
+rows, per = [], {}
+for i, p in enumerate(phases):
+    if design == "pb12" or p["tweak"] == "-": continue
+    before = next((q for q in reversed(phases[:i]) if q["tweak"] == "-"), None)
+    after = next((q for q in phases[i + 1:] if q["tweak"] == "-"), None)
+    # Both baselines around it must be valid, or drift doesn't cancel.
+    bases = [q for q in (before, after) if q and q["valid"] and q["bat"] is not None]
+    if not p["valid"] or p["bat"] is None or len(bases) < 2: per.setdefault(p["tweak"], []).append(None); continue
+    bb = st.mean(q["bat"] for q in bases)
+    bs = [q["sock"] for q in bases if q["sock"] is not None]
+    per.setdefault(p["tweak"], []).append((p["bat"] - bb, (p["sock"] - st.mean(bs)) if bs and p["sock"] is not None else None, p, bases))
+base = [p for p in phases if p["tweak"] == "-" and p["valid"] and p["bat"] is not None]
+noise = None
+if len(base) > 2:
+    diffs = [b["bat"] - a["bat"] for a, b in zip(base, base[1:])]
+    noise = st.pstdev(diffs) if len(diffs) > 1 else None
+verdicts = {}
+def verdict(mean, se2):
+    if mean is None: return "no valid rounds" if design != "pb12" else "not estimable"
+    if se2 is not None and mean < -0.10 and mean < -se2: return "saves"
+    if se2 is not None and mean > 0.10 and mean > se2: return "costs"
+    return "no effect beyond noise" if se2 is not None else "no noise estimate"
+def settled(mean, se2):
+    """The early stop: a further round can't change this verdict much. It saves, or it
+    clearly doesn't: the whole mean ± 2 SE interval is above −0.10 W."""
+    return mean is not None and se2 is not None and ((mean < -0.10 and mean < -se2) or mean - se2 > -0.10)
+if design == "pb12":
+    sys.path.insert(0, work)
+    import g16pb
+    run = load(work + "/run").split()
+    pts = [{"on": [] if p["tweak"] == "-" else p["tweak"].split(","), "round": p["round"], "seq": i,
+            "design": [1 if c == "+" else -1 for c in p.get("design", "")],
+            "bat": p["bat"] if p["valid"] else None, "sock": p["sock"] if p["valid"] else None} for i, p in enumerate(phases)]
+    fb = g16pb.fit(pts, run, "bat", list(range(len(run), 11)))
+    fs = g16pb.fit(pts, run, "sock")
+    pm = lambda e: "–" if e is None else f"{e[0]:+.2f}"  # noqa: E731
+    pe = lambda e: "–" if e is None or e[1] is None else f"{e[1]:.2f}"  # noqa: E731
+    o.append("| tweak | issue | phases on / off | Δ battery W | ±2 SE | Δ SoC W | ±2 SE | verdict |")
+    o.append("|---|---|---|---|---|---|---|---|")
+    valid = [q for q in pts if q["bat"] is not None]
+    for t in run:
+        e = fb["effects"].get(t)
+        v = verdict(e and e[0], e and e[1])
+        verdicts[t] = (v, e and e[0], e and e[1])
+        non = sum(t in q["on"] for q in valid)
+        o.append(f"| {t} | #{issues.get(t, '?')} | {non} / {len(valid) - non} | {pm(e)} | {pe(e)} | {pm(fs['effects'].get(t))} | {pe(fs['effects'].get(t))} | **{v}** |")
+    for j, e in enumerate(fb["dummies"]):
+        o.append(f"| (dummy, column {len(run) + j + 1}) | – | – | {pm(e)} | {pe(e)} | – | – | noise check |")
+    o.append(f"\nFit: {fb['n']} valid phases, residual noise (sd of one phase) "
+             + ("–" if fb["sigma"] is None else f"{fb['sigma']:.2f} W") + f" on {fb['df'] if fb['df'] is not None else 0} degrees of freedom"
+             + (", with a linear drift term" if fb["trend"] else ", no drift term") + ".")
+    o.append("\n<details><summary>The design matrix (+ on, − off)</summary>\n\n```\n" + load(work + "/matrix").rstrip() + "\n```\n</details>")
+def bnoise(k):
+    v = [b[k] for b in base if b.get(k) is not None]
+    d = [y - x for x, y in zip(v, v[1:])]
+    return st.pstdev(d) if len(d) > 1 else None
+def dkey(d, k):
+    p, bases = d[2], d[3]
+    bv = [q[k] for q in bases if q.get(k) is not None]
+    return None if p.get(k) is None or len(bv) < 2 else p[k] - st.mean(bv)
+def mean_or_none(v):
+    v = [x for x in v if x is not None]
+    return st.mean(v) if v else None
+sg = lambda v, n=2: "–" if v is None else f"{v:+.{n}f}"  # noqa: E731
+if light and per:
+    o.append("| tweak | issue | rounds | Δ battery W | ±2 SE | Δ SoC W | Δ p95 response ms | Δ p95 % | Δ Zen 5c share pp | Δ spikes >4 GHz pp | verdict |")
+    o.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for t, ds in per.items():
+        good = [d for d in ds if d]
+        dv = [d[0] for d in good]
+        mean = st.mean(dv) if dv else None
+        se2 = 2 * st.stdev(dv) / math.sqrt(len(dv)) if len(dv) > 1 else None
+        v = verdict(mean, se2)
+        if v == "no noise estimate": v = "no effect beyond noise"
+        dl = mean_or_none([dkey(d, "p95") for d in good])
+        bl95 = mean_or_none([q["p95"] for d in good for q in d[3] if q.get("p95") is not None])
+        rel = 100 * dl / bl95 if dl is not None and bl95 else None
+        flag = mean is not None and mean < 0 and rel is not None and rel > 10
+        verdicts[t] = (v + (f", flagged: p95 {rel:+.0f}%" if flag else ""), mean, se2)
+        o.append(f"| {t} | #{issues.get(t, '?')} | {len(dv)}/{len(ds)} | {sg(mean)} | {f(se2)} | {sg(mean_or_none([d[1] for d in good]))} | "
+                 f"{sg(dl, 1)} | {sg(rel, 0)} | {sg(mean_or_none([dkey(d, 'share5c') for d in good]), 1)} | "
+                 f"{sg(mean_or_none([dkey(d, 'spike') for d in good]), 1)} | **{v}**{f' · **flagged**: p95 {rel:+.0f}%' if flag else ''} |")
+    nz = {k: bnoise(k) for k in ("bat", "sock", "p95", "share5c", "spike")}
+    o.append(f"| baseline noise (sd, B to B) | – | {len(base)} | {f(nz['bat'])} | – | {f(nz['sock'])} | {f(nz['p95'], 1)} | – | "
+             f"{f(nz['share5c'], 1)} | {f(nz['spike'], 1)} | – |")
+elif per:
+    o.append("| tweak | issue | rounds | Δ battery W (mean) | ±2 SE | per round | Δ SoC W | verdict |")
+    o.append("|---|---|---|---|---|---|---|---|")
+    for t, ds in per.items():
+        good = [d for d in ds if d]
+        dv = [d[0] for d in good]
+        ds_ = [d[1] for d in good if d[1] is not None]
+        mean = st.mean(dv) if dv else None
+        se2 = 2 * st.stdev(dv) / math.sqrt(len(dv)) if len(dv) > 1 else None
+        v = verdict(mean, se2)
+        if v == "no noise estimate": v = "no effect beyond noise"
+        verdicts[t] = (v, mean, se2)
+        pr = ", ".join("left out" if d is None else f"{d[0]:+.2f}" for d in ds)
+        o.append(f"| {t} | #{issues.get(t, '?')} | {len(dv)}/{len(ds)} | {f(mean, 2) if mean is None else f'{mean:+.2f}'} | {f(se2)} | {pr} | "
+                 f"{'–' if not ds_ else f'{st.mean(ds_):+.2f}'} | **{v}** |")
+if stop == "check":
+    open_ = [t for t, (v, mean, se2) in verdicts.items() if not settled(mean, se2)]
+    print("settled" if verdicts and not open_ else " ".join(["open"] + open_))
+    sys.exit(0)
+if base:
+    o.append(f"\nBaseline{' (the phases with every tweak off)' if design == 'pb12' else ''} over the run: battery {st.mean(b['bat'] for b in base):.2f} W (min phase {min(b['bat'] for b in base):.2f}, "
+             f"max {max(b['bat'] for b in base):.2f}), SoC {f(st.mean([b['sock'] for b in base if b['sock'] is not None]) if any(b['sock'] is not None for b in base) else None)} W"
+             + (f", baseline-to-baseline noise (sd) {noise:.2f} W" if noise is not None else "") + ".")
+    gf = [b["gfx"] for b in base if b["gfx"] is not None]; cf = [b["core"] for b in base if b["core"] is not None]
+    if gf and cf: o.append(f"SoC split at baseline: GFX {st.mean(gf):.2f} W, all CPU cores {st.mean(cf):.2f} W, the rest of the SoC (fabric, memory, display, I/O) {st.mean(b['sock'] for b in base if b['sock'] is not None) - st.mean(gf) - st.mean(cf):.2f} W.")
+# Per-tweak detail: the device state each one aimed at, and the interrupt rates.
+o.append("\n<details><summary>Per phase: watts, device states, interrupt rates</summary>\n")
+o.append("| # | round | phase | battery W | SoC W | GFX W | cores W | states | irq/s (CAL, LOC, amdgpu, nvme, Wi-Fi, xhci) | note |")
+o.append("|---|---|---|---|---|---|---|---|---|---|")
+def irq(p, key):
+    return sum(v for k, v in p["irq"].items() if key in k)
+for i, p in enumerate(phases):
+    stt = "; ".join(f"{k} " + "/".join(f"{v}" for v in sorted(c)) for k, c in sorted(p["devstates"].items()))
+    o.append(f"| {i} | {p['round']} | {p['name'] + (' (' + p['tweak'] + ')' if design == 'pb12' else '')} | {f(p['bat'])} | {f(p['sock'])} | {f(p['gfx'])} | {f(p['core'])} | {stt} | "
+             f"{irq(p, 'CAL'):.0f}, {irq(p, 'LOC'):.0f}, {irq(p, 'amdgpu'):.0f}, {irq(p, 'nvme'):.1f}, {irq(p, 'mt7925'):.0f}, {irq(p, 'xhci'):.1f} | {', '.join(p['bad'])} |")
+o.append("\n</details>\n")
+if light:
+    o.append("<details><summary>Per phase under the light load: CPU time by core type, burst placement, latency, clocks</summary>\n")
+    o.append("| # | round | phase | battery W | Zen 5 busy CPUs | Zen 5c busy CPUs | Zen 5c share % | bursts | bursts on Zen 5c % | "
+             "wake lateness p50/p95/p99 ms | completion p50/p95/p99 ms | p95 response ms | Zen 5 GHz | Zen 5c GHz | spikes >4 GHz % | note |")
+    o.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    trio = lambda v: "/".join(f(x, 1) for x in v)  # noqa: E731
+    for i, p in enumerate(phases):
+        o.append(f"| {i} | {p['round']} | {p['name']} | {f(p['bat'])} | {f(p.get('busy5'))} | {f(p.get('busy5c'))} | {f(p.get('share5c'), 1)} | "
+                 f"{p.get('bursts', 0)} | {f(p.get('burst5c'), 1)} | {trio(p.get('lat', []))} | {trio(p.get('comp', []))} | {f(p.get('p95'), 1)} | "
+                 f"{f(p.get('ghz5'))} | {f(p.get('ghz5c'))} | {f(p.get('spike'), 1)} | {', '.join(p['bad'])} |")
+    o.append("\n</details>\n")
+rb = []
+for i, p in enumerate(phases):
+    seen = {}
+    for x in p["samples"]:
+        for k, v in (x.get("readback") or {}).items(): seen.setdefault(k, []).append(v)
+    off = sorted({f"{k} {v}" for x in p["samples"] for k, v in (x.get("off") or {}).items() if k not in seen})
+    if seen or off:
+        rb.append(f"{i} {p['name']}: " + "; ".join([f"{k} " + "/".join(dict.fromkeys(v)) + f" ({sum(a == p['samples'][0]['want'][k] for a in v)}/{len(v)} held)"
+                                                   for k, v in sorted(seen.items())] + [f"changed: {', '.join(off)}"] * bool(off)))
+if rb: o.append("<details><summary>CPU settings read back with every sample: the tweak's own, and every other one (boost, EPP, caps, "
+                "platform profiles) against the start; a phase where one did not hold is left out</summary>\n\n```\n" + "\n".join(rb) + "\n```\n</details>\n")
+applied = load(work + "/applied").strip()
+if applied: o.append("<details><summary>What each apply reported</summary>\n\n```\n" + "\n".join(sorted(set(applied.splitlines()))) + "\n```\n</details>\n")
+diag = load(work + "/diag").strip()
+if diag: o.append("<details><summary>Display and PMC state at the start (debugfs)</summary>\n\n```\n" + diag.replace("diag ", "") + "\n```\n</details>\n")
+tr = load(work + "/trace").strip()
+if tr: o.append("<details><summary>20 s trace at the start: IPIs (who sends them, which function) and hrtimers, per second</summary>\n\n```\n" + tr.replace("trace ", "") + "\n```\n</details>\n")
+o.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
+print("\n".join(o))
+# Each tweak's own issue gets its row, the context and the method; tweaks that
+# share an issue (#10's, #328's) share one post.
+hi = next((i for i, l in enumerate(o) if l.startswith("| tweak |")), None)
+head = o[hi:hi + 2] if hi is not None else []
+noisel = [l for l in o if l.startswith("| baseline noise")]
+ctxl = [l for l in load(work + "/context").splitlines() if l.split(":")[0] in ("- kernel", "- power profile", "- cpufreq", "- brightness", "- display", "- light load", "- core types")]
+basel = [l for l in o if l.startswith("Baseline") or l.startswith("SoC split") or l.startswith("\nFit: ")]
+meth = [l for l in o if l.startswith("- method:") or l.startswith("- stopped after") or l.startswith("- verdict:") or l.startswith("- assumes") or l.startswith("- light load: started")]
+by_issue = {}
+for t in verdicts: by_issue.setdefault(issues.get(t, "0"), []).append(t)
+for i, ts in by_issue.items():
+    rows_ = [l for t in ts for l in o if l.startswith(f"| {t} |")]
+    txt = [f"## A/B on the G16{' under a light load' if light else ''}: {', '.join(ts)}\n"]
+    txt += [(f"- {t}: " if len(ts) > 1 else "") + descs.get(t, "") for t in ts] + [""]
+    txt += head + rows_ + noisel + [""] + ctxl + meth + [""] + basel + [""]
+    for t in ts:
+        v, mean, se2 = verdicts[t]
+        txt.append(f"Verdict{' for ' + t if len(ts) > 1 else ''}: **{v}** ({'?' if mean is None else f'{mean:+.2f}'} W, ±2 SE {'?' if se2 is None else f'{se2:.2f}'} W).")
+    txt.append(f"\nThe full report, with every phase, the device states and the interrupt rates, is on #{summary}.")
+    txt.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
+    with open(f"{work}/post-{i}.md", "w") as fh: fh.write("\n".join(txt) + "\n")
+with open(work + "/verdicts", "w") as fh:
+    for i in by_issue: fh.write(f"{i}\n")
+PY
+}
+if [[ ${1:-} == --settled ]]; then
+  WORK=$2; mapfile -t PHASES <"$WORK/phases"; report_inputs
+  report_py "$WORK" - 0 0 0 "$5" 0 0 - 0 "$3" none "$4" check; exit
+fi
+
 # ------------------------------------------------------------------ options
 DRY=0 POST=1 ROUNDS='' DESIGN=ab DPMS=1 MEASURE='' SETTLE='' INTERVAL=2 ONLY='' SEED='' BOOT='' CMP_A='' CMP_B='' CMP_ISSUE=''
-LOAD=idle UNVERIFIED=0
+LOAD=idle UNVERIFIED=0 EARLY=1
 while (($#)); do
   case $1 in
     --dry-run) DRY=1 ;;
@@ -756,6 +1072,7 @@ while (($#)); do
     --no-dpms) DPMS=0 ;;
     --load) LOAD=${2:-}; shift ;;
     --unverified-msr) UNVERIFIED=1 ;;
+    --no-early-stop) EARLY=0 ;;
     --measure) MEASURE=${2:-}; shift ;;
     --settle) SETTLE=${2:-}; shift ;;
     --interval) INTERVAL=${2:-}; shift ;;
@@ -770,8 +1087,7 @@ while (($#)); do
 done
 [[ $LOAD == idle || $LOAD == light ]] || { echo "--load is light (or idle, the default)" >&2; exit 2; }
 if ((DRY)); then : "${MEASURE:=6}" "${SETTLE:=1}"; POST=0
-elif [[ $LOAD == light ]]; then : "${MEASURE:=30}" "${SETTLE:=10}"
-else : "${MEASURE:=60}" "${SETTLE:=15}"; fi
+else : "${MEASURE:=30}" "${SETTLE:=10}"; fi
 [[ $DESIGN == ab || $DESIGN == pb12 ]] || { echo "--design is pb12 (or ab, one tweak at a time, the default)" >&2; exit 2; }
 [[ $DESIGN == pb12 && $LOAD == light ]] && { echo "--load light runs one tweak at a time; it takes no --design pb12" >&2; exit 2; }
 [[ $DESIGN == pb12 && -n $BOOT ]] && { echo "--boot measures no tweaks; it takes no --design" >&2; exit 2; }
@@ -1337,7 +1653,11 @@ TOTAL_PH=$((ROUNDS * (2 * ${#SEL[@]} + 1)))
 [[ $DESIGN == pb12 ]] && TOTAL_PH=$((ROUNDS * 12))
 [[ -n $BOOT ]] && TOTAL_PH=$((ROUNDS * 2))
 say "G16 idle A/B$( [[ $LOAD == light ]] && echo ' under a light load' )$( [[ -n $BOOT ]] && echo " (boot run '$BOOT')" )$( ((DRY)) && echo ', dry run')"
-note "$TOTAL_PH phases, about $(( (SETTLE + MEASURE) * TOTAL_PH / 60 + 2 )) minutes; leave the laptop alone until it says done"
+# The early stop (from round 2 on) can't skip anything in a run of 2 rounds or a boot run.
+((ROUNDS > 2)) && [[ -z $BOOT ]] || EARLY=0
+if ((EARLY)); then
+  note "at most $TOTAL_PH phases, about $(( (SETTLE + MEASURE) * TOTAL_PH / 60 + 2 )) minutes, $(( (SETTLE + MEASURE) * TOTAL_PH * 2 / ROUNDS / 60 + 2 )) when every verdict is settled after round 2; leave the laptop alone until it says done"
+else note "$TOTAL_PH phases, about $(( (SETTLE + MEASURE) * TOTAL_PH / 60 + 2 )) minutes; leave the laptop alone until it says done"; fi
 if [[ $ROOT == testd ]]; then note "root steps through the open g16-testd session (no dialog)"; else note "asking for root once"; fi
 coproc HELPER { "${HELPER_CMD[@]}" 2>/dev/null; }
 HELPER_PID=$HELPER_PID
@@ -1506,6 +1826,16 @@ shuffle() { # seed items... -> items, shuffled reproducibly
   python3 -I -c 'import random, sys; r = random.Random(int(sys.argv[1])); x = sys.argv[2:]; r.shuffle(x); print("\n".join(x))' "$@"
 }
 SEED=${SEED:-$((RANDOM * 32768 + RANDOM))}
+# The early stop: after round 2 on, when every verdict is already settled, the rounds
+# left are skipped (--no-early-stop runs them all).
+ROUNDS_DONE=$ROUNDS STOPPED=''
+stop_early() { # round -> 0 to stop after it
+  ((EARLY && $1 >= 2 && $1 < ROUNDS)) || return 1
+  report_inputs
+  [[ $(report_py "$WORK" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$1" "$SEED" "$DRY" - "$SUMMARY_ISSUE" "$DESIGN" "$ROOT" "$LOAD" check 2>/dev/null) == settled ]] || return 1
+  ROUNDS_DONE=$1 STOPPED="$1 of $ROUNDS"
+  note "stopped after round $1 of $ROUNDS: every verdict settled"
+}
 if [[ $DESIGN == pb12 ]]; then
   ((${#RUN[@]} <= 11)) || die "pb12 takes at most 11 tweaks"
   # The matrix: tweak j is column j; the columns past the last tweak are dummies.
@@ -1518,7 +1848,9 @@ if [[ $DESIGN == pb12 ]]; then
   sed 's/^/    /' "$WORK/matrix"
   printf '%s\n' "${RUN[@]}" >"$WORK/run"
   declare -A ON=()
+  last=1
   while read -r round row signs; do
+    ((round > last)) && { stop_early "$last" && break; last=$round; }
     want_on=" "
     for ((j = 0; j < ${#RUN[@]}; j++)); do [[ ${signs:j:1} == + ]] && want_on+="${RUN[j]} "; done
     for t in "${RUN[@]}"; do [[ -n ${ON[$t]:-} && $want_on != *" $t "* ]] && { revert_t "$t"; unset "ON[$t]"; }; done
@@ -1541,293 +1873,15 @@ for ((round = 1; round <= AB_ROUNDS; round++)); do
     revert_t "$t"
     measure baseline - "$round" || break 2
   done
+  [[ -z $BOOT ]] && stop_early "$round" && break
 done
 
 # ------------------------------------------------------------------ report
 say "putting everything back"
 load_stop
 [[ $LOAD == light ]] && cp "$LOAD_DIR/bursts.log" "$WORK/bursts" 2>/dev/null
-printf '%s\n' "${PHASES[@]}" >"$WORK/phases"
-printf '%s\n' "${TWEAKS[@]}" >"$WORK/tweaks"
-printf '%s\n' "$PB12_PY" >"$WORK/g16pb.py"
-python3 -I - "$WORK" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$ROUNDS" "$SEED" "$DRY" "${BOOT:--}" "$SUMMARY_ISSUE" "$DESIGN" "$ROOT" "$LOAD" >"$WORK/report.md" <<'PY' || die "the report failed"
-import json, math, os, statistics as st, sys
-work, rev, settle, measure, interval, rounds, seed, dry, boot, summary, design, root, mode = sys.argv[1:14]
-light = mode == "light"
-def load(p):
-    try:
-        with open(p) as f: return f.read()
-    except OSError: return ""
-issues, descs = {}, {}
-for line in load(work + "/tweaks").splitlines():
-    n, i, d = line.split("|", 2); issues[n], descs[n] = i, d
-phases = [json.loads(load(p)) for p in load(work + "/phases").split()]
-stopped = set(load(work + "/load-stopped").split())
-for p, path in zip(phases, load(work + "/phases").split()):
-    p["load_stopped"] = path in stopped
-types = json.loads(load(work + "/cpus.json") or "{}")
-bursts = []  # (scheduled, woke, done, CPU at start, CPU at end)
-for line in load(work + "/bursts").splitlines():
-    x = line.split()
-    try:
-        if len(x) == 5: bursts.append((float(x[0]), float(x[1]), float(x[2]), x[3], x[4]))
-    except ValueError: pass
-def pct(v, q):
-    if not v: return None
-    v = sorted(v)
-    return v[min(len(v) - 1, max(0, math.ceil(q / 100 * len(v)) - 1))]
-HZ = os.sysconf("SC_CLK_TCK")
-def light_metrics(p):
-    """The light load's columns, kept as phase keys so other tweaks (#328) reuse them:
-    lat/comp [p50, p95, p99] ms, p95 (response: scheduled wake to done) ms, burst5c %,
-    busy5/busy5c (CPUs busy on average), share5c %, ghz5/ghz5c, spike % (above 4.0 GHz)."""
-    b = [x for x in bursts if p.get("t0", 0) <= x[0] < p.get("t1", 0)]
-    p["bursts"] = len(b)
-    p["lat"] = [pct([(w - s0) * 1000 for s0, w, e, c0, c1 in b], q) for q in (50, 95, 99)]
-    p["comp"] = [pct([(e - w) * 1000 for s0, w, e, c0, c1 in b], q) for q in (50, 95, 99)]
-    p["p95"] = pct([(e - s0) * 1000 for s0, w, e, c0, c1 in b], 95)
-    on = [types.get(c) == "zen5c" for x in b for c in x[3:5]]
-    p["burst5c"] = 100 * sum(on) / len(on) if on else None
-    busy, dt = p.get("busy", {}), p.get("dt") or 0
-    z = {k: sum(v for c, v in busy.items() if types.get(c) == k) / HZ / dt if dt else None for k in ("zen5", "zen5c")}
-    p["busy5"], p["busy5c"] = z["zen5"], z["zen5c"]
-    tot = (z["zen5"] or 0) + (z["zen5c"] or 0)
-    p["share5c"] = 100 * z["zen5c"] / tot if tot > 0 else None
-    fr = p.get("freq", {})
-    def ghz(k):
-        n = sum(v[0] for c, v in fr.items() if types.get(c) == k)
-        return sum(v[1] for c, v in fr.items() if types.get(c) == k) / n / 1e6 if n else None
-    p["ghz5"], p["ghz5c"] = ghz("zen5"), ghz("zen5c")
-    n = sum(v[0] for v in fr.values())
-    p["spike"] = 100 * sum(v[2] for v in fr.values()) / n if n else None
-def summarize(p):
-    s = p["samples"]
-    def m(k):
-        v = [x[k] for x in s if x.get(k) is not None]
-        return st.mean(v) if v else None
-    bad = []
-    if any(x.get("status") not in ("Discharging", None) for x in s): bad.append("on the charger")
-    if any(z.get("dgpu") not in ("suspended", "-", None) for z in p["states"]): bad.append("RTX awake")
-    bls = {x.get("bl") for x in s}
-    if len(bls) > 1: bad.append("brightness changed")
-    if dry != "1" and any(x.get("kbd") not in (None, 0) for x in s): bad.append("keyboard LED on")
-    # A CPU setting that did not hold (power-profiles-daemon wrote it back): left out.
-    off = sorted({f"{k} {v}" for x in s for k, v in (x.get("off") or {}).items()})
-    if off: bad.append("setting did not hold (" + ", ".join(off[:3]) + (", …" if len(off) > 3 else "") + ")")
-    if p.get("load_stopped"): bad.append("light load stopped")
-    stt = {}
-    for z in p["states"]:
-        for k, v in z.items(): stt.setdefault(k, {}).setdefault(v, 0); stt[k][v] += 1
-    p.update(bat=m("bat"), sock=None if m("sock") is None else m("sock") / 1000, gfx=None if m("gfx") is None else m("gfx") / 1000,
-             core=None if m("core") is None else m("core") / 1000, bad=bad, valid=not bad, devstates=stt)
-    if light: light_metrics(p)
-    return p
-for p in phases: summarize(p)
-f = lambda v, n=2: "–" if v is None else f"{v:.{n}f}"
-o = []
-if boot != "-":
-    # Boot runs: keep the numbers, report baselines only.
-    rec = {"label": boot, "when": os.popen("date -Iminutes").read().strip(), "kernel": os.uname().release,
-           "extra": " ".join(w for w in load("/proc/cmdline").split() if w.split("=")[0] in ("nmi_watchdog", "rcu_nocbs", "rcutree.enable_rcu_lazy", "workqueue.power_efficient", "nvme_core.default_ps_max_latency_us", "amdgpu.dcdebugmask", "amdgpu.dcfeaturemask")),
-           "settle": settle, "measure": measure, "interval": interval,
-           "phases": [{k: p[k] for k in ("bat", "sock", "valid")} for p in phases]}
-    with open(work + "/boot.json", "w") as fh: json.dump(rec, fh)
-o.append(f"## G16 {'A/B under a light load' if light else 'idle A/B'}{' (dry run, not a measurement)' if dry == '1' else ''}{' — boot run ' + boot if boot != '-' else ''}\n")
-o.append(load(work + "/context").rstrip())
-o.append(f"- root steps: {'the G16 test session helper (g16-testd)' if root == 'testd' else root}")
-if design == "pb12":
-    o.append(f"- method: Plackett-Burman screening (#276), {rounds} round{'' if rounds == '1' else 's'} of the 12-row matrix, each round in a shuffled order "
-             f"(seed {seed}). Each row switches on a different half of the tweaks; from one row to the next only the tweaks "
-             f"whose level differs change. Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. "
-             "Δ is a tweak's main effect, on minus off, fitted by least squares over every valid phase with a level per round "
-             "(and a linear drift over the run when the phases leave room for it); ±2 SE is from the residual noise. "
-             "Columns no tweak uses (dummies) are fitted on top and should read as noise. Phases with the charger in, the RTX "
-             "awake or the brightness changed are left out.")
-    o.append("- assumes the effects add up (no interactions): an interaction, such as kbd-usb with bt-off (they share an xHCI "
-             "controller), spreads over the other columns. A tweak this screen calls a winner gets a one-at-a-time A/B "
-             "(`g16-idle-ab --only T`) to confirm it.")
-else:
-    o.append(f"- method: {rounds} rounds; each round runs every tweak once in a shuffled order (seed {seed}), each between two baseline phases "
-             f"(B T1 B T2 … B). Each phase settles {settle} s, then {measure} s are measured, a sample every {interval} s. A tweak's delta "
-             "in a round is its phase minus the mean of the two baselines around it. ±2 SE is twice the standard error of the mean delta "
-             "over the rounds. Phases with the charger in, the RTX awake, the brightness changed or a keyboard LED lit are left out.")
-if light:
-    o.append("- light load: started once and running through every phase, baseline and tweak alike. Latency comes from the bursts "
-             "scheduled in a phase's measured window: wake lateness (actual minus scheduled wake), completion (the burst's fixed "
-             "work), and p95 response (scheduled wake to done). Zen 5c share: the Zen 5c cores' part of all CPU busy time "
-             "(/proc/stat). Spikes: the share of cpuinfo_avg_freq samples above 4.0 GHz. A tweak's Δ is its phase minus the mean "
-             "of the baselines around it; noise is the sd of one baseline minus the next. **flagged**: a watt saving with p95 "
-             "response more than 10% worse.")
-o.append(f"- verdict: **saves** when the {'effect' if design == 'pb12' else 'mean delta'} is below −0.10 W and below −2 SE; **costs** the mirror; otherwise **no effect beyond noise**.\n")
-skipped = load(work + "/skipped").strip()
-if skipped: o.append("Skipped: " + "; ".join(skipped.splitlines()) + "\n")
-rows, per = [], {}
-for i, p in enumerate(phases):
-    if design == "pb12" or p["tweak"] == "-": continue
-    before = next((q for q in reversed(phases[:i]) if q["tweak"] == "-"), None)
-    after = next((q for q in phases[i + 1:] if q["tweak"] == "-"), None)
-    # Both baselines around it must be valid, or drift doesn't cancel.
-    bases = [q for q in (before, after) if q and q["valid"] and q["bat"] is not None]
-    if not p["valid"] or p["bat"] is None or len(bases) < 2: per.setdefault(p["tweak"], []).append(None); continue
-    bb = st.mean(q["bat"] for q in bases)
-    bs = [q["sock"] for q in bases if q["sock"] is not None]
-    per.setdefault(p["tweak"], []).append((p["bat"] - bb, (p["sock"] - st.mean(bs)) if bs and p["sock"] is not None else None, p, bases))
-base = [p for p in phases if p["tweak"] == "-" and p["valid"] and p["bat"] is not None]
-noise = None
-if len(base) > 2:
-    diffs = [b["bat"] - a["bat"] for a, b in zip(base, base[1:])]
-    noise = st.pstdev(diffs) if len(diffs) > 1 else None
-verdicts = {}
-def verdict(mean, se2):
-    if mean is None: return "no valid rounds" if design != "pb12" else "not estimable"
-    if se2 is not None and mean < -0.10 and mean < -se2: return "saves"
-    if se2 is not None and mean > 0.10 and mean > se2: return "costs"
-    return "no effect beyond noise" if se2 is not None else "no noise estimate"
-if design == "pb12":
-    sys.path.insert(0, work)
-    import g16pb
-    run = load(work + "/run").split()
-    pts = [{"on": [] if p["tweak"] == "-" else p["tweak"].split(","), "round": p["round"], "seq": i,
-            "design": [1 if c == "+" else -1 for c in p.get("design", "")],
-            "bat": p["bat"] if p["valid"] else None, "sock": p["sock"] if p["valid"] else None} for i, p in enumerate(phases)]
-    fb = g16pb.fit(pts, run, "bat", list(range(len(run), 11)))
-    fs = g16pb.fit(pts, run, "sock")
-    pm = lambda e: "–" if e is None else f"{e[0]:+.2f}"  # noqa: E731
-    pe = lambda e: "–" if e is None or e[1] is None else f"{e[1]:.2f}"  # noqa: E731
-    o.append("| tweak | issue | phases on / off | Δ battery W | ±2 SE | Δ SoC W | ±2 SE | verdict |")
-    o.append("|---|---|---|---|---|---|---|---|")
-    valid = [q for q in pts if q["bat"] is not None]
-    for t in run:
-        e = fb["effects"].get(t)
-        v = verdict(e and e[0], e and e[1])
-        verdicts[t] = (v, e and e[0], e and e[1])
-        non = sum(t in q["on"] for q in valid)
-        o.append(f"| {t} | #{issues.get(t, '?')} | {non} / {len(valid) - non} | {pm(e)} | {pe(e)} | {pm(fs['effects'].get(t))} | {pe(fs['effects'].get(t))} | **{v}** |")
-    for j, e in enumerate(fb["dummies"]):
-        o.append(f"| (dummy, column {len(run) + j + 1}) | – | – | {pm(e)} | {pe(e)} | – | – | noise check |")
-    o.append(f"\nFit: {fb['n']} valid phases, residual noise (sd of one phase) "
-             + ("–" if fb["sigma"] is None else f"{fb['sigma']:.2f} W") + f" on {fb['df'] if fb['df'] is not None else 0} degrees of freedom"
-             + (", with a linear drift term" if fb["trend"] else ", no drift term") + ".")
-    o.append("\n<details><summary>The design matrix (+ on, − off)</summary>\n\n```\n" + load(work + "/matrix").rstrip() + "\n```\n</details>")
-def bnoise(k):
-    v = [b[k] for b in base if b.get(k) is not None]
-    d = [y - x for x, y in zip(v, v[1:])]
-    return st.pstdev(d) if len(d) > 1 else None
-def dkey(d, k):
-    p, bases = d[2], d[3]
-    bv = [q[k] for q in bases if q.get(k) is not None]
-    return None if p.get(k) is None or len(bv) < 2 else p[k] - st.mean(bv)
-def mean_or_none(v):
-    v = [x for x in v if x is not None]
-    return st.mean(v) if v else None
-sg = lambda v, n=2: "–" if v is None else f"{v:+.{n}f}"  # noqa: E731
-if light and per:
-    o.append("| tweak | issue | rounds | Δ battery W | ±2 SE | Δ SoC W | Δ p95 response ms | Δ p95 % | Δ Zen 5c share pp | Δ spikes >4 GHz pp | verdict |")
-    o.append("|---|---|---|---|---|---|---|---|---|---|---|")
-    for t, ds in per.items():
-        good = [d for d in ds if d]
-        dv = [d[0] for d in good]
-        mean = st.mean(dv) if dv else None
-        se2 = 2 * st.stdev(dv) / math.sqrt(len(dv)) if len(dv) > 1 else None
-        v = verdict(mean, se2)
-        if v == "no noise estimate": v = "no effect beyond noise"
-        dl = mean_or_none([dkey(d, "p95") for d in good])
-        bl95 = mean_or_none([q["p95"] for d in good for q in d[3] if q.get("p95") is not None])
-        rel = 100 * dl / bl95 if dl is not None and bl95 else None
-        flag = mean is not None and mean < 0 and rel is not None and rel > 10
-        verdicts[t] = (v + (f", flagged: p95 {rel:+.0f}%" if flag else ""), mean, se2)
-        o.append(f"| {t} | #{issues.get(t, '?')} | {len(dv)}/{len(ds)} | {sg(mean)} | {f(se2)} | {sg(mean_or_none([d[1] for d in good]))} | "
-                 f"{sg(dl, 1)} | {sg(rel, 0)} | {sg(mean_or_none([dkey(d, 'share5c') for d in good]), 1)} | "
-                 f"{sg(mean_or_none([dkey(d, 'spike') for d in good]), 1)} | **{v}**{f' · **flagged**: p95 {rel:+.0f}%' if flag else ''} |")
-    nz = {k: bnoise(k) for k in ("bat", "sock", "p95", "share5c", "spike")}
-    o.append(f"| baseline noise (sd, B to B) | – | {len(base)} | {f(nz['bat'])} | – | {f(nz['sock'])} | {f(nz['p95'], 1)} | – | "
-             f"{f(nz['share5c'], 1)} | {f(nz['spike'], 1)} | – |")
-elif per:
-    o.append("| tweak | issue | rounds | Δ battery W (mean) | ±2 SE | per round | Δ SoC W | verdict |")
-    o.append("|---|---|---|---|---|---|---|---|")
-    for t, ds in per.items():
-        good = [d for d in ds if d]
-        dv = [d[0] for d in good]
-        ds_ = [d[1] for d in good if d[1] is not None]
-        mean = st.mean(dv) if dv else None
-        se2 = 2 * st.stdev(dv) / math.sqrt(len(dv)) if len(dv) > 1 else None
-        v = verdict(mean, se2)
-        if v == "no noise estimate": v = "no effect beyond noise"
-        verdicts[t] = (v, mean, se2)
-        pr = ", ".join("left out" if d is None else f"{d[0]:+.2f}" for d in ds)
-        o.append(f"| {t} | #{issues.get(t, '?')} | {len(dv)}/{len(ds)} | {f(mean, 2) if mean is None else f'{mean:+.2f}'} | {f(se2)} | {pr} | "
-                 f"{'–' if not ds_ else f'{st.mean(ds_):+.2f}'} | **{v}** |")
-if base:
-    o.append(f"\nBaseline{' (the phases with every tweak off)' if design == 'pb12' else ''} over the run: battery {st.mean(b['bat'] for b in base):.2f} W (min phase {min(b['bat'] for b in base):.2f}, "
-             f"max {max(b['bat'] for b in base):.2f}), SoC {f(st.mean([b['sock'] for b in base if b['sock'] is not None]) if any(b['sock'] is not None for b in base) else None)} W"
-             + (f", baseline-to-baseline noise (sd) {noise:.2f} W" if noise is not None else "") + ".")
-    gf = [b["gfx"] for b in base if b["gfx"] is not None]; cf = [b["core"] for b in base if b["core"] is not None]
-    if gf and cf: o.append(f"SoC split at baseline: GFX {st.mean(gf):.2f} W, all CPU cores {st.mean(cf):.2f} W, the rest of the SoC (fabric, memory, display, I/O) {st.mean(b['sock'] for b in base if b['sock'] is not None) - st.mean(gf) - st.mean(cf):.2f} W.")
-# Per-tweak detail: the device state each one aimed at, and the interrupt rates.
-o.append("\n<details><summary>Per phase: watts, device states, interrupt rates</summary>\n")
-o.append("| # | round | phase | battery W | SoC W | GFX W | cores W | states | irq/s (CAL, LOC, amdgpu, nvme, Wi-Fi, xhci) | note |")
-o.append("|---|---|---|---|---|---|---|---|---|---|")
-def irq(p, key):
-    return sum(v for k, v in p["irq"].items() if key in k)
-for i, p in enumerate(phases):
-    stt = "; ".join(f"{k} " + "/".join(f"{v}" for v in sorted(c)) for k, c in sorted(p["devstates"].items()))
-    o.append(f"| {i} | {p['round']} | {p['name'] + (' (' + p['tweak'] + ')' if design == 'pb12' else '')} | {f(p['bat'])} | {f(p['sock'])} | {f(p['gfx'])} | {f(p['core'])} | {stt} | "
-             f"{irq(p, 'CAL'):.0f}, {irq(p, 'LOC'):.0f}, {irq(p, 'amdgpu'):.0f}, {irq(p, 'nvme'):.1f}, {irq(p, 'mt7925'):.0f}, {irq(p, 'xhci'):.1f} | {', '.join(p['bad'])} |")
-o.append("\n</details>\n")
-if light:
-    o.append("<details><summary>Per phase under the light load: CPU time by core type, burst placement, latency, clocks</summary>\n")
-    o.append("| # | round | phase | battery W | Zen 5 busy CPUs | Zen 5c busy CPUs | Zen 5c share % | bursts | bursts on Zen 5c % | "
-             "wake lateness p50/p95/p99 ms | completion p50/p95/p99 ms | p95 response ms | Zen 5 GHz | Zen 5c GHz | spikes >4 GHz % | note |")
-    o.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-    trio = lambda v: "/".join(f(x, 1) for x in v)  # noqa: E731
-    for i, p in enumerate(phases):
-        o.append(f"| {i} | {p['round']} | {p['name']} | {f(p['bat'])} | {f(p.get('busy5'))} | {f(p.get('busy5c'))} | {f(p.get('share5c'), 1)} | "
-                 f"{p.get('bursts', 0)} | {f(p.get('burst5c'), 1)} | {trio(p.get('lat', []))} | {trio(p.get('comp', []))} | {f(p.get('p95'), 1)} | "
-                 f"{f(p.get('ghz5'))} | {f(p.get('ghz5c'))} | {f(p.get('spike'), 1)} | {', '.join(p['bad'])} |")
-    o.append("\n</details>\n")
-rb = []
-for i, p in enumerate(phases):
-    seen = {}
-    for x in p["samples"]:
-        for k, v in (x.get("readback") or {}).items(): seen.setdefault(k, []).append(v)
-    off = sorted({f"{k} {v}" for x in p["samples"] for k, v in (x.get("off") or {}).items() if k not in seen})
-    if seen or off:
-        rb.append(f"{i} {p['name']}: " + "; ".join([f"{k} " + "/".join(dict.fromkeys(v)) + f" ({sum(a == p['samples'][0]['want'][k] for a in v)}/{len(v)} held)"
-                                                   for k, v in sorted(seen.items())] + [f"changed: {', '.join(off)}"] * bool(off)))
-if rb: o.append("<details><summary>CPU settings read back with every sample: the tweak's own, and every other one (boost, EPP, caps, "
-                "platform profiles) against the start; a phase where one did not hold is left out</summary>\n\n```\n" + "\n".join(rb) + "\n```\n</details>\n")
-applied = load(work + "/applied").strip()
-if applied: o.append("<details><summary>What each apply reported</summary>\n\n```\n" + "\n".join(sorted(set(applied.splitlines()))) + "\n```\n</details>\n")
-diag = load(work + "/diag").strip()
-if diag: o.append("<details><summary>Display and PMC state at the start (debugfs)</summary>\n\n```\n" + diag.replace("diag ", "") + "\n```\n</details>\n")
-tr = load(work + "/trace").strip()
-if tr: o.append("<details><summary>20 s trace at the start: IPIs (who sends them, which function) and hrtimers, per second</summary>\n\n```\n" + tr.replace("trace ", "") + "\n```\n</details>\n")
-o.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
-print("\n".join(o))
-# Each tweak's own issue gets its row, the context and the method; tweaks that
-# share an issue (#10's, #328's) share one post.
-hi = next((i for i, l in enumerate(o) if l.startswith("| tweak |")), None)
-head = o[hi:hi + 2] if hi is not None else []
-noisel = [l for l in o if l.startswith("| baseline noise")]
-ctxl = [l for l in load(work + "/context").splitlines() if l.split(":")[0] in ("- kernel", "- power profile", "- cpufreq", "- brightness", "- display", "- light load", "- core types")]
-basel = [l for l in o if l.startswith("Baseline") or l.startswith("SoC split") or l.startswith("\nFit: ")]
-meth = [l for l in o if l.startswith("- method:") or l.startswith("- verdict:") or l.startswith("- assumes") or l.startswith("- light load: started")]
-by_issue = {}
-for t in verdicts: by_issue.setdefault(issues.get(t, "0"), []).append(t)
-for i, ts in by_issue.items():
-    rows_ = [l for t in ts for l in o if l.startswith(f"| {t} |")]
-    txt = [f"## A/B on the G16{' under a light load' if light else ''}: {', '.join(ts)}\n"]
-    txt += [(f"- {t}: " if len(ts) > 1 else "") + descs.get(t, "") for t in ts] + [""]
-    txt += head + rows_ + noisel + [""] + ctxl + meth + [""] + basel + [""]
-    for t in ts:
-        v, mean, se2 = verdicts[t]
-        txt.append(f"Verdict{' for ' + t if len(ts) > 1 else ''}: **{v}** ({'?' if mean is None else f'{mean:+.2f}'} W, ±2 SE {'?' if se2 is None else f'{se2:.2f}'} W).")
-    txt.append(f"\nThe full report, with every phase, the device states and the interrupt rates, is on #{summary}.")
-    txt.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
-    with open(f"{work}/post-{i}.md", "w") as fh: fh.write("\n".join(txt) + "\n")
-with open(work + "/verdicts", "w") as fh:
-    for i in by_issue: fh.write(f"{i}\n")
-PY
+report_inputs
+report_py "$WORK" "$REV" "$SETTLE" "$MEASURE" "$INTERVAL" "$ROUNDS_DONE" "$SEED" "$DRY" "${BOOT:--}" "$SUMMARY_ISSUE" "$DESIGN" "$ROOT" "$LOAD" "$STOPPED" >"$WORK/report.md" || die "the report failed"
 [[ -s $WORK/report.md ]] || die "the report is empty"
 scrub "$WORK/report.md" "$REPORT"
 if [[ -n $BOOT && $DRY == 0 ]]; then
