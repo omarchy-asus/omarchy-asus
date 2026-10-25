@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+"""One tracking issue per release train: what a channel's release carries, as the source of
+truth for its tags and release notes (#212).
+
+Usage: bin/release-train [--channel quattro|rc] update [--db DB] [--withheld FILE] [--dry-run]
+       bin/release-train [--channel quattro|rc] render [--db DB] [--withheld FILE]
+       bin/release-train [--channel quattro|rc] find
+       bin/release-train [--channel quattro|rc] notes [--issue N]
+       bin/release-train [--channel quattro|rc] cut NAME [--dry-run]
+
+A train is the run of a channel's release ($GH_TAG: x86_64 or rc-x86_64) from one cut to the
+next. Its issue on $GH_REPO (title "Release train: <tag> ...", first body line
+"<!-- release-train:<tag> -->") lists every package the release serves with its version, the
+recipe it comes from and that recipe's last issue and pull request; what waits for the next
+train (a recipe behind its version or not built yet, a held recipe, a package withheld as a
+regression); and the recipe changes since the last cut.
+
+  update  bin/sync-release runs it after every sync that went through (DB: the db it put on the
+          release) and after a withheld one (DB: the db the release still serves, if any;
+          --withheld: $CHANNEL_DATA/release-withheld). It writes the issue body, opening the
+          train's issue when there is none open. --dry-run prints the body and what it would do.
+  render  print the body for DB (offline; no DB: the release serves nothing yet).
+  find    print the open train issue's number (exit 1: none).
+  notes   print the release notes cut from the open train issue (or issue N): what is on the
+          release and the changes since the last cut, read back from GitHub, never from a db.
+  cut     close the train: tag the recipes commit its issue records as train/<tag>/NAME with
+          the notes as the message, push the tag, then comment the notes and close the issue.
+          The next update opens the next train. --dry-run prints the tag and the notes.
+          The cut first marks the issue (update then leaves it, and its notes, alone), so a cut
+          that stops half way (push, comment or close failed) resumes when rerun with the same
+          NAME; the tag is made once, the comment posted once.
+update and cut hold the publication lock ($DATA/publish.lock, shared with bin/publish,
+bin/unpublish and bin/sync-release, whose own lock covers its update): never two at once.
+Exit 75 when it stays busy for PUBLISH_LOCK_WAIT seconds.
+
+Recipes and git history come from $WORKSPACE (bin/env.sh): run it from a checkout of the
+channel's branch, as bin/sync-release is. A recipe's issue and pull request are read from the
+last commit that touched recipes/<dir>: its subject's last "(#N)" is the pull request, earlier
+ones and "Fixes/Closes/Refs #N" lines in the body are issues.
+Everything posted is refused on control characters (other than newline and tab), then goes
+through bin/sync-release --pii-scan-text; a hit posts nothing.
+Exit: 0 done, 1 failed (nothing posted after a failed scan), 2 usage, 75 lock busy.
+"""
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+BIN = os.path.dirname(os.path.realpath(__file__))
+MARK = "<!-- release-train:{tag} -->"
+COMMIT_MARK = re.compile(r"^<!-- release-train-commit:([0-9a-f]{7,40}) -->$", re.M)
+CUTTING_MARK = re.compile(r"^<!-- release-train-cutting:(\S+) -->$", re.M)
+FOOTER = "Kept by bin/release-train"
+# C0 controls and DEL, except tab and newline (bin/issue refuses the same)
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+TITLE = "Release train: {tag} ({label})"
+LABELS = {"quattro": "Quattro channel", "rc": "RC channel"}
+MAX_CHANGES = 200      # keep the body well under GitHub's 65536 characters
+
+
+def load_check_upstream():
+    """bin/check-upstream as a module: its db parser, recipe inventory and HOLD reader."""
+    sys.dont_write_bytecode = True
+    loader = importlib.machinery.SourceFileLoader("check_upstream_mod", os.path.join(BIN, "check-upstream"))
+    spec = importlib.util.spec_from_loader("check_upstream_mod", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def channel_env():
+    """{CHANNEL, GH_REPO, GH_TAG, GH_BRANCH, DATA, CHANNEL_DATA, WORKSPACE} as bin/env.sh sets them."""
+    keys = ["CHANNEL", "GH_REPO", "GH_TAG", "GH_BRANCH", "DATA", "CHANNEL_DATA", "WORKSPACE"]
+    script = 'source "$1" >/dev/null || exit 1; for k in ' + " ".join(keys) + '; do printf "%s\\n" "${!k}"; done'
+    r = subprocess.run(["bash", "-c", script, "_", os.path.join(BIN, "env.sh")], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(f"release-train: bin/env.sh failed: {r.stderr.strip()}")
+    return dict(zip(keys, r.stdout.splitlines()))
+
+
+# --- git: a recipe's issue and pull request ---
+
+def git(ws, *args):
+    r = subprocess.run(["git", "-C", ws, *args], capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def refs_of(subject, body):
+    """(pr, [issues]) from a commit: the subject's last "(#N)" is the pull request when the
+    subject ends with it, the other "(#N)" and Fixes/Closes/Refs lines are issues."""
+    nums = re.findall(r"\(#(\d+)\)", subject)
+    pr = nums.pop() if nums and re.search(r"\(#\d+\)\s*$", subject) else None
+    issues = nums + re.findall(r"^(?:Fixes|Closes|Refs)\s+#(\d+)\b", body or "", re.M | re.I)
+    seen = []
+    for n in issues:
+        if n != pr and n not in seen:
+            seen.append(n)
+    return pr, seen
+
+
+def last_commit(ws, recipe):
+    """{sha, subject, pr, issues} of the last commit touching recipes/<recipe>, or None."""
+    out = git(ws, "log", "-1", "--format=%h%x00%s%x00%b", "--", f"recipes/{recipe}")
+    if not out:
+        return None
+    sha, subject, body = (out.split("\0") + ["", ""])[:3]
+    pr, issues = refs_of(subject, body)
+    return {"sha": sha, "subject": subject, "pr": pr, "issues": issues}
+
+
+def last_cut(ws, tag):
+    """The newest train/<tag>/* tag reachable from HEAD, or None."""
+    out = git(ws, "describe", "--tags", "--abbrev=0", "--match", f"train/{tag}/*", "HEAD")
+    return out.strip() if out else None
+
+
+def changes_since(ws, base):
+    """[(sha, subject, pr, issues)] of the commits touching recipes/ after base (newest first)."""
+    out = git(ws, "log", f"--max-count={MAX_CHANGES + 1}", "--format=%h%x00%s%x00%b%x1e",
+              f"{base}..HEAD", "--", "recipes")
+    rows = []
+    for rec in (out or "").split("\x1e"):
+        rec = rec.strip("\n")
+        if not rec:
+            continue
+        sha, subject, body = (rec.split("\0") + ["", ""])[:3]
+        rows.append((sha, subject, *refs_of(subject, body)))
+    return rows
+
+
+# --- the body ---
+
+def cell(text):
+    return str(text).replace("|", "/").replace("\n", " ")
+
+
+def refs_text(pr, issues):
+    return (", ".join(f"#{n}" for n in issues) or "-"), (f"#{pr}" if pr else "-")
+
+
+def withheld_names(path):
+    """{name: line} from a release-withheld file (bin/check-upstream --complete --previous)."""
+    names = {}
+    if path and os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                m = re.match(r"(?:regression|unknown)\s+(\S+)", line.strip())
+                if m:
+                    names[m.group(1)] = line.strip()
+    return names
+
+
+def render(env, served, recipes, errors, hold, withheld, ws_info, now=None):
+    """The issue body. served: {name: version} on the release (None: no db yet); recipes:
+    [(dir, name, version)]; errors: unreadable recipe dirs; hold: {dir: reason or None};
+    withheld: {name: line} (empty unless the last sync was withheld); ws_info: {head,
+    commits: {dir: last_commit()}, cut, changes}."""
+    tag, now = env["GH_TAG"], now or datetime.datetime.now(datetime.timezone.utc)
+    head = ws_info.get("head")
+    lines = [MARK.format(tag=tag)]
+    if head:
+        lines.append(f"<!-- release-train-commit:{head} -->")
+    state = "withheld (a regression): the release keeps serving its previous set" if withheld else "synced"
+    lines += ["",
+              f"What the `{tag}` release serves ({LABELS.get(env['CHANNEL'], env['CHANNEL'])}, branch "
+              f"`{env['GH_BRANCH']}`). Each sync rewrites this issue (`bin/sync-release`); the train's tag "
+              "and release notes are cut from it (`bin/release-train cut`), which closes it and starts the next.",
+              "",
+              f"**Last sync:** {now.strftime('%Y-%m-%d %H:%M UTC')}, {state}"
+              + (f"; recipes at {head[:12]}." if head else "."), ""]
+    if withheld:
+        lines += ["## Withheld", "",
+                  "The last sync was withheld: the db built for it lacks our build of a package the previous "
+                  "release served (#201). Nothing went up; these go up once they are built:", ""]
+        lines += [f"- `{cell(w)}`" for _, w in sorted(withheld.items())] + [""]
+    by_name = {n: (d, v) for d, n, v in recipes}
+    commits = ws_info.get("commits", {})
+    lines += ["## On the release", ""]
+    if served is None:
+        lines += ["The release has no db yet.", ""]
+    elif not served:
+        lines += ["The release's db is empty.", ""]
+    else:
+        lines += ["| package | version | recipe | status | issues | PR |", "|---|---|---|---|---|---|"]
+        for name, ver in sorted(served.items()):
+            d, want = by_name.get(name, (None, None))
+            if d is None and name.endswith("-debug") and name[:-6] in by_name:
+                d, want = by_name[name[:-6]]   # makepkg's debug package goes with its recipe
+            if d is None:
+                status = "no recipe: withdrawn by the next unpublish" if not errors else "recipe unreadable"
+                issues, pr = "-", "-"
+            else:
+                c = commits.get(d) or {}
+                issues, pr = refs_text(c.get("pr"), c.get("issues", []))
+                if d in hold:
+                    status = f"held ({cell(hold[d] or 'held')}); our last build stays"
+                elif want == ver:
+                    status = "ready"
+                else:
+                    status = f"our last build; recipe at {want} waits"
+            lines.append(f"| {name} | {ver} | {d or '-'} | {status} | {issues} | {pr} |")
+        lines.append("")
+    waiting = []
+    for d, name, want in sorted(recipes, key=lambda r: r[1]):
+        have = (served or {}).get(name)
+        if name in withheld:
+            why = "blocked by a regression: " + withheld[name]
+        elif d in hold:
+            why = f"held: {hold[d] or 'held'}"
+        elif have is None:
+            why = "not built yet"
+        elif have != want:
+            why = "behind its version: not built yet"
+        else:
+            continue
+        c = commits.get(d) or {}
+        issues, pr = refs_text(c.get("pr"), c.get("issues", []))
+        waiting.append(f"| {name} | {d} | {have or '-'} | {want} | {cell(why)} | {issues} | {pr} |")
+    for d in errors:
+        waiting.append(f"| ? | {d} | - | - | recipe unreadable (makepkg --printsrcinfo failed) | - | - |")
+    lines += ["## Waiting for the next train", ""]
+    if waiting:
+        lines += ["| package | recipe | on the release | recipe version | why | issues | PR |",
+                  "|---|---|---|---|---|---|---|"] + waiting + [""]
+    else:
+        lines += ["Nothing: every recipe's package is on the release at its version.", ""]
+    cut, changes = ws_info.get("cut"), ws_info.get("changes")
+    lines += [f"## Changes since {cut}" if cut else "## Changes", ""]
+    if not cut:
+        lines += ["No train has been cut on this release yet; the table above names each recipe's "
+                  "last issue and PR.", ""]
+    elif not changes:
+        lines += ["No recipe changes since the last cut.", ""]
+    else:
+        for sha, subject, pr, issues in changes[:MAX_CHANGES]:
+            lines.append(f"- {sha} {cell(subject)}" + (f" (issues: {', '.join('#' + n for n in issues)})"
+                                                       if issues and not pr else ""))
+        if len(changes) > MAX_CHANGES:
+            lines.append(f"- ... and more (`git log {cut}..{(head or 'HEAD')[:12]} -- recipes`)")
+        lines.append("")
+    lines += ["---", FOOTER]
+    return "\n".join(lines)
+
+
+def notes_from(body, tag):
+    """Release notes from an issue body: the summary, On the release and Changes; never the
+    markers, Withheld or Waiting."""
+    if not body.startswith(MARK.format(tag=tag)):
+        raise SystemExit(f"release-train: not a {tag} train issue")
+    parts = re.split(r"(?m)^(?=## )", body)
+    keep = [p for p in parts[1:] if p.startswith(("## On the release", "## Changes"))]
+    head = "\n".join(l for l in parts[0].splitlines() if l.startswith("**Last sync:**"))
+    return (head + "\n\n" + "".join(keep)).strip() + "\n"
+
+
+def gather(env, db, withheld_path):
+    cu = load_check_upstream()
+    served = None
+    if db:
+        with open(db, "rb") as f:
+            served = cu.parse_db(f.read())
+    rows, errors = cu.recipe_packages()
+    recipes = [(d, n, v) for d, n, v, _ in rows]
+    hold = {d: cu.hold_reason(d) for d in {r[0] for r in recipes} if cu.hold_reason(d) is not None}
+    ws = env["WORKSPACE"]
+    head = (git(ws, "rev-parse", "HEAD") or "").strip() or None
+    info = {"head": head, "commits": {}, "cut": None, "changes": None}
+    if head:
+        info["commits"] = {d: last_commit(ws, d) for d in {r[0] for r in recipes}}
+        info["cut"] = last_cut(ws, env["GH_TAG"])
+        if info["cut"]:
+            info["changes"] = changes_since(ws, info["cut"])
+    return served, recipes, errors, hold, withheld_names(withheld_path), info
+
+
+# --- GitHub ---
+
+def gh(*args, check=True):
+    r = subprocess.run(["gh", *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise SystemExit(f"release-train: gh {args[0]} {args[1] if len(args) > 1 else ''} failed: "
+                         f"{r.stderr.strip()[:500]}")
+    return r
+
+
+def pii_ok(env, text):
+    """No control characters, then bin/sync-release --pii-scan-text on text (fails closed)."""
+    bad = [n for n, l in enumerate(text.split("\n"), 1) if CONTROL_RE.search(l)]
+    if bad:
+        print(f"release-train: control characters on line(s) {', '.join(map(str, bad[:10]))} "
+              "(only newline and tab); nothing posted", file=sys.stderr)
+        return False
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(text)
+        path = f.name
+    try:
+        r = subprocess.run([os.path.join(BIN, "sync-release"), "--channel", env["CHANNEL"],
+                            "--pii-scan-text", path], capture_output=True, text=True)
+    finally:
+        os.unlink(path)
+    if r.returncode != 0:
+        print(f"release-train: the PII scan refused the text; nothing posted\n{r.stdout}{r.stderr}".rstrip(),
+              file=sys.stderr)
+    return r.returncode == 0
+
+
+def publish_lock(env):
+    """Take $DATA/publish.lock (bin/publish-lib.sh's pub_lock) unless a parent holds it, so an
+    update and a cut never interleave (and two updates never both open an issue). Exit 75
+    after PUBLISH_LOCK_WAIT seconds, as the other publishers do."""
+    import fcntl
+    import time
+    if os.environ.get("OMARCHY_ASUS_PUBLISH_LOCKED") == "1":
+        return None
+    os.makedirs(env["DATA"], exist_ok=True)
+    fd = os.open(os.path.join(env["DATA"], "publish.lock"), os.O_WRONLY | os.O_CREAT, 0o644)
+    deadline = time.monotonic() + float(os.environ.get("PUBLISH_LOCK_WAIT", "600"))
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.environ["OMARCHY_ASUS_PUBLISH_LOCKED"] = "1"   # our bin/sync-release scan runs under it
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                print(f"release-train: another publish/unpublish/sync-release/cut holds "
+                      f"{env['DATA']}/publish.lock", file=sys.stderr)
+                sys.exit(75)
+            time.sleep(0.5)
+
+
+def cache_path(env):
+    return os.path.join(env["CHANNEL_DATA"], "release-train-issue")
+
+
+def find_issue(env):
+    """(number, body) of the open train issue for this release, or (None, None)."""
+    mark = MARK.format(tag=env["GH_TAG"])
+    try:
+        with open(cache_path(env)) as f:
+            n = f.read().strip()
+    except OSError:
+        n = ""
+    if n.isdigit():
+        r = gh("issue", "view", n, "-R", env["GH_REPO"], "--json", "number,state,body", check=False)
+        if r.returncode == 0:
+            obj = json.loads(r.stdout)
+            if obj.get("state") == "OPEN" and (obj.get("body") or "").startswith(mark):
+                return int(n), obj["body"]
+    # Not the search API: a train opened a minute ago must not be missed (and opened twice).
+    r = gh("issue", "list", "-R", env["GH_REPO"], "--state", "open", "--limit", "500",
+           "--json", "number,title,body")
+    found = sorted((i["number"], i["body"]) for i in json.loads(r.stdout or "[]")
+                   if (i.get("body") or "").startswith(mark))
+    if len(found) > 1:
+        print(f"release-train: warning: {len(found)} open {env['GH_TAG']} train issues "
+              f"({', '.join('#%d' % n for n, _ in found)}); using the oldest", file=sys.stderr)
+    return found[0] if found else (None, None)
+
+
+def remember(env, number):
+    try:
+        os.makedirs(env["CHANNEL_DATA"], exist_ok=True)
+        with open(cache_path(env) + ".tmp", "w") as f:
+            f.write(f"{number}\n")
+        os.replace(cache_path(env) + ".tmp", cache_path(env))
+    except OSError as e:
+        print(f"release-train: warning: cannot record the issue number: {e}", file=sys.stderr)
+
+
+def update(env, db, withheld, dry):
+    body = render(env, *gather(env, db, withheld))
+    number, old = find_issue(env)
+    m = CUTTING_MARK.search(old or "")
+    if m:
+        # A cut that stopped half way: its notes are this body; don't change them under it.
+        print(f"release-train: #{number} is being cut as {m.group(1)}; finish that first "
+              f"(bin/release-train cut {m.group(1).rsplit('/', 1)[-1]}); not updated", file=sys.stderr)
+        return 1
+    if dry:
+        what = f"would update #{number}" if number else "would open a new train issue"
+        print(f"release-train: {what} ({env['GH_TAG']}) with:\n{body}")
+        return 0
+    if not pii_ok(env, body):
+        return 1
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(body)
+        path = f.name
+    try:
+        if number:
+            gh("issue", "edit", str(number), "-R", env["GH_REPO"], "--body-file", path)
+            print(f"release-train: updated #{number}")
+        else:
+            title = TITLE.format(tag=env["GH_TAG"], label=LABELS.get(env["CHANNEL"], env["CHANNEL"]))
+            r = gh("issue", "create", "-R", env["GH_REPO"], "--title", title, "--body-file", path)
+            m = re.search(r"/issues/(\d+)", r.stdout)
+            number = int(m.group(1)) if m else None
+            print(f"release-train: opened {r.stdout.strip()}")
+    finally:
+        os.unlink(path)
+    if number:
+        remember(env, number)
+    return 0
+
+
+def notes(env, issue):
+    if issue:
+        body = json.loads(gh("issue", "view", str(issue), "-R", env["GH_REPO"], "--json", "body").stdout)["body"]
+    else:
+        n, body = find_issue(env)
+        if not n:
+            print(f"release-train: no open {env['GH_TAG']} train issue", file=sys.stderr)
+            return 1
+    sys.stdout.write(notes_from(body or "", env["GH_TAG"]))
+    return 0
+
+
+def cut(env, name, dry):
+    # git's own ref rules too (no trailing ".", no ".lock", ...): checked before the issue is
+    # marked, so a name git refuses never strands a train as "being cut"
+    ok = re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) and ".." not in name and subprocess.run(
+        ["git", "check-ref-format", f"refs/tags/train/{env['GH_TAG']}/{name}"], capture_output=True).returncode == 0
+    if not ok:
+        print(f"release-train: bad train name {name!r} (letters, digits, . _ -, and a valid git tag)",
+              file=sys.stderr)
+        return 2
+    number, body = find_issue(env)
+    if not number:
+        print(f"release-train: no open {env['GH_TAG']} train issue to cut", file=sys.stderr)
+        return 1
+    m = COMMIT_MARK.search(body)
+    if not m:
+        print(f"release-train: #{number} records no recipes commit; run a sync first", file=sys.stderr)
+        return 1
+    ws, commit, tag = env["WORKSPACE"], m.group(1), f"train/{env['GH_TAG']}/{name}"
+    cutting = CUTTING_MARK.search(body)
+    if cutting and cutting.group(1) != tag:
+        print(f"release-train: #{number} is being cut as {cutting.group(1)}; finish that cut first",
+              file=sys.stderr)
+        return 1
+    if git(ws, "cat-file", "-e", f"{commit}^{{commit}}") is None:
+        print(f"release-train: {commit} (from #{number}) is not in {ws}; fetch the channel's branch",
+              file=sys.stderr)
+        return 1
+    have = git(ws, "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}")
+    full = (git(ws, "rev-parse", f"{commit}^{{commit}}") or "").strip()
+    if have is not None and (not cutting or have.strip() != full):
+        # Ours to resume only when this issue says it is being cut as that tag, at that commit.
+        print(f"release-train: tag {tag} exists already", file=sys.stderr)
+        return 1
+    text = f"{env['GH_TAG']} train {name}\n\n" + notes_from(body, env["GH_TAG"])
+    if dry:
+        print(f"release-train: would {'resume the cut: ' if cutting else ''}tag {commit[:12]} as {tag}, "
+              f"push it, comment and close #{number}:\n{text}")
+        return 0
+    if not pii_ok(env, text):
+        return 1
+    # Each step can be retried: the issue says the cut is under way (so update leaves it, and
+    # its notes, alone), the tag is made once, pushed (a no-op when origin has it), the comment
+    # posted once, then the issue closed.
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        path = f.name
+    try:
+        if not cutting:
+            lines = body.split("\n")
+            at = next(i for i, l in enumerate(lines) if COMMIT_MARK.match(l)) + 1
+            with open(path, "w") as f:
+                f.write("\n".join(lines[:at] + [f"<!-- release-train-cutting:{tag} -->"] + lines[at:]))
+            gh("issue", "edit", str(number), "-R", env["GH_REPO"], "--body-file", path)
+        if have is None:
+            with open(path, "w") as f:
+                f.write(text)
+            r = subprocess.run(["git", "-C", ws, "tag", "-a", "-F", path, tag, commit],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"release-train: git tag failed: {r.stderr.strip()}", file=sys.stderr)
+                return 1
+        r = subprocess.run(["git", "-C", ws, "push", "origin", f"refs/tags/{tag}"], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"release-train: pushing {tag} failed; rerun the same cut to resume: {r.stderr.strip()}",
+                  file=sys.stderr)
+            return 1
+        head = f"Cut as `{tag}` ({commit[:12]})."
+        done = json.loads(gh("issue", "view", str(number), "-R", env["GH_REPO"], "--json", "comments").stdout
+                      or "{}").get("comments") or []
+        if not any((c.get("body") or "").startswith(head) for c in done):
+            with open(path, "w") as f:
+                f.write(f"{head} The next sync opens the next train.\n\n" + text)
+            gh("issue", "comment", str(number), "-R", env["GH_REPO"], "--body-file", path)
+        gh("issue", "close", str(number), "-R", env["GH_REPO"])
+    finally:
+        os.unlink(path)
+    try:
+        os.unlink(cache_path(env))
+    except OSError:
+        pass
+    print(f"release-train: cut {tag}, closed #{number}")
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="bin/release-train", description=__doc__.splitlines()[0])
+    ap.add_argument("--channel", choices=["quattro", "rc"])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for c in ("update", "render"):
+        p = sub.add_parser(c)
+        p.add_argument("--db")
+        p.add_argument("--withheld")
+        if c == "update":
+            p.add_argument("--dry-run", action="store_true")
+    sub.add_parser("find")
+    p = sub.add_parser("notes")
+    p.add_argument("--issue", type=int)
+    p = sub.add_parser("cut")
+    p.add_argument("name")
+    p.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+    if args.channel:
+        os.environ["OMARCHY_ASUS_CHANNEL"] = args.channel
+    env = channel_env()
+    os.environ.setdefault("OMARCHY_ASUS_WORKSPACE", env["WORKSPACE"])
+    if args.cmd == "render":
+        sys.stdout.write(render(env, *gather(env, args.db, args.withheld)) + "\n")
+        return 0
+    if args.cmd == "update":
+        if not args.dry_run:
+            publish_lock(env)
+        return update(env, args.db, args.withheld, args.dry_run)
+    if args.cmd == "find":
+        n, _ = find_issue(env)
+        if n:
+            print(n)
+        return 0 if n else 1
+    if args.cmd == "notes":
+        return notes(env, args.issue)
+    if not args.dry_run:
+        publish_lock(env)
+    return cut(env, args.name, args.dry_run)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError) as e:
+        print(f"release-train: {e}", file=sys.stderr)
+        sys.exit(1)

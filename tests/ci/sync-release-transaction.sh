@@ -23,6 +23,8 @@
 #      last build; a db missing bar is withheld while recipes/bar exists, also when it is
 #      unreadable, and goes up once the recipe is removed; an unreadable Quattro release
 #      refuses (exit 1); no recipes/ at all refuses (exit 1)
+#   e also checks that a train issue the fake gh cannot update (bin/release-train, #212)
+#   is a warning, never a failed sync, and that RELEASE_TRAIN=off skips it
 # No network, no real gh, no pacman; workspace and data dir are temp dirs.
 # Usage: tests/ci/sync-release-transaction.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
@@ -185,6 +187,10 @@ done
 cmp -s "$S/release/omarchy-asus.db" "$R/omarchy-asus.db.tar.gz"; expect $? 0 "the release's db is the local db"
 if [[ -e $S/data/sync-pending ]]; then r=0; else r=1; fi; expect "$r" 1 "sync-pending is cleared"
 if [[ $(cat "$S/data/release-db.sha256" 2>/dev/null) == "$db_sum" ]]; then r=0; else r=1; fi; expect "$r" 0 "release-db.sha256 records the db"
+# the fake gh knows no issues: the train issue (bin/release-train, #212) fails, the sync stands
+grep -q "warning: the release train issue was not updated" <<<"$out"; expect $? 0 "a failed train update only warns"
+out=$(RELEASE_TRAIN=off run_sync); expect $? 0 "RELEASE_TRAIN=off syncs"
+grep -q "release train issue not updated (RELEASE_TRAIN=off)" <<<"$out"; expect $? 0 "and skips the train issue"
 
 echo "== f. superseded assets wait out the grace period"
 printf 'stale\n' >"$S/release/old-1-1-x86_64.pkg.tar.zst"
@@ -269,7 +275,7 @@ echo "== k. no regression"
 # recipe's SRCINFO file (or fails when the recipe has a FAIL file)
 L=$S/lib
 mkdir -p "$L" "$S/pool"
-cp "$W/bin/sync-release" "$W/bin/env.sh" "$W/bin/publish-lib.sh" "$W/bin/check-upstream" "$L/"
+cp "$W/bin/sync-release" "$W/bin/env.sh" "$W/bin/publish-lib.sh" "$W/bin/check-upstream" "$W/bin/release-train" "$L/"
 cat >"$L/recipe-sandbox" <<'STUB'
 #!/bin/bash
 dir=.

@@ -29,7 +29,8 @@ start a timer, service or cron job that builds or publishes.
 4. **Review, PR, CI, merge:** a second model reviews the change; the pull request goes into the
    channel's branch and merges once CI passes.
 5. **Publish:** `bin/publish` signs what was built and `bin/sync-release` puts it on the channel's
-   release, through every safeguard below; the run ends when the release serves it.
+   release, through every safeguard below, and updates the release's train issue (below); the
+   run ends when the release serves it.
 
 `unpublish` and `attention` rows are reported for a person; the run withdraws nothing by itself.
 When a patch stops applying or a build fails, our last build stays published.
@@ -76,6 +77,33 @@ checksums, the personal-information scan, release cohorts, and no regression.
 - **Each chroot carries our packager** (`PACKAGER="omarchy-asus"` in
   `/etc/makepkg.conf.d/packager.conf`). `bin/mkchroot [--channel rc]` makes or updates a chroot
   and writes it; rerun it on an older chroot.
+
+## Release trains (#212)
+
+Each release has one open tracking issue, its **train**: "Release train: x86_64 (Quattro
+channel)" or "Release train: rc-x86_64 (RC channel)". It is the record of what the release
+carries, and the train's tag and release notes are cut from it, not from the db by hand.
+
+- **Every sync rewrites it.** After a sync that went through, and after a withheld one,
+  `bin/sync-release` runs `bin/release-train update`, which opens the issue if no train is open.
+  It lists every package the release serves with its version, its recipe, its status (ready,
+  our last build while the recipe waits, held, no recipe) and the recipe's last issue and pull
+  request; what waits for the next train (not built yet, behind its version, held, blocked by a
+  regression); for a withheld sync, the regression; and the recipe changes since the last cut.
+  It also records the recipes commit the sync checked. The body goes through the
+  personal-information scan first. A failed update is a warning: the release is already
+  settled. `RELEASE_TRAIN=off` skips it.
+- **Cutting a train:** `bin/release-train [--channel rc] cut NAME` (try `--dry-run` first), from
+  a checkout of the channel's branch, tags the recorded commit `train/<release>/NAME` with the
+  notes as its message, pushes the tag, comments the notes on the issue and closes it. The next
+  sync opens the next train, whose changes start at that tag. The cut marks the issue first, so
+  a cut that stops half way (push, comment or close) is finished by rerunning it with the same
+  name, and syncs leave the issue alone until then.
+- `update` and `cut` hold the publication lock (`publish.lock`, shared with `bin/publish`,
+  `bin/unpublish` and `bin/sync-release`), so a sync never rewrites the issue during a cut.
+  Text with control characters (other than newline and tab) is refused before the scan.
+- `bin/release-train notes` prints the notes from the open issue (on the release and changes,
+  without the waiting list); `find` prints its number; `render --db DB` prints a body offline.
 
 ## Reverse-dependency checks
 
