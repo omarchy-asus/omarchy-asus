@@ -1075,14 +1075,16 @@ class Daemon:
         self.handover = None
         pid, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
         try:
-            if uid not in (self.uid, 0):
-                fail(f"uid {uid} is not this session's user")
+            # Read the request before any refusal: closing on unread data would break
+            # the client's send, and it would never see why it was refused.
             buf = b""
             while not buf.endswith(b"\n") and len(buf) < 65536:
                 chunk = conn.recv(4096)
                 if not chunk:
                     break
                 buf += chunk
+            if uid not in (self.uid, 0):
+                fail(f"uid {uid} is not this session's user")
             req = json.loads(buf or b"{}")
             if not isinstance(req, dict):
                 fail("bad request")
@@ -1282,10 +1284,16 @@ def call(method, args=(), reason=""):
     fds = []
     with s:
         s.settimeout(300)
-        s.sendall((json.dumps({"method": method, "args": list(args), "reason": reason}) + "\n").encode())
+        try:
+            s.sendall((json.dumps({"method": method, "args": list(args), "reason": reason}) + "\n").encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the daemon answered and closed early (a refusal); its reply is still to read
         buf = b""
         while not buf.endswith(b"\n"):
-            chunk, got, _, _ = socket.recv_fds(s, 65536, 1)
+            try:
+                chunk, got, _, _ = socket.recv_fds(s, 65536, 1)
+            except ConnectionResetError:
+                break
             fds += got
             if not chunk:
                 break

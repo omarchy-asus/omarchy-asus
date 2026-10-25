@@ -1501,7 +1501,7 @@ it is installed.
 <a id="pkg-omarchy-asus-g16-testd"></a>
 ### G16 test-session helper (omarchy-asus-g16-testd, held)
 
-- **Component:** `omarchy-asus-g16-testd` 0.1.0-102. **Held** (`recipes/omarchy-asus-g16-testd/HOLD`):
+- **Component:** `omarchy-asus-g16-testd` 0.1.0-106. **Held** (`recipes/omarchy-asus-g16-testd/HOLD`):
   CI builds it, nothing publishes it, until the maintainer agrees to install it on the G16 and its
   G16 test passes (#277; allowlist gaps in #284).
 - **What:** one root helper per G16 hardware test session: one polkit approval, then fixed
