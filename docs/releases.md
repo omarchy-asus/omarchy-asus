@@ -118,9 +118,9 @@ and records, and **publishes nothing**. No signing key, secret or release upload
 it. The second is the signer on the build host, `bin/release-sign` (below), which checks a run's
 record with GitHub before it hands the packages to `bin/publish`. The daily rebase onto upstream
 runs it only for the recipes `build/release-path.conf` lists, on the rc channel: so far
-`asus-rog-nkey-winlock`, `nvidia-open-dkms`, `omarchy` and `omarchy-settings` (a cohort, listed
-together), `omarchy-asus-g16`, `omarchy-asus-g16-apply` and `omarchy-asus-keyring`. `hyprland` and
-`linux-omarchy` are not switched yet. For every other recipe the chroot path (`bin/build-pkg`,
+`asus-rog-nkey-winlock`, `hyprland`, `nvidia-open-dkms`, `omarchy` and `omarchy-settings` (a
+cohort, listed together), `omarchy-asus-g16`, `omarchy-asus-g16-apply` and `omarchy-asus-keyring`.
+`linux-omarchy` is not switched yet. For every other recipe the chroot path (`bin/build-pkg`,
 then `bin/publish`) stays the live publisher (below, "Switching a recipe to the release path").
 
 ```
@@ -166,6 +166,10 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   `SHA256SUMS`, kept 14 days, and the attest job makes a build-provenance attestation for every
   package (`gh attestation verify <file> -R omarchy-asus/omarchy-asus`). That job is the only one
   that can request an OIDC token, and it runs no recipe code.
+- **No debug packages:** a recipe on the release path publishes no `-debug` package, as the PR
+  check builds none. The chroot path published `hyprland-debug`; it was dropped from
+  `rc-x86_64` when `hyprland` moved to the release path (0.56.2-4.103), by the maintainer's
+  decision, rather than keeping hyprland on the chroot path for it.
 - **Checked as if it would publish** (`ci/release-check`), and the run fails otherwise: every
   package matches its `SHA256SUMS`; pkgrel is in the channel's range (`ci/check-pkgrel`); no
   release cohort member ships without its partner, in the run or in the channel's published db

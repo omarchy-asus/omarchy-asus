@@ -1,18 +1,23 @@
-# hyprland 0.56.2-4.102 (RC channel)
+# hyprland 0.56.2-4.103 (RC channel)
 
 **Base:** Arch's `hyprland` 0.56.2-4 packaging, commit `abb207b` ("upgpkg: 0.56.2-4") of
 https://gitlab.archlinux.org/archlinux/packaging/packages/hyprland. The Omarchy stable mirror's
 `extra` carries the same build: `hyprland` and `hyprpm` 0.56.2-4, with a package sha256 identical to
 Arch's `extra`. Arch's split (`hyprland` + `hyprpm`, split out in 0.56.2-3) is unchanged, so both
-packages are built at 0.56.2-4.102 and replace exactly what Arch ships. The PKGBUILD is Arch's (0BSD, see
+packages are built at 0.56.2-4.103 and replace exactly what Arch ships. The PKGBUILD is Arch's (0BSD, see
 `LICENSE`).
 
-**Our changes to Arch's PKGBUILD:** `pkgrel=4.102`, `(omarchy-asus build)` appended to both
+**Our changes to Arch's PKGBUILD:** `pkgrel=4.103`, `(omarchy-asus build)` appended to both
 `pkgdesc`s (`pkgbuild-pkgdesc-label.diff`), plus `reconnect-render-offset.patch` and
 `seat-leave-on-capability-loss.patch` added to `source`/`sha256sums` and applied at the end of `prepare()`.
 On the RC channel our pkgrel is Arch's pkgrel + `.101` and up (`.1` to `.99` is Quattro's range, where
-this recipe is at 4.2): 4.101 moved the recipe into the RC range (#201), and 4.102 added
-`seat-leave-on-capability-loss.patch` (#302, #305).
+this recipe is at 4.2): 4.101 moved the recipe into the RC range (#201), 4.102 added
+`seat-leave-on-capability-loss.patch` (#302, #305), and 4.103 changes nothing in the packages: it
+releases them once through the release workflow (`build/release-path.conf`, #258).
+
+**No `hyprland-debug`:** the chroot path also published a `hyprland-debug` package; the release
+workflow publishes no `-debug` packages, so the RC channel stopped serving it when this recipe moved
+to the release path (4.103). Only `hyprland` and `hyprpm` are released.
 
 **Patch:** `reconnect-render-offset.patch` (`src/output/Monitor.cpp`, `CMonitor::onConnect`). After an HDMI
 replug, the monitor gets its remembered workspace back through an internal `changeWorkspace()`.

@@ -367,7 +367,7 @@ daily check reports their pull requests' state. When no patch is left, unpublish
 
 ## Hyprland: hyprland and hyprpm
 
-0.56.2: RC 4.102, Quattro 4.2 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`).
+0.56.2: RC 4.103, Quattro 4.2 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`).
 Once neither patch is left, `bin/unpublish hyprland hyprpm` and delete the recipe.
 
 <a id="hyprland-reconnect-render-offset"></a>
