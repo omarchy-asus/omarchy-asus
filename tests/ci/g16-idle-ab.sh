@@ -160,6 +160,9 @@ cpu_state() { # boost, then per policy max/EPP, then asus-wmi and amd-pmf
 }
 CPU_WANT="1 5090000/balance_power 5090000/balance_power 3510000/balance_power 3500000/balance_power quiet balanced"
 CPU=(boost-off epp-power max-3500 max-3000 epp-dynamic pmf-low-power)
+# A stand-in power-profiles-daemon's write: only on a change, and whole (sysfs reads
+# never see a half-written value; `echo >` can, on a slow runner)
+put() { [[ $(cat "$2") == "$1" ]] || { echo "$1" >"$2.new" && mv -f "$2.new" "$2"; }; }
 WANT="1 100 2000 100000 on auto on off 1 0 vox-on on 0 "
 ALL=(nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle usb4 cacp3 cacp4)
 PB_DEFAULT=(nmi nvme-apst sd-off kbd-usb wifi-ps bt-off voxtype usb4 cacp3)
@@ -941,7 +944,7 @@ grep -qE '^\| epp-power \| #328 \| 2/2 \|' "$T/home/report.md" && ok "the other 
 # power-profiles-daemon writes EPP back mid-phase: the phase is left out.
 reset
 ( e=$S/devices/system/cpu/cpufreq/policy0/energy_performance_preference
-  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break; [[ $(cat "$e") == power ]] && echo balance_power >"$e"; sleep 0.01; done ) &
+  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break; [[ $(cat "$e") == power ]] && put balance_power "$e"; sleep 0.01; done ) &
 ppd=$!
 # 2 s phases: three samples each, so the rewrite is seen whatever the timing.
 out=$(run --only epp-power,boost-off --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
@@ -958,15 +961,15 @@ grep -qE '^\| boost-off \| #328 \| 2/2 \|' "$r" && ok "PPD rewrite: the other tw
 reset
 ( c=$S/devices/system/cpu/cpufreq armed=0
   for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break
-    if [[ $(cat "$c/boost") == 0 ]]; then armed=1; echo balance_power >"$c/policy1/energy_performance_preference"
-    elif ((armed)); then echo performance >"$c/policy1/energy_performance_preference"; fi
+    if [[ $(cat "$c/boost") == 0 ]]; then armed=1; put balance_power "$c/policy1/energy_performance_preference"
+    elif ((armed)); then put performance "$c/policy1/energy_performance_preference"; fi
     sleep 0.01; done ) &
 ppd=$!
 out=$(run --only boost-off,nmi --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
 touch "$ST/stop-ppd"; wait "$ppd"
 r=$T/home/report.md
 ((rc == 0)) && ok "baseline rewrite: the run finishes" || bad "baseline rewrite: exit $rc: $out"
-nb=$(grep -cE '^\| [0-9]+ \| [12] \| baseline \|.*setting did not hold \(policy1/EPP performance' "$r")
+nb=$(grep -cE '^\| [0-9]+ \| [12] \| baseline \|.*setting did not hold \(.*policy1/EPP performance' "$r")
 ((nb >= 4)) && ok "baseline rewrite: the baselines after it left out ($nb)" || bad "baseline rewrite: $nb baselines left out: $(grep -E '^\| [0-9]+ \| [12] \| baseline' "$r")"
 grep -qE '^\| boost-off \| #328 \| 0/2 \|' "$r" && ! grep -qE '^\| nmi \| #225 \| 2/2 \|' "$r" && ok "baseline rewrite: no delta from a bad baseline" || bad "baseline rewrite rows: $(grep -E '^\| (boost-off|nmi) \|' "$r")"
 grep -qE '\| [0-9]+ \| [12] \| boost-off \|.*\|  \|$' "$r" && ok "baseline rewrite: the boost-off phases themselves held" || bad "boost-off phases: $(grep -E '^\| [0-9]+ \| [12] \| boost-off' "$r")"
@@ -975,7 +978,7 @@ grep -qE '\| [0-9]+ \| [12] \| boost-off \|.*\|  \|$' "$r" && ok "baseline rewri
 reset
 ( d=$S/class/platform-profile
   for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break
-    if [[ $(cat "$d/platform-profile-1/profile") == low-power ]]; then echo balanced >"$d/platform-profile-0/profile"; else echo quiet >"$d/platform-profile-0/profile"; fi
+    if [[ $(cat "$d/platform-profile-1/profile") == low-power ]]; then put balanced "$d/platform-profile-0/profile"; else put quiet "$d/platform-profile-0/profile"; fi
     sleep 0.01; done ) &
 ppd=$!
 out=$(run --only pmf-low-power,epp-power --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
