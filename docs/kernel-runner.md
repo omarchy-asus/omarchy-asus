@@ -6,7 +6,7 @@ instead, where distcc sends compiles to the helper (docs/distcc.md). The
 kernel's release build (`.github/workflows/release.yml`, #258) runs there only.
 Every other job stays on GitHub's runners.
 
-One runner account on the build host, two registrations of it:
+Two runner accounts on the build host, one registration each:
 
 | registration (label) | runs | chosen by the repository variable |
 |---|---|---|
@@ -15,8 +15,10 @@ One runner account on the build host, two registrations of it:
 
 Two registrations so a release never queues behind a PR check in GitHub's
 queue; one host lock (below) so their two kernel builds still never overlap.
-Both have the same isolation: the same account, its rootless docker, the same
-job-started hook, distcc key and compiler cache.
+Two accounts so the release build has a compiler cache that PR jobs cannot
+write (below, "Why a second account"). Each account has the same isolation:
+its own rootless docker, the same job-started hook and distcc key, and its
+own compiler cache.
 
 It is off unless the repository variable `KERNEL_RUNNER` is set. With it set:
 
@@ -57,11 +59,17 @@ as the other recipes. The run's attest, check and result jobs cover it, and
 
 Both kernel jobs take one lock, `ci/kernel-lock`, around their build: a
 `flock` on the file `OMARCHY_ASUS_CI_LOCK` names in the runner's `.env` (the
-same file in both registrations' `.env`). Next to it:
+same file in both accounts' `.env`, in a directory of a group both accounts
+are in). The lock creates its files there group-readable and writable (660),
+so the other account can take the same lock and read its record; a job's own
+state under its temp dir stays private (600). Next to it:
 
 - `<lock>.holder` records who holds it: `kind` (`pr` or `release`), the run
   ID and attempt, the workflow, the job, the build container's name, the
-  holding process and since when. `ci/kernel-lock holder` prints it, with
+  holding process and its start time, and since when. The holder may be the
+  other account's process, which `kill -0` can't signal (EPERM), so it counts
+  as alive while its `/proc` entry is there with the recorded start time (a
+  reused PID has another). `ci/kernel-lock holder` prints it, with
   `state=held` or `state=free` (a record left by a killed holder shows as
   `stale_...` on a free lock).
 - `<lock>.queue` is a release's place in line. A release takes it first and
@@ -69,16 +77,41 @@ same file in both registrations' `.env`). Next to it:
   second release waits behind the first.
 
 A job's steps are separate processes, so the lock is held by a small
-background process that `ci/kernel-lock` starts without the job's token. It
-lets go when the job's last steps ask (`ci/kernel-lock release`, after the
-cleanup), or when the job's `Runner.Worker` is gone (a cancelled or killed
-job). A lock never looks free while a build container still runs:
-`release` removes the job's own container first, and keeps the lock if it
-won't go; a holder whose job ended without `release` removes the job's
-container (waiting up to 10 minutes for it to go) before it lets go, and
-leaves its record behind; and a new holder that finds the previous holder's
-container still there waits up to 10 minutes for it, then removes it, before
-it builds.
+background process that `ci/kernel-lock` starts without the job's token (and
+without the mark by which the runner ends a job's leftover processes, so it
+can outlive the job while its container is still there). It lets go when the
+job's last steps ask (`ci/kernel-lock release`, after the cleanup), or when
+the job's `Runner.Worker` is gone (a cancelled or killed job).
+
+A lock never looks free while a build container still runs. Each account's
+rootless docker sees only its own containers, so this is the holder's to
+ensure, for its own job's container:
+
+- `release` removes the job's own container first, and keeps the lock if it
+  won't go;
+- a holder whose job ended without `release` removes the job's container and
+  keeps the lock until it is gone, however long that takes, and leaves its
+  record behind;
+- a new holder that finds the previous holder's container still there (a
+  holder of its own account killed outright, before it could remove it) waits
+  up to 10 minutes for it, then removes it, before it builds. This check only
+  sees the new holder's own account's containers: a previous holder of the
+  other account is out of its docker's sight, which is why the two above keep
+  the lock rather than leave the container to the next holder. Both count a
+container as gone only when docker confirms it: if docker can't answer (its
+daemon is down), they keep the lock, with no time limit: letting go after a
+timeout could start a build that overlaps one the next holder can't see.
+
+A stuck lock is rare and shows in the waiting job's log, every minute until
+that job's own timeout: `kernel lock: waiting for the lock: held by <kind>
+run <id> attempt <n> (<job>, container <name>, since <time>) ...`. If that run
+is over, its holder is waiting for that container (or its account's docker):
+remove it as the runner account that ran the run (`docker rm --force <name>`
+with that account's `DOCKER_HOST`, or restart its docker service), and the
+holder lets go.
+
+The lock keeps two builds from overlapping; it is not a security boundary.
+Branch code runs as the PR account and could skip it, as it always could.
 
 With `OMARCHY_ASUS_CI_LOCK` unset, kernel jobs on the build host refuse to
 build, PR checks and releases alike: a build without the lock could overlap
@@ -141,17 +174,26 @@ the distcc key at. What keeps the rest of the build host out of reach:
   external contributors").
 - Its distcc key is its own (not the chroot release builds' key), limited on
   the helper the same way, so it can be revoked on its own.
-- The release registration shares the runner account, its compiler cache
-  and its distcc key with the PR registration, as #258 decided: everything on
-  the runner runs as one account, PR jobs included, and once the chroots are
-  retired the runner's cache is the only one and there is one distcc key. It
-  runs main's code only, but while it waits for the lock a PR job's own steps
-  run as the same account and could read its token. That token can cancel and
-  re-run runs while the job lasts; it can't push code, sign or publish, and
-  only this repository's own branches run here (the trust level above). This
-  is why the packages it builds are not trusted for being on the build host:
+- The release registration runs as a second account (below), with its own
+  rootless docker and its own compiler cache, so no PR job can write the
+  cache a release builds from or read the release job's token. It shares the
+  distcc key with the PR account (a copy in its own home): once the chroots
+  are retired there is one distcc key. It runs main's code only. The packages
+  it builds are still not trusted for being on the build host:
   `bin/release-sign` checks GitHub's record of the run before signing
   (docs/releases.md).
+
+### Why a second account
+
+A compiler cache that branch code can write can put any object into a build
+that reads it. PR jobs run branch code, and a branch can change its own
+`build-pr.yml` steps: a job runs as its account on the host, not only in the
+container, so mounting the cache read-only into PR containers would not stop
+it writing the directory directly. Only another account stops it. So the
+release registration runs as its own account, whose cache lives in its own
+home (mode 700); the PR account can't reach it. The PR account keeps its own
+cache for PR checks. The release cache starts empty: the first release kernel
+build after the switch is a cold one.
 
 ## Setup
 
@@ -267,12 +309,9 @@ changes. After makepkg the log has this build's
 runner's subuids; to empty it, remove them from a container:
 `docker run --rm -v /var/lib/<runner>/ccache:/c <image> sh -c 'rm -rf /c/*'`.
 
-The host lock, in the runner's home, named in its `.env`:
-
-```bash
-runuser -u <runner> -- install -d -m 700 /var/lib/<runner>/lock
-echo "OMARCHY_ASUS_CI_LOCK=/var/lib/<runner>/lock/kernel.lock" >> /var/lib/<runner>/actions-runner/.env
-```
+The host lock lives in a directory both runner accounts share; set it up
+(in "The release registration", below) before turning the runner on: without
+`OMARCHY_ASUS_CI_LOCK` a kernel job refuses to build.
 
 Then turn it on:
 
@@ -288,28 +327,68 @@ the ccache hit rate; the helper's `journalctl -t distccd` shows the compiles.
 
 ### The release registration
 
-A second registration of the same account, in its own directory, with its own
-label and service. Its `.env` is the first one's (the same rootless docker,
-hook, distcc key dir, compiler cache and lock file):
+A second system account, `<release-runner>`, set up as the first one is in
+Setup above, with `<release-runner>` for `<runner>` throughout: its own home
+(mode 700), the runner software, its own rootless docker service with a
+subuid/subgid range of its own (overlapping neither the first account's nor
+anyone else's in `/etc/subuid`), linger, and the job-started hook line in its
+`.env`. Register it with the release label instead:
 
 ```bash
-runuser -u <runner> -- bash -c '
-    cd ~ && mkdir actions-runner-release && cd actions-runner-release &&
-    curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v<ver>/actions-runner-linux-x64-<ver>.tar.gz &&
-    echo "<sha256>  r.tgz" | sha256sum -c && tar xzf r.tgz && rm r.tgz'
 token=$(gh api -X POST repos/omarchy-asus/omarchy-asus/actions/runners/registration-token --jq .token)
-runuser -u <runner> -- /var/lib/<runner>/actions-runner-release/config.sh --unattended \
+runuser -u <release-runner> -- /var/lib/<release-runner>/actions-runner/config.sh --unattended \
     --url https://github.com/omarchy-asus/omarchy-asus --token "$token" \
     --name <name>-release --labels omarchy-asus-release --no-default-labels --replace
-install -o <runner> -g <runner> -m 600 /var/lib/<runner>/actions-runner/.env /var/lib/<runner>/actions-runner-release/.env
-cd /var/lib/<runner>/actions-runner-release && ./svc.sh install <runner> && ./svc.sh start
+```
+
+Its own copy of the runner's distcc key dir, and its own compiler cache,
+which starts empty:
+
+```bash
+install -d -o <release-runner> -g <release-runner> -m 700 /var/lib/<release-runner>/distcc
+install -o <release-runner> -g <release-runner> -m 600 /var/lib/<runner>/distcc/* /var/lib/<release-runner>/distcc/
+runuser -u <release-runner> -- install -d -m 1777 /var/lib/<release-runner>/ccache
+cat >> /var/lib/<release-runner>/actions-runner/.env <<'EOF'
+OMARCHY_ASUS_CI_DISTCC=/var/lib/<release-runner>/distcc
+OMARCHY_ASUS_CI_CCACHE=/var/lib/<release-runner>/ccache
+EOF
+```
+
+The shared lock: a group both accounts are in owns its directory, setgid so
+the files made there get that group, group-writable and without the sticky
+bit (a holder replaces the other account's record). Both `.env` files name
+the same lock file (the `sed` drops an older line naming a lock in the first
+account's home):
+
+```bash
+groupadd --system <lock-group>
+usermod -aG <lock-group> <runner>
+usermod -aG <lock-group> <release-runner>
+install -d -o root -g <lock-group> -m 2770 /var/lib/<lock-dir>
+for a in <runner> <release-runner>; do
+    sed -i '/^OMARCHY_ASUS_CI_LOCK=/d' /var/lib/$a/actions-runner/.env
+    echo "OMARCHY_ASUS_CI_LOCK=/var/lib/<lock-dir>/kernel.lock" >> /var/lib/$a/actions-runner/.env
+done
+```
+
+`/proc` must not be mounted with `hidepid`: each holder sees whether the
+other account's is alive through its `/proc` entry. Then the service, and the
+variable (it names the label):
+
+```bash
+cd /var/lib/<release-runner>/actions-runner && ./svc.sh install <release-runner> && ./svc.sh start
 gh variable set RELEASE_RUNNER -R omarchy-asus/omarchy-asus --body '["omarchy-asus-release"]'
 ```
 
-Keep the two `.env` files the same when one changes, and restart both
-services. Re-install the job-started hook (the `install` line in Setup) too:
-the release registration needs the copy that lets release.yml's kernel job
-through. Try it with a release dispatch (nothing publishes from the release
+Restart both services after a `.env` change, and after the group change, so
+they run with the new group. Re-install the job-started hook (the `install`
+line in Setup) too: the release registration needs the copy that lets
+release.yml's kernel job through. Moving from one account to two: stop both
+services, remove the release registration from the first account
+(`config.sh remove` in its `actions-runner-release` directory, with a removal
+token), then set up the second account as above.
+
+Try it with a release dispatch (nothing publishes from the release
 workflow): `gh workflow run release.yml --ref main -f channel=rc -f recipes=linux-omarchy`.
 The kernel job's log says `kernel runner: workflow_dispatch on ... accepted`,
 `kernel lock: release queue taken`, `kernel lock: held by this job (release run ...)`,
