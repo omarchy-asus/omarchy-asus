@@ -118,10 +118,11 @@ and records, and **publishes nothing**. No signing key, secret or release upload
 it. The second is the signer on the build host, `bin/release-sign` (below), which checks a run's
 record with GitHub before it hands the packages to `bin/publish`. The daily rebase onto upstream
 runs it only for the recipes `build/release-path.conf` lists, on the rc channel: so far
-`asus-rog-nkey-winlock`, `hyprland`, `nvidia-open-dkms`, `omarchy` and `omarchy-settings` (a
-cohort, listed together), `omarchy-asus-g16`, `omarchy-asus-g16-apply` and `omarchy-asus-keyring`.
-`linux-omarchy` is not switched yet. For every other recipe the chroot path (`bin/build-pkg`,
-then `bin/publish`) stays the live publisher (below, "Switching a recipe to the release path").
+`asus-rog-nkey-winlock`, `hyprland`, `linux-omarchy`, `nvidia-open-dkms`, `omarchy` and
+`omarchy-settings` (a cohort, listed together), `omarchy-asus-g16`, `omarchy-asus-g16-apply` and
+`omarchy-asus-keyring`. A kernel build still waits for its G16 test before it is published, as
+on the chroot path. For every other recipe the chroot path (`bin/build-pkg`, then `bin/publish`)
+stays the live publisher (below, "Switching a recipe to the release path").
 
 ```
 release workflow (GitHub)  ->  bin/release-sign (build host)  ->  bin/publish  ->  bin/sync-release
@@ -287,6 +288,31 @@ A recipe is listed only after the two paths have been compared for it and match:
 3. **Switch it** in a pull request that adds the recipe to `build/release-path.conf` and names the
    run and the comparison's result. `linux-omarchy` also needs the build host's release runner
    (docs/kernel-runner.md, "The release registration") and `RELEASE_RUNNER` naming it.
+
+#### Known differences: the kernel
+
+`bin/compare-build-paths` reports differences for `linux-omarchy` (for 7.2.8-9.103 it flagged
+102 modules beyond its size and normalising thresholds), and exits 1. A byte-level
+classification of both packages (all 6,496 modules, `vmlinux`, `vdso32.so` and the headers) found
+three causes, all harmless, and each path produces them from one build to the next:
+
+1. **UBSAN source-location columns.** GCC's UBSAN handler data (`{file, line, column}`, used only
+   to print a report) differs in the column field. In 1,167 modules every differing word is such
+   a column (the pointer 12 bytes before it is relocated to a `.c`/`.h` file name, and the line
+   is equal); so are 4,499 differing words in `vmlinux`'s `.data`, and a few DWARF column bytes
+   in `vdso32.so`'s debug info, whose code (`.text`) is identical. Most likely some objects were
+   compiled from preprocessed source (distcc or ccache) in one build and directly in the other,
+   which moves the column of a macro-expanded expression.
+2. **The build timestamp:** `UTS_VERSION`, `linux_banner` and `init_uts_ns`, and the file mtimes
+   in `kheaders.ko`'s embedded header tarball (the headers themselves are identical).
+3. **The per-build module signing key:** the kernel makes a fresh key every build
+   (`CONFIG_MODULE_SIG_ALL`), so the embedded certificate (`system_certificate_list` in
+   `.init.data`), every module signature, the build IDs, and the vDSO image copied into
+   `vmlinux`'s `.rodata` (`raw_data`, which carries the vDSO's build ID) differ.
+
+Nothing else differed. A later kernel comparison that shows only these is a match; anything
+else (a changed instruction, a `.text` difference, a module or file on one side only) is a real
+difference.
 
 `tests/ci/compare-build-paths.sh` covers it offline, with small fabricated packages: identical
 builds, a dropped file, a changed dependency, scriptlet or mode, a size beyond the threshold, a
