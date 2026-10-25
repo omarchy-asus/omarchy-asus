@@ -85,10 +85,12 @@
 # pmf-low-power) are light-load tweaks: the idle mode leaves them out unless --only
 # names them; --load light runs them with the rest. Each changes every cpufreq
 # policy (a cap leaves a policy whose cpuinfo_max_freq is at or below it alone), and
-# power-profiles-daemon may write EPP or the profile back: the setting is read back
-# with every sample, logged in the report, and a phase in which it did not hold is
-# left out. epp-dynamic is skipped when energy_performance_available_preferences
-# doesn't list dynamic.
+# power-profiles-daemon may write EPP or the profile back: in a run with a CPU tweak,
+# every CPU setting (boost, each policy's EPP and cap, every platform profile, the
+# asus-wmi one included) is read back with every sample, baselines too, against its
+# value at the start or the tweak's own; it is logged in the report, and a phase in
+# which one did not hold is left out. epp-dynamic is skipped when
+# energy_performance_available_preferences doesn't list dynamic.
 #
 # Guards: it starts only on battery (Discharging) with the RTX runtime-suspended,
 # and stops (putting everything back) if the charger comes back or the RTX stays
@@ -213,6 +215,19 @@ cpu_hold() { # sys tweak
     pmf-low-power) f=$(pmf_profile "$1") && printf '%s=low-power\n' "$f" ;;
   esac
   return 0
+}
+# Every CPU setting the tweaks touch or must leave alone, as it is now ("file=value"
+# lines): boost, each policy's EPP and scaling_max_freq, every platform profile.
+cpu_snapshot() { # sys
+  local f p v
+  for f in "$1"/devices/system/cpu/cpufreq/boost "$1"/class/platform-profile/platform-profile-*/profile; do
+    [[ -e $f ]] && { v=''; read -r v 2>/dev/null <"$f"; printf '%s=%s\n' "$f" "$v"; }
+  done
+  while read -r p; do
+    for f in "$p/energy_performance_preference" "$p/scaling_max_freq"; do
+      [[ -e $f ]] && { v=''; read -r v 2>/dev/null <"$f"; printf '%s=%s\n' "$f" "$v"; }
+    done
+  done < <(cpu_policies "$1")
 }
 # A CPU tweak that can't run here -> why (nothing when it can)
 cpu_skip() { # sys tweak
@@ -1142,7 +1157,8 @@ ask_root_lines() { # command -> lines until "end"
 # writes the samples and the counter differences as JSON.
 PHASES=()
 measure() { # name tweak round [design row signs]
-  local name=$1 tweak=$2 round=$3 design=${4:-} n out waited=0 hold='' x
+  local name=$1 tweak=$2 round=$3 design=${4:-} n out waited=0 hold='' tgt='' x l k
+  local -A want=()
   n=$(printf '%03d' "${#PHASES[@]}")
   out=$WORK/$n.json
   PHASES+=("$out")
@@ -1160,16 +1176,25 @@ measure() { # name tweak round [design row signs]
       sleep 5; waited=$((waited + 5))
     done
   fi
-  # The CPU tweaks' settings, read back with every sample (power-profiles-daemon
-  # may write them back): "file=value" lines.
-  if ((DRY == 0)); then
-    for x in ${tweak//,/ }; do [[ $LIGHT_TWEAKS == *" $x "* ]] && hold+=$(cpu_hold "$SYS" "$x")$'\n'; done
+  # The CPU settings, read back with every sample (power-profiles-daemon may write
+  # them back): every one as it was at the start, but the phase's tweaks' targets
+  # ($tgt). Under boost-off the caps aren't checked: the kernel may lower them.
+  if ((DRY == 0)) && [[ -n $CPU_BASE ]]; then
+    while IFS= read -r l; do [[ -n $l ]] && want[${l%=*}]=${l##*=}; done <<<"$CPU_BASE"
+    for x in ${tweak//,/ }; do
+      [[ $LIGHT_TWEAKS == *" $x "* ]] || continue
+      if [[ $x == boost-off ]]; then for k in "${!want[@]}"; do [[ $k == */scaling_max_freq ]] && unset "want[$k]"; done; fi
+      tgt+=$(cpu_hold "$SYS" "$x")$'\n'
+    done
+    while IFS= read -r l; do [[ -n $l ]] && want[${l%=*}]=${l##*=}; done <<<"$tgt"
+    for k in "${!want[@]}"; do hold+="$k=${want[$k]}"$'\n'; done
   fi
   python3 -I - "$SYS" "$PROC" "${AMDGPU:-}" "$BAT" "${DGPU:-}" "${BACKLIGHT:-}" "$MEASURE" "$INTERVAL" "$name" "$tweak" "$round" "$design" \
-    "$LOAD" "$(printf '%s\n' "${KBD_LEDS[@]}")" "$WORK/cpus.json" "$hold" >"$out" <<'PY'
+    "$LOAD" "$(printf '%s\n' "${KBD_LEDS[@]}")" "$WORK/cpus.json" "$hold" "$tgt" >"$out" <<'PY'
 import glob, json, os, struct, sys, time
-sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd, design, load, kbd, cpuf, hold = sys.argv[1:17]
+sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd, design, load, kbd, cpuf, hold, tgt = sys.argv[1:18]
 hold = [l.rsplit("=", 1) for l in hold.splitlines() if "=" in l]
+tgt = [l.rsplit("=", 1) for l in tgt.splitlines() if "=" in l]
 def short(f):
     f = f[len(sysfs) + 1:] if f.startswith(sysfs + "/") else f
     for a, b in (("devices/system/cpu/cpufreq/", ""), ("class/platform-profile/", ""),
@@ -1270,7 +1295,8 @@ while True:
     st = devstate()
     samples.append({"t": t, "bat": w, "sock": sock, "gfx": gfx, "core": core, "status": rd(bat + "/status"),
                     "bl": rd(bl + "/actual_brightness") if bl else None, "kbd": kbd_level(),
-                    "readback": {short(f): rd(f) for f, _ in hold}, "want": {short(f): v for f, v in hold}})
+                    "readback": {short(f): rd(f) for f, _ in tgt}, "want": {short(f): v for f, v in tgt},
+                    "off": {short(f): rd(f) for f, v in hold if rd(f) != v}})
     states.append(st)
     if t + interval > end:
         # under load the clocks cover the whole phase, and so does its burst window
@@ -1416,6 +1442,10 @@ for t in "${SEL[@]}"; do
   esac
 done
 [[ -n $BOOT ]] && RUN=()
+# With a CPU tweak in the run, every CPU setting as it is before any change: each
+# phase, baselines too, must keep it (but for its own tweak's targets).
+CPU_BASE=''
+for t in "${RUN[@]}"; do [[ $LIGHT_TWEAKS == *" $t "* ]] && { CPU_BASE=$(cpu_snapshot "$SYS"); break; }; done
 for s in "${SKIP[@]}"; do note "skipped: $s"; printf '%s\n' "$s" >>"$WORK/skipped"; done
 [[ -n $BOOT ]] || ((${#RUN[@]})) || die "no tweak can run here"
 
@@ -1582,7 +1612,7 @@ def summarize(p):
     if len(bls) > 1: bad.append("brightness changed")
     if dry != "1" and any(x.get("kbd") not in (None, 0) for x in s): bad.append("keyboard LED on")
     # A CPU setting that did not hold (power-profiles-daemon wrote it back): left out.
-    off = sorted({f"{k} {v}" for x in s for k, v in (x.get("readback") or {}).items() if v != x["want"][k]})
+    off = sorted({f"{k} {v}" for x in s for k, v in (x.get("off") or {}).items()})
     if off: bad.append("setting did not hold (" + ", ".join(off[:3]) + (", …" if len(off) > 3 else "") + ")")
     if p.get("load_stopped"): bad.append("light load stopped")
     stt = {}
@@ -1760,10 +1790,12 @@ for i, p in enumerate(phases):
     seen = {}
     for x in p["samples"]:
         for k, v in (x.get("readback") or {}).items(): seen.setdefault(k, []).append(v)
-    if seen:
-        rb.append(f"{i} {p['name']}: " + "; ".join(f"{k} " + "/".join(dict.fromkeys(v)) + f" ({sum(a == p['samples'][0]['want'][k] for a in v)}/{len(v)} held)"
-                                                  for k, v in sorted(seen.items())))
-if rb: o.append("<details><summary>CPU settings read back with every sample (a phase where one did not hold is left out)</summary>\n\n```\n" + "\n".join(rb) + "\n```\n</details>\n")
+    off = sorted({f"{k} {v}" for x in p["samples"] for k, v in (x.get("off") or {}).items() if k not in seen})
+    if seen or off:
+        rb.append(f"{i} {p['name']}: " + "; ".join([f"{k} " + "/".join(dict.fromkeys(v)) + f" ({sum(a == p['samples'][0]['want'][k] for a in v)}/{len(v)} held)"
+                                                   for k, v in sorted(seen.items())] + [f"changed: {', '.join(off)}"] * bool(off)))
+if rb: o.append("<details><summary>CPU settings read back with every sample: the tweak's own, and every other one (boost, EPP, caps, "
+                "platform profiles) against the start; a phase where one did not hold is left out</summary>\n\n```\n" + "\n".join(rb) + "\n```\n</details>\n")
 applied = load(work + "/applied").strip()
 if applied: o.append("<details><summary>What each apply reported</summary>\n\n```\n" + "\n".join(sorted(set(applied.splitlines()))) + "\n```\n</details>\n")
 diag = load(work + "/diag").strip()

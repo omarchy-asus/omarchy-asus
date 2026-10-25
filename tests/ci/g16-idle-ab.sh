@@ -44,8 +44,9 @@
 #  16. the CPU tweaks (#328): listed, left out of idle runs unless --only names them,
 #      in the --load light default set; each applies on every policy it should (a cap
 #      at or above a policy's top leaves it alone) and goes back; epp-dynamic is
-#      skipped with a line when a policy doesn't list it; a setting that
-#      power-profiles-daemon writes back drops the phase; through g16-testd each is
+#      skipped with a line when a policy doesn't list it; a CPU setting written back
+#      (the tweak's, a baseline's, asus-wmi's under pmf-low-power) drops the phase,
+#      and a baseline that drops takes its deltas with it; through g16-testd each is
 #      its knob; tweaks that share an issue share one post.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -951,6 +952,39 @@ grep -qE '^\| epp-power \| #328 \| 0/2 \|' "$r" && ok "PPD rewrite: both epp-pow
 grep -qE '\| epp-power \|.*setting did not hold \(policy0/EPP balance_power' "$r" && ok "PPD rewrite: the phase says which setting slipped" || bad "PPD note: $(grep -E '^\| [0-9]+ \| [12] \| epp-power' "$r")"
 grep -qE '^\| boost-off \| #328 \| 2/2 \|' "$r" && ok "PPD rewrite: the other tweak is kept" || bad "boost-off: $(grep '^| boost-off' "$r")"
 [[ $(cpu_state) == "$CPU_WANT" ]] && ok "PPD rewrite: everything back" || bad "PPD rewrite left: $(cpu_state)"
+
+# A rewrite during the baselines (from the first boost-off on, EPP moves whenever no
+# tweak is on): those baselines are left out, so is every delta that needs them.
+reset
+( c=$S/devices/system/cpu/cpufreq armed=0
+  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break
+    if [[ $(cat "$c/boost") == 0 ]]; then armed=1; echo balance_power >"$c/policy1/energy_performance_preference"
+    elif ((armed)); then echo performance >"$c/policy1/energy_performance_preference"; fi
+    sleep 0.01; done ) &
+ppd=$!
+out=$(run --only boost-off,nmi --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+touch "$ST/stop-ppd"; wait "$ppd"
+r=$T/home/report.md
+((rc == 0)) && ok "baseline rewrite: the run finishes" || bad "baseline rewrite: exit $rc: $out"
+nb=$(grep -cE '^\| [0-9]+ \| [12] \| baseline \|.*setting did not hold \(policy1/EPP performance' "$r")
+((nb >= 4)) && ok "baseline rewrite: the baselines after it left out ($nb)" || bad "baseline rewrite: $nb baselines left out: $(grep -E '^\| [0-9]+ \| [12] \| baseline' "$r")"
+grep -qE '^\| boost-off \| #328 \| 0/2 \|' "$r" && ! grep -qE '^\| nmi \| #225 \| 2/2 \|' "$r" && ok "baseline rewrite: no delta from a bad baseline" || bad "baseline rewrite rows: $(grep -E '^\| (boost-off|nmi) \|' "$r")"
+grep -qE '\| [0-9]+ \| [12] \| boost-off \|.*\|  \|$' "$r" && ok "baseline rewrite: the boost-off phases themselves held" || bad "boost-off phases: $(grep -E '^\| [0-9]+ \| [12] \| boost-off' "$r")"
+
+# asus-wmi moved while amd-pmf is low-power: those phases are left out.
+reset
+( d=$S/class/platform-profile
+  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break
+    if [[ $(cat "$d/platform-profile-1/profile") == low-power ]]; then echo balanced >"$d/platform-profile-0/profile"; else echo quiet >"$d/platform-profile-0/profile"; fi
+    sleep 0.01; done ) &
+ppd=$!
+out=$(run --only pmf-low-power,epp-power --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+touch "$ST/stop-ppd"; wait "$ppd"
+r=$T/home/report.md
+grep -qE '^\| pmf-low-power \| #328 \| 0/2 \|' "$r" && grep -qE '\| pmf-low-power \|.*setting did not hold \(platform-profile-0/profile balanced' "$r" &&
+  ok "asus-wmi moved under pmf-low-power: those phases left out" || bad "asus-wmi move: $(grep -E 'pmf-low-power \|' "$r")"
+grep -qE '^\| epp-power \| #328 \| 2/2 \|' "$r" && ok "asus-wmi move: the other tweak and the baselines kept" || bad "epp-power: $(grep '^| epp-power' "$r")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "asus-wmi move: everything back" || bad "asus-wmi move left: $(cpu_state)"
 
 # Through g16-testd: each CPU tweak is its knob.
 reset
