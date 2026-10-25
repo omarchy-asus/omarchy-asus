@@ -23,24 +23,32 @@ What the report tells apart (Hyprland 0.56.2, Omarchy's foot + fcitx5):
                  extra characters that stops by itself.
   ime repeat     fcitx5 repeats a key itself while its grab is active (release + press
                  pairs on the wire carrying the original press's time) and stops only
-                 when the release of that key comes back through its grab. A run that
-                 ends with another key's press, not its own release, is a release that
-                 never reached fcitx5: the runaway "until another key is pressed".
-  stuck          a press with no release for over 2 s while other keys were typed (and
-                 no keyboard leave): the release was lost on the way to the window.
+                 when the release of that key comes back through its grab. A run whose
+                 key is never released (to the end of the capture, with no leave) is a
+                 release that never reached fcitx5: the runaway "until another key is
+                 pressed" (the other key stops the repeat, not the lost release).
+  stuck          a repeating key still down when the capture ends, over 2 s after its
+                 press, with other keys typed since (and no keyboard leave, which ends
+                 a hold normally): the release was lost on the way to the window.
+  long hold      a repeating key held over 2 s while others were typed, then released:
+                 listed for a look, not a verdict (the wire can't tell it from a real
+                 hold; libinput's key count near it can).
+  A capture with no keyboard focus or no key presses (foot failed, nothing typed)
+  exits 1 instead of reporting "nothing seen".
   The capture types nothing and changes nothing but fcitx5 with --ime off. Type plain
   letters in the window, never a password: the raw logs hold the key codes (they stay
   in DIR); the report numbers the keys instead (k1, k2, ...).
 
 Files: DIR (default ~/.local/state/omarchy-asus/key-repeat/<time>): wire.log, side.log,
 devices-before.json, devices-after.json, versions.txt, report.md.
-Exit status: 0 done, 1 a problem, 2 bad usage.
+Exit status: 0 done, 1 a problem (foot failed, or no keyboard traffic), 2 bad usage.
 """
 import argparse
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -55,6 +63,9 @@ DEFAULT_RATE, DEFAULT_DELAY = 40, 250   # Omarchy's input.lua
 # The wire lines kept from foot's WAYLAND_DEBUG (the rest is frame traffic).
 KEEP = re.compile(r"\b(wl_keyboard|wl_seat|wl_output|zwp_text_input_v3)[@#]\d+\.|wl_registry[@#]\d+\.global_remove")
 WIRE = re.compile(r"^\[\s*[\d:.]+\]\s+(?:\{[^}]*\}\s+)?(->\s+)?(\w+)[@#](\d+)\.(\w+)\((.*)\)\s*$")
+# evdev codes of Ctrl, Shift, Alt, Super (left and right) and Caps Lock: they don't repeat
+MODIFIERS = {29, 42, 54, 56, 58, 97, 100, 125, 126}
+NO_CAPTURE = "no capture: the window got no keyboard focus or no key presses"
 SOCKET2_KEEP = ("monitoradded", "monitoraddedv2", "monitorremoved", "monitorremovedv2",
                 "configreloaded", "focusedmon", "focusedmonv2")
 
@@ -221,10 +232,19 @@ def capture(a):
         after = keyboards(out, "devices-after.json")
         rec.write("side.log", f"capture end keyboards={len(after)}")
         rec.close()
+    rc = term.wait()
     report = analyze_dir(out)
     with open(os.path.join(out, "report.md"), "w", encoding="utf-8") as f:
         f.write(render(report))
     print(render(report))
+    # foot's status is its shell's (closing the window hangs the shell up), so only a
+    # foot that never reached the compositor is a failed start
+    if rc not in (0, -signal.SIGTERM) and not read_lines(os.path.join(out, "wire.log")):
+        log(f"foot exited with status {rc} before reaching the compositor: the capture is not usable")
+        return 1
+    if report["verdict"] == NO_CAPTURE:
+        log("no keyboard traffic was recorded: type in the g16-key-repeat window")
+        return 1
     return 0
 
 
@@ -274,14 +294,16 @@ def analyze(wire, side):
     def add(kind, t, **kw):
         anomalies.append(dict(kind=kind, at=round(t - t0, 3), **kw))
 
-    def unreleased(code, h, t, ended):
-        # A key whose release never reached the window: fcitx5 kept repeating it, or the
-        # window's own repeat ran (a long hold while other keys were typed).
+    def unreleased(code, h, t):
+        # A key whose release never reached the window by the end of the capture: fcitx5
+        # kept repeating it, or the window's own repeat ran while other keys were typed.
+        # Modifiers don't repeat, and a key held at a leave ends there normally.
         if h["reps"]:
             add("ime repeat", h["t"], key=kname(code), repeats=len(h["reps"]), seconds=round(t - h["t"], 3),
-                ended=ended, others_typed=h["others"])
-        elif t - h["t"] > STUCK_S and h["others"]:
-            add("stuck", h["t"], key=kname(code), seconds=round(t - h["t"], 3), others_typed=h["others"], ended=ended)
+                ended="never released", others_typed=h["others"])
+        elif t - h["t"] > STUCK_S and h["others"] and code not in MODIFIERS:
+            add("stuck", h["t"], key=kname(code), seconds=round(t - h["t"], 3), others_typed=h["others"],
+                ended="never released")
 
     def released(k, h, t, wt):
         held.pop(k)
@@ -294,16 +316,18 @@ def analyze(wire, side):
         if past:
             add("ime repeat past release", h["t"], key=kname(code), repeats_after_release=past,
                 late_ms=round(late_ms), hardware_hold_ms=round(hw_s * 1000.0))
-        elif late_ms > LATE_MS and hold_s * 1000.0 > delay:
+        elif late_ms > LATE_MS and hold_s * 1000.0 > delay and (wt or h["wt"]):   # time 0: no clock
             def reps(ms):   # how many repeats the window makes in a hold of ms
                 return int(max(0, round(ms) - delay) * rate / 1000.0 + 1e-6)
             extra = reps(hold_s * 1000.0) - reps(hw_s * 1000.0)
             add("late release", h["t"], key=kname(code), late_ms=round(late_ms),
                 hardware_hold_ms=round(hw_s * 1000.0), extra_repeats=max(extra, 0))
-        if hold_s > STUCK_S and h["others"]:
-            # released only when the key was pressed again (Hyprland still held it)
-            add("stuck", h["t"], key=kname(code), seconds=round(hold_s, 3), others_typed=h["others"],
-                ended="a later release", fcitx5_repeats=len(h["reps"]))
+        if hold_s > STUCK_S and h["others"] and code not in MODIFIERS:
+            # A long hold of a repeating key while others were typed: a real hold, or a
+            # release lost until the key was pressed again. The wire can't tell, so it is
+            # listed for a look (with libinput's keys near it) and leaves the verdict alone.
+            add("long hold", h["t"], key=kname(code), seconds=round(hold_s, 3), others_typed=h["others"],
+                fcitx5_repeats=len(h["reps"]))
 
     def settle(oid, but=None):
         # A release carrying its press's time is half of an fcitx5 repeat pair only if the
@@ -325,7 +349,7 @@ def analyze(wire, side):
                 stats["leaves"] += 1
                 settle(oid)
                 for k in [k for k in held if k[0] == oid]:
-                    unreleased(k[1], held.pop(k), t, "keyboard leave")
+                    held.pop(k)   # the release goes to the next focus: a normal end
             elif ev == "key" and len(args) == 4:
                 wt, code, state = int(args[1]), int(args[2]), int(args[3])
                 k = (oid, code)
@@ -362,7 +386,7 @@ def analyze(wire, side):
     for oid in {k[0] for k in held}:
         settle(oid)
     for (oid, code), h in list(held.items()):
-        unreleased(code, h, end, "never released")
+        unreleased(code, h, end)
     anomalies.sort(key=lambda x: x["at"])
     for an in anomalies:
         at, span = an["at"] + t0, an.get("seconds", 0)
@@ -375,11 +399,13 @@ def analyze(wire, side):
     events = [f"{s - t0:+.3f}s {text}" for s, text in side
               if not text.startswith("libinput") and not text.startswith("udev")]
     udev = sum(1 for _, text in side if text.startswith("udev"))
-    return dict(verdict=verdict_of(anomalies), repeat_rate=rate, repeat_delay=delay, stats=stats,
+    return dict(verdict=verdict_of(anomalies, stats), repeat_rate=rate, repeat_delay=delay, stats=stats,
                 anomalies=anomalies, events=events, uevents=udev, keys=len(names))
 
 
-def verdict_of(anomalies):
+def verdict_of(anomalies, stats):
+    if not stats["enters"] or not stats["presses"]:
+        return NO_CAPTURE
     kinds = {a["kind"] for a in anomalies}
     if "ime repeat" in kinds:
         a = next(a for a in anomalies if a["kind"] == "ime repeat")
@@ -466,7 +492,7 @@ def main(argv=None):
         return 1
     r = analyze_dir(a.dir)
     print(json.dumps(r, indent=1) if a.json else render(r), end="")
-    return 0
+    return 1 if r["verdict"] == NO_CAPTURE else 0
 
 
 if __name__ == "__main__":

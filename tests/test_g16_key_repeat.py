@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Offline tests for bin/g16-key-repeat (#350): the WAYLAND_DEBUG parse (libwayland 1.26's
 clock stamps and the older millisecond ones), and the analysis on synthetic captures:
-plain typing, a late release, fcitx5's repeat running away and stopping normally, fcitx5
-repeating past the release, a key stuck without fcitx5, wtype's time-0 keys, the side
-events listed with an anomaly, the report's scrub, and the command line's exit codes.
+plain typing, a late release, fcitx5's repeat running away and stopping normally (on its
+own release or a focus change), fcitx5 repeating past the release, a held modifier, a
+long hold vs a key stuck without fcitx5, wtype's time-0 keys, failed and empty captures
+vs a good one (a stand-in foot), the side events listed with an anomaly, the report's
+scrub, and the command line's exit codes.
 
   python3 -I tests/test_g16_key_repeat.py
 """
@@ -142,10 +144,20 @@ class Analyze(unittest.TestCase):
         self.assertTrue(r["verdict"].startswith("late release"))
 
     def test_fcitx_repeat_cut_by_leave(self):
+        # a held letter, then focus moves: the release goes to the next window, a normal end
         w = Wire().key(1.0, 6000, A, 1).fcitx_repeats(A, 6000, 1.247, 1.5).ev(1.5, "leave(90, wl_surface#3)")
+        w.ev(1.6, "enter(91, wl_surface#3, array[0])").tap(2.0, B)
         r = w.run()
-        self.assertEqual(kinds(r), ["ime repeat"])
-        self.assertEqual(r["anomalies"][0]["ended"], "keyboard leave")
+        self.assertEqual(r["anomalies"], [])
+        self.assertTrue(r["verdict"].startswith("nothing seen"))
+
+    def test_modifier_hold(self):
+        # Shift held for 3 s while two letters are typed, then released normally
+        w = Wire().key(1.0, 6000, 42, 1).tap(1.5, A).tap(2.5, B).key(4.0, 9000, 42, 0)
+        r = w.run()
+        self.assertEqual(r["anomalies"], [])
+        w = Wire().key(1.0, 6000, 42, 1).tap(1.5, A).tap(2.5, B).tap(4.0, C)
+        self.assertEqual(w.run()["anomalies"], [], "a modifier still down at the end")
 
     def test_stuck_without_fcitx(self):
         # A's release is lost; the next A (pressed 5 s later) only delivers a release
@@ -154,9 +166,10 @@ class Analyze(unittest.TestCase):
             w.tap(1.5 + i * 0.3, B if i % 2 else C)
         w.key(6.0, 11000, A, 0)
         r = w.run()
-        self.assertEqual(kinds(r), ["stuck"])
+        # the wire can't tell this from a real 5 s hold: listed, no verdict
+        self.assertEqual(kinds(r), ["long hold"])
         self.assertEqual(r["anomalies"][0]["others_typed"], 10)
-        self.assertTrue(r["verdict"].startswith("lost release on the way"))
+        self.assertTrue(r["verdict"].startswith("nothing seen"))
 
     def test_stuck_never_released(self):
         w = Wire().key(1.0, 6000, A, 1)
@@ -165,6 +178,12 @@ class Analyze(unittest.TestCase):
         r = w.run()
         self.assertEqual(kinds(r), ["stuck"])
         self.assertEqual(r["anomalies"][0]["ended"], "never released")
+        self.assertTrue(r["verdict"].startswith("lost release on the way"))
+
+    def test_no_capture(self):
+        self.assertEqual(K.analyze([], [])["verdict"], K.NO_CAPTURE)
+        # focus but nothing typed is no capture either, not "nothing seen"
+        self.assertEqual(Wire().run()["verdict"], K.NO_CAPTURE)
 
     def test_wtype_time_zero(self):
         w = Wire()
@@ -174,6 +193,50 @@ class Analyze(unittest.TestCase):
         self.assertEqual(r["anomalies"], [])
         self.assertEqual(r["stats"]["ime_repeats"], 0)
         self.assertEqual(r["stats"]["releases"], 6)
+        # a time-0 key held 600 ms has no hardware clock to be late against
+        self.assertEqual(Wire().tap(1.0, A, hold=0.6, wt=0).tap(2.0, B, wt=0).run()["anomalies"], [])
+
+
+class Capture(unittest.TestCase):
+    def run_capture(self, foot_body):
+        with tempfile.TemporaryDirectory() as d:
+            bin_dir = os.path.join(d, "bin")
+            os.mkdir(bin_dir)
+            with open(os.path.join(bin_dir, "foot"), "w") as f:
+                f.write("#!/bin/sh\n" + foot_body + "\n")
+            os.chmod(os.path.join(bin_dir, "foot"), 0o755)
+            env = {k: v for k, v in os.environ.items() if k not in ("HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY")}
+            env["PATH"] = bin_dir + ":/usr/bin:/bin"
+            out = os.path.join(d, "cap")
+            p = subprocess.run([sys.executable, "-I", SCRIPT, "capture", "--minutes", "1", "--out", out],
+                               capture_output=True, text=True, env=env, timeout=60)
+            return p.returncode, p.stderr
+
+    def test_foot_fails(self):
+        rc, err = self.run_capture("echo 'failed to connect to wayland' >&2; exit 1")
+        self.assertEqual(rc, 1)
+        self.assertIn("foot exited with status 1", err)
+
+    def test_closed_window_is_not_a_failure(self):
+        # closing the window hangs up the shell and foot exits 1 with what it recorded
+        lines = ["wl_keyboard#40.enter(11, wl_surface#3, array[0])",
+                 "wl_keyboard#40.key(12, 6000, 30, 1)", "wl_keyboard#40.key(13, 6080, 30, 0)"]
+        body = "; ".join(f"echo '[20:52:11.560075] {{Default Queue}} {x}' >&2" for x in lines) + "; exit 1"
+        rc, err = self.run_capture(body)
+        self.assertEqual(rc, 0, err)
+
+    def test_nothing_typed(self):
+        # foot ran and exited cleanly, but no key reached it
+        rc, err = self.run_capture("echo '[20:52:11.560075] {Default Queue} wl_seat#19.capabilities(2)' >&2; exit 0")
+        self.assertEqual(rc, 1)
+        self.assertIn("no keyboard traffic", err)
+
+    def test_good_capture(self):
+        lines = ["wl_keyboard#40.repeat_info(40, 250)", "wl_keyboard#40.enter(11, wl_surface#3, array[0])",
+                 "wl_keyboard#40.key(12, 6000, 30, 1)", "wl_keyboard#40.key(13, 6080, 30, 0)"]
+        body = "; ".join(f"echo '[20:52:11.560075] {{Default Queue}} {x}' >&2" for x in lines) + "; exit 0"
+        rc, err = self.run_capture(body)
+        self.assertEqual(rc, 0, err)
 
 
 class Report(unittest.TestCase):
@@ -206,6 +269,11 @@ class Report(unittest.TestCase):
             self.assertIn('"late release"', js.stdout)
             self.assertEqual(subprocess.run([sys.executable, "-I", SCRIPT, "analyze", os.path.join(d, "none")],
                                             capture_output=True).returncode, 1)
+            with open(os.path.join(d, "wire.log"), "w") as f:
+                f.write("")
+            empty = subprocess.run([sys.executable, "-I", SCRIPT, "analyze", d], capture_output=True, text=True)
+            self.assertEqual(empty.returncode, 1)
+            self.assertIn("no capture", empty.stdout)
         self.assertEqual(subprocess.run([sys.executable, "-I", SCRIPT, "bogus"], capture_output=True).returncode, 2)
         self.assertEqual(subprocess.run([sys.executable, "-I", SCRIPT, "capture", "--minutes", "0"],
                                         capture_output=True).returncode, 2)
