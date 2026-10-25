@@ -48,6 +48,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [asus-wmi restores the thermal policy after hibernation](#kernel-0808-thermal-policy-restore) | linux-omarchy | 0808 | RC only | not submitted |
 | [panel_power_savings applies when written](#kernel-0810-panel-power-savings) | linux-omarchy | 0810 | RC only | not submitted |
 | [EXPERIMENTAL Zen 5c-first soft park](#kernel-9900-zen5c-soft-park) | linux-omarchy | 9900 | both | ours-only |
+| [EXPERIMENTAL DCN 3.5 S0i2-ready display idle](#kernel-9901-dcn35-s0i2) | linux-omarchy | 9901 | RC only | not submitted |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -92,7 +93,7 @@ we no longer carry.
 
 ## Kernel: linux-omarchy
 
-RC 7.2.8-9.103 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
+RC 7.2.8-9.106 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
 why, the risks and the long test scripts are in `recipes/linux-omarchy/NOTES.md`. Our patches have
 no `.sig` (upstream's patch signatures use the Omarchy kernel maintainer's key); their checksums
 pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for each patch.
@@ -296,6 +297,24 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
   in experiment issue #10.
 - **Upstream: ours-only.** Not meant for upstream.
 - **Drop when:** the A/B shows no win (or move it to a separate `-experimental` kernel).
+
+<a id="kernel-9901-dcn35-s0i2"></a>
+### EXPERIMENTAL DCN 3.5 S0i2-ready display idle (9901)
+
+- **Component:** `linux-omarchy`,
+  `9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch`, after 9900. RC only
+  (since 9.106).
+- **What:** a new `amdgpu.dcn35_s0i2` parameter (bool, writable at runtime, default 0). When it is 1,
+  the DCN 3.5 clock manager sends `SetDisplayIdleOptimizations` with `df_request_disabled`,
+  `phy_ref_clk_off` and `s0i2_rdy` when the active display count drops to 0, as DCN 3.1 does. Stock
+  DCN 3.5 never sends them, so the SMU's display-idle bit (idlemask bit 5) and IPS2 (bit 20) stay
+  not idle even with every display off (#249). With 0, the driver takes the stock path.
+  Compile-tested only.
+- **Test:** the kit's `9901` check (present, off, nothing sets it). The one-boot A/B is
+  `g16-test/dcn35-s0i2-ab`, and its results go to experiment issue #353.
+- **Upstream: not submitted.** Mainline master is unchanged (2026-10-25). An amd-gfx report will be
+  drafted after the G16 numbers.
+- **Drop when:** the A/B shows no effect or a wake problem, or upstream sends the flags itself.
 
 ## NVIDIA: nvidia-open-dkms
 

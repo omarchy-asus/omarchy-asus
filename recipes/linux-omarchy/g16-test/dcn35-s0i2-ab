@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""dcn35-s0i2-ab: one-boot A/B of patch 9901's amdgpu.dcn35_s0i2 on the G16 (#353).
+
+Patch 9901 (EXPERIMENTAL, default off) makes the DCN 3.5 display driver tell the SMU
+that the display is idle and S0i2-ready (SetDisplayIdleOptimizations with
+df_request_disabled, phy_ref_clk_off and s0i2_rdy) when no display is active, as DCN 3.1
+does. The parameter is read at the transition to low power, so each phase writes it
+first and then switches the screen off.
+
+  dcn35-s0i2-ab                 run it: on battery, one root prompt, about 5 minutes
+  dcn35-s0i2-ab --post          and post the report to #353 (bin/issue)
+  dcn35-s0i2-ab --rounds N      ABBA rounds (2: phases 0 1 1 0 0 1 1 0)
+  dcn35-s0i2-ab --measure S     seconds measured per screen-off phase (30)
+  dcn35-s0i2-ab --dry-run       simulated readings, no root, nothing changed
+
+Per phase: write the parameter, DPMS off (Hyprland), wait 3 s, then for --measure seconds
+read amd_pmc's idlemask (debugfs) at 10 Hz, gpu_metrics' average_socket_power (v3.0,
+offset 112) every 0.5 s and battery watts every second; then DPMS on and check every
+output reads back on. At the end the parameter goes back to its value at the start and
+the kernel log since the start is checked for amdgpu / DMUB errors.
+
+Pass: with 1, idlemask bit 5 (display idle) reads idle (1) in most screen-off reads (bit 20,
+IPS2, ideally too) and socket power drops; the panel comes back after every phase; no
+amdgpu or DMUB errors. The report (no host or user names) goes to
+~/omarchy-asus-g16-dcn35-s0i2-<kernel>-<date>.md.
+
+Root: pkexec through the desktop's polkit agent (G16_POLKIT_REASON=<wrapper> runs
+`<wrapper> run REASON -- pkexec ...`; G16_ROOT=sudo uses sudo). Everything it changes
+(the parameter, the screen) is put back on exit, Ctrl-C included.
+Exit status: 0 the run finished (whatever the verdict), 1 a problem, 2 bad usage.
+"""
+import argparse
+import glob
+import json
+import os
+import pwd
+import random
+import re
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+ISSUE = 353
+SELF = os.path.realpath(__file__)
+KIT = os.path.dirname(SELF)
+PARAM = "/sys/module/amdgpu/parameters/dcn35_s0i2"
+IDLEMASK = "/sys/kernel/debug/amd_pmc/amd_pmc_idlemask"
+BITS = (5, 20)          # display idle, IPS2
+SOCKET_OFF = 112        # gpu_metrics_v3_0.average_socket_power (u32, mW)
+ERR_RE = re.compile(r"\*ERROR\*|dmub.*(timeout|timed out|error|fail)|REG_WAIT timeout|"
+                    r"amdgpu.*(timeout|timed out|failed|hang|reset|error)", re.I)
+
+
+def rd(p, d=None):
+    try:
+        with open(p, errors="replace") as f:
+            return f.read(4096).strip()
+    except OSError:
+        return d
+
+
+def wr(p, v):
+    try:
+        with open(p, "w") as f:
+            f.write(f"{v}\n")
+        return True
+    except OSError:
+        return False
+
+
+def battery():
+    for s in sorted(glob.glob("/sys/class/power_supply/*")):
+        if rd(s + "/type") == "Battery" and rd(s + "/scope") != "Device":
+            return s
+    return None
+
+
+def bat_w(bat):
+    c, v = rd(bat + "/current_now", ""), rd(bat + "/voltage_now", "")
+    if c.lstrip("-").isdigit() and v.isdigit() and int(c):
+        return abs(int(c)) * int(v) / 1e12
+    p = rd(bat + "/power_now", "")
+    return abs(int(p)) / 1e6 if p.lstrip("-").isdigit() else None
+
+
+def amdgpu_dev():
+    for c in sorted(glob.glob("/sys/class/drm/card*")):
+        d = os.path.realpath(c + "/device")
+        if os.path.basename(os.path.realpath(d + "/driver")) == "amdgpu" and os.path.exists(d + "/gpu_metrics"):
+            return d
+    return None
+
+
+def socket_w(dev):
+    try:
+        with open(dev + "/gpu_metrics", "rb") as f:
+            b = f.read()
+    except OSError:
+        return None
+    if len(b) < SOCKET_OFF + 4 or b[2] != 3 or b[3] != 0:
+        return None
+    v = struct.unpack_from("<I", b, SOCKET_OFF)[0]
+    return None if v == 0xFFFFFFFF else v / 1000
+
+
+def parse_mask(t):
+    m = re.search(r"0x[0-9a-fA-F]+", t or "")
+    return int(m.group(0), 16) if m else None
+
+
+def hypr_instance():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if re.match(r"^[A-Za-z0-9_]+$", sig):
+        return sig
+    run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    socks = [x for x in glob.glob(run + "/hypr/*/.socket.sock")
+             if re.match(r"^[A-Za-z0-9_]+$", os.path.basename(os.path.dirname(x)))]
+    return os.path.basename(os.path.dirname(max(socks, key=os.path.getmtime))) if socks else ""
+
+
+class Display:
+    """DPMS of every output through the user's Hyprland (Lua dispatch first, then the old one)."""
+
+    def __init__(self, user, uid, sig):
+        self.base = ["runuser", "-u", user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                     f"HYPRLAND_INSTANCE_SIGNATURE={sig}", "hyprctl"]
+
+    def _ctl(self, *a):
+        try:
+            return subprocess.run(self.base + list(a), capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def reads(self, on):
+        try:
+            mons = json.loads(self._ctl("monitors", "-j") or "x")
+        except ValueError:
+            return None
+        return all(bool(m.get("dpmsStatus")) == on for m in mons if not m.get("disabled"))
+
+    def set(self, on):
+        said = self._ctl("dispatch", 'hl.dsp.dpms({ action = "%s" })' % ("enable" if on else "disable")) == "ok"
+        time.sleep(1)
+        got = self.reads(on)
+        if got is False or (got is None and not said):
+            said = self._ctl("dispatch", "dpms", "on" if on else "off") == "ok"
+            time.sleep(1)
+            got = self.reads(on)
+        return said if got is None else got
+
+
+class SimHw:
+    """--dry-run: with 1 the model sets bits 5 and 20 idle and takes 0.3 W off the socket."""
+
+    def __init__(self):
+        self.v, self.rng = "N", random.Random(353)
+
+    def set_param(self, v):
+        self.v = "Y" if v else "N"
+        return True
+
+    def screen(self, on):
+        return True
+
+    def sample(self, secs):
+        n = int(secs * 10)
+        base = 0xffce9add | ((1 << 5) | (1 << 20) if self.v == "Y" else 0)
+        masks = [base if self.rng.random() > 0.05 else base & ~(1 << 7) for _ in range(n)]
+        sock = [(4.4 - (0.3 if self.v == "Y" else 0)) + self.rng.uniform(-0.05, 0.05) for _ in range(n // 5)]
+        bat = [(5.9 - (0.3 if self.v == "Y" else 0)) + self.rng.uniform(-0.2, 0.2) for _ in range(n // 10)]
+        return {"masks": masks, "sock": sock, "bat": bat, "status": ["Discharging"]}
+
+
+class Hw:
+    def __init__(self, display):
+        self.display, self.dev, self.bat = display, amdgpu_dev(), battery()
+
+    def set_param(self, v):
+        return wr(PARAM, 1 if v else 0) and rd(PARAM) == ("Y" if v else "N")
+
+    def screen(self, on):
+        return self.display.set(on)
+
+    def sample(self, secs):
+        out = {"masks": [], "sock": [], "bat": [], "status": set()}
+        t0, k = time.monotonic(), 0
+        while time.monotonic() - t0 < secs:
+            out["masks"].append(parse_mask(rd(IDLEMASK, "")))
+            if k % 5 == 0 and self.dev:
+                out["sock"].append(socket_w(self.dev))
+            if k % 10 == 0 and self.bat:
+                out["bat"].append(bat_w(self.bat))
+                out["status"].add(rd(self.bat + "/status"))
+            k += 1
+            time.sleep(max(0.0, t0 + k * 0.1 - time.monotonic()))
+        out["status"] = sorted(x for x in out["status"] if x)
+        return out
+
+
+def mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def summarize(ph):
+    good = [m for m in ph["masks"] if m is not None]
+    idle = {b: (sum(1 for m in good if (m >> b) & 1) / len(good) if good else None) for b in BITS}
+    top = {}
+    for m in good:
+        top[f"0x{m:08x}"] = top.get(f"0x{m:08x}", 0) + 1
+    return {"idle": idle, "reads": len(good), "masks": sorted(top.items(), key=lambda x: -x[1])[:3],
+            "sock": mean(ph["sock"]), "bat": mean(ph["bat"])}
+
+
+def run(hw, a, log):
+    """ABBA rounds; -> phases. The caller puts the parameter and the screen back."""
+    order = [v for _ in range(a.rounds) for v in (0, 1, 1, 0)]
+    phases = []
+    for i, v in enumerate(order, 1):
+        if not hw.set_param(v):
+            raise RuntimeError(f"could not set {PARAM} to {v}")
+        off = hw.screen(False)
+        if not a.dry_run:
+            time.sleep(3)
+        s = hw.sample(a.measure if not a.dry_run else 3)
+        on = hw.screen(True)
+        if not a.dry_run:
+            time.sleep(4)
+        p = {"n": i, "param": v, "screen_off": off, "panel_back": on, "status": s["status"], **summarize(s)}
+        log(f"phase {i}/{len(order)} param={v} bit5 idle {fmt_share(p['idle'][5])} bit20 idle "
+            f"{fmt_share(p['idle'][20])} socket {fmt_w(p['sock'])} battery {fmt_w(p['bat'])}"
+            + ("" if on else " PANEL DID NOT READ BACK ON"))
+        phases.append(p)
+        if not a.dry_run and any(x != "Discharging" for x in s["status"]):
+            log("the charger came back: stopping")
+            break
+    return phases
+
+
+def fmt_share(x):
+    return "-" if x is None else f"{x * 100:.0f}%"
+
+
+def fmt_w(x):
+    return "-" if x is None else f"{x:.2f} W"
+
+
+def journal_errors(since):
+    try:
+        r = subprocess.run(["journalctl", "-k", "-q", "-o", "cat", "--since", f"@{int(since)}"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ["(journalctl failed)"]
+    return [ln for ln in r.stdout.splitlines() if ERR_RE.search(ln)][:20]
+
+
+def stage_root(a):
+    """Root: measure, put everything back, write results.json into the user's directory."""
+    if os.geteuid() != 0:
+        print("dcn35-s0i2-ab: the root stage needs root", file=sys.stderr)
+        return 1
+    uid = int(os.environ.get("PKEXEC_UID") or os.environ.get("SUDO_UID") or -1)
+    try:
+        pw = pwd.getpwuid(uid)
+    except (KeyError, OverflowError):
+        print("dcn35-s0i2-ab: can't tell who asked (no PKEXEC_UID/SUDO_UID)", file=sys.stderr)
+        return 1
+    out = os.path.realpath(a.out)
+    if not out.startswith(pw.pw_dir.rstrip("/") + "/") or os.stat(out).st_uid != uid:
+        print("dcn35-s0i2-ab: the output directory must be the user's own, in their home", file=sys.stderr)
+        return 1
+    if rd(PARAM) not in ("Y", "N"):
+        print(f"dcn35-s0i2-ab: no {PARAM} (not a kernel with patch 9901)", file=sys.stderr)
+        return 1
+    if parse_mask(rd(IDLEMASK, "")) is None:
+        print(f"dcn35-s0i2-ab: can't read {IDLEMASK}", file=sys.stderr)
+        return 1
+    hw = Hw(Display(pw.pw_name, uid, a.hypr))
+    start_v, t0 = rd(PARAM) == "Y", time.time()
+    res = {"param_at_start": int(start_v), "phases": [], "errors": [], "problems": []}
+
+    def back():
+        if not hw.set_param(start_v):
+            res["problems"].append(f"could not put {PARAM} back to {int(start_v)}")
+        if not hw.screen(True):
+            res["problems"].append("the screen did not read back on (hyprctl): press a key")
+
+    def on_term(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGHUP, on_term)
+    try:
+        res["phases"] = run(hw, a, lambda m: print(m, flush=True))
+    except KeyboardInterrupt:
+        res["problems"].append("interrupted")
+    except RuntimeError as e:
+        res["problems"].append(str(e))
+    finally:
+        back()
+    time.sleep(2)
+    res["errors"] = journal_errors(t0 - 1)
+    path = os.path.join(out, "results.json")
+    with open(path, "w") as f:
+        json.dump(res, f, indent=1)
+    os.chown(path, uid, pw.pw_gid)
+    return 0
+
+
+def verdict(res):
+    ph = res["phases"]
+    on = [p for p in ph if p["param"] == 1]
+    off = [p for p in ph if p["param"] == 0]
+    b5 = mean([p["idle"][5] for p in on])
+    b20 = mean([p["idle"][20] for p in on])
+    d_sock = None if mean([p["sock"] for p in on]) is None or mean([p["sock"] for p in off]) is None \
+        else mean([p["sock"] for p in on]) - mean([p["sock"] for p in off])
+    d_bat = None if mean([p["bat"] for p in on]) is None or mean([p["bat"] for p in off]) is None \
+        else mean([p["bat"] for p in on]) - mean([p["bat"] for p in off])
+    panel = all(p["panel_back"] for p in ph)
+    if not ph or res["problems"] or not on or not off:
+        v = "INCOMPLETE"
+    elif not panel or res["errors"]:
+        v = "FAIL"
+    elif b5 is not None and b5 >= 0.8 and d_sock is not None and d_sock < 0:
+        v = "PASS"
+    else:
+        v = "NO EFFECT"
+    return v, b5, b20, d_sock, d_bat, panel
+
+
+def report(res, kernel, a):
+    v, b5, b20, d_sock, d_bat, panel = verdict(res)
+
+    def sign(x):
+        return "-" if x is None else f"{x:+.2f} W"
+
+    o = [f"## dcn35_s0i2 A/B on the G16: {v} (#353)", "",
+         f"Kernel {kernel}, on battery, screen off (DPMS) for {a.measure} s per phase, phases in ABBA "
+         f"order ({a.rounds} rounds). Idlemask at 10 Hz, socket power from gpu_metrics, battery watts."
+         + (" **Dry run: simulated readings.**" if a.dry_run else ""), "",
+         f"- bit 5 (display idle) idle with 1: {fmt_share(b5)} of reads; bit 20 (IPS2): {fmt_share(b20)}",
+         f"- socket power, 1 minus 0: {sign(d_sock)}; battery: {sign(d_bat)}",
+         f"- panel back after every phase: {'yes' if panel else 'NO'}",
+         f"- amdgpu / DMUB errors in the kernel log: {len(res['errors']) or 'none'}", "",
+         "| phase | dcn35_s0i2 | bit 5 idle | bit 20 idle | socket W | battery W | idlemask (most read) | panel back |",
+         "|---|---|---|---|---|---|---|---|"]
+    for p in res["phases"]:
+        masks = ", ".join(f"{m} x{n}" for m, n in p["masks"][:2])
+        sock = "-" if p["sock"] is None else f"{p['sock']:.2f}"
+        bat = "-" if p["bat"] is None else f"{p['bat']:.2f}"
+        o.append(f"| {p['n']} | {p['param']} | {fmt_share(p['idle'][5])} | {fmt_share(p['idle'][20])} | "
+                 f"{sock} | {bat} | {masks} | {'yes' if p['panel_back'] else 'NO'} |")
+    if res["errors"]:
+        o += ["", "<details><summary>Kernel log</summary>", "", "```", *res["errors"], "```", "", "</details>"]
+    if res["problems"]:
+        o += ["", "Problems: " + "; ".join(res["problems"])]
+    o += ["", "<sub>recipes/linux-omarchy/g16-test/dcn35-s0i2-ab</sub>"]
+    return "\n".join(o) + "\n", v
+
+
+def normalize(res):
+    """JSON turns the int bit keys into strings; put them back."""
+    for p in res["phases"]:
+        p["idle"] = {int(k): x for k, x in p["idle"].items()}
+    return res
+
+
+def front(a):
+    kernel = os.uname().release
+    if a.dry_run:
+        hw = SimHw()
+        res = {"param_at_start": 0, "phases": run(hw, a, print), "errors": [], "problems": []}
+        kernel += " (dry run)"
+    else:
+        bat = battery()
+        bad = []
+        if "GA605" not in (rd("/sys/class/dmi/id/product_name", "") + rd("/sys/class/dmi/id/board_name", "")):
+            bad.append("not a GA605 (the G16)")
+        if rd(PARAM) not in ("Y", "N"):
+            bad.append(f"no {PARAM}: boot a kernel with patch 9901 (7.2.8-9.106 or later)")
+        if not bat or rd(bat + "/status") != "Discharging":
+            bad.append("not on battery: unplug the charger")
+        sig = hypr_instance()
+        if not sig:
+            bad.append("no running Hyprland found (HYPRLAND_INSTANCE_SIGNATURE)")
+        if bad:
+            print("dcn35-s0i2-ab: not starting, nothing was changed:\n  - " + "\n  - ".join(bad), file=sys.stderr)
+            return 1
+        state = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                             "omarchy-asus-g16-test")
+        os.makedirs(state, exist_ok=True)
+        out = tempfile.mkdtemp(prefix="dcn35-s0i2-", dir=state)
+        args = [sys.executable, "-I", SELF, "--stage", "root", "--out", out, "--hypr", sig,
+                "--rounds", str(a.rounds), "--measure", str(a.measure)]
+        why = (f"G16 display idle A/B (#353): switch amdgpu.dcn35_s0i2 between 0 and 1 and the screen off and on, "
+               f"about {a.rounds * 4 * (a.measure + 10) // 60 + 1} minutes; the parameter goes back to its value now")
+        if os.environ.get("G16_POLKIT_REASON"):
+            cmd = [os.environ["G16_POLKIT_REASON"], "run", why, "--", "pkexec", *args]
+        elif os.environ.get("G16_ROOT") == "sudo":
+            cmd = ["sudo", *args]
+        else:
+            cmd = ["pkexec", "--disable-internal-agent", *args]
+        print(f"==> {why}\n    hands off the keyboard and the lid until it says done", flush=True)
+        if subprocess.run(cmd).returncode != 0:
+            print("dcn35-s0i2-ab: the root stage failed", file=sys.stderr)
+            return 1
+        try:
+            with open(os.path.join(out, "results.json")) as f:
+                res = normalize(json.load(f))
+        except (OSError, ValueError):
+            print("dcn35-s0i2-ab: no results from the root stage", file=sys.stderr)
+            return 1
+    text, v = report(res, kernel, a)
+    path = os.path.expanduser(f"~/omarchy-asus-g16-dcn35-s0i2-{os.uname().release}-{time.strftime('%Y%m%d-%H%M')}.md")
+    if a.dry_run:
+        path = os.path.join(tempfile.gettempdir(), os.path.basename(path))
+    with open(path, "w") as f:
+        f.write(text)
+    print(f"\n{text}\n==> {v}; report: {path}")
+    if a.post and not a.dry_run:
+        helper = os.path.realpath(os.path.join(KIT, "..", "..", "..", "bin", "issue"))
+        if os.access(helper, os.X_OK):
+            r = subprocess.run([helper, "comment", str(ISSUE), "--agent", "laptop-claude", "--body-file", path])
+            print(f"posted to #{ISSUE}" if r.returncode == 0 else f"not posted (bin/issue refused it); the text is in {path}")
+        else:
+            print(f"not posted: no bin/issue in this checkout; the text is in {path}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="dcn35-s0i2-ab", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--rounds", type=int, default=2)
+    ap.add_argument("--measure", type=int, default=30)
+    ap.add_argument("--post", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--stage", choices=["front", "root"], default="front", help=argparse.SUPPRESS)
+    ap.add_argument("--out", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--hypr", default="", help=argparse.SUPPRESS)
+    a = ap.parse_args()
+    if not 1 <= a.rounds <= 5 or not 10 <= a.measure <= 300:
+        ap.error("--rounds 1-5, --measure 10-300")
+    if a.hypr and not re.match(r"^[A-Za-z0-9_]+$", a.hypr):
+        ap.error("bad --hypr")
+    return stage_root(a) if a.stage == "root" else front(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

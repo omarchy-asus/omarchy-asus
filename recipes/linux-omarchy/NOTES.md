@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.103**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.106**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,10 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.103` (kernel release string becomes `7.2.8-9.103-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.106` (kernel release string becomes `7.2.8-9.106-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
-   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808.
+   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -41,6 +42,7 @@ Compared with upstream, only:
 9. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
    `0808-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
 10. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
+11. `9901-EXPERIMENTAL-...` after 9900 (see "EXPERIMENTAL: 9901" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -317,10 +319,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900 last.
+   9900, then 9901, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -365,6 +367,42 @@ for upstream**.
   against 7.2.8-9 without offsets).
 - Remove it if the battery A/B testing shows no win, or move it to a
   separate `-experimental` kernel package.
+
+## EXPERIMENTAL: 9901 DCN 3.5 S0i2-ready display idle (default off, #353)
+
+`9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch` (ours,
+compile-tested only, applied after 9900). It only touches
+`drivers/gpu/drm/amd/display/dc/clk_mgr/dcn35/dcn35_clk_mgr.c`.
+
+**What.** A new parameter `amdgpu.dcn35_s0i2` (bool, 0644, default 0). When it
+is 1, `dcn35_update_clocks()` (`safe_to_lower`) and `dcn35_set_low_power_state()`
+send `SetDisplayIdleOptimizations` with `df_request_disabled`,
+`phy_ref_clk_off` and `s0i2_rdy` set when the active display count drops to 0,
+before setting `DCN_PWR_STATE_LOW_POWER`. That is what DCN 3.1/3.14/3.15/3.16
+do in the same places, and DCN 4.2 does it in its `set_low_power_state`. The
+existing path back to mission mode sends 0, so leaving low power clears them.
+
+**Why.** Stock DCN 3.5 sets `DCN_PWR_STATE_LOW_POWER` without sending anything,
+and `dcn35_smu_enable_phy_refclk_pwrdwn()` has no caller, so the SMU never
+hears that the display is idle. On the G16 the `amd_pmc` idlemask bits 5
+(display idle) and 20 (IPS2, which needs bit 5) stay not idle even with the
+screen off (#249). Mainline master is unchanged (checked 2026-10-25).
+
+**Default behaviour.** None: with the parameter at 0 the driver takes the stock
+path. The parameter is read on every transition, so a write takes effect the
+next time the displays go off (turn the screen on and off again after
+changing it). Nothing in this repo sets it.
+
+**Test** (on the G16, booted on this kernel, on battery):
+`g16-test/dcn35-s0i2-ab` runs the one-boot A/B: each phase writes the parameter, turns the
+screen off for 30 s, samples the idlemask at 10 Hz and the socket and battery
+power, then turns the screen back on and checks the journal for amdgpu or DMUB
+errors. Pass: with 1, bit 5 (ideally bit 20 too) reads idle with the screen off
+and socket power drops; the panel comes back; the journal is clean.
+
+**Upstream.** Not submitted (target: amd-gfx), drafted after the G16 numbers.
+**Remove** if the A/B shows no effect or a wake problem, or once upstream sends
+the flags itself.
 
 ## 0810: panel_power_savings applies when written (#172)
 
