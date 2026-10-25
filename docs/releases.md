@@ -1,17 +1,18 @@
 # Releases: keeping the channels current
 
-Each channel is kept current with upstream once a day by Steward's
-Rebase onto upstream workflow, scheduled once per channel:
+The RC channel is kept current with upstream once a day by Steward's Rebase onto upstream
+workflow, on one schedule: **RC** from `main`, the channel's trunk, built against Omarchy rc in
+its own chroot and published to the `rc-x86_64` release.
 
-- **Quattro**: `main`, built against Omarchy stable, published to the `x86_64` release.
-- **RC**: `next/omarchy-4.5`, built against Omarchy rc in its own chroot, published to the
-  `rc-x86_64` release.
+**Quattro is frozen** (#309) on what `x86_64` serves until the Omarchy 4.5 stable switch. Its
+schedule is disabled: nothing is rebuilt or published to it, and the build and publish scripts
+refuse the quattro channel unless `OMARCHY_ASUS_ALLOW_QUATTRO=1` (`bin/sync-release --dry-run`
+still reads it). It keeps serving its current packages, never stock over our patch.
 
-**Moving to one trunk (#309):** `main` is now the RC channel's trunk, so the RC run builds from
-`main`. Quattro is frozen on what it serves until the Omarchy 4.5 stable switch: nothing is
-rebuilt or published to `x86_64`, and the build and publish scripts refuse the quattro channel
-unless `OMARCHY_ASUS_ALLOW_QUATTRO=1` (`bin/sync-release --dry-run` still reads it). The rest of
-this page still describes the two-branch layout until it is rewritten.
+**At the 4.5 stable switch**, when Omarchy ships 4.5 to stable and our Quattro channel moves with
+it, Quattro picks up the trunk: rc-built packages are promoted to stable as the exact same files
+(one filename, one set of bytes), after a G16 test for the kernel and NVIDIA. That promotion step
+is not built yet; #309 has the plan.
 
 On each channel, Arch packages come through that channel's Omarchy mirror, and `linux-omarchy`
 comes from its `[omarchy]`.
@@ -62,24 +63,22 @@ recipe is rebased. The day's run raises it as attention (`dep-mismatch`).
 
 ## Release channels
 
-| | Quattro | RC |
+| | RC | Quattro |
 |---|---|---|
-| branch | `main` | `next/omarchy-4.5` |
-| upstream dbs (`bin/check-upstream`) | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` |
-| chroot | `/var/lib/omarchy-asus/chroot` (`build/pacman.conf`) | `/var/lib/omarchy-asus/chroot-rc` (`build/pacman-rc.conf`) |
-| stage dir, local repo | `stage`, `repo/x86_64` | `stage-rc`, `repo/rc-x86_64` |
-| release | `x86_64` | `rc-x86_64` |
-| state | the data dir | `channel-rc/` of the data dir |
+| branch | `main` (the trunk) | none: frozen until the 4.5 stable switch (#309) |
+| upstream dbs (`bin/check-upstream`) | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` |
+| chroot | `/var/lib/omarchy-asus/chroot-rc` (`build/pacman-rc.conf`) | `/var/lib/omarchy-asus/chroot` (`build/pacman.conf`) |
+| stage dir, local repo | `stage-rc`, `repo/rc-x86_64` | `stage`, `repo/x86_64` |
+| release | `rc-x86_64` | `x86_64` |
+| state | `channel-rc/` of the data dir | the data dir |
 
 Both channels have the same gates: holds (`recipes/<r>/HOLD`), signing and signature checks,
 checksums, the personal-information scan, release cohorts, and no regression.
 
-- **The release tooling comes from `main`.** `bin/`, `ci/`, `build/`, `.github/`, `tests/` and the
-  build docs on `next/omarchy-4.5` must be `main`'s (`ci/tooling-sync list`; the G16 kit's test
-  and `bin/g16-check` stay per channel). When `main` moves, a "Tooling from main" PR into
-  `next/omarchy-4.5` (made with `ci/tooling-sync apply origin/main`) brings the RC branch along.
-  On RC PRs the lint fails only tooling the PR itself changes away from `main`, and warns while
-  the branch lags behind it.
+- **The release tooling comes from `main`.** `main` carries the recipes, the tests and all the
+  tooling (`bin/`, `ci/`, `build/`, `.github/`, `tests/`), so a change to any of them is one PR
+  into `main`; there is no per-branch copy to keep in step. `tests/channel/` holds `main`'s
+  recipe tests and runs in the lint with the rest.
 - **Each chroot carries our packager** (`PACKAGER="omarchy-asus"` in
   `/etc/makepkg.conf.d/packager.conf`). `bin/mkchroot [--channel rc]` makes or updates a chroot
   and writes it; rerun it on an older chroot.

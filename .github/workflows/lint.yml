@@ -24,27 +24,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The RC branch's tooling must be main's, which both channels run (ci/tooling-sync):
-      # a PR to it that changes bin/, ci/, the workflows... fails here, saying what to do.
-      - name: Tooling matches main (RC branch only)
-        env:
-          BRANCH: ${{ github.base_ref || github.ref_name }}
-          GH_TOKEN: ${{ github.token }} # ci/channel: a stacked PR's base, by compare API
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          # main is the RC trunk (#309): only next/omarchy-4.5 and PRs stacked on it compare
-          on=$(ci/channel --base "$BRANCH")
-          if [[ $on != next/omarchy-4.5 ]]; then echo "$BRANCH is not the RC branch: nothing to compare"; exit 0; fi
-          git fetch --no-tags --depth=1 origin main
-          main=$(git rev-parse FETCH_HEAD)
-          # a PR fails only on tooling it changes; the branch lagging behind main is a warning
-          if [[ -n $BASE_SHA ]]; then
-            git fetch --no-tags --depth=1 origin "$BASE_SHA"
-            ci/tooling-sync check "$main" --base "$BASE_SHA"
-          else
-            ci/tooling-sync check "$main"
-          fi
       - name: shellcheck, bash -n, py_compile
         run: |
           shellcheck --version | sed -n 2p
@@ -68,7 +47,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libarchive-tools
       # Offline tests: tests/test_*.py (python unittest, e.g. bin/issue's),
       # tests/ci/*.sh (hermetic shell tests opt in by living there) and tests/channel/*.sh
-      # (the same, for one channel's recipes: ci/tooling-sync leaves them per branch).
+      # (main's recipe tests).
       - name: Offline tests
         run: |
           shopt -s nullglob
@@ -88,7 +67,6 @@ jobs:
       - name: makepkg --printsrcinfo, namcap and the channel's pkgrel range (archlinux container)
         env:
           BRANCH: ${{ github.base_ref || github.ref_name }}
-          GH_TOKEN: ${{ github.token }} # ci/channel: a stacked PR's base, by compare API
         run: |
           set -euo pipefail
           channel=$(ci/channel "$BRANCH")
