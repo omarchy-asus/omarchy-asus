@@ -236,7 +236,7 @@ Where our fixes are headed (every carried change and its upstream state:
 - `bin/auto-update-state`: plans what the daily rebase does per recipe (rebase, build,
   unpublish, attention) from `bin/check-upstream`'s output.
 - [docs/releases.md](docs/releases.md): how the channels are kept current and published.
-- [docs/status.md](docs/status.md): what each release serves now, the open work, and what waits on the maintainer.
+- [docs/status.md](docs/status.md): the open work and what waits on the maintainer.
 - `recipes/omarchy-asus-g16-apply/`: the user-run command for the G16 fixes no package can
   ship (they live in your config or `/etc`); `--check` is read-only.
 - `keys/`: the repo signing key.
