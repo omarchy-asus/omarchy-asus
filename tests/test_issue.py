@@ -8,6 +8,7 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -136,6 +137,29 @@ class ConcurrentCache(unittest.TestCase):
                 self.assertEqual(len(data), 300)
                 self.assertEqual({e["writer"] for e in data} in ({1}, {2}), True)
                 self.assertEqual(sorted(os.listdir(cache_dir)), ["o__r.issues.json"])
+
+
+class Templates(unittest.TestCase):
+    """Issues are for work; carried changes are recorded in docs/deltas.md, not in an issue."""
+
+    def run_cli(self, *argv):
+        return subprocess.run([sys.executable, "-I", ISSUE, *argv], capture_output=True, text=True)
+
+    def test_default_is_bug(self):
+        r = self.run_cli("template")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, issue.TEMPLATES["bug"])
+
+    def test_bug_has_every_required_section(self):
+        self.assertEqual(issue.missing_sections(issue.TEMPLATES["bug"]), [])
+
+    def test_carried_change_templates_point_at_the_doc(self):
+        self.assertEqual(sorted(issue.TEMPLATES), ["bug"])
+        for kind in ("delta", "upstream-report"):
+            r = self.run_cli("template", kind)
+            self.assertEqual(r.returncode, 1)
+            self.assertEqual(r.stdout, "")
+            self.assertIn("docs/deltas.md", r.stderr)
 
 
 if __name__ == "__main__":

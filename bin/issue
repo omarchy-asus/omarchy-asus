@@ -10,7 +10,10 @@ checked against the existing ones first and scanned for personal information.
                  [--agent NAME] [--force] [--dry-run]
   bin/issue comment N (--body-file F | --body B) [--agent NAME] [--dry-run]
   bin/issue labels
-  bin/issue template [delta|bug|upstream-report]
+  bin/issue template [bug]
+
+Issues are for work: bugs, experiments and tasks. A change we carry is recorded in
+docs/deltas.md, not in an issue, and so is its upstream report draft (AGENTS.md).
 
 The issue and label lists are fetched with one gh call each and cached for
 five minutes under ~/.local/share/omarchy-asus/cache (--refresh forces a new
@@ -63,18 +66,6 @@ REQUIRED_SECTIONS = [
 ]
 
 TEMPLATES = {
-    "delta": """## What it fixes
-<one paragraph: the symptom on the G16 and what the change does>
-
-## Evidence / How to test
-<commands, journal excerpts (scrubbed), before/after>
-
-## Upstream status
-<upstream PR/issue number and state, or "not submitted" and why>
-
-## Where it lives
-<package + recipe path, e.g. recipes/linux-omarchy/0568-....patch; PR/commit in this repo>
-""",
     "bug": """## What happened
 <what you saw, what you expected; package versions from `pacman -Q`>
 
@@ -83,18 +74,6 @@ TEMPLATES = {
 
 ## Upstream status
 <is this ours, or an upstream bug? link upstream issue numbers if any>
-""",
-    "upstream-report": """## What happened
-<the upstream bug, in upstream's terms>
-
-## Evidence / How to test
-<reproducer that does not depend on our patches>
-
-## Upstream status
-<target project and tracker; NOT filed yet - a human decides and files it>
-
-## Draft report
-<the text to post upstream>
 """,
 }
 
@@ -115,8 +94,8 @@ def die(msg, code=1):
 def check_repo(repo):
     if repo != DEFAULT_REPO:
         die(f"refusing to touch {repo}: this helper only works on {DEFAULT_REPO}. "
-            "Never file on upstream projects; propose the upstream report in an "
-            "issue here instead (bin/issue template upstream-report).")
+            "Never file on upstream projects; draft the upstream report here instead: "
+            "in the change's docs/deltas.md entry when we carry it, else in the bug's issue.")
 
 
 def gh(args, input_text=None):
@@ -452,7 +431,15 @@ def cmd_labels(args):
         print(f"{l['name']:<28} {l.get('description') or ''}")
 
 
+# Kinds that no longer have an issue template: carried changes are recorded in docs/deltas.md.
+RETIRED_TEMPLATES = ("delta", "upstream-report")
+
+
 def cmd_template(args):
+    if args.kind in RETIRED_TEMPLATES:
+        die(f"no '{args.kind}' template: a carried change, and its upstream report draft, get an "
+            "entry in docs/deltas.md in the pull request that carries it, not an issue "
+            "(AGENTS.md, Carried changes). Issues are for work: `bin/issue template bug`.")
     sys.stdout.write(TEMPLATES[args.kind])
 
 
@@ -463,7 +450,7 @@ def cmd_file(args):
     miss = missing_sections(body)
     if miss:
         die("body is missing section(s): " + "; ".join(miss) + ". Start from "
-            "`bin/issue template delta|bug|upstream-report` (sections are markdown "
+            "`bin/issue template bug` (sections are markdown "
             "headings, e.g. '## Upstream status').")
 
     known = {l["name"] for l in get_labels(args.repo, args.refresh)}
@@ -580,7 +567,8 @@ def main():
     l.set_defaults(fn=cmd_labels)
 
     t = sub.add_parser("template", help="print a body skeleton")
-    t.add_argument("kind", nargs="?", default="delta", choices=sorted(TEMPLATES))
+    t.add_argument("kind", nargs="?", default="bug",
+                   choices=sorted(TEMPLATES) + list(RETIRED_TEMPLATES))
     t.set_defaults(fn=cmd_template, repo=DEFAULT_REPO)
 
     args = p.parse_args()

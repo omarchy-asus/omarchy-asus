@@ -205,7 +205,7 @@ a lone member never publishes next to a partner at another version.
 
 ## Recipe deltas
 
-`recipes/<r>/DELTA` declares how a recipe differs from upstream, so a rebase is mechanical. `bin/rebase-recipe --help` documents the format. There are three shapes today:
+`recipes/<r>/DELTA` declares how a recipe differs from upstream, so a rebase is mechanical. `bin/rebase-recipe --help` documents the format. Why each change is carried, how to test it and when to drop it is in [deltas.md](deltas.md), one entry per change; the upstream pull requests in `recipes/<r>/UPSTREAM_PRS` are what the daily `bin/check-upstream` watches. There are three shapes today:
 
 - `hyprland`: Arch's PKGBUILD plus a patch appended to `prepare()` (`patch <file> prepare`).
 - `linux-omarchy`: upstream's PKGBUILD. `prepare()` applies every `*.patch` in `source=()` order, so the delta is where each patch goes (`patch <file> after 0567-*`, `patch <file> end`).

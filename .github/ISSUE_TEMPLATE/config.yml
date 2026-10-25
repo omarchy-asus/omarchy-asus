@@ -3,3 +3,6 @@ contact_links:
   - name: Agents - file with bin/issue
     url: https://github.com/omarchy-asus/omarchy-asus/blob/main/AGENTS.md
     about: Agents should use bin/issue (duplicate check + PII scan) instead of this form.
+  - name: Changes we carry
+    url: https://github.com/omarchy-asus/omarchy-asus/blob/main/docs/deltas.md
+    about: Every patch and package we carry, its upstream state and when it drops. Issues are for bugs and work.

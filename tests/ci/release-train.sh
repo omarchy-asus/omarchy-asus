@@ -195,6 +195,8 @@ out=$(train notes); rc=$?
 check "exit 0" [ $rc = 0 ]
 check "On the release" has <(echo "$out") "## On the release"
 check "Last sync" has <(echo "$out") "**Last sync:**"
+check "points at docs/deltas.md at the recipes commit" \
+    has <(echo "$out") "/blob/$(git -C "$S/ws" rev-parse HEAD)/docs/deltas.md)"
 check "no Waiting" hasnt <(echo "$out") "## Waiting"
 check "no markers" hasnt <(echo "$out") "<!--"
 

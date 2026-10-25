@@ -42,11 +42,15 @@ Things that already work on your model are worth reporting too. They tell us wha
    conventions in `omarchy-asus/omarchy-pkgs`.
 2. **Packaged here when it has to be.** Kernel, driver and compositor fixes ship as patched
    builds from `recipes/` in this repo. Versions are upstream's plus `.1`.
-3. **Every patch names its upstream.** Add the pull request, issue or mailing-list
-   submission to the recipe's `NOTES.md` (and `UPSTREAM_PRS` for GitHub pull requests). If
-   there is no upstream path yet, say why.
+3. **Every patch names its upstream.** The pull request that adds a patch adds its entry to
+   [docs/deltas.md](docs/deltas.md), the record of every change we carry (what it fixes, how
+   to test it, its upstream state, when to drop it), and updates the recipe's `DELTA` and
+   `NOTES.md`. Name the upstream pull request, issue or mailing-list submission there (and in
+   `UPSTREAM_PRS` for GitHub pull requests, which the daily check watches). If there is no
+   upstream path yet, say why. A carried change gets no issue of its own; issues are for bugs
+   and work.
 4. **The upstream pull request is the goal.** A fix that only lives here is unfinished. When
-   upstream releases it, we drop ours.
+   upstream releases it, we drop ours and move its docs/deltas.md entry to "Dropped".
 
 ## Pull requests
 

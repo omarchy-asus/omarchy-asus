@@ -183,6 +183,10 @@ def render(env, served, recipes, errors, hold, withheld, ws_info, now=None):
     by_name = {n: (d, v) for d, n, v in recipes}
     commits = ws_info.get("commits", {})
     lines += ["## On the release", ""]
+    # What each package carries over upstream lives in docs/deltas.md, at the recipes commit.
+    lines += [f"What each package carries over upstream, its upstream state and when it drops: "
+              f"[docs/deltas.md](https://github.com/{env['GH_REPO']}/blob/{head or env['GH_BRANCH']}"
+              "/docs/deltas.md).", ""]
     if served is None:
         lines += ["The release has no db yet.", ""]
     elif not served:

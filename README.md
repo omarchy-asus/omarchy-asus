@@ -55,7 +55,8 @@ The signed `[omarchy-asus]` repo, served from the
 | `omarchy-asus-g16-apply` | 0.1.0-7 (main: 0.1.0-8) | A command you run yourself. It reports every known G16 fix with `--check` and applies the ones that live in your own config or `/etc` | Local tool ([notes](recipes/omarchy-asus-g16-apply/README.md)) |
 
 Versions are what the release serves now. When main gets ahead, the daily rebase onto
-upstream publishes the new build.
+upstream publishes the new build. Every change we carry, with its upstream state and when it
+drops, is listed in [docs/deltas.md](docs/deltas.md).
 
 On a fresh G16, the patched `omarchy` and `omarchy-settings` (#58) apply the G16 fixes that
 live in your own config or `/etc` (iGPU video decode, HDMI cursor, rtkit, asusd) through their
@@ -169,7 +170,8 @@ helps. Keep pull requests small, test them on real hardware, and explain the bug
 
 ## Upstream
 
-Where our fixes are headed:
+Where our fixes are headed (every carried change and its upstream state:
+[docs/deltas.md](docs/deltas.md)):
 
 - **Omarchy:** [#15667](https://github.com/omacom/omarchy/pull/15667) stop asusd switching
   the power profile and EPP on ROG laptops,
@@ -197,6 +199,8 @@ Where our fixes are headed:
 - `bin/omarchy-asus-setup`: the one-step setup a user runs on a G16. See LAPTOP-SETUP.md.
 - `recipes/*/UPSTREAM_PRS`: upstream pull requests a recipe carries; `bin/check-upstream`
   reports their state.
+- `docs/deltas.md`: the record of every change we carry (one entry each: what it fixes, how
+  to test it, upstream state, when to drop it). Carried changes have no issue of their own.
 - `build/pacman.conf`: package sources for the build chroot (the Omarchy stable snapshot plus
   `[omarchy]`); `build/pacman-rc.conf` is the RC channel's (Omarchy rc). `bin/env.sh` maps each
   channel to its chroot, stage dir, local repo and release.
