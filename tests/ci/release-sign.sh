@@ -12,10 +12,12 @@
 #   3. the jobs: a failed build job, a build job missing, a failed attest job
 #   4. the artifacts: a digest mismatch (the artifact, a file), an extra file, a missing file,
 #      a path component, a non-package name, an artifact for another channel, an expired one,
-#      an artifact from another run, a file in two artifacts, a malformed SHA256SUMS
+#      an artifact from another run, a file in two artifacts, two artifacts with one name, a
+#      malformed SHA256SUMS
 #   5. the attestations: none, one from another run, workflow, commit or file
 #   6. passing: --dry-run stages nothing; a real run hands bin/publish --channel rc exactly
-#      the manifests' files, from the stage dir, byte for byte
+#      the manifests' files, from the stage dir, byte for byte; so does a run with a single
+#      artifact (each artifact is read into its own directory, whatever their number)
 # Usage: tests/ci/release-sign.sh [keep]   (keep: leave the temp dir for inspection)
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -257,6 +259,8 @@ fixture; edit artifacts '.total_count = 5'
 check refused "an artifact list shorter than its count" --channel rc "$RUN"
 fixture; echo '{"total_count": 0, "artifacts": []}' >"$FX/artifacts.json"
 check refused "no artifacts" --channel rc "$RUN"
+fixture; add_artifact 103 release-rc-foo bar
+check refused "two artifacts with one name" --channel rc "$RUN"
 
 echo "== 5. the attestations"
 fixture; rm "$FX/att/foo-docs-1.0-1.101-any.pkg.tar.zst.json"
@@ -296,6 +300,13 @@ wsums=$(for f in $ALL; do r=${f%%-*}; echo "$(sum "$P/$r/$f")  $OMARCHY_ASUS_DAT
     { echo "FAIL: the staged files differ"; fail=1; }
 [[ $(ls -A "$OMARCHY_ASUS_DATA/stage-rc" | sort | tr '\n' ' ') == "$ALL " ]] &&
     echo "ok: nothing else in the stage dir" || { echo "FAIL: stage dir:"; ls -A "$OMARCHY_ASUS_DATA/stage-rc"; fail=1; }
+# a run with a single artifact (the layout must not depend on how many there are)
+fixture; edit artifacts '.artifacts = [.artifacts[] | select(.name == "release-rc-bar")] | .total_count = 1'
+check ok "a run with a single artifact" --channel rc "$RUN"
+[[ $(tail -n +3 "$S/published" 2>/dev/null) == "$OMARCHY_ASUS_DATA/stage-rc/bar-2-101-any.pkg.tar.zst" &&
+    $(cut -d' ' -f1 "$S/published.sums" 2>/dev/null) == "$(sum "$P/bar/bar-2-101-any.pkg.tar.zst")" ]] &&
+    echo "ok: a single artifact: bin/publish got exactly its file, byte for byte" ||
+    { echo "FAIL: a single artifact: bin/publish got:"; cat "$S/published" 2>/dev/null; fail=1; }
 # a file already staged with other bytes is never replaced
 fixture; mkdir -p "$OMARCHY_ASUS_DATA/stage-rc"; echo old >"$OMARCHY_ASUS_DATA/stage-rc/bar-2-101-any.pkg.tar.zst"
 sign --channel rc "$RUN"; rc=$?

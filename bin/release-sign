@@ -131,10 +131,13 @@ job_ok attest
 job_ok result
 
 n_art=$(jq -er 'length' <<<"$artifacts") || die "cannot count the run's artifacts"
+# each artifact is taken by its name, so a name must be unique in the run
+jq -e '[.[].name] | length == (unique | length)' <<<"$artifacts" >/dev/null ||
+    die "the run has two artifacts with one name"
 ((n_art > 0)) || die "the run has no artifacts"
 NAME_RE='^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*\.pkg\.tar\.zst$'
 mkdir -m 700 "$T/zip" "$T/files" "$T/list"
-declare -A seen=() sums=()
+declare -A seen=() sums=() path=()
 files=()
 for ((i = 0; i < n_art; i++)); do
     a=$(jq -ec ".[$i] | objects" <<<"$artifacts") || die "the run's artifact list is malformed"
@@ -153,6 +156,11 @@ for ((i = 0; i < n_art; i++)); do
     digest=${BASH_REMATCH[1]}
     job_ok "build ($recipe)"
 
+    # downloaded and read one artifact at a time, each into its own directory, so the layout
+    # never depends on how many artifacts the run has. The zip itself, not gh run download:
+    # its SHA-256 is what GitHub recorded as the artifact's digest.
+    d=$T/files/$name
+    mkdir -m 700 "$d"
     z=$T/zip/$id.zip
     gh api "repos/$GH_REPO/actions/artifacts/$id/zip" >"$z" 2>"$T/gh.err" ||
         die "downloading artifact $name failed: $(tr '\n' ' ' <"$T/gh.err")"
@@ -188,8 +196,9 @@ for ((i = 0; i < n_art; i++)); do
     [[ $(grep -vx SHA256SUMS "$entries" | sort) == $(sort "$T/list/$id.names") ]] ||
         die "artifact $name's files are not exactly the ones its SHA256SUMS lists"
     while IFS= read -r f; do
-        bsdtar -xOf "$z" "$f" >"$T/files/$f" 2>/dev/null || die "cannot read $f from artifact $name"
-        got=$(sha256sum <"$T/files/$f" | cut -d' ' -f1)
+        bsdtar -xOf "$z" "$f" >"$d/$f" 2>/dev/null || die "cannot read $f from artifact $name"
+        path[$f]=$d/$f
+        got=$(sha256sum <"$d/$f" | cut -d' ' -f1)
         [[ $got == "${sums[$f]}" ]] || die "$f's SHA-256 is $got, its SHA256SUMS says ${sums[$f]}"
         files+=("$f")
     done <"$T/list/$id.names"
@@ -198,7 +207,7 @@ done
 
 # --- attestations: one by this run's release workflow for every file
 for f in "${files[@]}"; do
-    gh attestation verify "$T/files/$f" --repo "$GH_REPO" --signer-workflow "$GH_REPO/$WORKFLOW" \
+    gh attestation verify "${path[$f]}" --repo "$GH_REPO" --signer-workflow "$GH_REPO/$WORKFLOW" \
         --source-ref refs/heads/main --source-digest "$head_sha" --signer-digest "$head_sha" \
         --format json >"$T/att.json" 2>"$T/gh.err" ||
         die "no attestation for $f verifies: $(tr '\n' ' ' <"$T/gh.err")"
@@ -230,7 +239,7 @@ for f in "${files[@]}"; do
         [[ -f $dst && ! -L $dst && $(sha256sum <"$dst" | cut -d' ' -f1) == "${sums[$f]}" ]] ||
             die "$dst already exists with other bytes"
     else
-        cp -- "$T/files/$f" "$STAGE_DIR/.$f.release-sign"
+        cp -- "${path[$f]}" "$STAGE_DIR/.$f.release-sign"
         mv -- "$STAGE_DIR/.$f.release-sign" "$dst"
     fi
     [[ $(sha256sum <"$dst" | cut -d' ' -f1) == "${sums[$f]}" ]] || die "$dst changed while it was staged"

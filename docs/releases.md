@@ -184,8 +184,10 @@ error, a missing or malformed field, no attestation) is a refusal.
 - **Jobs:** `attest`, `result` and the `build (<recipe>)` job of every artifact it uses
   concluded `success` (latest attempt).
 - **Artifacts:** every artifact of the run is `release-rc-<recipe>` (any other name, another
-  channel's included, is refused), not expired, and from this run, commit and repository. The
-  downloaded zip's SHA-256 is the digest GitHub recorded. Its entries are regular files with
+  channel's included, is refused), its name unique in the run, not expired, and from this run,
+  commit and repository. Each is downloaded on its own (the artifact's zip, not
+  `gh run download`) and read into its own directory, so the layout never depends on how many
+  artifacts the run has. The zip's SHA-256 is the digest GitHub recorded. Its entries are regular files with
   plain names (no directories, links or path components): `SHA256SUMS` and exactly the
   `*.pkg.tar.zst` files it lists, no more, no fewer, each with the SHA-256 it lists, and no file
   in two artifacts. `SHA256SUMS` lines are `<sha256>  <name>`, nothing else.
