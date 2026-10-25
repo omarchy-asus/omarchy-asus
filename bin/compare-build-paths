@@ -21,16 +21,18 @@
 # contents. A file whose size differs by more than --size-bytes and --size-percent of the
 # release's size is a difference; below that it is reproducibility noise, counted but not
 # failed. A file whose contents differ is a difference (shown as a diff when both are text),
-# unless it is a compiled file (ELF, a compressed kernel module, the kernel image, Python
-# bytecode: build ID notes and embedded dates change them every build; they are listed) or
-# matches an --allow-content glob. A package only one side has is a difference.
+# unless the two are equal once the bytes every build changes are taken out (normalize, below:
+# ELF build ID notes and debug links, kernel module signatures, .pyc timestamps; they are
+# listed) or it matches an --allow-content glob. A changed instruction or constant in compiled
+# code is a difference. A package only one side has is a difference.
 #
 # Expected to differ, and not compared: builddate, packager and size in .PKGINFO, .BUILDINFO
 # and timestamps.
 #
 # It only reads: the archives with bsdtar, extracted into its private temp dir with bsdtar's
 # safeguards (no absolute paths, no .., nothing written through a link) and without owners or
-# setuid bits; no makepkg, no PKGBUILD, no scriptlet or other file from them is ever run. It
+# setuid bits, and read with zstd/xz/gzip and objcopy (normalize) into it; no makepkg, no
+# PKGBUILD, no scriptlet or other file from them is ever run. It
 # changes nothing, here or on GitHub.
 #
 # Usage: bin/compare-build-paths --channel rc [options] RECIPE RUN_ID
@@ -83,7 +85,7 @@ ART=release-$channel-$recipe
 T=$(mktemp -d "${TMPDIR:-/tmp}/compare-build-paths.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 chmod 700 "$T"
-mkdir -m 700 "$T/new" "$T/old" "$T/list" "$T/a" "$T/b" "$T/x"
+mkdir -m 700 "$T/new" "$T/old" "$T/list" "$T/a" "$T/b" "$T/x" "$T/n"
 
 api() {
     local out
@@ -245,15 +247,37 @@ entries() {
             print line
         }' "$T/mtree" | LC_ALL=C sort >"$3"
 }
-# compiled <path> <release copy> <new copy>: a file whose bytes every build changes (build ID
-# notes, embedded dates): a compressed kernel module, the kernel image, Python bytecode, or an
-# ELF file on both sides (a script in place of a binary is a difference)
-compiled() {
-    case $1 in *.ko.zst|*.ko.xz|*.ko.gz|*.pyc|*/vmlinuz) return 0 ;; esac
-    local f
-    for f in "$2" "$3"; do
-        [[ $(head -c4 "$f" | od -An -tx1 | tr -d ' \n') == 7f454c46 ]] || return 1
-    done
+# normalize <path> <file> <out>: the file with only the bytes every build changes taken out, or
+# fail when it isn't a kind normalized here (the caller then compares the raw bytes):
+#   kernel modules (.ko, .ko.zst/.xz/.gz)  decompressed, the appended module signature (signed
+#            with a key made for each build) cut off, then as an ELF file
+#   ELF      the build ID note (.note.gnu.build-id) and the debug link (.gnu_debuglink, the
+#            separate debug file's name and checksum) removed, with objcopy; the machine code
+#            and data are compared byte for byte
+#   .pyc     the source timestamp in a timestamp-based header (bytes 8 to 11) removed
+# Everything else (the kernel image included) is compared as it is.
+SIG_MAGIC='~Module signature appended~'
+normalize() {
+    local p=$1 in=$2 out=$3 raw=$3.raw n len
+    case $p in
+        *.pyc)
+            [[ $(od -An -tx1 -j4 -N4 "$in" | tr -d ' \n') == 00000000 ]] || return 1
+            { head -c 8 "$in"; tail -c +13 "$in"; } >"$out"
+            return ;;
+        *.ko.zst) zstd -dcq -- "$in" >"$raw" 2>/dev/null || return 1 ;;
+        *.ko.xz) xz -dc -- "$in" >"$raw" 2>/dev/null || return 1 ;;
+        *.ko.gz) gzip -dc -- "$in" >"$raw" 2>/dev/null || return 1 ;;
+        *) cp -- "$in" "$raw" ;;
+    esac
+    if [[ $p == *.ko* && $(tail -c 28 "$raw") == "$SIG_MAGIC" ]]; then
+        # struct module_signature (12 bytes, sig_len big-endian last) precedes the magic
+        n=$(stat -c %s "$raw")
+        len=$(tail -c 32 "$raw" | head -c 4 | od -An -tu1 | awk '{ print ((($1 * 256) + $2) * 256 + $3) * 256 + $4 }')
+        ((n >= 40 + len)) || return 1
+        head -c $((n - 40 - len)) "$raw" >"$raw.unsigned" && mv -- "$raw.unsigned" "$raw"
+    fi
+    [[ $(head -c4 "$raw" | od -An -tx1 | tr -d ' \n') == 7f454c46 ]] || return 1
+    objcopy --remove-section=.note.gnu.build-id --remove-section=.gnu_debuglink "$raw" "$out" 2>/dev/null || return 1
 }
 # text <file>: empty, or no NUL bytes
 text() { [[ ! -s $1 ]] || LC_ALL=C grep -qI . "$1"; }
@@ -295,7 +319,7 @@ for n in "${names[@]}"; do
         rm -f "$T/sizes-flagged"
     fi
     noise=$(cat "$T/noise")
-    # contents of the files both have: only compiled files and the --allow-content paths may differ
+    # contents of the files both have: equal once normalized, or matching --allow-content
     expected=()
     allowed=()
     : >"$T/contents"
@@ -307,16 +331,17 @@ for n in "${names[@]}"; do
             [[ $p == $g ]] && { ok=1; break; }
         done
         if [[ -n $ok ]]; then allowed+=("$p")
-        elif compiled "$p" "$ac" "$bc"; then expected+=("$p")
+        elif normalize "$p" "$ac" "$T/n/a" && normalize "$p" "$bc" "$T/n/b" && cmp -s "$T/n/a" "$T/n/b"; then
+            expected+=("$p")
         elif text "$ac" && text "$bc"; then
             { echo "$p:"; diff -u "$ac" "$bc" | tail -n +3 | head -40 || true; } >>"$T/contents"
         else
-            echo "$p: binary contents differ" >>"$T/contents"
+            echo "$p: binary contents differ (beyond build IDs, module signatures and bytecode timestamps)" >>"$T/contents"
         fi
     done < <(LC_ALL=C join -t $'\t' "$T/a/sums" "$T/b/sums" | awk -F'\t' '$2 != $3')
     if [[ -s $T/contents ]]; then
         fail=1
-        note "    contents differ (files that aren't compiled; - release, + new path):"
+        note "    contents differ (- release, + new path):"
         if ((!full)) && (($(wc -l <"$T/contents") > 100)); then
             head -100 "$T/contents" | sed 's/^/      /' >>"$out"
             note "      ... and $(($(wc -l <"$T/contents") - 100)) more lines (--full prints them all)"
@@ -325,7 +350,7 @@ for n in "${names[@]}"; do
         fi
     fi
     if ((${#expected[@]} || ${#allowed[@]} || noise)); then
-        note "    expected: $noise file(s) differ in size within the threshold; ${#expected[@]} compiled file(s) differ in content:"
+        note "    expected: $noise file(s) differ in size within the threshold; ${#expected[@]} file(s) differ only in build IDs, module signatures or bytecode timestamps:"
         ((${#expected[@]} == 0)) || printf '      %s\n' "${expected[@]:0:20}" >>"$out"
         ((${#expected[@]} <= 20)) || note "      ... and $((${#expected[@]} - 20)) more"
         ((${#allowed[@]} == 0)) || note "    accepted with --allow-content: ${allowed[*]}"
@@ -342,4 +367,4 @@ if ((fail)); then
     echo "compare-build-paths: $recipe DIFFERS between the two paths (above): do not switch it"
     exit 1
 fi
-echo "compare-build-paths: $recipe: the same packages, only expected differences (build date, packager, compiled files, sizes within the threshold)"
+echo "compare-build-paths: $recipe: the same packages, only expected differences (build date, packager, build IDs, module signatures, bytecode timestamps, sizes within the threshold)"

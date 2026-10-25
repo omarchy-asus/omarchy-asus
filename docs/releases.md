@@ -251,15 +251,18 @@ A recipe is listed only after the two paths have been compared for it and match:
    hardlink group, the install scriptlet, file sizes and file contents. A file whose size moved
    by more than 64 bytes and 1% is a difference (`--size-bytes`, `--size-percent`); less is
    reproducibility noise. A file whose contents differ is a difference, shown as a diff when
-   both are text, unless it is compiled (ELF on both sides, a compressed kernel module, the
-   kernel image, Python bytecode: build ID notes and embedded dates change those every build;
-   they are listed). A content difference that has been read and understood (the kernel
-   headers' build timestamp, say) can be accepted with `--allow-content '<glob>'`, named in the
-   switching pull request. Build date, packager and `.BUILDINFO` are expected to differ and
+   both are text, unless the two are equal once the bytes every build changes are taken out:
+   ELF build ID notes and debug links (removed with `objcopy`), the signature appended to a
+   kernel module (signed with a key made for each build; the module is decompressed first),
+   and the source timestamp in a `.pyc` header. Those files are listed. A changed instruction
+   or constant in compiled code, and any change to the kernel image, is a difference. One that
+   has been read and understood (the kernel headers' build timestamp, say) can be accepted with
+   `--allow-content '<glob>'`, named in the switching pull request. Build date, packager and `.BUILDINFO` are expected to differ and
    aren't compared. A package only one side has is a difference. When the release serves another version than the
    run built, it says so first and compares the rest anyway; compare again once both are at the
    same version. It only reads the archives (`bsdtar`, extracted into a private temp dir
-   without owners or setuid bits), never runs anything from them, and changes nothing. Exit 0: only expected differences; 1: differences, printed as a diff
+   without owners or setuid bits; `zstd`/`xz`/`gzip` and `objcopy` for the normalizing), never
+   runs anything from them, and changes nothing. Exit 0: only expected differences; 1: differences, printed as a diff
    (`- release`, `+ new path`); 3: it couldn't compare (the run isn't a successful release
    workflow run on `main`, no such artifact, a digest or signature that doesn't check out).
 3. **Switch it** in a pull request that adds the recipe to `build/release-path.conf` and names the
@@ -268,8 +271,9 @@ A recipe is listed only after the two paths have been compared for it and match:
 
 `tests/ci/compare-build-paths.sh` covers it offline, with small fabricated packages: identical
 builds, a dropped file, a changed dependency, scriptlet or mode, a size beyond the threshold, a
-same-size change to a config file (and accepting it with `--allow-content`), a script in place
-of a compiled file, a hardlink retargeted or turned into a copy, a package on one side only, a
+same-size change to a config file (and accepting it with `--allow-content`), a same-size change
+to compiled code (an ELF file, a kernel module, Python bytecode, each built with `objcopy`), a
+script in place of a compiled file, a hardlink retargeted or turned into a copy, a package on one side only, a
 version mismatch, and the refusals.
 
 ## Reverse-dependency checks

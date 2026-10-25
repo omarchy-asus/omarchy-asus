@@ -4,11 +4,12 @@
 # directory reached through ci/fetch-release's RELEASE override, signed with a throwaway key
 # that stands in for keys/omarchy-asus.asc. The packages are small fabricated ones: the recipe
 # foo builds foo and foo-docs, and the release also serves bar, which is never compared.
-#   1. the same: identical but for build date, packager, contents and a size within the
-#      threshold: exit 0
+#   1. the same: identical but for build date, packager, ELF build IDs (a size within the
+#      threshold), kernel module signatures and bytecode timestamps: exit 0
 #   2. differences, exit 1 with the diff: a dropped file, a changed dependency, a changed
 #      scriptlet, a changed mode, a size beyond the threshold, a same-size change to a config
-#      file (accepted only with --allow-content), a file that is no longer compiled, a hardlink
+#      file (accepted only with --allow-content), a same-size change to compiled code (an ELF
+#      file, a kernel module, Python bytecode), a file that is no longer compiled, a hardlink
 #      to another file, a package only the new path builds, a package only the release serves
 #   3. a version mismatch: said first, and the rest still compared
 #   4. cannot compare, exit 3: the quattro channel, a run off main, a failed run, no artifact
@@ -49,8 +50,32 @@ unset OMARCHY_ASUS_CHANNEL GH_TOKEN
 fail=0
 R=omarchy-asus/omarchy-asus SHA=$(printf 'a%.0s' {1..40})
 
-# elf <size> <source>: an ELF file of that size, the rest from source
-elf() { { printf '\177ELF'; head -c $(($1 - 4)) "$2"; }; }
+# Compiled files, made with objcopy (no compiler): code and code2 are the same size and differ
+# in one byte, standing for a changed instruction.
+mkdir -p "$S/d"
+head -c 4000 /dev/zero >"$S/d/code"
+{ head -c 2000 /dev/zero; printf '\001'; head -c 1999 /dev/zero; } >"$S/d/code2"
+# elf <out> <code> <build ID>: an ELF file holding that code, with a .note.gnu.build-id, mode 755
+elf() {
+    local t=$S/d/elf
+    rm -rf "$t"; mkdir -p "$t"; cp "$2" "$t/code"
+    (cd "$t" && objcopy -I binary -O elf64-x86-64 -B i386:x86-64 code code.o) || exit 1
+    printf '%s' "$3" >"$t/id"
+    objcopy --add-section .note.gnu.build-id="$t/id" "$t/code.o" "$1" || exit 1
+    chmod 755 "$1"
+}
+# module <out.ko.zst> <code> <build ID> <signature>: a compressed kernel module with an
+# appended module signature (struct module_signature: sig_len big-endian last, then the magic)
+module() {
+    local t=$S/d/mod
+    elf "$t" "$2" "$3"
+    { cat "$t"; printf '%s' "$4"; printf '\0\0\0\0\0\0\0\0'
+      printf "\\$(printf %03o 0)\\$(printf %03o 0)\\$(printf %03o 0)\\$(printf %03o ${#4})"
+      printf '~Module signature appended~\n'; } >"$t.ko"
+    zstd -qf "$t.ko" -o "$1"
+}
+# pyc <out> <mtime byte>: timestamp-based Python bytecode (magic, flags 0, mtime, size, code)
+pyc() { { printf '\x61\x0d\x0d\x0a\0\0\0\0'; printf "\\$(printf %03o "$2")\\0\\0\\0"; printf 'size'; cat "$S/d/code"; } >"$1"; }
 # tree <dir> <pkgname> <pkgver>: a package's tree, as the chroot builds it
 tree() {
     local d=$1 n=$2 v=$3
@@ -77,7 +102,10 @@ replaces = old-$n
 backup = etc/$n.conf
 EOF
     printf 'post_install() {\n    echo installed\n}\n' >"$d/.INSTALL"
-    elf 4000 /dev/zero >"$d/usr/bin/$n"
+    mkdir -p "$d/usr/lib/modules/6.0-test" "$d/usr/lib/python3"
+    elf "$d/usr/bin/$n" "$S/d/code" release-build-id-0001
+    module "$d/usr/lib/modules/6.0-test/$n.ko.zst" "$S/d/code" release-module-id-0001 RELEASESIG
+    pyc "$d/usr/lib/python3/$n.pyc" 1
     chmod 755 "$d/usr/bin/$n"
     echo "setting=1" >"$d/etc/$n.conf"
     echo "data" >"$d/usr/share/$n/data"
@@ -125,9 +153,12 @@ artifact() {
 new() {
     rm -rf "$S/new"; mkdir -p "$S/new"
     tree "$S/new/foo" foo "$1"; tree "$S/new/foo-docs" foo-docs "$1"
-    # what every build changes: date, packager, compiled contents, a few bytes of size
+    # what every build changes: date, packager, build IDs (a few bytes of size), module
+    # signatures (made with a key of each build's own), bytecode timestamps
     sed -i 's/^builddate = .*/builddate = 1800000000/; s/^packager = .*/packager = someone else/' "$S"/new/*/.PKGINFO
-    elf 4010 /dev/urandom >"$S/new/foo/usr/bin/foo"
+    elf "$S/new/foo/usr/bin/foo" "$S/d/code" new-path-build-id-00000002
+    module "$S/new/foo/usr/lib/modules/6.0-test/foo.ko.zst" "$S/d/code" new-module-id-2 NEWPATHSIGNATURE
+    pyc "$S/new/foo/usr/lib/python3/foo.pyc" 2
 }
 run_json() {
     jq -n --arg r "$R" --arg sha "$SHA" --arg br "${1:-main}" --arg c "${2:-success}" \
@@ -158,8 +189,9 @@ release foo:1.0-1.101 foo-docs:1.0-1.101
 
 # 1. the same
 new 1.0-1.101; artifact
-check "identical but for date, packager, contents and size noise" 0 "only expected differences" \
-    "1 file(s) differ in size within the threshold" "./usr/bin/foo"
+check "identical but for date, packager, build IDs, module signatures, timestamps" 0 "only expected differences" \
+    "differ only in build IDs, module signatures or bytecode timestamps" "./usr/bin/foo" \
+    "./usr/lib/modules/6.0-test/foo.ko.zst" "./usr/lib/python3/foo.pyc"
 grep -q '^  bar' <<<"$out" && { echo "FAIL: bar, another recipe's package, was compared"; fail=1; }
 
 # 2. differences
@@ -178,8 +210,17 @@ check "a dropped scriptlet" 1 "install scriptlet" "+ (no install scriptlet)"
 new 1.0-1.101; chmod 4755 "$S/new/foo/usr/bin/foo"; artifact
 check "a changed mode" 1 "- ./usr/bin/foo type=file mode=755" "+ ./usr/bin/foo type=file mode=4755"
 
-new 1.0-1.101; elf 9000 /dev/urandom >"$S/new/foo/usr/bin/foo"; artifact
-check "a size beyond the threshold" 1 "file sizes beyond the threshold" "./usr/bin/foo: 4000 -> 9000 bytes (+5000)"
+new 1.0-1.101; head -c 9000 /dev/zero >"$S/d/big"; elf "$S/new/foo/usr/bin/foo" "$S/d/big" release-build-id-0001; artifact
+check "a size beyond the threshold" 1 "file sizes beyond the threshold" "./usr/bin/foo: " "bytes (+5000)"
+
+new 1.0-1.101; elf "$S/new/foo/usr/bin/foo" "$S/d/code2" new-path-build-id-00000002; artifact
+check "a same-size change to compiled code" 1 "./usr/bin/foo: binary contents differ"
+
+new 1.0-1.101; module "$S/new/foo/usr/lib/modules/6.0-test/foo.ko.zst" "$S/d/code2" new-module-id-2 NEWPATHSIGNATURE; artifact
+check "a change to a kernel module's code" 1 "./usr/lib/modules/6.0-test/foo.ko.zst: binary contents differ"
+
+new 1.0-1.101; { head -c 16 "$S/new/foo/usr/lib/python3/foo.pyc"; cat "$S/d/code2"; } >"$S/d/p"; mv "$S/d/p" "$S/new/foo/usr/lib/python3/foo.pyc"; artifact
+check "a change to Python bytecode" 1 "./usr/lib/python3/foo.pyc: binary contents differ"
 
 new 1.0-1.101; echo "setting=0" >"$S/new/foo/etc/foo.conf"; artifact
 check "a same-size change to a config file" 1 "contents differ" "./etc/foo.conf:" "-setting=1" "+setting=0"
