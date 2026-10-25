@@ -290,6 +290,30 @@ version mismatch, and the refusals; and `--served`: a run failing only on alread
 compared (and refused without it), refused with any other check error, a failed build, attest
 or eligibility job, the recipe not built, or a commit not on `main`.
 
+### Retiring the old path: the inventory
+
+Once every recipe has released from the new path on both channels, the old chroot path is removed
+(#258, "Cleanup"), and the first step only lists it. `bin/old-path-inventory` prints, as Markdown,
+everything that path owns, with sizes: each channel's chroot and what was added to it by hand, the
+release ccache and distcc key dir, `bin/build-pkg`'s work dirs, keyrings and logs, every other
+data-dir entry (with the scripts that name it), units that call it and their timers, sudoers and
+cron entries, devtools, the repo's
+old-path files, doc sections, variables, tests and the issues they name (each with what still
+references it), and the two ccaches and two distcc keys. `--helper <ssh target>` also reads the
+helper's `authorized_keys` for the release key's line.
+
+```bash
+sudo BUILD_USER=<build user> bin/old-path-inventory   # as root, so nothing reads "needs root"
+```
+
+It only reads. Its output is meant for posting: home directories print as `~`, the runner's as
+`<runner home>`, and the whole report goes through `bin/sync-release --pii-scan-text` first (an
+inherited `PII_SCAN=off` does not skip it); on a hit it prints nothing and exits 1 (`--local`
+prints it anyway, for reading on the build host). Without root, whatever it cannot read, including
+a path below a directory it cannot search, says "needs root", never "absent".
+`tests/ci/old-path-inventory.sh` covers it offline against a fake system root and repo tree,
+checks that the trees are unchanged afterwards, and that the script holds no destructive command.
+
 ## Reverse-dependency checks
 
 `build/revdeps.conf` maps a kernel recipe to the DKMS packages that must compile against
