@@ -16,9 +16,9 @@
 #                makepkg.conf.d files and distcc/ccache/openssh packages put in it by hand, the
 #                release ccache (CCACHE_HOST_DIR, default $DATA/ccache), the release distcc
 #                key dir (DISTCC_KEY_DIR, default $DATA/distcc), bin/build-pkg's work dirs,
-#                keyrings and logs, the runner's work dirs, $DATA entries no tracked file
-#                names, systemd units, sudoers and cron entries that call the old path, and
-#                devtools
+#                keyrings and logs, the runner's work dirs, every other $DATA entry (with the
+#                scripts that name it), systemd units (and their timers), sudoers and cron
+#                entries that call the old path, and devtools
 #   helper       the release key's line in the distcc account's authorized_keys (--helper)
 #   repo         bin/build-pkg, bin/mkchroot, bin/recipe-sandbox, build/no-ccache.conf,
 #                build/distcc-ssh, the chroot sections of docs/distcc.md, DISTCC_KEY_DIR and
@@ -82,7 +82,7 @@ table() { printf '| Item | Kind | Size | Referenced by / notes |\n|---|---|---|-
 hsize() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "$1 B"; }
 size() {  # size <path>: disk usage; "needs root" for what cannot be read
     local p=$1 out st=0 b
-    [[ -e $p || -L $p ]] || { echo "absent"; return; }
+    if [[ ! -e $p && ! -L $p ]]; then hidden "$p" && echo "needs root" || echo "absent"; return; fi
     out=$(du -s -B1 -- "$p" 2>/dev/null) || st=$?
     b=${out%%[[:space:]]*}
     [[ $b =~ ^[0-9]+$ ]] || { echo "needs root"; return; }
@@ -91,6 +91,19 @@ size() {  # size <path>: disk usage; "needs root" for what cannot be read
     else echo "at least $(hsize "$b") (needs root for the rest)"; fi
 }
 readable_dir() { [[ -d $1 && -r $1 && -x $1 ]]; }
+# hidden <path>: 0 when the path cannot be seen because a dir above it cannot be searched
+# (so "not there" would be a guess); never for root
+hidden() {
+    local p=$1
+    ((is_root)) && return 1
+    [[ -e $p || -L $p ]] && return 1
+    while p=$(dirname "$p"); [[ $p != / && $p != . ]]; do
+        [[ -e $p ]] || continue
+        [[ -d $p && ! -x $p ]] && return 0
+        return 1
+    done
+    return 1
+}
 # refs <fixed string> [path to leave out]: the tracked files that mention it, comma-separated
 refs() {
     local out
@@ -176,7 +189,9 @@ host_section() {
         done
         ((locks)) && row "$(show "$d")/*.lock" "lock files ($locks)" "" "makechrootpkg's"
         local conf=$d/root/etc/makepkg.conf.d f
-        if [[ -d $conf ]]; then
+        if hidden "$conf"; then
+            row "$(show "$conf")" "chroot makepkg config" "needs root" "not read"
+        elif [[ -d $conf ]]; then
             if readable_dir "$conf"; then
                 for f in "$conf"/*; do
                     [[ -e $f ]] || continue
@@ -193,7 +208,9 @@ host_section() {
             fi
         fi
         local db=$d/root/var/lib/pacman/local
-        if [[ -d $db ]]; then
+        if hidden "$db"; then
+            row "$(show "$db")" "chroot package db" "needs root" "not read"
+        elif [[ -d $db ]]; then
             if readable_dir "$db"; then
                 # name, version, size, reason per installed package
                 local name ver sz why
@@ -226,19 +243,27 @@ host_section() {
     fi
 
     # scratch: bin/build-pkg's work dirs, keyrings and logs
-    for e in "$DATA"/work-*; do
-        [[ -e $e ]] || continue
-        row "$(show "$e")" "bin/build-pkg work dir" "$(size "$e")" "left by KEEP_WORK=1 or a build that was killed"
-    done
-    [[ -e $DATA/verify-gnupg ]] &&
-        row "$(show "$DATA/verify-gnupg")" "bin/build-pkg recipe keyrings" "$(size "$DATA/verify-gnupg")" "bin/build-pkg's PGP source checks"
-    local logs=()
-    for e in "$LOG_DIR"/*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].log*; do
-        [[ -f $e ]] && logs+=("$e")
-    done
-    if ((${#logs[@]})); then
-        n=$(du -c -B1 -- "${logs[@]}" 2>/dev/null | tail -n1 | cut -f1)
-        row "$(show "$LOG_DIR")/<recipe>-<date>.log*" "bin/build-pkg logs (${#logs[@]} files)" "$(hsize "${n:-0}")" ""
+    if ! readable_dir "$DATA"; then
+        row "$(show "$DATA")/work-*, verify-gnupg" "bin/build-pkg scratch" "needs root" "not read"
+    else
+        for e in "$DATA"/work-*; do
+            [[ -e $e ]] || continue
+            row "$(show "$e")" "bin/build-pkg work dir" "$(size "$e")" "left by KEEP_WORK=1 or a build that was killed"
+        done
+        [[ -e $DATA/verify-gnupg ]] &&
+            row "$(show "$DATA/verify-gnupg")" "bin/build-pkg recipe keyrings" "$(size "$DATA/verify-gnupg")" "bin/build-pkg's PGP source checks"
+    fi
+    if [[ -e $LOG_DIR ]] && ! readable_dir "$LOG_DIR"; then
+        row "$(show "$LOG_DIR")/<recipe>-<date>.log*" "bin/build-pkg logs" "needs root" "not read"
+    else
+        local logs=()
+        for e in "$LOG_DIR"/*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].log*; do
+            [[ -f $e ]] && logs+=("$e")
+        done
+        if ((${#logs[@]})); then
+            n=$(du -c -B1 -- "${logs[@]}" 2>/dev/null | tail -n1 | cut -f1)
+            row "$(show "$LOG_DIR")/<recipe>-<date>.log*" "bin/build-pkg logs (${#logs[@]} files)" "$(hsize "${n:-0}")" ""
+        fi
     fi
     # the runner's work dirs (the new path's scratch)
     if [[ -n $runner_home ]]; then
@@ -252,41 +277,69 @@ host_section() {
     else
         row "runner work dirs (new path)" "" "" "runner account not configured here (OMARCHY_ASUS_RUNNER_USER or \$DATA/runner-user)"
     fi
-    # $DATA entries no tracked file names: stray test or build output, to look at
-    local known=" work-* verify-gnupg logs ccache distcc "
-    for e in "$DATA"/* "$DATA"/.[!.]*; do
-        [[ -e $e ]] || continue
-        n=${e##*/}
-        [[ $n == work-* || $known == *" $n "* ]] && continue
-        [[ -e $release_cc && $e -ef $release_cc ]] && continue
-        [[ -e $release_key && $e -ef $release_key ]] && continue
-        grep -rqIF --exclude-dir=.git -- "$n" "$WORKSPACE" 2>/dev/null && continue
-        row "$(show "$e")" "not named by any tracked file" "$(size "$e")" "stray test or build output? check before keeping"
-    done
+    # every other $DATA entry, so stray test or build output from either path shows: which
+    # tracked scripts name it is a hint for the review, not proof it is in use
+    if readable_dir "$DATA"; then
+        local known=" verify-gnupg ccache distcc " named
+        for e in "$DATA"/* "$DATA"/.[!.]*; do
+            [[ -e $e || -L $e ]] || continue
+            n=${e##*/}
+            [[ $n == work-* || $known == *" $n "* ]] && continue
+            [[ -e $release_cc && $e -ef $release_cc ]] && continue
+            [[ -e $release_key && $e -ef $release_key ]] && continue
+            named=$(cd "$WORKSPACE" && grep -rlIF -- "$n" bin ci build .github 2>/dev/null | grep -vx bin/old-path-inventory |
+                sort | paste -sd, - | sed 's/,/, /g')
+            row "$(show "$e")" "data dir entry" "$(size "$e")" \
+                "${named:+named by $named}${named:-named by no tracked script: stray test or build output?}"
+        done
+    fi
 
     # units, timers, sudoers and cron entries that call the old path
     local pat='bin/build-pkg|build-pkg |bin/mkchroot|makechrootpkg|mkarchroot'
-    local where=() w hit
+    local where=() w hit hits st any=0 units=() u t
     where=("$SYS/etc/systemd/system" "$SYS/etc/systemd/user")
     for w in "${homes[@]}"; do where+=("$w/.config/systemd/user"); done
-    local any=0
+    # greps <dir or file>: the files under it that call the old path; a row when some cannot be read
+    greps() {
+        st=0; hits=$(grep -rlE -- "$pat" "$1" 2>/dev/null | sort) || st=$?
+        if ((st > 1)); then row "$(show "$1")" "$2" "needs root" "some files could not be read"; any=1; fi
+    }
     for w in "${where[@]}"; do
+        if hidden "$w"; then row "$(show "$w")" "systemd units" "needs root" "not read"; any=1; continue; fi
         [[ -d $w ]] || continue
-        if ! readable_dir "$w"; then row "$(show "$w")" "systemd units" "needs root" ""; any=1; continue; fi
+        if ! readable_dir "$w"; then row "$(show "$w")" "systemd units" "needs root" "not read"; any=1; continue; fi
+        greps "$w" "systemd units"
         while IFS= read -r hit; do
-            row "$(show "$hit")" "systemd unit or timer" "$(size "$hit")" "calls the old path"; any=1
-        done < <(grep -rlE -- "$pat" "$w" 2>/dev/null | sort)
+            [[ -n $hit ]] || continue
+            row "$(show "$hit")" "systemd unit" "$(size "$hit")" "calls the old path"; any=1
+            units+=("${hit##*/}")
+        done <<<"$hits"
+    done
+    # a timer names no command, only its unit: <name>.timer for <name>.service, or Unit=
+    for u in "${units[@]}"; do
+        [[ $u == *.service ]] || continue
+        for w in "${where[@]}"; do
+            readable_dir "$w" || continue
+            while IFS= read -r t; do
+                [[ -n $t ]] || continue
+                row "$(show "$t")" "systemd timer" "$(size "$t")" "starts $u"; any=1
+            done < <({ [[ -f $w/${u%.service}.timer ]] && echo "$w/${u%.service}.timer"
+                grep -rlE --include='*.timer' -- "^[[:space:]]*Unit[[:space:]]*=[[:space:]]*${u//./\\.}[[:space:]]*$" "$w" 2>/dev/null; } | sort -u)
+        done
     done
     for w in "$SYS/etc/sudoers" "$SYS/etc/sudoers.d" "$SYS/etc/cron.d" "$SYS/var/spool/cron"; do
+        if hidden "$w"; then row "$(show "$w")" "sudoers/cron" "needs root" "not read"; any=1; continue; fi
         [[ -e $w ]] || continue
         if [[ ! -r $w ]] || { [[ -d $w ]] && ! readable_dir "$w"; }; then
             row "$(show "$w")" "sudoers/cron" "needs root" "not read"; any=1; continue
         fi
+        greps "$w" "sudoers/cron"
         while IFS= read -r hit; do
+            [[ -n $hit ]] || continue
             # a crontab is named after its user: not printed
-            [[ $w == */var/spool/cron ]] && hit="$(show "$w")/<a crontab>" || hit=$(show "$hit")
-            row "$hit" "sudoers/cron entry" "" "calls the old path"; any=1
-        done < <(grep -rlE -- "$pat" "$w" 2>/dev/null | sort)
+            if [[ $w == */var/spool/cron ]]; then u="$(show "$w")/<a crontab>"; else u=$(show "$hit"); fi
+            row "$u" "sudoers/cron entry" "$(size "$hit")" "calls the old path"; any=1
+        done <<<"$hits"
     done
     ((any)) || row "units, timers, sudoers, cron" "" "" "nothing found that calls the old path"
 
@@ -366,9 +419,9 @@ repo_section() {
         [[ $n == tests/ci/old-path-inventory.sh ]] && continue
         grep -qE -- "$OLD_ONLY_RE" "$f" || continue
         if grep -qE -- "$NEW_RE" "$f"; then
-            row "$n" "test (both paths)" "" "covers the old path and more: edit, don't drop"
+            row "$n" "test (both paths)" "$(size "$f")" "covers the old path and more: edit, don't drop"
         else
-            row "$n" "test (old path only)" "" "$(refs "${n##*/}" "$n")"
+            row "$n" "test (old path only)" "$(size "$f")" "$(refs "${n##*/}" "$n")"
             old_tests+=("$f")
         fi
     done
@@ -409,13 +462,14 @@ dup_section() {
     else
         row "runner ccache" "ccache (runner, new path)" "" "runner account not configured here"
     fi
-    row "$( [[ -n $release_key ]] && show "$release_key" || echo "release distcc key (off)")" "distcc key (release, old path)" "" \
+    row "$( [[ -n $release_key ]] && show "$release_key" || echo "release distcc key (off)")" "distcc key (release, old path)" \
+        "$( [[ -n $release_key ]] && size "$release_key")" \
         "$( [[ -n $release_key ]] && keydesc "$release_key"); goes"
     if [[ -n $runner_home ]]; then
         if [[ -n $runner_env && ! -r $runner_env ]] && ((!is_root)); then
-            row "<runner home>/distcc (as its .env says)" "distcc key (runner, new path)" "" "needs root; stays"
+            row "<runner home>/distcc (as its .env says)" "distcc key (runner, new path)" "needs root" "stays"
         else
-            row "$(show "$runner_key")" "distcc key (runner, new path)" "" "$(keydesc "$runner_key"); stays"
+            row "$(show "$runner_key")" "distcc key (runner, new path)" "$(size "$runner_key")" "$(keydesc "$runner_key"); stays"
         fi
     fi
     echo
@@ -436,7 +490,8 @@ report() {
 out=$(report)
 if ((!local_out)); then
     # the same scan bin/sync-release runs on posted text; it prints only denylist line numbers
-    if ! "$lib/sync-release" --pii-scan-text <(printf '%s\n' "$out") >/dev/null; then
+    # PII_SCAN=on: an inherited PII_SCAN=off must not let it through; only --local skips the scan
+    if ! PII_SCAN=on "$lib/sync-release" --pii-scan-text <(printf '%s\n' "$out") >/dev/null; then
         echo "old-path-inventory: the report failed the PII scan (above); nothing printed. --local prints it here." >&2
         exit 1
     fi

@@ -22,6 +22,9 @@ fail=0
 ok() { echo "ok: $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 has() { if grep -qF -- "$1" <<<"$out"; then ok "${2:-has: $1}"; else bad "${2:-missing: $1}"; fi; }
+# hasre <ERE> [label]: SZ in it stands for a size column, which varies with the filesystem
+SZ='[0-9.]+[KMG]?i?B'
+hasre() { if grep -qE -- "$1" <<<"$out"; then ok "${2:-has: $1}"; else bad "${2:-missing: $1}"; fi; }
 hasnt() { if grep -qiF -- "$1" <<<"$out"; then bad "${2:-unexpected: $1}"; else ok "${2:-not shown: $1}"; fi; }
 
 SYS=$S/sys
@@ -50,6 +53,9 @@ head -c 5000 /dev/zero >"$D/logs/foo-20261001-120000.log"
 : >"$D/logs/other.log"
 printf 'ExecStart=%s/Work/repo/bin/build-pkg recipes/foo\n' "$H" >"$SYS/etc/systemd/system/old-build.service"
 printf 'ExecStart=/usr/bin/true\n' >"$SYS/etc/systemd/system/unrelated.service"
+printf '[Timer]\nOnCalendar=daily\n' >"$SYS/etc/systemd/system/old-build.timer"
+printf '[Timer]\nOnCalendar=weekly\nUnit=old-build.service\n' >"$SYS/etc/systemd/system/weekly-build.timer"
+printf '[Timer]\nOnCalendar=daily\n' >"$SYS/etc/systemd/system/unrelated.timer"
 printf '0 3 * * * %s/Work/repo/bin/build-pkg recipes/foo\n' "$H" >"$SYS/var/spool/cron/$U"
 printf 'OMARCHY_ASUS_CI_CCACHE=%s/ccache\nOMARCHY_ASUS_CI_DISTCC=%s/distcc\n' "$R" "$R" >"$R/actions-runner/.env"
 head -c 30000 /dev/zero >"$R/ccache/blob"
@@ -118,11 +124,13 @@ printf '# test denylist\n%s\nrunnerz\nhelperbox\n' "$U" >"$S/deny"
 snap() { find "$SYS" "$S/ws" -printf '%p %s %T@ %m\n' 2>/dev/null | sort; }
 chmod 000 "$SYS/etc/sudoers.d"
 before=$(snap)
-run() {
+run() {  # run [VAR=value...] [args]: the script in the fake world; VAR=value after the resets
+    local a=()
+    while [[ ${1:-} == [A-Z]*=* ]]; do a+=("$1"); shift; done
     env -u PII_SCAN -u RUNNER_USER -u OMARCHY_ASUS_RUNNER_USER -u BUILD_USER -u CCACHE_HOST_DIR -u DISTCC_KEY_DIR \
         HOME="$H" PATH="$S/stubs:$PATH" PII_DENYLIST="$S/deny" \
         OMARCHY_ASUS_SYSROOT="$SYS" OMARCHY_ASUS_DATA="$D" OMARCHY_ASUS_WORKSPACE="$S/ws" \
-        OMARCHY_ASUS_CHROOT="$C" OMARCHY_ASUS_RUNNER_HOME="$R" "$W/bin/old-path-inventory" "$@"
+        OMARCHY_ASUS_CHROOT="$C" OMARCHY_ASUS_RUNNER_HOME="$R" "${a[@]}" "$W/bin/old-path-inventory" "$@"
 }
 
 echo "== 1. the expected rows"
@@ -149,10 +157,15 @@ has '| ~/.local/share/omarchy-asus/work-foo.AbCd | bin/build-pkg work dir |'
 has '| ~/.local/share/omarchy-asus/verify-gnupg | bin/build-pkg recipe keyrings |'
 has '| ~/.local/share/omarchy-asus/logs/<recipe>-<date>.log* | bin/build-pkg logs (2 files) |'
 has '| <runner home>/actions-runner/_work | runner work dir (new path) |'
-has '| ~/.local/share/omarchy-asus/mystery-dir | not named by any tracked file |'
-has '| /etc/systemd/system/old-build.service | systemd unit or timer |'
+has '| ~/.local/share/omarchy-asus/mystery-dir | data dir entry |' "a stray data-dir entry"
+has 'named by no tracked script: stray test or build output? |' "  ... named by no script"
+hasre "^\\| /etc/systemd/system/old-build\\.service \\| systemd unit \\| $SZ \\| calls the old path \\|$" "the unit, sized"
+has '| /etc/systemd/system/old-build.timer | systemd timer |' "the timer named after the unit"
+has '| /etc/systemd/system/weekly-build.timer | systemd timer |' "a timer with Unit="
+has '| starts old-build.service |'
 hasnt 'unrelated.service'
-has '| /var/spool/cron/<a crontab> | sudoers/cron entry |'
+hasnt 'unrelated.timer'
+hasre "^\\| /var/spool/cron/<a crontab> \\| sudoers/cron entry \\| $SZ \\|" "the crontab, sized"
 if ((EUID)); then has '| /etc/sudoers.d | sudoers/cron | needs root | not read |'; fi
 has '| devtools 1:1.5.3-1 | package | 462.79 KiB | required by: None; repo users besides the old path: bin/revdep-check |'
 if ((keys)); then
@@ -160,8 +173,8 @@ if ((keys)); then
     has '| authorized_keys line |  | stays; present, line 3 |' "the runner key's line on the helper"
     grep -qx 'BatchMode=yes.*helperbox cat .ssh/authorized_keys\|-o BatchMode=yes -o ConnectTimeout=10 -- helperbox cat .ssh/authorized_keys' "$S/ssh.log" &&
         ok "ssh only reads authorized_keys" || bad "ssh ran: $(cat "$S/ssh.log")"
-    has '| ~/.local/share/omarchy-asus/distcc | distcc key (release, old path) |  | key SHA256:'
-    has '| <runner home>/distcc | distcc key (runner, new path) |  | key SHA256:'
+    hasre "^\\| ~/\\.local/share/omarchy-asus/distcc \\| distcc key \\(release, old path\\) \\| $SZ \\| key SHA256:" "the release key dir, sized"
+    hasre "^\\| <runner home>/distcc \\| distcc key \\(runner, new path\\) \\| $SZ \\| key SHA256:" "the runner key dir, sized"
 fi
 has '| bin/build-pkg | file (3 lines) |'
 has '| bin/recipe-sandbox | file (2 lines) |' "recipe-sandbox listed"
@@ -172,8 +185,8 @@ hasnt 'docs/distcc.md: Requirements' "a section without the chroot is left out"
 hasnt 'docs/distcc.md: not a heading' "a code-block comment is no heading"
 has '| DISTCC_KEY_DIR | variable |  | bin/build-pkg |'
 has '| CCACHE_HOST_DIR | variable |  | bin/build-pkg, build/no-ccache.conf |'
-has '| tests/ci/build-pkg-args.sh | test (old path only) |'
-has '| tests/ci/mixed.sh | test (both paths) |'
+hasre "^\\| tests/ci/build-pkg-args\\.sh \\| test \\(old path only\\) \\| $SZ \\|" "an old-path test, sized"
+hasre "^\\| tests/ci/mixed\\.sh \\| test \\(both paths\\) \\| $SZ \\|" "a mixed test, sized"
 hasnt 'tests/ci/unrelated.sh'
 for n in 163 201 237; do has "| #$n | issue the old path names |  | state not looked up |"; done
 hasnt '| #258 |' "#258 itself is not listed"
@@ -191,6 +204,10 @@ grep -qi "$U" "$S/err" && bad "the refusal prints the word" || ok "the refusal d
 out=$(run --offline --local 2>/dev/null); rc=$?
 [[ $rc == 0 ]] && grep -qF "$U-notes" <<<"$out" && ok "--local prints it anyway" || bad "--local: exit $rc"
 rmdir "$D/$U-notes"
+mkdir "$D/$U-notes"
+out=$(run PII_SCAN=off --offline 2>/dev/null); rc=$?
+[[ $rc == 1 && -z $out ]] && ok "an inherited PII_SCAN=off does not skip the scan" || bad "PII_SCAN=off: exit $rc, output ${#out} bytes"
+rmdir "$D/$U-notes"
 out=$(run --bogus 2>/dev/null); rc=$?
 [[ $rc == 2 ]] && ok "unknown argument: exit 2" || bad "unknown argument: exit $rc"
 
@@ -202,5 +219,20 @@ if hits=$(grep -nE -- "$pat" "$W/bin/old-path-inventory"); then bad "destructive
 for w in "pacman -R" "systemctl stop" "systemctl disable" "rm -rf"; do
     grep -qF -- "$w" "$W/bin/old-path-inventory" && bad "contains '$w'" || ok "no '$w'"
 done
+
+echo "== 4. what cannot be read says so"
+if ((EUID)); then
+    chmod 000 "$C/root/etc" "$C/root/var/lib/pacman"
+    mkdir -p "$S/locked/cc" "$SYS/etc/cron.d"; chmod 000 "$S/locked"
+    printf 'secret\n' >"$SYS/etc/cron.d/private"; chmod 000 "$SYS/etc/cron.d/private"
+    out=$(run CCACHE_HOST_DIR="$S/locked/cc" --offline --local 2>/dev/null)
+    has '/root/etc/makepkg.conf.d | chroot makepkg config | needs root | not read |' "the chroot config behind an unreadable dir"
+    has '/root/var/lib/pacman/local | chroot package db | needs root | not read |' "the chroot package db behind an unreadable dir"
+    has '/locked/cc | release ccache | needs root |' "a path behind an unsearchable dir is not 'absent'"
+    has '| /etc/cron.d | sudoers/cron | needs root | some files could not be read |' "an unreadable file in a readable dir"
+    chmod 755 "$C/root/etc" "$C/root/var/lib/pacman" "$S/locked"
+else
+    echo "skip: running as root, everything is readable"
+fi
 
 exit $fail
