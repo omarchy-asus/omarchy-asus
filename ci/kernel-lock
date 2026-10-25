@@ -96,7 +96,15 @@ worker() {
     done
     die "no Runner.Worker above this step (KERNEL_LOCK_WATCH names one in tests)"
 }
-container_exists() { command -v docker >/dev/null && docker container inspect "$1" >/dev/null 2>&1; }
+# container_exists <name>: the container is there, or docker can't say (its daemon is down or
+# doesn't answer); false only when docker confirms there is no such container, so a lock is
+# never let go on a failed look
+container_exists() {
+    local err
+    command -v docker >/dev/null || return 1
+    err=$(docker container inspect "$1" 2>&1 >/dev/null) && return 0
+    ! grep -q 'No such container' <<<"$err"
+}
 
 # _hold queue|lock <kind> <container> <watch>: the background holder
 hold() {
@@ -153,7 +161,7 @@ hold() {
     if [[ $container =~ $CONTAINER_RE ]]; then
         n=0
         while container_exists "$container"; do
-            (( n++ % 60 )) || echo "the job ended with its build container $container still there: removing it, keeping the lock until it is gone"
+            (( n++ % 60 )) || echo "the job ended with its build container $container still there (or docker can't say): removing it, keeping the lock until it is gone"
             docker rm --force "$container" >/dev/null 2>&1 || true
             container_exists "$container" || break
             sleep "$POLL"
@@ -215,7 +223,7 @@ case $cmd in
         # this account's: the other account's docker is out of sight, and its holder covers it)
         prev=$(field "$STATE/prev" container)
         if [[ $prev =~ $CONTAINER_RE && $prev != "$container" ]] && container_exists "$prev"; then
-            say "the previous holder's build container $prev is still there: waiting up to ${CWAIT}s for it to go"
+            say "the previous holder's build container $prev is still there (or docker can't say): waiting up to ${CWAIT}s for it to go"
             waited=0
             while container_exists "$prev" && (( waited < CWAIT )); do sleep 1; waited=$((waited + 1)); done
             if container_exists "$prev"; then
@@ -231,7 +239,7 @@ case $cmd in
         if [[ $c =~ $CONTAINER_RE ]] && container_exists "$c"; then
             say "removing this job's build container $c before letting go"
             docker rm --force "$c" >/dev/null 2>&1 || true
-            container_exists "$c" && die "this job's build container $c is still there: keeping the lock"
+            container_exists "$c" && die "this job's build container $c is still there (or docker can't say): keeping the lock"
         fi
         for what in lock queue; do
             [[ -e $STATE/$what.pid ]] || continue

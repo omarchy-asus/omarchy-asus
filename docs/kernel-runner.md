@@ -97,7 +97,9 @@ ensure, for its own job's container:
   up to 10 minutes for it, then removes it, before it builds. This check only
   sees the new holder's own account's containers: a previous holder of the
   other account is out of its docker's sight, which is why the two above keep
-  the lock rather than leave the container to the next holder.
+  the lock rather than leave the container to the next holder. Both count a
+container as gone only when docker confirms it: if docker can't answer (its
+daemon is down), they keep the lock.
 
 The lock keeps two builds from overlapping; it is not a security boundary.
 Branch code runs as the PR account and could skip it, as it always could.

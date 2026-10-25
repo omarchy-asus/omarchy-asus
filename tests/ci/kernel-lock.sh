@@ -13,7 +13,8 @@
 #      re-runs it (--failed) once finished, unless a newer run on its branch replaced it
 #   8. two runner accounts: the files next to the lock are 660 (the job's own state 600), a
 #      holder owned by another uid counts as alive, and a holder keeps the lock while its own
-#      job's build container is there (the other account's docker can't see it)
+#      job's build container is there (the other account's docker can't see it), or while
+#      docker can't say whether it is (its daemon down): only a confirmed absence lets go
 # Usage: tests/ci/kernel-lock.sh [keep]
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -37,8 +38,9 @@ mkdir -p "$S/bin" "$S/containers"
 cat >"$S/bin/docker" <<EOF
 #!/bin/bash
 echo "docker \$*" >>"$S/docker.log"
+[[ -e "$S/docker.down" ]] && { echo "Cannot connect to the Docker daemon. Is the docker daemon running?" >&2; exit 1; }
 case "\$1 \$2" in
-    "container inspect") [[ -e "$S/containers/\$3" ]] ;;
+    "container inspect") [[ -e "$S/containers/\$3" ]] || { echo "Error: No such container: \$3" >&2; exit 1; } ;;
     "rm --force") rm -f "$S/containers/\$3" ;;
     *) exit 1 ;;
 esac
@@ -153,8 +155,9 @@ job e
 cat >"$S/bin/docker" <<EOF2
 #!/bin/bash
 echo "docker \$*" >>"$S/docker.log"
+[[ -e "$S/docker.down" ]] && { echo "Cannot connect to the Docker daemon. Is the docker daemon running?" >&2; exit 1; }
 case "\$1 \$2" in
-    "container inspect") [[ -e "$S/containers/\$3" ]] ;;
+    "container inspect") [[ -e "$S/containers/\$3" ]] || { echo "Error: No such container: \$3" >&2; exit 1; } ;;
     "rm --force") [[ \$3 == $(cname 306) && ! -e "$S/unstick" ]] || rm -f "$S/containers/\$3" ;;
     *) exit 1 ;;
 esac
@@ -187,13 +190,14 @@ as a pr 402 acquire pr "$(cname 402)" 2>/dev/null
 as a pr 402 release 2>"$S/a.err"; rc=$?
 check "a container that won't go: release fails" test "$rc" = 1
 check "...and keeps the lock" grep -qx 'state=held' <<<"$("$KL" holder)"
-check "...and says why" has "still there: keeping the lock" "$(cat "$S/a.err")"
+check "...and says why" has "keeping the lock" "$(cat "$S/a.err")"
 kill -KILL "$(cat "$S/state/a/lock.pid")"
 cat >"$S/bin/docker" <<EOF
 #!/bin/bash
 echo "docker \$*" >>"$S/docker.log"
+[[ -e "$S/docker.down" ]] && { echo "Cannot connect to the Docker daemon. Is the docker daemon running?" >&2; exit 1; }
 case "\$1 \$2" in
-    "container inspect") [[ -e "$S/containers/\$3" ]] ;;
+    "container inspect") [[ -e "$S/containers/\$3" ]] || { echo "Error: No such container: \$3" >&2; exit 1; } ;;
     "rm --force") rm -f "$S/containers/\$3" ;;
     *) exit 1 ;;
 esac
@@ -337,6 +341,28 @@ as a pr 902 acquire pr "$(cname 902)" 2>"$S/a.err"; rc=$?
 check "after the other account's holder: the lock is taken" test "$rc" = 0
 check "...with no wait for a container this docker can't see" bash -c '! grep -q "still there" "$1" && ! grep -q "rm --force" "$2"' _ "$S/a.err" "$S/docker.log"
 as a pr 902 release 2>/dev/null
+# docker can't answer (its daemon is down) while the build container may still run: a failed
+# look is not a gone container, on either way of letting go
+: >"$S/containers/$(cname 903)"
+as a pr 903 acquire pr "$(cname 903)" 2>/dev/null
+touch "$S/docker.down"
+as a pr 903 release 2>"$S/a.err"; rc=$?
+check "docker down: release fails" test "$rc" = 1
+check "...and keeps the lock" grep -qx 'state=held' <<<"$("$KL" holder)"
+rm -f "$S/docker.down"
+as a pr 903 release 2>/dev/null; rc=$?
+check "docker back: release removes the container, then lets go" \
+    bash -c '[[ $1 == 0 && ! -e $2 ]] && "$3" holder | grep -qx state=free' _ "$rc" "$S/containers/$(cname 903)" "$KL"
+job f
+: >"$S/containers/$(cname 904)"
+as f pr 904 acquire pr "$(cname 904)" 2>/dev/null
+touch "$S/docker.down"
+kill "${watch[f]}"
+sleep 1.5
+check "docker down when the job ends: the holder keeps the lock" grep -qx 'state=held' <<<"$("$KL" holder)"
+rm -f "$S/docker.down"
+check "...and lets go once docker confirms the container gone" wait_for 5 bash -c '"$1" holder | grep -qx state=free' _ "$KL"
+check "...having removed it" test ! -e "$S/containers/$(cname 904)"
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"
