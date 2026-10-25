@@ -22,6 +22,8 @@
 # A cancelled job must not leave its build container compiling while the lock looks free:
 #   - `release` force-removes this job's build container before letting go (the job's cleanup
 #     step normally has already);
+#   - a holder whose job ended without `release` (its Runner.Worker is gone) removes the
+#     job's build container before letting go, and leaves its record for the next holder;
 #   - `acquire` looks at the previous holder's record: if its container still exists (its job
 #     was killed before its cleanup ran), it waits for it to go, then removes it, before the
 #     new build starts.
@@ -36,8 +38,8 @@
 #   ci/kernel-lock preempt-target pr|release  the run ID to cancel for a job of that kind, or
 #                                             nothing: only a release preempts, and only a PR
 #                                             check's kernel job (never a release, never a PR)
-# Unset OMARCHY_ASUS_CI_LOCK: a PR job builds without the lock (one registration, nothing to
-# overlap with) and says so; a release job refuses.
+# Unset OMARCHY_ASUS_CI_LOCK: refused, PR and release jobs alike (a build without the lock
+# could overlap the other registration's).
 # Tests: KERNEL_LOCK_WATCH=<pid> stands in for the Runner.Worker; KERNEL_LOCK_POLL (seconds,
 # default 5, at most 10), KERNEL_LOCK_REPORT (default 60), KERNEL_LOCK_CONTAINER_WAIT (default 600).
 set -euo pipefail
@@ -102,7 +104,21 @@ hold() {
     fi
     echo "$BASHPID" >"$STATE/$what.ready"
     while kill -0 "$watch" 2>/dev/null && [[ ! -e $STATE/$what.release ]]; do sleep "$POLL"; done
-    if [[ $what == lock && $(field "$LOCK.holder" pid) == "$BASHPID" ]]; then rm -f "$LOCK.holder"; fi
+    [[ $what == lock ]] || exit 0
+    if [[ -e $STATE/$what.release ]]; then
+        # `release` asked, after it saw the build container gone: the record goes with the lock
+        [[ $(field "$LOCK.holder" pid) == "$BASHPID" ]] && rm -f "$LOCK.holder"
+        exit 0
+    fi
+    # The job's Runner.Worker is gone (cancelled or killed) and its cleanup may not have run:
+    # remove its build container while still holding the lock, and keep the record either way,
+    # so the next holder checks that container again before it builds.
+    if [[ $container =~ $CONTAINER_RE ]] && container_exists "$container"; then
+        echo "the job ended with its build container $container still there: removing it"
+        docker rm --force "$container" >/dev/null 2>&1 || true
+        waited=0
+        while container_exists "$container" && (( waited < CWAIT )); do sleep 1; waited=$((waited + 1)); done
+    fi
     exit 0
 }
 
@@ -149,11 +165,7 @@ case $cmd in
         kind=${1:-} container=${2:-}
         [[ $kind == pr || $kind == release ]] || usage
         [[ $container =~ $CONTAINER_RE ]] || die "container name '$container' is not omarchy-asus-kernel-<run>-<attempt>"
-        if [[ -z $LOCK ]]; then
-            [[ $kind == pr ]] || die "OMARCHY_ASUS_CI_LOCK is not set in the runner's environment (docs/kernel-runner.md): a release kernel build needs the build host's lock"
-            echo "::warning::kernel lock: OMARCHY_ASUS_CI_LOCK is not set: building without the build host's lock (docs/kernel-runner.md)"
-            exit 0
-        fi
+        [[ -n $LOCK ]] || die "OMARCHY_ASUS_CI_LOCK is not set in the runner's environment (docs/kernel-runner.md): a kernel build on the build host needs the host's lock"
         mkdir -p "$STATE"
         if [[ $kind == release && ! -s $STATE/queue.ready ]]; then die "a release takes the queue first (ci/kernel-lock queue)"; fi
         echo "$container" >"$STATE/container"

@@ -3,13 +3,12 @@
 #   1. two holders never overlap (three jobs at once), and the holder is recorded
 #   2. a killed holder leaves a stale record and a free lock; the next holder waits for the
 #      killed job's build container, then removes it; a job whose Runner.Worker is gone
-#      lets go
+#      removes its build container, keeps its record and lets go
 #   3. release removes the job's own build container before letting go
 #   4. a queued release comes first: PR jobs give way to it
 #   5. the preemption decision: a release preempts a PR holder, a PR never preempts, a
 #      release never preempts a release, nothing to preempt on a free lock
-#   6. the holder process keeps no token; OMARCHY_ASUS_CI_LOCK unset: a PR builds without the
-#      lock, a release refuses
+#   6. the holder process keeps no token; OMARCHY_ASUS_CI_LOCK unset: PR and release jobs refuse
 #   7. ci/kernel-preempt with gh stubbed: cancels only a run GitHub lists as build-pr.yml, and
 #      re-runs it (--failed) once finished, unless a newer run on its branch replaced it
 # Usage: tests/ci/kernel-lock.sh [keep]
@@ -127,12 +126,42 @@ kill -KILL "$(cat "$S/state/a/lock.pid")"
 KERNEL_LOCK_CONTAINER_WAIT=20 as b pr 304 acquire pr "$(cname 304)" 2>/dev/null
 check "a container that goes by itself: waited for, not force-removed" bash -c '! grep -q "rm --force" "$1"' _ "$S/docker.log"
 as b pr 304 release 2>/dev/null
-# the job's Runner.Worker ends (a cancelled or killed job): the holder lets go
+# the job's Runner.Worker ends (a cancelled or killed job) before its cleanup ran, its build
+# container still running: the holder removes the container, keeps the record, lets go
 job d
+: >"$S/containers/$(cname 305)"; : >"$S/docker.log"
 as d pr 305 acquire pr "$(cname 305)" 2>/dev/null
 kill "${watch[d]}"
 check "the job's Runner.Worker ends: the lock is let go" \
     wait_for 5 bash -c '"$1" holder | grep -qx state=free' _ "$KL"
+check "...after its build container was removed" \
+    bash -c 'grep -qx "docker rm --force $1" "$2" && [[ ! -e $3 ]]' _ "$(cname 305)" "$S/docker.log" "$S/containers/$(cname 305)"
+check "...and its record is kept (stale), naming the container" grep -qx "stale_container=$(cname 305)" <<<"$("$KL" holder)"
+# a container that won't go when the worker ends: the lock is let go after the wait, and the
+# next holder, finding the container in the record, waits for it and removes it before it builds
+job e
+: >"$S/containers/$(cname 306)"
+cat >"$S/bin/docker" <<EOF2
+#!/bin/bash
+echo "docker \$*" >>"$S/docker.log"
+case "\$1 \$2" in
+    "container inspect") [[ -e "$S/containers/\$3" ]] ;;
+    "rm --force") [[ \$3 == $(cname 306) && ! -e "$S/unstick" ]] || rm -f "$S/containers/\$3" ;;
+    *) exit 1 ;;
+esac
+EOF2
+KERNEL_LOCK_CONTAINER_WAIT=1 as e pr 306 acquire pr "$(cname 306)" 2>/dev/null
+kill "${watch[e]}"
+wait_for 10 bash -c '"$1" holder | grep -qx state=free' _ "$KL"
+check "a container that won't go: still there when the worker's holder gives up" test -e "$S/containers/$(cname 306)"
+check "...its record is kept" grep -qx "stale_container=$(cname 306)" <<<"$("$KL" holder)"
+touch "$S/unstick"; : >"$S/docker.log"
+KERNEL_LOCK_CONTAINER_WAIT=1 as b pr 307 acquire pr "$(cname 307)" 2>"$S/b.err"
+check "...the next holder waits for it, then removes it, before it builds" \
+    bash -c 'grep -q "$1 is still there" "$2" && grep -qx "docker rm --force $1" "$3" && [[ ! -e $4 ]]' \
+    _ "$(cname 306)" "$S/b.err" "$S/docker.log" "$S/containers/$(cname 306)"
+as b pr 307 release 2>/dev/null
+rm -f "$S/unstick"
 
 echo "== 3. release removes the build container first"
 : >"$S/containers/$(cname 401)"; : >"$S/docker.log"
@@ -213,8 +242,8 @@ check "the holder process has no GH_TOKEN or GITHUB_TOKEN" \
     bash -c '! tr "\0" "\n" <"/proc/$1/environ" | grep -qE "^(GH_TOKEN|GITHUB_TOKEN)="' _ "$hpid"
 as a pr 701 release 2>/dev/null
 out=$(OMARCHY_ASUS_CI_LOCK='' as a pr 702 acquire pr "$(cname 702)" 2>&1); rc=$?
-check "no lock configured: a PR builds without it" test "$rc" = 0
-check "...and says so" has "building without the build host's lock" "$out"
+check "no lock configured: a PR refuses too (it could overlap a release)" test "$rc" = 1
+check "...and says what is missing" has "OMARCHY_ASUS_CI_LOCK is not set" "$out"
 out=$(OMARCHY_ASUS_CI_LOCK='' as r release 703 queue 2>&1); rc=$?
 check "no lock configured: a release refuses" test "$rc" = 1
 check "...and says what is missing" has "OMARCHY_ASUS_CI_LOCK is not set" "$out"

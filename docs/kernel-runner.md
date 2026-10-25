@@ -74,13 +74,16 @@ lets go when the job's last steps ask (`ci/kernel-lock release`, after the
 cleanup), or when the job's `Runner.Worker` is gone (a cancelled or killed
 job). A lock never looks free while a build container still runs:
 `release` removes the job's own container first, and keeps the lock if it
-won't go; and a new holder that finds the previous holder's container still
-there (its job was killed before its cleanup ran) waits up to 10 minutes for
-it, then removes it, before it builds.
+won't go; a holder whose job ended without `release` removes the job's
+container (waiting up to 10 minutes for it to go) before it lets go, and
+leaves its record behind; and a new holder that finds the previous holder's
+container still there waits up to 10 minutes for it, then removes it, before
+it builds.
 
-With `OMARCHY_ASUS_CI_LOCK` unset a PR check builds without the lock (with
-one registration there is nothing to overlap with) and says so; a release
-refuses.
+With `OMARCHY_ASUS_CI_LOCK` unset, kernel jobs on the build host refuse to
+build, PR checks and releases alike: a build without the lock could overlap
+the other registration's. Set it in both registrations' `.env` before this
+change reaches PR branches.
 
 ## Preemption
 
