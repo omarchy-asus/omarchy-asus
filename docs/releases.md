@@ -129,8 +129,8 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
 ```
 
 - **Refused before anything builds** (`ci/release-plan`): a ref other than `main`, the Quattro
-  channel (frozen, #309), `linux-omarchy` (its release build will run on the build host's runner),
-  a held recipe (`recipes/<r>/HOLD`), an unknown recipe, and release cohorts whose recipes disagree
+  channel (frozen, #309), `linux-omarchy` while the repository variable `RELEASE_RUNNER` does not
+  name the build host's release runner (it never builds on a hosted runner), a held recipe (`recipes/<r>/HOLD`), an unknown recipe, and release cohorts whose recipes disagree
   (`bin/release-cohort check-recipes`). Every later job is also skipped off `main`.
 - **Eligibility** (`ci/release-eligibility`): the daily rebase's own decision for the requested
   recipes, made by its scripts: `bin/check-upstream` against the channel's upstream dbs, with the
@@ -140,12 +140,24 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   expired upstream db, ...) fail the run. Upstream PR states are not read here. `check-upstream`
   runs `makepkg --printsrcinfo` in `bin/recipe-sandbox`, so this job's container gets user
   namespaces and its own `/proc` (it holds no token).
-- **Build:** one job per recipe on `ubuntu-24.04`, `ci/build-recipe --channel rc --release` in the
+- **Build:** one job per recipe (but the kernel) on `ubuntu-24.04`, `ci/build-recipe --channel rc --release` in the
   PR check's container, so the channel's package sources (`build/pacman-rc.conf`), the devtools
   makepkg config and the packager (`omarchy-asus`) are the chroot's. As in the chroot, build dependencies come from the channel's Omarchy and Arch repos,
   never from `[omarchy-asus]`. `NO_DISTCC` is honoured where distcc is on (the build host's
   runner). The build step holds no token; `tests/ci/build-recipe-no-secrets.sh` covers this
   workflow too.
+- **The kernel** (`linux-omarchy`) builds on the build host's release runner (the
+  `omarchy-asus-release` registration, named by `RELEASE_RUNNER`), in a job named
+  `build (linux-omarchy)` like the others, exactly as the PR check's kernel job builds it there:
+  the same container with `--release`, the runner's distcc helper and compiler cache, a low CPU
+  weight. It takes the build host's kernel lock first, so it never overlaps a PR check's kernel
+  build; a PR check holding the lock is cancelled and re-run after the release build (PR checks
+  absorb the wait, not releases). docs/kernel-runner.md has the lock, the preemption and the
+  runner's setup.
+
+  ```bash
+  gh workflow run release.yml --ref main -f channel=rc -f recipes="linux-omarchy"
+  ```
 - **Recorded:** the artifact `release-rc-<recipe>` holds the packages (no `-debug` ones) and their
   `SHA256SUMS`, kept 14 days, and the attest job makes a build-provenance attestation for every
   package (`gh attestation verify <file> -R omarchy-asus/omarchy-asus`). That job is the only one
@@ -154,8 +166,9 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   package matches its `SHA256SUMS`; pkgrel is in the channel's range (`ci/check-pkgrel`); no
   release cohort member ships without its partner, in the run or in the channel's published db
   (`bin/release-cohort check-publish`); no release (either channel) already serves a different
-  file by the same name. `nvidia-open-dkms` also gets its reverse-dependency check against the
-  published `linux-omarchy-headers` (`ci/nvidia-compat`). The regression check (`bin/sync-release`)
+  file by the same name. When `nvidia-open-dkms` or `linux-omarchy` builds, the module is compiled
+  against the headers (`ci/nvidia-compat`), each side from this run when it built, else the
+  channel's published package. The regression check (`bin/sync-release`)
   stays at publish time: it needs the local db.
 
 ### The signer: `bin/release-sign`

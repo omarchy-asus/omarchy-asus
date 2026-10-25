@@ -21,11 +21,14 @@
 # The runner picks a hook's interpreter by its extension, so the installed copy
 # must end in .sh.
 #
-# It lets through only, on this repository:
-#   - pull_request from a branch of this repository (never a fork),
-#   - workflow_dispatch (needs write access to start),
-# and only the kernel job of build-pr.yml, and only while the runner account
-# can't reach the system docker.
+# It lets through only, on this repository, and only while the runner account
+# can't reach the system docker:
+#   - the kernel job of build-pr.yml (the PR check), for a pull_request from a
+#     branch of this repository (never a fork) or a workflow_dispatch (needs
+#     write access to start);
+#   - the kernel job of release.yml (the release build, on the release runner's
+#     registration), for a workflow_dispatch on main only.
+# Both registrations (omarchy-asus-kernel, omarchy-asus-release) run this hook.
 set -euo pipefail
 # Fixed, not from the environment: a workflow's env must not be able to move it.
 REPO=omarchy-asus/omarchy-asus
@@ -59,10 +62,14 @@ refuse() {
 id -nG | tr ' ' '\n' | grep -qx docker &&
     refuse "this account is in the docker group, which is root-equivalent; use its rootless docker"
 [[ ${GITHUB_REPOSITORY:-} == "$REPO" ]] || refuse "repository '${GITHUB_REPOSITORY:-}' is not $REPO"
-[[ ${GITHUB_JOB:-} == kernel ]] || refuse "job '${GITHUB_JOB:-}' is not build-pr.yml's kernel job"
+[[ ${GITHUB_JOB:-} == kernel ]] || refuse "job '${GITHUB_JOB:-}' is not build-pr.yml's or release.yml's kernel job"
 case ${GITHUB_WORKFLOW_REF:-} in
     "$REPO/.github/workflows/build-pr.yml@"*) ;;
-    *) refuse "workflow '${GITHUB_WORKFLOW_REF:-}' is not $REPO's build-pr.yml" ;;
+    "$REPO/.github/workflows/release.yml@refs/heads/main")
+        [[ ${GITHUB_EVENT_NAME:-} == workflow_dispatch && ${GITHUB_REF:-} == refs/heads/main ]] ||
+            refuse "release.yml runs here only as a workflow_dispatch on main, not ${GITHUB_EVENT_NAME:-} on ${GITHUB_REF:-}"
+        ;;
+    *) refuse "workflow '${GITHUB_WORKFLOW_REF:-}' is not $REPO's build-pr.yml, or its release.yml on main" ;;
 esac
 case ${GITHUB_EVENT_NAME:-} in
     workflow_dispatch) ;;

@@ -24,7 +24,10 @@ name: Build changed packages
 # Only runs on this repository's own branches and maintainer dispatches use it: a
 # fork's PR always gets the hosted runner. A fork's PR runs its own copy of this
 # file, so the runner enforces that too, before any step
-# (build/kernel-runner-job-started.sh). Every other job stays hosted.
+# (build/kernel-runner-job-started.sh). Every other job stays hosted. There it
+# takes the build host's kernel lock (ci/kernel-lock), which the release kernel
+# build (release.yml) also takes; a release preempts it (cancels this run and
+# re-runs it afterwards).
 #
 # No paths filter: `result` reports on every PR (a PR without recipe changes
 # plans an empty matrix and passes in seconds; one that changes build tooling
@@ -254,6 +257,15 @@ jobs:
           { echo "### linux-omarchy (not rebuilt)"; echo
             echo "Same tree ($LABEL) already built by run [$RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID); reusing its packages."
             echo; echo '```'; ls -l "$DIR/out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # The build host's kernel lock (ci/kernel-lock, docs/kernel-runner.md): the release kernel
+      # build takes it too, so two kernel builds never overlap there. A PR job only waits for
+      # it, and gives way to a queued release; a release that finds this job holding it cancels
+      # this run and re-runs it after its own build.
+      - name: Take the build host's kernel lock
+        if: steps.prev.outputs.run_id == '' && runner.environment == 'self-hosted'
+        env:
+          CONTAINER: omarchy-asus-kernel-${{ github.run_id }}-${{ github.run_attempt }}
+        run: ci/kernel-lock acquire pr "$CONTAINER"
       # No -e/--env, no docker socket: the container holds no credentials
       # (ci/build-recipe header, tests/ci/build-recipe-no-secrets.sh).
       # On the build host's runner, more arguments: a lower CPU weight, so the
@@ -312,6 +324,11 @@ jobs:
           docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
           docker run --rm -v "$DIR:/d" "$BUILDER_IMAGE" rm -rf /d/work /d/out
           rmdir "$DIR" || true
+      # After the cleanup: the lock is only given back once the build container is gone
+      # (ci/kernel-lock release checks again).
+      - name: Release the build host's kernel lock
+        if: always() && runner.environment == 'self-hosted'
+        run: ci/kernel-lock release
 
   nvidia-compat:
     needs: [changes, build, kernel]

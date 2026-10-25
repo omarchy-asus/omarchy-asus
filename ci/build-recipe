@@ -24,7 +24,9 @@
 #     read-only token and no secrets either. .github/workflows/release.yml
 #     (workflow_dispatch from main only) runs it the same way: its build job
 #     holds a read-only token and no secret, and only its attest job, which
-#     runs no recipe code, may request an OIDC token.
+#     runs no recipe code, may request an OIDC token. Its kernel job's token
+#     can also cancel and re-run runs (actions: write, to preempt a PR check's
+#     kernel build), and only its ci/kernel-preempt steps get it in their env.
 #   - The job token is read-only (`permissions: contents: read`,
 #     `actions: read`) and is only in the env of the separate "Look for an
 #     earlier build" step (ci/find-build), never in the build step.

@@ -7,20 +7,28 @@ name: Release build
 # runs it yet, so nothing reads these artifacts.
 #
 #   plan     ci/release-plan: main only, the rc channel only (Quattro is frozen, #309),
-#            no linux-omarchy (its release build will run on the build host's runner),
-#            no held recipe (recipes/<r>/HOLD), the release cohorts' recipes agree
-#   build    one job per recipe: ci/build-recipe --release in the container the PR check
-#            uses (build-pr.yml), with the channel's package sources (ci/setup-arch
-#            --channel) and the release chroot's packager.
+#            no held recipe (recipes/<r>/HOLD), the release cohorts' recipes agree, and
+#            linux-omarchy only while RELEASE_RUNNER names the build host's release runner
+#   build    one job per recipe but the kernel, on GitHub-hosted runners: ci/build-recipe
+#            --release in the container the PR check uses (build-pr.yml), with the channel's
+#            package sources (ci/setup-arch --channel) and the release chroot's packager.
 #            Uploads release-<channel>-<recipe>: the packages (no -debug ones) and their
 #            SHA256SUMS. Read-only token, kept out of the build step; no secret.
+#   kernel   linux-omarchy, named "build (linux-omarchy)" like the others (bin/release-sign
+#            looks for that job), on the build host's release runner (the repository variable
+#            RELEASE_RUNNER; the omarchy-asus-release registration, docs/kernel-runner.md),
+#            built exactly as the PR check's kernel job builds it there, under the host's
+#            kernel lock (ci/kernel-lock). A PR check's kernel build holding the lock is
+#            cancelled and re-run after this build (ci/kernel-preempt): the only steps with a
+#            token, which can cancel and re-run (actions: write); the build step has none.
 #   eligibility  ci/release-eligibility: the daily rebase's decision for these recipes
 #            (bin/check-upstream against the channel's upstream dbs and published db, then
 #            bin/auto-update-state plan); only build or current passes
 #   check    ci/release-check on the artifacts: manifests, pkgrel range, release cohorts
 #            against the channel's published db, one file per name on every release
-#   nvidia-compat  when nvidia-open-dkms builds: its reverse-dependency check against the
-#            channel's published linux-omarchy-headers (ci/nvidia-compat)
+#   nvidia-compat  when nvidia-open-dkms or linux-omarchy builds: the module compiled against
+#            the headers, each side from this run when it built, else the channel's published
+#            package (ci/nvidia-compat)
 #   attest   build-provenance attestations for every package (actions/attest-build-provenance).
 #            The only job with id-token: write and attestations: write; it runs no recipe
 #            code (no checkout, no container), only checks the manifests and attests.
@@ -32,7 +40,7 @@ on:
   workflow_dispatch:
     inputs:
       recipes:
-        description: "Space-separated recipe directories to build (not linux-omarchy)."
+        description: "Space-separated recipe directories to build (linux-omarchy builds on the build host's release runner)."
         required: true
       channel:
         description: "Release channel (rc only for now: Quattro is frozen, #309)."
@@ -58,9 +66,12 @@ jobs:
     permissions:
       contents: read
     outputs:
+      all: ${{ steps.plan.outputs.all }}
       recipes: ${{ steps.plan.outputs.recipes }}
+      kernel: ${{ steps.plan.outputs.kernel }}
       channel: ${{ steps.plan.outputs.channel }}
       nvidia: ${{ steps.plan.outputs.nvidia }}
+      nvidia_built: ${{ steps.plan.outputs.nvidia_built }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,6 +81,7 @@ jobs:
           REF: ${{ github.ref }}
           CHANNEL: ${{ github.event.inputs.channel }}
           REQUESTED: ${{ github.event.inputs.recipes }}
+          RELEASE_RUNNER: ${{ vars.RELEASE_RUNNER }}
         run: |
           set -euo pipefail
           ci/release-plan "$REF" "$CHANNEL" "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
@@ -77,12 +89,12 @@ jobs:
             echo "### Release build plan (nothing is published)"
             echo
             echo "- commit: $GITHUB_SHA"
-            sed 's/^/- /' "$GITHUB_OUTPUT" | grep -E '^- (channel|recipes)='
+            sed 's/^/- /' "$GITHUB_OUTPUT" | grep -E '^- (channel|all|kernel)='
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: plan
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.recipes != '[]'
     name: build (${{ matrix.recipe }})
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -132,6 +144,122 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+  # The kernel builds on the build host's release runner only (docs/kernel-runner.md): the
+  # plan refuses it while RELEASE_RUNNER is unset, and runs-on never falls back to a hosted
+  # runner. The runner's job-started hook lets this job through only as a workflow_dispatch
+  # on main (build/kernel-runner-job-started.sh). The build is the PR check's kernel job on
+  # the build host (build-pr.yml), with --release; tests/ci/release-workflow.sh compares them.
+  kernel:
+    needs: plan
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.kernel == 'true'
+    name: build (linux-omarchy)
+    # tests/ci/release-workflow.sh checks this expression (never ubuntu-*).
+    runs-on: ${{ fromJSON(vars.RELEASE_RUNNER || '["omarchy-asus-release"]') }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      actions: write # ci/kernel-preempt only: cancel and re-run a PR check's kernel build
+    steps:
+      - name: The build host's release runner
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+        run: |
+          [[ $RUNNER_KIND == self-hosted ]] ||
+            { echo "::error::linux-omarchy's release build runs on the build host's release runner only, not on $RUNNER_KIND"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The release queue first: from here on no PR check takes the build host's lock.
+      - name: Queue for the build host's kernel lock
+        run: ci/kernel-lock queue
+      - name: Preempt a PR check's kernel build
+        id: preempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ci/kernel-preempt cancel | tee -a "$GITHUB_OUTPUT"
+      - name: Take the build host's kernel lock
+        env:
+          CONTAINER: omarchy-asus-kernel-${{ github.run_id }}-${{ github.run_attempt }}
+        run: ci/kernel-lock acquire release "$CONTAINER"
+      - name: Pick the build disk
+        id: disk
+        run: |
+          # The job's own temp dir only: nothing the build host publishes from.
+          dir=$RUNNER_TEMP/omarchy-asus-build
+          mkdir -p "$dir/work" "$dir/out"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "building in $dir ($(df -h --output=avail "$dir" | tail -1) free), $(nproc) CPUs, $(free -g | awk '/Mem/{print $2}') GB RAM"
+      # No -e/--env, no docker socket, no token: the container holds no credentials
+      # (ci/build-recipe header, tests/ci/build-recipe-no-secrets.sh). The same extra
+      # arguments as the PR check's kernel job on the build host: a lower CPU weight, the
+      # run's container name, and, when the runner's environment names them, its
+      # compile-only distcc key dir (read-only) and its compiler cache.
+      - name: Build linux-omarchy
+        env:
+          DIR: ${{ steps.disk.outputs.dir }}
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+          CONTAINER: omarchy-asus-kernel-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          host=(--cpu-shares 256 --name "$CONTAINER")
+          if [[ -n ${OMARCHY_ASUS_CI_DISTCC:-} ]]; then
+            host+=(-v "$OMARCHY_ASUS_CI_DISTCC:/mnt/distcc:ro")
+            echo "distcc: $OMARCHY_ASUS_CI_DISTCC mounted read-only at /mnt/distcc"
+          fi
+          if [[ -n ${OMARCHY_ASUS_CI_CCACHE:-} ]]; then
+            host+=(-v "$OMARCHY_ASUS_CI_CCACHE:/mnt/ccache")
+            echo "ccache: $OMARCHY_ASUS_CI_CCACHE mounted at /mnt/ccache"
+          fi
+          docker run --rm -v "$PWD:/repo:ro" -v "$DIR/out:/out" -v "$DIR/work:/build" "${host[@]}" \
+            "$BUILDER_IMAGE" /repo/ci/build-recipe --channel "$CHANNEL" --release linux-omarchy
+          ls -l "$DIR/out"
+      # As for the other recipes: -debug packages are left out before the manifest.
+      - name: Record SHA-256 of linux-omarchy
+        env:
+          DIR: ${{ steps.disk.outputs.dir }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rm -f -- "$DIR"/out/*-debug-*.pkg.tar.zst
+          pkgs=("$DIR"/out/*.pkg.tar.zst)
+          (( ${#pkgs[@]} )) || { echo "::error::linux-omarchy built no packages to release"; exit 1; }
+          (cd "$DIR/out" && sha256sum -- *.pkg.tar.zst > SHA256SUMS)
+          { echo "### linux-omarchy"; echo; echo '```'; cat "$DIR/out/SHA256SUMS"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload packages (unsigned) and SHA256SUMS
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ needs.plan.outputs.channel }}-linux-omarchy
+          path: |
+            ${{ steps.disk.outputs.dir }}/out/*.pkg.tar.zst
+            ${{ steps.disk.outputs.dir }}/out/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      # As in the PR check: the build container first (a cancelled run can leave it
+      # compiling), then the root-owned tree, pass or fail.
+      - name: Clean up the build tree
+        if: always() && steps.disk.outputs.dir != ''
+        env:
+          DIR: ${{ steps.disk.outputs.dir }}
+          CONTAINER: omarchy-asus-kernel-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
+          docker run --rm -v "$DIR:/d" "$BUILDER_IMAGE" rm -rf /d/work /d/out
+          rmdir "$DIR" || true
+      # After the cleanup: the lock is only given back once the build container is gone
+      # (ci/kernel-lock release checks again).
+      - name: Release the build host's kernel lock
+        if: always()
+        run: ci/kernel-lock release
+      - name: Re-run the preempted PR check
+        if: always() && steps.preempt.outputs.cancelled != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ steps.preempt.outputs.cancelled }}
+        run: ci/kernel-preempt rerun "$RUN"
+
   # The daily rebase's own decision for these recipes (bin/check-upstream, then
   # bin/auto-update-state plan): only build or current passes. check-upstream runs
   # `makepkg --printsrcinfo` (recipe code) in bin/recipe-sandbox, whose bubblewrap needs user
@@ -152,7 +280,7 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Would the daily rebase build these recipes now?
         env:
-          RECIPES: ${{ needs.plan.outputs.recipes }}
+          RECIPES: ${{ needs.plan.outputs.all }}
           CHANNEL: ${{ needs.plan.outputs.channel }}
         run: |
           set -euo pipefail
@@ -160,9 +288,14 @@ jobs:
           docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
             -v "$PWD:/repo:ro" "$BUILDER_IMAGE" /repo/ci/release-eligibility --channel "$CHANNEL" "${recipes[@]}"
 
+  # check, nvidia-compat and attest wait for both build jobs; either may be skipped (no hosted
+  # recipe, or no kernel), never both (the plan has at least one recipe). With a status
+  # function in the condition a job runs whatever its needs did, so each names what must pass.
   check:
-    needs: [plan, build]
-    if: github.ref == 'refs/heads/main'
+    needs: [plan, build, kernel]
+    if: github.ref == 'refs/heads/main' && !cancelled() && needs.plan.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.kernel.result == 'success' || needs.kernel.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -184,8 +317,10 @@ jobs:
         run: ci/release-check --channel "$CHANNEL" pkgs
 
   nvidia-compat:
-    needs: [plan, build]
-    if: github.ref == 'refs/heads/main' && needs.plan.outputs.nvidia == 'true'
+    needs: [plan, build, kernel]
+    if: github.ref == 'refs/heads/main' && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.nvidia == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.kernel.result == 'success' || needs.kernel.result == 'skipped')
     name: nvidia-open-dkms vs linux-omarchy-headers
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -195,21 +330,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # Each side from this run when it built (the kernel's headers just built on the build
+      # host), else from the channel's published release (signature-verified).
+      - if: needs.plan.outputs.nvidia_built == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-${{ needs.plan.outputs.channel }}-nvidia-open-dkms
-          path: pkgs
-      # The headers come from the channel's published release (signature-verified).
+          path: pkgs/nvidia
+      - if: needs.plan.outputs.kernel == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ needs.plan.outputs.channel }}-linux-omarchy
+          path: pkgs/kernel
       - name: dkms build nvidia against linux-omarchy-headers
         env:
           CHANNEL: ${{ needs.plan.outputs.channel }}
         run: |
-          ls -l pkgs
-          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/pkgs:/pkgs:ro" "$BUILDER_IMAGE" /repo/ci/nvidia-compat --channel "$CHANNEL" /pkgs
+          set -euo pipefail
+          mkdir -p pkgs/all
+          shopt -s nullglob
+          for f in pkgs/nvidia/*.pkg.tar.zst pkgs/kernel/*.pkg.tar.zst; do mv -- "$f" pkgs/all/; done
+          ls -l pkgs/all
+          docker run --rm -v "$PWD:/repo:ro" -v "$PWD/pkgs/all:/pkgs:ro" "$BUILDER_IMAGE" /repo/ci/nvidia-compat --channel "$CHANNEL" /pkgs
 
   attest:
-    needs: [plan, build]
-    if: github.ref == 'refs/heads/main'
+    needs: [plan, build, kernel]
+    if: github.ref == 'refs/heads/main' && !cancelled() && needs.plan.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.kernel.result == 'success' || needs.kernel.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The only job that can sign anything with GitHub's identity: no checkout, no
@@ -229,7 +377,7 @@ jobs:
       - name: One directory per artifact, checked against its SHA256SUMS
         env:
           CHANNEL: ${{ needs.plan.outputs.channel }}
-          RECIPES: ${{ needs.plan.outputs.recipes }}
+          RECIPES: ${{ needs.plan.outputs.all }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -259,7 +407,7 @@ jobs:
           subject-path: pkgs/*/*.pkg.tar.zst
 
   result:
-    needs: [plan, eligibility, build, check, nvidia-compat, attest]
+    needs: [plan, eligibility, build, kernel, check, nvidia-compat, attest]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}
@@ -268,12 +416,20 @@ jobs:
           PLAN: ${{ needs.plan.result }}
           ELIGIBILITY: ${{ needs.eligibility.result }}
           BUILD: ${{ needs.build.result }}
+          KERNEL: ${{ needs.kernel.result }}
           CHECK: ${{ needs.check.result }}
           NVIDIA: ${{ needs.nvidia-compat.result }}
           ATTEST: ${{ needs.attest.result }}
+          HOSTED_RECIPES: ${{ needs.plan.outputs.recipes }}
+          KERNEL_PLANNED: ${{ needs.plan.outputs.kernel }}
         run: |
-          echo "plan=$PLAN eligibility=$ELIGIBILITY build=$BUILD check=$CHECK nvidia-compat=$NVIDIA attest=$ATTEST"
-          for r in "$PLAN" "$ELIGIBILITY" "$BUILD" "$CHECK" "$ATTEST"; do
+          echo "plan=$PLAN eligibility=$ELIGIBILITY build=$BUILD kernel=$KERNEL check=$CHECK nvidia-compat=$NVIDIA attest=$ATTEST"
+          for r in "$PLAN" "$ELIGIBILITY" "$CHECK" "$ATTEST"; do
             [[ $r == success ]] || { echo "::error::a release build job did not pass (nothing is published either way)"; exit 1; }
           done
+          # each build job passed when it had something to build, and was skipped otherwise
+          if [[ $HOSTED_RECIPES == '[]' ]]; then want_build=skipped; else want_build=success; fi
+          if [[ $KERNEL_PLANNED == true ]]; then want_kernel=success; else want_kernel=skipped; fi
+          [[ $BUILD == "$want_build" ]] || { echo "::error::the hosted build jobs: $BUILD, expected $want_build"; exit 1; }
+          [[ $KERNEL == "$want_kernel" ]] || { echo "::error::the kernel build (linux-omarchy): $KERNEL, expected $want_kernel"; exit 1; }
           [[ $NVIDIA == success || $NVIDIA == skipped ]] || { echo "::error::the nvidia-open-dkms reverse-dependency check did not pass"; exit 1; }
