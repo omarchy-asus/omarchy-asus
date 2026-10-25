@@ -3,65 +3,94 @@ From: rdoupe
 Date: Sun, 18 Oct 2026 03:29:12 -0400
 Subject: [PATCH 15/24] Read every udev record before asking the webcams
 
-A node udev had no record for sent the guard straight to
-omarchy-capture-webcam-list, which opens every camera, even when a
-later node's record already answered. Check all recorded nodes first
-and ask the devices only when none of them is a capture node and some
-had no record.
+Backport-of: omacom/omarchy#15910 (e5437fda), which carries 0014 and this
+commit unchanged plus two fixes on top, taken as is: udev records a node's
+capabilities once, when it appears, so a capture record answers only from
+a node with a parent device (a v4l2loopback camera, whose role follows its
+producer, goes to the live query), and only for a camera this user can
+open read-write. Fork commits 1c396770, 5ba289be and ccd0f93d on
+asus/v4-5-0-rc1, squashed.
 
-Co-Authored-By: Claude Opus 5.5
-Backport-of: 6c7d70014d5f4d9f1f26bf7094224f02857dda29
-
-(cherry picked from commit 6c7d70014d5f4d9f1f26bf7094224f02857dda29)
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- bin/omarchy-hw-webcam                | 13 ++++++++-----
- test/shell.d/screenrecording-test.sh | 15 +++++++++++++++
- 2 files changed, 23 insertions(+), 5 deletions(-)
+ bin/omarchy-hw-webcam                | 26 +++++++-------
+ test/shell.d/screenrecording-test.sh | 64 +++++++++++++++++++++++++++++++---
+ 2 files changed, 72 insertions(+), 18 deletions(-)
 
 diff --git a/bin/omarchy-hw-webcam b/bin/omarchy-hw-webcam
-index 0a48b8a8..d1fbb0c9 100755
+index 0a48b8a8..4b3d82f8 100755
 --- a/bin/omarchy-hw-webcam
 +++ b/bin/omarchy-hw-webcam
-@@ -26,6 +26,9 @@ udev_capabilities() {
+@@ -4,10 +4,11 @@
+ 
+ # The menu asks this on every open. Read the capture capability udev already
+ # recorded for each video node rather than opening the nodes with v4l2-ctl, which
+-# powers up every camera on the bus just to answer a menu guard. A node udev has
+-# no answer for (no udev database, as in a container) falls back to asking it.
++# powers up every camera on the bus just to answer a menu guard. Without a recorded
++# capture node (no udev database, as in a container) it falls back to asking them.
+ v4l_class_path="${OMARCHY_V4L_CLASS_PATH:-/sys/class/video4linux}"
+ udev_data_path="${OMARCHY_UDEV_DATA_PATH:-/run/udev/data}"
++dev_path="${OMARCHY_DEV_PATH:-/dev}"
+ 
+ shopt -s nullglob
+ nodes=("$v4l_class_path"/video*)
+@@ -26,18 +27,17 @@ udev_capabilities() {
    done <"$1"
  }
  
-+# Every recorded answer comes first, so one node udev knows nothing about does not
-+# make the guard open the cameras udev already describes.
-+unknown=0
++# udev records a node once, so a virtual camera (v4l2loopback, with no parent device),
++# whose capabilities follow its producer, is left to the live query below.
  for node in "${nodes[@]}"; do
-   [[ -r $node/dev ]] || continue
-   capabilities=""
-@@ -33,11 +36,11 @@ for node in "${nodes[@]}"; do
-   [[ -r $data ]] && capabilities=$(udev_capabilities "$data")
- 
-   if [[ -z $capabilities ]]; then
+-  [[ -r $node/dev ]] || continue
+-  capabilities=""
++  [[ -e $node/device && -r $node/dev ]] || continue
++  # The picker lists only nodes it can open read-write, so a camera this user
++  # cannot open is no answer.
++  device="$dev_path/${node##*/}"
++  [[ -r $device && -w $device ]] || continue
+   data="$udev_data_path/c$(<"$node/dev")"
+-  [[ -r $data ]] && capabilities=$(udev_capabilities "$data")
+-
+-  if [[ -z $capabilities ]]; then
 -    [[ -n $(omarchy-capture-webcam-list) ]]
 -    exit
-+    unknown=1
-+  elif [[ $capabilities == *:capture:* ]]; then
-+    exit 0
-   fi
+-  fi
 -
 -  [[ $capabilities == *:capture:* ]] && exit 0
++  [[ -r $data && $(udev_capabilities "$data") == *:capture:* ]] && exit 0
  done
  
 -exit 1
-+# No recorded capture node: ask the devices, but only if some had no record.
-+((unknown)) && [[ -n $(omarchy-capture-webcam-list) ]]
++# No capture node recorded: ask the devices.
++[[ -n $(omarchy-capture-webcam-list) ]]
 diff --git a/test/shell.d/screenrecording-test.sh b/test/shell.d/screenrecording-test.sh
-index 56518068..3e97b586 100644
+index 56518068..315d1417 100644
 --- a/test/shell.d/screenrecording-test.sh
 +++ b/test/shell.d/screenrecording-test.sh
-@@ -150,6 +150,21 @@ OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDE
+@@ -136,7 +136,10 @@ fi
+ # With udev's record available the guard answers from it and opens no device.
+ udev_v4l="$tmp_dir/v4l-udev"
+ udev_data="$tmp_dir/udev-data"
+-mkdir -p "$udev_v4l/video0" "$udev_v4l/video1" "$udev_data"
++udev_dev="$tmp_dir/dev"
++mkdir -p "$udev_v4l/video0/device" "$udev_v4l/video1/device" "$udev_data" "$udev_dev"
++touch "$udev_dev/video0" "$udev_dev/video1"
++export OMARCHY_DEV_PATH="$udev_dev"
+ echo 81:0 >"$udev_v4l/video0/dev"
+ echo 81:1 >"$udev_v4l/video1/dev"
+ printf '%s\n' 'E:ID_V4L_VERSION=2' 'E:ID_V4L_CAPABILITIES=:' >"$udev_data/c81:0"
+@@ -150,12 +153,63 @@ OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDE
    fail "webcam hardware detection opens no video device when udev answers" "$(cat "$v4l2_log")"
  pass "webcam hardware detection reads udev's record without opening a device"
  
+-printf '%s\n' 'E:ID_V4L_CAPABILITIES=:video_output:' >"$udev_data/c81:1"
+-if OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDEV_DATA_PATH="$udev_data" \
 +# A node udev has no record for, sorted before a recorded capture node, must not
 +# send the guard to the devices: the recorded answer is enough.
 +mixed_v4l="$tmp_dir/v4l-mixed"
 +mixed_data="$tmp_dir/udev-mixed"
-+mkdir -p "$mixed_v4l/video0" "$mixed_v4l/video1" "$mixed_data"
++mkdir -p "$mixed_v4l/video0/device" "$mixed_v4l/video1/device" "$mixed_data"
 +echo 81:0 >"$mixed_v4l/video0/dev"
 +echo 81:1 >"$mixed_v4l/video1/dev"
 +printf '%s\n' 'E:ID_V4L_CAPABILITIES=:capture:' >"$mixed_data/c81:1"
@@ -72,6 +101,50 @@ index 56518068..3e97b586 100644
 +  fail "webcam hardware detection opens no device when a later node's record answers" "$(cat "$v4l2_log")"
 +pass "webcam hardware detection answers from a later node's record before asking any device"
 +
- printf '%s\n' 'E:ID_V4L_CAPABILITIES=:video_output:' >"$udev_data/c81:1"
- if OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDEV_DATA_PATH="$udev_data" \
++# A recorded capture node this user cannot open is not one the picker would list.
++rm "$udev_dev/video1"
++if OMARCHY_TEST_RAW_WEBCAM=true OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDEV_DATA_PATH="$udev_data" \
    "$ROOT/bin/omarchy-hw-webcam"; then
+-  fail "webcam hardware detection rejects nodes udev records as output-only"
++  fail "webcam hardware detection rejects a recorded capture node the user cannot open"
+ fi
+-pass "webcam hardware detection rejects nodes udev records as output-only"
++[[ -s $v4l2_log ]] ||
++  fail "webcam hardware detection asks the devices when the recorded capture node cannot be opened"
++pass "webcam hardware detection rejects a recorded capture node the user cannot open"
++: >"$v4l2_log"
++touch "$udev_dev/video1"
++
++# v4l2loopback with exclusive_caps=1 switches between output and capture with its
++# producer, after udev recorded either, so neither record is taken as the answer.
++printf '%s\n' 'E:ID_V4L_CAPABILITIES=:video_output:' >"$udev_data/c81:1"
++OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDEV_DATA_PATH="$udev_data" \
++  "$ROOT/bin/omarchy-hw-webcam" ||
++  fail "webcam hardware detection asks a node udev recorded as output-only, which can capture by now"
++[[ -s $v4l2_log ]] ||
++  fail "webcam hardware detection asks the devices when udev records no capture node"
++pass "webcam hardware detection asks a node udev recorded as output-only, which can capture by now"
++: >"$v4l2_log"
++
++if OMARCHY_TEST_RAW_WEBCAM=true OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$udev_v4l" OMARCHY_UDEV_DATA_PATH="$udev_data" \
++  "$ROOT/bin/omarchy-hw-webcam"; then
++  fail "webcam hardware detection rejects nodes that are output-only both in udev and live"
++fi
++pass "webcam hardware detection rejects nodes that are output-only both in udev and live"
++: >"$v4l2_log"
++
++virtual_v4l="$tmp_dir/v4l-virtual"
++mkdir -p "$virtual_v4l/video0"
++echo 81:1 >"$virtual_v4l/video0/dev"
++printf '%s\n' 'E:ID_V4L_CAPABILITIES=:capture:' >"$udev_data/c81:1"
++if OMARCHY_TEST_RAW_WEBCAM=true OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$virtual_v4l" OMARCHY_UDEV_DATA_PATH="$udev_data" \
++  "$ROOT/bin/omarchy-hw-webcam"; then
++  fail "webcam hardware detection asks a virtual camera udev recorded as capture, which may have stopped"
++fi
++[[ -s $v4l2_log ]] ||
++  fail "webcam hardware detection asks the devices for a node with no parent device"
++pass "webcam hardware detection asks a virtual camera udev recorded as capture, which may have stopped"
++: >"$v4l2_log"
+ 
+ if OMARCHY_TEST_V4L2_LOG="$v4l2_log" OMARCHY_V4L_CLASS_PATH="$tmp_dir/no-v4l" "$ROOT/bin/omarchy-hw-webcam"; then
+   fail "webcam hardware detection fails without any video node"
