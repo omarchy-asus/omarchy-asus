@@ -1,8 +1,9 @@
 #!/bin/bash
 # ci/build-recipe runs `makepkg -s` on recipe code outside bin/recipe-sandbox (#79, #89):
 # that is only safe while the CI build step holds no secrets. This keeps the reasons
-# in the ci/build-recipe header true: a pull_request workflow (never
-# pull_request_target), no -e/--env/--privileged/docker socket/seccomp on the
+# in the ci/build-recipe header true, for every workflow that runs it (build-pr.yml, the
+# PR check, and release.yml, the release build): never
+# pull_request_target, no -e/--env/--privileged/docker socket/seccomp on the
 # `docker run ... ci/build-recipe` lines, checkout without persisted credentials, no
 # secrets.* reference, no token in the build steps' env, and ci/build-recipe itself
 # refusing to run with a token in its environment. Offline: plain grep/awk on the
@@ -10,7 +11,6 @@
 # guard or at the PKGBUILD check, before ci/setup-arch touches anything).
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
-WF=$W/.github/workflows/build-pr.yml
 fails=0
 expect() {
     if [[ $2 == "$3" ]]; then echo "ok - $1"; else echo "not ok - $1: expected $3, got $2"; fails=1; fi
@@ -19,8 +19,13 @@ TOKENS=(GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOK
 unset_tokens=()
 for v in "${TOKENS[@]}"; do unset_tokens+=(-u "$v"); done
 
+# check_workflow <file> <docker runs/steps of ci/build-recipe>
+check_workflow() {
+local WF=$W/.github/workflows/$1 want=$2 n=$1 runs checkouts nsteps nbad
+echo "== $n"
+
 # a. never pull_request_target (fork PRs would get secrets and a write token)
-expect "a: no pull_request_target in build-pr.yml" \
+expect "a: no pull_request_target in $n" \
     "$(grep -c 'pull_request_target' "$WF")" 0
 
 # b. the docker run lines that start ci/build-recipe, backslash continuations joined,
@@ -29,15 +34,17 @@ runs=$(awk '/^[[:space:]]*#/ { next }
     { line = acc $0
       if (line ~ /\\$/) { sub(/\\$/, "", line); acc = line " "; next }
       acc = ""; print line }' "$WF" | grep 'docker run' | grep 'ci/build-recipe')
-expect "b: two docker run lines start ci/build-recipe (build and kernel jobs)" \
-    "$(printf '%s\n' "$runs" | grep -c 'ci/build-recipe')" 2
+expect "b: $want docker run line(s) start ci/build-recipe in $n" \
+    "$(printf '%s\n' "$runs" | grep -c 'ci/build-recipe')" "$want"
 expect "b: those docker runs pass no env, privilege, docker socket or seccomp change" \
     "$(printf '%s\n' "$runs" | grep -c -F -e ' -e ' -e '--env' -e '--privileged' -e 'docker.sock' -e 'seccomp')" 0
-expect "b: the kernel run's continuation was joined (its image and script are on one line)" \
-    "$(printf '%s\n' "$runs" | grep -c 'docker run.*"\$DIR/work:/build".*ci/build-recipe --channel "\$CHANNEL" linux-omarchy')" 1
+if [[ $n == build-pr.yml ]]; then
+    expect "b: the kernel run's continuation was joined (its image and script are on one line)" \
+        "$(printf '%s\n' "$runs" | grep -c 'docker run.*"\$DIR/work:/build".*ci/build-recipe --channel "\$CHANNEL" linux-omarchy')" 1
+fi
 # The channel reaches the container as an argument, not through its environment (#168).
-expect "b: both docker runs pass the PR's channel to ci/build-recipe" \
-    "$(printf '%s\n' "$runs" | grep -c 'ci/build-recipe --channel "\$CHANNEL" ')" 2
+expect "b: every docker run passes the channel to ci/build-recipe" \
+    "$(printf '%s\n' "$runs" | grep -c 'ci/build-recipe --channel "\$CHANNEL" ')" "$want"
 
 # c. checkout never persists credentials
 expect "c: every persist-credentials value is false" \
@@ -52,7 +59,7 @@ expect "c: every actions/checkout has persist-credentials: false within 3 lines"
 
 # d. no secrets at all
 # (YAML comment lines skipped: they name tests/ci/build-recipe-no-secrets.sh)
-expect "d: no secrets. reference in build-pr.yml" \
+expect "d: no secrets. reference in $n" \
     "$(grep -v -E '^[[:space:]]*#' "$WF" | grep -c -E '(^|[^-A-Za-z0-9_])secrets[.[]')" 0
 
 # e. the steps that run ci/build-recipe carry no token in their own env. A step block
@@ -66,8 +73,14 @@ read -r nsteps nbad < <(awk '
     /^      - / || /^[^ ]/ || /^  [^ ]/ { flush() }
     { blk = blk "\n" $0 }
     END { flush(); print n + 0, bad + 0 }' "$WF")
-expect "e: two steps run ci/build-recipe" "$nsteps" 2
+expect "e: $want step(s) run ci/build-recipe" "$nsteps" "$want"
 expect "e: no GH_TOKEN/GITHUB_TOKEN/github.token in those steps" "$nbad" 0
+}
+check_workflow build-pr.yml 2
+check_workflow release.yml 1
+# A new workflow that runs ci/build-recipe has to be added above.
+expect "every workflow that runs ci/build-recipe is checked here" \
+    "$(cd "$W/.github/workflows" && grep -l -E '^[^#]*ci/build-recipe' -- *.yml | tr '\n' ' ')" "build-pr.yml release.yml "
 
 # f. ci/build-recipe refuses a token in its environment, before the PKGBUILD check
 for v in "${TOKENS[@]}"; do

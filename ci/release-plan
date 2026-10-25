@@ -1,0 +1,54 @@
+#!/bin/bash
+# Plan a release build (.github/workflows/release.yml), or refuse it before anything builds.
+# Refuses (exit 1, one ::error:: line per reason):
+#   - a ref other than refs/heads/main: releases are built from main only
+#   - a channel other than rc: Quattro is frozen (#309) and builds no release here
+#   - no recipe, a name without a PKGBUILD, linux-omarchy (the kernel builds on the build
+#     host's runner, not here: #258), a held recipe (recipes/<r>/HOLD, its first line the
+#     reason: merged but never built or published until the hold is removed)
+#   - recipes the release cohorts don't allow (bin/release-cohort check-recipes)
+# Usage: ci/release-plan <ref> <channel> "<recipe> <recipe>..."
+# Prints GITHUB_OUTPUT lines:
+#   recipes=<JSON list>   channel=rc   nvidia=true|false (nvidia-open-dkms builds: its
+#   reverse-dependency check, ci/nvidia-compat, runs on the result)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+KERNEL=linux-omarchy NVIDIA=nvidia-open-dkms
+ref=${1?usage: ci/release-plan <ref> <channel> "<recipes>"} channel=${2?} requested=${3-}
+
+fail=0
+err() { echo "::error::$*" >&2; fail=1; }
+[[ $ref == refs/heads/main ]] ||
+    err "release builds run from main only, not ${ref:-(no ref)}: dispatch with --ref main"
+case $channel in
+    rc) ;;
+    quattro) err "the Quattro channel is frozen (#309): release builds are rc only for now" ;;
+    *) err "unknown channel '$channel' (rc)" ;;
+esac
+
+names=()
+for n in $requested; do
+    n=${n#recipes/}; n=${n%/}
+    if [[ ! $n =~ ^[A-Za-z0-9][A-Za-z0-9@._+-]*$ || ! -f recipes/$n/PKGBUILD ]]; then
+        err "no such recipe: $n"
+    elif [[ $n == "$KERNEL" ]]; then
+        err "$KERNEL does not build here: the kernel's release build runs on the build host's runner (#258)"
+    elif [[ -f recipes/$n/HOLD ]]; then
+        err "recipes/$n is held: $(grep -v -E '^[[:space:]]*(#|$)' "recipes/$n/HOLD" | head -1)"
+    else
+        names+=("$n")
+    fi
+done
+((${#names[@]} || fail)) || err "no recipe to build: give at least one recipe directory"
+
+bin/release-cohort --workspace "$PWD" check-recipes >&2 || err "the release cohorts' recipes disagree (bin/release-cohort check-recipes)"
+((fail == 0)) || exit 1
+
+mapfile -t names < <(printf '%s\n' "${names[@]}" | sort -u)
+nvidia=false
+for n in "${names[@]}"; do [[ $n == "$NVIDIA" ]] && nvidia=true; done
+json=$(printf '%s\n' "${names[@]}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))')
+echo "==> release plan: channel=$channel recipes=$json" >&2
+echo "recipes=$json"
+echo "channel=$channel"
+echo "nvidia=$nvidia"

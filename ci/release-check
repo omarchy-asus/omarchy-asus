@@ -1,0 +1,82 @@
+#!/bin/bash
+# The checks bin/publish and the release make before a package goes out, run on a release
+# build's packages as soon as they are built (.github/workflows/release.yml), so a build that
+# could never be published fails its run instead of reaching the signer. Runs on the CI host,
+# never in the build container, on the downloaded artifacts; it runs no recipe code.
+#   1. manifest: each artifact dir's SHA256SUMS lists exactly its packages, and they match
+#   2. pkgrel: in the channel's range (ci/check-pkgrel; rc builds .101 and up)
+#   3. release cohorts: no member without its partner at the same version, in this build or
+#      in the channel's published db (bin/release-cohort check-publish; the db from
+#      ci/fetch-release --db, signature-checked)
+#   4. one file per name: a release (either channel's) that already serves a file by the
+#      same name with other bytes, or with a digest that can't be compared, refuses it
+#      (bin/publish, bin/sync-release): bump pkgrel. Read with publish-lib's
+#      pub_release_assets; a release that can't be read fails the check.
+# The reverse-dependency check is ci/nvidia-compat, its own job (it needs the container).
+# Usage: ci/release-check --channel rc <dir>   (<dir>/<artifact>/{*.pkg.tar.zst,SHA256SUMS})
+# Env: GH_TOKEN (read-only); RELEASE_CHECK_DB, a db file to use instead of fetching one (tests)
+# Exit: 0 all passed, 1 a check failed (each failure is an ::error:: line), 2 usage.
+set -uo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+[[ ${1:-} == --channel && -n ${2:-} && -d ${3:-} ]] || { echo "usage: ci/release-check --channel rc <dir>" >&2; exit 2; }
+channel=$2 dir=$(realpath "$3")
+CHANNELS=(quattro rc)
+GH_REPO=${GITHUB_REPOSITORY:-omarchy-asus/omarchy-asus}
+# shellcheck source=bin/publish-lib.sh
+source "$repo/bin/publish-lib.sh"
+fail=0
+err() { echo "::error::$*"; fail=1; }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+
+echo "==> 1. manifests"
+pkgs=()
+shopt -s nullglob
+for d in "$dir"/*/; do
+    d=${d%/}
+    if [[ ! -f $d/SHA256SUMS ]]; then err "$(basename "$d"): no SHA256SUMS"; continue; fi
+    (cd "$d" && sha256sum --quiet --strict -c SHA256SUMS) || err "$(basename "$d"): a package does not match SHA256SUMS"
+    listed=$(awk '{sub(/^\*/, "", $2); print $2}' "$d/SHA256SUMS" | sort)
+    here=$(cd "$d" && printf '%s\n' *.pkg.tar.zst | sort)
+    [[ $listed == "$here" ]] || err "$(basename "$d"): SHA256SUMS lists $(tr '\n' ' ' <<<"$listed")but the artifact has $(tr '\n' ' ' <<<"$here")"
+    for f in "$d"/*.pkg.tar.zst; do pkgs+=("$f"); done
+done
+((${#pkgs[@]})) || { err "no packages under $dir"; exit 1; }
+
+echo "==> 2. pkgrel in the $channel channel's range"
+for f in "${pkgs[@]}"; do
+    ver=$(bsdtar -xOf "$f" .PKGINFO | awk -F' = ' '$1 == "pkgver" {print $2; exit}')
+    if [[ -z $ver ]]; then err "$(basename "$f"): no pkgver in .PKGINFO"; continue; fi
+    why=$("$repo/ci/check-pkgrel" "$channel" "${ver##*-}") || err "$(basename "$f"): $why"
+done
+
+echo "==> 3. release cohorts (build/cohorts.conf)"
+db=${RELEASE_CHECK_DB:-}
+if [[ -z $db ]]; then
+    db=$("$repo/ci/fetch-release" --channel "$channel" --db "$tmp/db") ||
+        { err "cannot read the $channel channel's published db"; db=; }
+fi
+if [[ -n $db ]]; then
+    "$repo/bin/release-cohort" --workspace "$repo" check-publish --db "$db" "${pkgs[@]}" ||
+        err "a release cohort member would ship without its partner (build/cohorts.conf)"
+fi
+
+echo "==> 4. one file per name on every release"
+for c in "${CHANNELS[@]}"; do
+    tag=$("$repo/ci/channel" --tag "$c")
+    rc=0; assets=$(pub_release_assets "$tag") || rc=$?
+    if ((rc == 2)); then echo "    $tag: no release yet"; continue; fi
+    if ((rc != 0)); then err "cannot read the $tag release"; continue; fi
+    for f in "${pkgs[@]}"; do
+        b=$(basename "$f")
+        d=$(awk -F'\t' -v n="$b" '$1 == n {print $3; f = 1; exit} END {exit !f}' <<<"$assets") || continue
+        sum=$(sha256sum "$f" | cut -d' ' -f1)
+        if [[ $d != "sha256:$sum" ]]; then
+            err "$b: the $tag release already serves a different file by this name: bump pkgrel"
+        else
+            echo "    $b: the $tag release already serves these bytes"
+        fi
+    done
+done
+
+((fail == 0)) && echo "==> all release checks passed"
+exit "$fail"

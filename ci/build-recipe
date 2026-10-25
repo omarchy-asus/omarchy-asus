@@ -6,9 +6,12 @@
 #   sources are verified against exactly the keys checked into the recipe.
 # Output: the unsigned packages land in $OUT (default /out). The build tree
 # is $WORK/<recipe> (default /build), so it can live on a big disk.
-# Usage: ci/build-recipe [--channel quattro|rc] <recipe>
+# Usage: ci/build-recipe [--channel quattro|rc] [--release] <recipe>
 #   --channel: the release channel the PR targets (ci/channel); the container gets
 #   that channel's package sources (ci/setup-arch). Default quattro.
+#   --release: a release build (.github/workflows/release.yml): the packages carry the
+#   release chroot's packager ($PACKAGER_LINE in bin/env.sh), not the PR check's
+#   "omarchy-asus CI (unsigned)".
 #
 # Why no bin/recipe-sandbox here (#79, #89): on the build host, recipe code
 # runs under bin/recipe-sandbox because that host holds the signing key and
@@ -18,7 +21,10 @@
 #     .github/workflows/build-pr.yml, a `pull_request` workflow (never
 #     pull_request_target), so fork PRs get no secrets; its other trigger,
 #     `workflow_dispatch`, is started by a maintainer and gets the same
-#     read-only token and no secrets either.
+#     read-only token and no secrets either. .github/workflows/release.yml
+#     (workflow_dispatch from main only) runs it the same way: its build job
+#     holds a read-only token and no secret, and only its attest job, which
+#     runs no recipe code, may request an OIDC token.
 #   - The job token is read-only (`permissions: contents: read`,
 #     `actions: read`) and is only in the env of the separate "Look for an
 #     earlier build" step (ci/find-build), never in the build step.
@@ -45,17 +51,29 @@ for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TO
     fi
 done
 repo=$(cd "$(dirname "$0")/.." && pwd)
-channel=quattro
-if [[ ${1:-} == --channel ]]; then
-    channel=${2:?usage: ci/build-recipe [--channel quattro|rc] <recipe>}
-    shift 2
-fi
-name=${1:?usage: ci/build-recipe [--channel quattro|rc] <recipe>}
+usage="usage: ci/build-recipe [--channel quattro|rc] [--release] <recipe>"
+channel=quattro release=0
+while [[ ${1:-} == --* ]]; do
+    case $1 in
+        --channel) channel=${2:?$usage}; shift 2 ;;
+        --release) release=1; shift ;;
+        *) echo "::error::$usage" >&2; exit 2 ;;
+    esac
+done
+name=${1:?$usage}
 src=$repo/recipes/$name
 [[ -f $src/PKGBUILD ]] || { echo "::error::recipes/$name/PKGBUILD not found" >&2; exit 1; }
 OUT=${OUT:-/out} WORK=${WORK:-/build}
 
 "$repo/ci/setup-arch" --channel "$channel"
+
+# A release build's packager is the release chroot's (bin/mkchroot writes the same line).
+if ((release)); then
+    packager=$(sed -n "s/^PACKAGER_LINE='\(PACKAGER=.*\)'$/\1/p" "$repo/bin/env.sh")
+    [[ -n $packager ]] || { echo "::error::no PACKAGER_LINE in bin/env.sh" >&2; exit 1; }
+    echo "$packager" >/etc/makepkg.conf.d/zz-packager.conf
+    echo "==> release build: $packager"
+fi
 
 # distcc (the build host's kernel runner only; docs/kernel-runner.md): when the
 # workflow mounts the runner's compile-only key dir at /mnt/distcc (id_ed25519,
@@ -65,7 +83,14 @@ OUT=${OUT:-/out} WORK=${WORK:-/build}
 # build/distccd-gate refuses it on another gcc or binutils and distcc compiles
 # here instead. The key is copied for the builder user (makepkg runs as it) to
 # /distcc, where the wrapper looks. Hosted runners mount nothing.
-if [[ -f /mnt/distcc/id_ed25519 && -f /mnt/distcc/known_hosts && -s /mnt/distcc/hosts ]]; then
+# A recipe with a NO_DISTCC file (its first line is the reason; hyprland's
+# precompiled headers) compiles here, as bin/build-pkg does it.
+no_distcc=0
+if [[ -f $src/NO_DISTCC && -e /mnt/distcc ]]; then
+    no_distcc=1
+    echo "==> distcc: off for $name (recipes/$name/NO_DISTCC)"
+fi
+if [[ -f /mnt/distcc/id_ed25519 && -f /mnt/distcc/known_hosts && -s /mnt/distcc/hosts && ${no_distcc:-0} == 0 ]]; then
     pacman -S --needed --noconfirm --noprogressbar distcc openssh
     install -d -o builder -g builder -m 700 /distcc
     install -o builder -g builder -m 600 /mnt/distcc/id_ed25519 /mnt/distcc/known_hosts /distcc/

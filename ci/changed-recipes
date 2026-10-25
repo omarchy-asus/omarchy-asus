@@ -11,14 +11,21 @@
 #   - a change to the shared build inputs (build/pacman.conf, build/pacman-rc.conf, bin/build-pkg)
 #     rebuilds every recipe except the kernel, which builds only when
 #     recipes/linux-omarchy itself changes (or is listed explicitly)
+#   - a PR that changes build tooling (ci/, build/, bin/build-pkg, .github/workflows/)
+#     and would otherwise build nothing (no recipe, no kernel) builds one small recipe,
+#     TOOLING_CANARY, fresh (never reused from an earlier run), so the build path it
+#     changes is run at least once
 # Prints GITHUB_OUTPUT lines:
 #   recipes=<JSON list of non-kernel recipes>   kernel=true|false
+#   fresh=<JSON list>: recipes to build even when an earlier run built the same tree
 #   nvidia_built=true|false (nvidia-open-dkms is in recipes)
 #   nvidia_compat=true|false (kernel or nvidia-open-dkms builds: compile NVIDIA against the headers)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 KERNEL=linux-omarchy NVIDIA=nvidia-open-dkms
 SHARED_INPUTS=(build/pacman.conf build/pacman-rc.conf bin/build-pkg)
+TOOLING_RE='^(ci/|build/|bin/build-pkg$|\.github/workflows/)'
+TOOLING_CANARY=omarchy-asus-keyring
 
 buildable() { [[ -f recipes/$1/PKGBUILD ]]; }
 all_small() { for d in recipes/*/PKGBUILD; do d=${d%/PKGBUILD}; d=${d#recipes/}; [[ $d == "$KERNEL" ]] || echo "$d"; done; }
@@ -48,6 +55,7 @@ else
             break
         fi
     done
+    tooling=$(grep -E "$TOOLING_RE" <<<"$files" || true)
 fi
 
 kernel=false nvidia_built=false small=()
@@ -59,12 +67,19 @@ for n in $(printf '%s\n' "${names[@]}" | sort -u); do
         *) small+=("$n") ;;
     esac
 done
+fresh=()
+if [[ -n ${tooling:-} && $kernel == false && ${#small[@]} -eq 0 ]] && buildable "$TOOLING_CANARY"; then
+    echo "==> build tooling changed and nothing else builds: building $TOOLING_CANARY fresh" >&2
+    small=("$TOOLING_CANARY") fresh=("$TOOLING_CANARY")
+fi
 nvidia_compat=false
 [[ $kernel == true || $nvidia_built == true ]] && nvidia_compat=true
 
-json=$(printf '%s\n' "${small[@]}" | python3 -c 'import json,sys; print(json.dumps([l for l in sys.stdin.read().split() if l]))')
+to_json() { printf '%s\n' "$@" | python3 -c 'import json,sys; print(json.dumps([l for l in sys.stdin.read().split() if l]))'; }
+json=$(to_json "${small[@]}")
 echo "==> plan: recipes=$json kernel=$kernel nvidia_compat=$nvidia_compat" >&2
 echo "recipes=$json"
+echo "fresh=$(to_json "${fresh[@]}")"
 echo "kernel=$kernel"
 echo "nvidia_built=$nvidia_built"
 echo "nvidia_compat=$nvidia_compat"
