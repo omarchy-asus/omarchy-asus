@@ -13,7 +13,7 @@ pkgname='omarchy'
 _tag='v4.5.0-rc1'
 _commit='03ff1eff3812933f7088484533784d2f63eaf19a'
 pkgver=4.5.0rc1
-pkgrel=1.110
+pkgrel=1.111
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH (omarchy-asus build)'
 # The payload is architecture-independent, but the dependency set is not: the
 # boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
@@ -139,7 +139,7 @@ else
               '937809a3b3412d5db240e98a9cd51c6eee999b64db7e30ca8b8c39fea9b767a8'
               '3b56da054d6126dfa64715c45c85124f927e564a74b38aa7d6cd29e4762fd6c6'
               '821965b3d2b7caece587b1869731c3cfdca0e2af31ddb19fba2e64eb93397da5'
-              'bb543747b1867af60999478b7bf80b24375c2dd76108afc9ec6019f81911c317'
+              'ce314a38b3958f72fa32fc74f8beff767d906876554ed65bb8cc36957edb2170'
               '6bc1cf36292c878357aef33b20101d04c2f66be372a6fe3d27abd00ee478c5ed'
               'c94044fa6a7fc732190d1df89c5da5f9613701fdd7ca959c3602ae6957398115'
               '6f9aeb0ec6b52d995ea1afd6755ff66cd8bec8ae930dedfbde0268d501514b39'
