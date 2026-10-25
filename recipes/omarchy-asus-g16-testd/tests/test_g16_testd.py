@@ -131,6 +131,15 @@ class Session(unittest.TestCase):
         self.assertIn("not this session's user", out)
         self.assertEqual(get(self.root, "proc/sys/kernel/nmi_watchdog"), "1")
 
+    def test_refusal_reaches_a_client_still_sending(self):
+        # A request bigger than the socket buffers: the daemon stops reading at its
+        # 64 KiB cap and refuses, so the client's send breaks mid-request (#323).
+        self.start(uid=UID + 4242)
+        rc, out = self.g("call", "knob-set", "nmi-watchdog", "0", *["x" * 100000] * 4)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not this session's user", out)
+        self.assertNotIn("Traceback", out)
+
     def test_reason_required(self):
         self.start()
         rc, out = self.g("call", "knob-set", "nmi-watchdog", "0", reason="")
