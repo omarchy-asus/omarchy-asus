@@ -171,6 +171,8 @@ run_block >/dev/null
 expect "e: no key dir: no distcc config" "$(ls "$t/etc/makepkg.conf.d" | wc -l)" 0
 : >"$t/mnt/distcc/id_ed25519"; : >"$t/mnt/distcc/known_hosts"
 printf '# helpers\nacct@helper-a/8\n\nacct@helper-b/2\n' >"$t/mnt/distcc/hosts"
+no_distcc=1 run_block >/dev/null
+expect "e: a NO_DISTCC recipe: no distcc config, even with the key dir" "$(ls "$t/etc/makepkg.conf.d" | wc -l)" 0
 out=$(run_block)
 conf=$t/etc/makepkg.conf.d/zz-distcc.conf
 expect "e: key dir: distcc config written" "$([[ -f $conf ]] && echo 1)" 1

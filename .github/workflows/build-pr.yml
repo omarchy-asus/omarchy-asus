@@ -27,7 +27,8 @@ name: Build changed packages
 # (build/kernel-runner-job-started.sh). Every other job stays hosted.
 #
 # No paths filter: `result` reports on every PR (a PR without recipe changes
-# plans an empty matrix and passes in seconds).
+# plans an empty matrix and passes in seconds; one that changes build tooling
+# builds omarchy-asus-keyring fresh, so the build path still runs).
 #
 # Reuse (as omarchy-pkgs does): each build uploads its packages as
 # pkgs-<recipe>-<hash>, where the hash covers the recipe's git tree and the
@@ -69,6 +70,7 @@ jobs:
       kernel: ${{ steps.plan.outputs.kernel }}
       nvidia_built: ${{ steps.plan.outputs.nvidia_built }}
       nvidia_compat: ${{ steps.plan.outputs.nvidia_compat }}
+      fresh: ${{ steps.plan.outputs.fresh }}
       channel: ${{ steps.channel.outputs.channel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -120,6 +122,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A tooling-only PR's canary (ci/changed-recipes "fresh") always builds.
       - name: Look for an earlier build of this tree
         id: prev
         env:
@@ -127,6 +130,7 @@ jobs:
           GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
           RECIPE: ${{ matrix.recipe }}
           CHANNEL: ${{ needs.changes.outputs.channel }}
+          FORCE_BUILD: ${{ env.FORCE_BUILD == 'true' || contains(fromJSON(needs.changes.outputs.fresh), matrix.recipe) }}
         run: ci/find-build "$RECIPE" | tee -a "$GITHUB_OUTPUT"
       - name: Reuse ${{ matrix.recipe }} from run ${{ steps.prev.outputs.run_id }}
         if: steps.prev.outputs.run_id != ''

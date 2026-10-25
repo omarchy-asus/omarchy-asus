@@ -111,6 +111,48 @@ carries, and the train's tag and release notes are cut from it, not from the db 
 - `bin/release-train notes` prints the notes from the open issue (on the release and changes,
   without the waiting list); `find` prints its number; `render --db DB` prints a body offline.
 
+## Release builds on GitHub (#258, nothing publishes from them yet)
+
+Release builds are moving off the build host's chroots onto the same `ci/build-recipe`
+container the PR check uses (#258). The first piece is `.github/workflows/release.yml`: it builds
+and records, and **publishes nothing**. No signing key, secret or release upload is anywhere in
+it, and no daily run or other tool reads its artifacts yet; a signer on the build host that
+checks a run's record with GitHub before signing comes later.
+
+```bash
+gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-keyring"
+```
+
+- **Refused before anything builds** (`ci/release-plan`): a ref other than `main`, the Quattro
+  channel (frozen, #309), `linux-omarchy` (its release build will run on the build host's runner),
+  a held recipe (`recipes/<r>/HOLD`), an unknown recipe, and release cohorts whose recipes disagree
+  (`bin/release-cohort check-recipes`). Every later job is also skipped off `main`.
+- **Eligibility** (`ci/release-eligibility`): the daily rebase's own decision for the requested
+  recipes, made by its scripts: `bin/check-upstream` against the channel's upstream dbs, with the
+  channel's published db as the local repo, then `bin/auto-update-state plan`. Only `build` (not in
+  the release, or the release holds another version) and `current` pass; `rebase` (upstream
+  moved past the recipe) and `attention` (upstream-older, bad-pkgrel, dep-mismatch, held, an
+  expired upstream db, ...) fail the run. Upstream PR states are not read here. `check-upstream`
+  runs `makepkg --printsrcinfo` in `bin/recipe-sandbox`, so this job's container gets user
+  namespaces and its own `/proc` (it holds no token).
+- **Build:** one job per recipe on `ubuntu-24.04`, `ci/build-recipe --channel rc --release` in the
+  PR check's container, so the channel's package sources (`build/pacman-rc.conf`), the devtools
+  makepkg config and the packager (`omarchy-asus`) are the chroot's. As in the chroot, build dependencies come from the channel's Omarchy and Arch repos,
+  never from `[omarchy-asus]`. `NO_DISTCC` is honoured where distcc is on (the build host's
+  runner). The build step holds no token; `tests/ci/build-recipe-no-secrets.sh` covers this
+  workflow too.
+- **Recorded:** the artifact `release-rc-<recipe>` holds the packages (no `-debug` ones) and their
+  `SHA256SUMS`, kept 14 days, and the attest job makes a build-provenance attestation for every
+  package (`gh attestation verify <file> -R omarchy-asus/omarchy-asus`). That job is the only one
+  that can request an OIDC token, and it runs no recipe code.
+- **Checked as if it would publish** (`ci/release-check`), and the run fails otherwise: every
+  package matches its `SHA256SUMS`; pkgrel is in the channel's range (`ci/check-pkgrel`); no
+  release cohort member ships without its partner, in the run or in the channel's published db
+  (`bin/release-cohort check-publish`); no release (either channel) already serves a different
+  file by the same name. `nvidia-open-dkms` also gets its reverse-dependency check against the
+  published `linux-omarchy-headers` (`ci/nvidia-compat`). The regression check (`bin/sync-release`)
+  stays at publish time: it needs the local db.
+
 ## Reverse-dependency checks
 
 `build/revdeps.conf` maps a kernel recipe to the DKMS packages that must compile against

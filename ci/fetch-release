@@ -4,11 +4,13 @@
 # it with keys/omarchy-asus.asc: first the signed repo database (which names the
 # file), then the package's own detached signature.
 # Usage: ci/fetch-release [--channel quattro|rc] <pkgname> <dest dir>    prints the package path
+#        ci/fetch-release [--channel quattro|rc] --db <dest dir>         only the verified
+#        database: prints its path (ci/release-check)
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 channel=quattro
 if [[ ${1:-} == --channel ]]; then channel=${2:?--channel needs quattro or rc}; shift 2; fi
-pkg=${1:?usage: ci/fetch-release [--channel quattro|rc] <pkgname> <dest dir>} dest=${2:?}
+pkg=${1:?usage: ci/fetch-release [--channel quattro|rc] <pkgname>|--db <dest dir>} dest=${2:?}
 RELEASE=${RELEASE:-https://github.com/omarchy-asus/omarchy-asus/releases/download/$("$repo/ci/channel" --tag "$channel")}
 DB=omarchy-asus.db
 
@@ -19,6 +21,11 @@ get() { curl -fsSL --retry 5 --retry-all-errors -o "$1" "$RELEASE/$(basename "$1
 
 get "$tmp/$DB"; get "$tmp/$DB.sig"
 verify "$tmp/$DB" || { echo "::error::$DB signature does not verify with keys/omarchy-asus.asc" >&2; exit 1; }
+if [[ $pkg == --db ]]; then
+    mkdir -p "$dest"; cp "$tmp/$DB" "$dest/$DB.tar.gz"
+    echo "==> published $DB (signature OK)" >&2
+    echo "$dest/$DB.tar.gz"; exit 0
+fi
 mkdir "$tmp/db"; bsdtar -xf "$tmp/$DB" -C "$tmp/db"
 file=
 for desc in "$tmp"/db/*/desc; do
