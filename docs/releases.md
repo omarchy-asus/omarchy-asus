@@ -232,7 +232,9 @@ all.
 A recipe is listed only after the two paths have been compared for it and match:
 
 1. **Build it on the new path:** run the release workflow for that recipe on `main`, and note the
-   run ID once it has succeeded.
+   run ID once it has finished. When the recipe is at the version the rc release already serves
+   (the comparison the switch needs), the run fails its check job on purpose: the release already
+   serves files by those names, and builds are not byte-reproducible. Compare it with `--served`.
 
    ```bash
    gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-keyring"
@@ -240,8 +242,17 @@ A recipe is listed only after the two paths have been compared for it and match:
 2. **Compare** that run with what the rc release serves today:
 
    ```bash
-   bin/compare-build-paths --channel rc omarchy-asus-keyring <run ID>
+   bin/compare-build-paths --channel rc --served omarchy-asus-keyring <run ID>
    ```
+
+   `--served` accepts a run that failed only because the release already serves its file names:
+   still the release workflow, dispatched on `main` at a commit on `main`, its plan,
+   eligibility, every build job (the recipe's own built; others built or skipped), attest and
+   nvidia-compat (or skipped) passed, and the check job's full log (not the annotations, which
+   GitHub caps) has at least one error, every one of them `<package>: the <tag> release already
+   serves a different file by this name`. Any other error or failed job refuses. The report
+   opens with `SAME-VERSION REBUILD` and the file names. Without `--served` only a run that
+   succeeded is compared. `bin/release-sign` never accepts such a run.
 
    It downloads the run's `release-rc-<recipe>` artifact (its digest and `SHA256SUMS` checked,
    into a directory of its own) and the packages the rc release serves from that recipe (through
@@ -264,7 +275,8 @@ A recipe is listed only after the two paths have been compared for it and match:
    without owners or setuid bits; `zstd`/`xz`/`gzip` and `objcopy` for the normalizing), never
    runs anything from them, and changes nothing. Exit 0: only expected differences; 1: differences, printed as a diff
    (`- release`, `+ new path`); 3: it couldn't compare (the run isn't a successful release
-   workflow run on `main`, no such artifact, a digest or signature that doesn't check out).
+   workflow run on `main`, or with `--served` one that failed only on already-served names; no
+   such artifact; a digest or signature that doesn't check out; the check job's log expired).
 3. **Switch it** in a pull request that adds the recipe to `build/release-path.conf` and names the
    run and the comparison's result. `linux-omarchy` also needs the build host's release runner
    (docs/kernel-runner.md, "The release registration") and `RELEASE_RUNNER` naming it.
@@ -274,7 +286,9 @@ builds, a dropped file, a changed dependency, scriptlet or mode, a size beyond t
 same-size change to a config file (and accepting it with `--allow-content`), a same-size change
 to compiled code (an ELF file, a kernel module, Python bytecode, each built with `objcopy`), a
 script in place of a compiled file, a hardlink retargeted or turned into a copy, a package on one side only, a
-version mismatch, and the refusals.
+version mismatch, and the refusals; and `--served`: a run failing only on already-served names
+compared (and refused without it), refused with any other check error, a failed build, attest
+or eligibility job, the recipe not built, or a commit not on `main`.
 
 ## Reverse-dependency checks
 
