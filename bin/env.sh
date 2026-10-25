@@ -28,6 +28,10 @@ export GNUPGHOME=$DATA/gnupg              # dedicated signing key; never in git
 SIGN_KEY=$(cat "$DATA/fingerprint" 2>/dev/null || true)
 LOG_DIR=$DATA/logs
 GH_REPO=omarchy-asus/omarchy-asus         # public; pacman pulls from its release
+# The self-hosted runner's account (docs/kernel-runner.md), which bin/release-sign never runs
+# as: local configuration, never in the repo. OMARCHY_ASUS_RUNNER_USER, else the first line of
+# $DATA/runner-user; bin/release-sign refuses to run when neither names it.
+RUNNER_USER=${OMARCHY_ASUS_RUNNER_USER:-$(head -n1 "$DATA/runner-user" 2>/dev/null || true)}
 CHANNELS=(quattro rc)
 CHANNEL=${OMARCHY_ASUS_CHANNEL:-quattro}
 # channel_stage_dir <channel>: where bin/build-pkg leaves that channel's packages

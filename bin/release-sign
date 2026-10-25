@@ -1,0 +1,249 @@
+#!/bin/bash
+# Take the packages a release workflow run built (.github/workflows/release.yml) and hand them
+# to bin/publish, but only after GitHub's record of the run says they are ours (#258, step 2).
+# The runner that built them also runs PR jobs, so the files on their own prove nothing: every
+# check below is made against GitHub's API, and any check that can't be made (an API error, a
+# missing or malformed field, no attestation) refuses. Nothing is staged or published until
+# every check has passed, for every file.
+#
+#   who      not root, not the runner account (RUNNER_USER, bin/env.sh: local configuration,
+#            never in the repo; refused when it isn't set)
+#   run      the repo's own run (repository and head repository), of exactly the release
+#            workflow, triggered by workflow_dispatch, on main at a commit on main (compare
+#            main...<sha>: identical or behind), completed with conclusion success
+#   jobs     the build job of every artifact used, the attest job and the result job succeeded
+#   artifacts  each named release-<channel>-<recipe> (anything else refuses), not expired,
+#            from this run and commit; the downloaded zip's SHA-256 is the digest GitHub
+#            recorded; its entries are regular files: SHA256SUMS and exactly the files it
+#            lists (*.pkg.tar.zst names, no path components), each with the SHA-256 it lists,
+#            no file in two artifacts
+#   attestation  gh attestation verify for each file: signed by the release workflow at
+#            refs/heads/main, from this commit, made by this run, naming this file and digest
+#
+# Then the files are copied into the channel's stage dir and given to bin/publish, which signs
+# them and adds them to the repo db. This never signs anything or reads the signing key itself,
+# runs no recipe or artifact code (no makepkg, no PKGBUILD, no scriptlets; the only archive it
+# reads is the artifact zip), and leaves bin/sync-release to the caller. It is a command, run
+# once per release: no daemon, unit, timer or cron job.
+#
+# Usage: bin/release-sign --channel rc [--dry-run] RUN_ID
+#   --channel rc  the only channel it serves (Quattro is frozen, #309; no override)
+#   --dry-run     every check, then print the files and stop: nothing staged or published
+# Exit: 0 published (or, with --dry-run, would publish), 1 refused, 2 usage.
+set -euo pipefail
+usage() { sed -n 's/^# \{0,1\}Usage: /Usage: /p; /^#   --/s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+die() { echo "release-sign: refusing: $*" >&2; exit 1; }
+say() { echo "release-sign: $*"; }
+
+channel='' dry=0 run_id=''
+while (($#)); do
+    case $1 in
+        --channel) (($# >= 2)) || usage; channel=$2; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        -h|--help) usage ;;
+        -*) usage ;;
+        *) [[ -z $run_id ]] || usage; run_id=$1; shift ;;
+    esac
+done
+[[ -n $channel && -n $run_id ]] || usage
+[[ $run_id =~ ^[1-9][0-9]{0,19}$ ]] || die "run ID '$run_id' is not a number"
+case $channel in
+    rc) ;;
+    quattro) die "the Quattro channel is frozen until the Omarchy 4.5 stable switch (#309)" ;;
+    *) die "unknown channel '$channel' (rc only)" ;;
+esac
+
+export OMARCHY_ASUS_CHANNEL=$channel
+source "$(dirname "$0")/env.sh"
+here=$(cd "$(dirname "$0")" && pwd)
+
+# --- who runs it
+uid=$(id -u) || die "cannot tell which user this is"
+[[ $EUID -ne 0 && $uid != 0 ]] || die "it runs as the build user, never as root"
+[[ -n ${RUNNER_USER:-} ]] ||
+    die "the runner account isn't configured (OMARCHY_ASUS_RUNNER_USER or $DATA/runner-user), so it can't tell it isn't running as it"
+me=$(id -un) || die "cannot tell which user this is"
+[[ -n $me && $me != "$RUNNER_USER" ]] || die "it never runs as the runner account"
+
+WORKFLOW=.github/workflows/release.yml
+SIGNER=https://github.com/$GH_REPO/$WORKFLOW@refs/heads/main
+T=$(mktemp -d "${TMPDIR:-/tmp}/release-sign.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+chmod 700 "$T"
+
+# api <path> [gh api args]: the response body, or refuse
+api() {
+    local out
+    out=$(gh api "$@" 2>"$T/gh.err") || die "GitHub API call for $1 failed: $(tr '\n' ' ' <"$T/gh.err")"
+    printf '%s\n' "$out"
+}
+# want <json> <jq filter> <expected> <what>: the filter must give exactly that string
+want() {
+    local got
+    got=$(jq -er "$2 | strings" <<<"$1" 2>/dev/null) || die "the run's $4 is missing from GitHub's answer"
+    [[ $got == "$3" ]] || die "the run's $4 is '$got', not '$3'"
+}
+
+# --- the run
+run=$(api "repos/$GH_REPO/actions/runs/$run_id") || exit 1
+want "$run" '.id | numbers | tostring' "$run_id" "ID"
+want "$run" '.repository.full_name' "$GH_REPO" repository
+want "$run" '.head_repository.full_name' "$GH_REPO" "head repository"
+repo_id=$(jq -er '.repository.id | numbers | tostring' <<<"$run") || die "the run's repository ID is missing"
+want "$run" '.head_repository.id | numbers | tostring' "$repo_id" "head repository ID"
+want "$run" '.path' "$WORKFLOW" "workflow"
+want "$run" '.event' workflow_dispatch "trigger"
+want "$run" '.head_branch' main "branch"
+want "$run" '.status' completed "status"
+want "$run" '.conclusion' success "conclusion"
+head_sha=$(jq -er '.head_sha | strings' <<<"$run") || die "the run's commit is missing"
+[[ $head_sha =~ ^[0-9a-f]{40}$ ]] || die "the run's commit '$head_sha' is not a commit ID"
+attempt=$(jq -er '.run_attempt | numbers | tostring' <<<"$run") || die "the run's attempt is missing"
+[[ $attempt =~ ^[1-9][0-9]*$ ]] || die "the run's attempt '$attempt' is not a number"
+
+# the commit is on main: main is identical to it or ahead of it
+cmp=$(api "repos/$GH_REPO/compare/main...$head_sha") || exit 1
+on_main=$(jq -er '.status | strings' <<<"$cmp") || die "GitHub's comparison of $head_sha with main has no status"
+[[ $on_main == identical || $on_main == behind ]] ||
+    die "commit $head_sha is not on main (compared with main: $on_main)"
+say "run $run_id: the release workflow, dispatched on main at $head_sha (on main), succeeded"
+
+# --- jobs and artifacts (every page; the count must add up)
+pages() {   # pages <path> <key>: one JSON array of every page's <key> entries, checked against total_count
+    local all
+    all=$(api "$1" --paginate) || exit 1
+    jq -se --arg k "$2" '
+        if length > 0 and all(.[]; (.total_count | type) == "number" and (.[$k] | type) == "array")
+           and ([.[][$k][]] | length) == .[0].total_count
+        then [.[][$k][]] else error("incomplete") end' <<<"$all" 2>/dev/null ||
+        die "GitHub's list of the run's $2 is incomplete or malformed"
+}
+jobs=$(pages "repos/$GH_REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100" jobs) || exit 1
+artifacts=$(pages "repos/$GH_REPO/actions/runs/$run_id/artifacts?per_page=100" artifacts) || exit 1
+# job_ok <name>: exactly one job by that name, and it succeeded
+job_ok() {
+    local n
+    n=$(jq -er --arg n "$1" '[.[] | select(.name == $n)] | if length == 1 then .[0].conclusion | strings else error("count") end' \
+        <<<"$jobs" 2>/dev/null) || die "the run has no single job named '$1'"
+    [[ $n == success ]] || die "the run's job '$1' concluded '$n', not success"
+}
+job_ok attest
+job_ok result
+
+n_art=$(jq -er 'length' <<<"$artifacts") || die "cannot count the run's artifacts"
+# each artifact is taken by its name, so a name must be unique in the run
+jq -e '[.[].name] | length == (unique | length)' <<<"$artifacts" >/dev/null ||
+    die "the run has two artifacts with one name"
+((n_art > 0)) || die "the run has no artifacts"
+NAME_RE='^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*\.pkg\.tar\.zst$'
+mkdir -m 700 "$T/zip" "$T/files" "$T/list"
+declare -A seen=() sums=() path=()
+files=()
+for ((i = 0; i < n_art; i++)); do
+    a=$(jq -ec ".[$i] | objects" <<<"$artifacts") || die "the run's artifact list is malformed"
+    name=$(jq -er '.name | strings' <<<"$a") || die "an artifact of the run has no name"
+    [[ $name =~ ^release-$channel-([a-z0-9][a-z0-9@._+-]*)$ ]] ||
+        die "artifact '$name' is not a release-$channel-<recipe> artifact"
+    recipe=${BASH_REMATCH[1]}
+    jq -e '.expired == false' <<<"$a" >/dev/null || die "artifact $name has expired (or GitHub doesn't say)"
+    jq -e --arg id "$run_id" --arg sha "$head_sha" --arg r "$repo_id" '
+        (.workflow_run.id | tostring) == $id and .workflow_run.head_sha == $sha and
+        (.workflow_run.repository_id | tostring) == $r and (.workflow_run.head_repository_id | tostring) == $r' \
+        <<<"$a" >/dev/null || die "artifact $name does not say it came from run $run_id at $head_sha in $GH_REPO"
+    id=$(jq -er '.id | numbers | tostring' <<<"$a") || die "artifact $name has no ID"
+    digest=$(jq -er '.digest | strings' <<<"$a") || die "GitHub recorded no digest for artifact $name"
+    [[ $digest =~ ^sha256:([0-9a-f]{64})$ ]] || die "artifact $name's digest '$digest' is not a SHA-256"
+    digest=${BASH_REMATCH[1]}
+    job_ok "build ($recipe)"
+
+    # downloaded and read one artifact at a time, each into its own directory, so the layout
+    # never depends on how many artifacts the run has. The zip itself, not gh run download:
+    # its SHA-256 is what GitHub recorded as the artifact's digest.
+    d=$T/files/$name
+    mkdir -m 700 "$d"
+    z=$T/zip/$id.zip
+    gh api "repos/$GH_REPO/actions/artifacts/$id/zip" >"$z" 2>"$T/gh.err" ||
+        die "downloading artifact $name failed: $(tr '\n' ' ' <"$T/gh.err")"
+    got=$(sha256sum <"$z" | cut -d' ' -f1)
+    [[ $got == "$digest" ]] || die "artifact $name: the download's SHA-256 is $got, GitHub recorded $digest"
+
+    # its entries: regular files with plain names, each once
+    entries=$T/list/$id.entries
+    bsdtar -tf "$z" >"$entries" 2>/dev/null || die "artifact $name is not a readable zip"
+    types=$(bsdtar -tvf "$z" 2>/dev/null) || die "artifact $name is not a readable zip"
+    [[ $(wc -l <"$entries") -eq $(grep -c '^-' <<<"$types") && $(wc -l <"$entries") -eq $(wc -l <<<"$types") ]] ||
+        die "artifact $name holds something other than regular files"
+    while IFS= read -r e; do
+        [[ $e == SHA256SUMS || $e =~ $NAME_RE ]] || die "artifact $name holds '$e', not a package or SHA256SUMS"
+    done <"$entries"
+    [[ -z $(sort "$entries" | uniq -d) ]] || die "artifact $name holds a file twice"
+    grep -qx SHA256SUMS "$entries" || die "artifact $name has no SHA256SUMS"
+
+    # the manifest: "<sha256>  <name>" lines, a name once, at least one
+    manifest=$T/list/$id.sums
+    bsdtar -xOf "$z" SHA256SUMS >"$manifest" 2>/dev/null || die "cannot read artifact $name's SHA256SUMS"
+    : >"$T/list/$id.names"
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line =~ ^([0-9a-f]{64})\ \ (.+)$ ]] || die "artifact $name's SHA256SUMS has a malformed line"
+        sum=${BASH_REMATCH[1]} f=${BASH_REMATCH[2]}
+        [[ $f =~ $NAME_RE ]] || die "artifact $name's SHA256SUMS lists '$f', not a package name"
+        [[ -z ${seen[$f]:-} ]] || die "$f is listed twice (in ${seen[$f]} and $name)"
+        seen[$f]=$name sums[$f]=$sum
+        echo "$f" >>"$T/list/$id.names"
+    done <"$manifest"
+    [[ -s $T/list/$id.names ]] || die "artifact $name's SHA256SUMS lists no package"
+    # exactly the manifest's files: no extra, none missing
+    [[ $(grep -vx SHA256SUMS "$entries" | sort) == $(sort "$T/list/$id.names") ]] ||
+        die "artifact $name's files are not exactly the ones its SHA256SUMS lists"
+    while IFS= read -r f; do
+        bsdtar -xOf "$z" "$f" >"$d/$f" 2>/dev/null || die "cannot read $f from artifact $name"
+        path[$f]=$d/$f
+        got=$(sha256sum <"$d/$f" | cut -d' ' -f1)
+        [[ $got == "${sums[$f]}" ]] || die "$f's SHA-256 is $got, its SHA256SUMS says ${sums[$f]}"
+        files+=("$f")
+    done <"$T/list/$id.names"
+    say "artifact $name: digest and ${#files[@]} file(s) so far check out"
+done
+
+# --- attestations: one by this run's release workflow for every file
+for f in "${files[@]}"; do
+    gh attestation verify "${path[$f]}" --repo "$GH_REPO" --signer-workflow "$GH_REPO/$WORKFLOW" \
+        --source-ref refs/heads/main --source-digest "$head_sha" --signer-digest "$head_sha" \
+        --format json >"$T/att.json" 2>"$T/gh.err" ||
+        die "no attestation for $f verifies: $(tr '\n' ' ' <"$T/gh.err")"
+    jq -e --arg san "$SIGNER" --arg sha "$head_sha" --arg f "$f" --arg sum "${sums[$f]}" \
+        --arg run "https://github.com/$GH_REPO/actions/runs/$run_id/attempts/" --argjson att "$attempt" '
+        type == "array" and any(.[]; .verificationResult as $v |
+            $v.signature.certificate.subjectAlternativeName == $san and
+            $v.signature.certificate.sourceRepositoryRef == "refs/heads/main" and
+            $v.signature.certificate.sourceRepositoryDigest == $sha and
+            any(range(1; $att + 1); "\($run)\(.)" == $v.signature.certificate.runInvocationURI) and
+            any($v.statement.subject[]; .name == $f and .digest.sha256 == $sum))' \
+        "$T/att.json" >/dev/null 2>&1 ||
+        die "$f's attestation does not name this run ($run_id), commit, workflow and digest"
+done
+say "attestations: all ${#files[@]} file(s) attested by run $run_id"
+
+if ((dry)); then
+    say "dry run: every check passed; would stage and publish to $channel:"
+    printf '  %s\n' "${files[@]}"
+    exit 0
+fi
+
+# --- hand-off: the channel's stage dir, then bin/publish
+mkdir -p "$STAGE_DIR"
+staged=()
+for f in "${files[@]}"; do
+    dst=$STAGE_DIR/$f
+    if [[ -e $dst || -L $dst ]]; then
+        [[ -f $dst && ! -L $dst && $(sha256sum <"$dst" | cut -d' ' -f1) == "${sums[$f]}" ]] ||
+            die "$dst already exists with other bytes"
+    else
+        cp -- "${path[$f]}" "$STAGE_DIR/.$f.release-sign"
+        mv -- "$STAGE_DIR/.$f.release-sign" "$dst"
+    fi
+    [[ $(sha256sum <"$dst" | cut -d' ' -f1) == "${sums[$f]}" ]] || die "$dst changed while it was staged"
+    staged+=("$dst")
+done
+say "publishing ${#staged[@]} file(s) to $channel (bin/publish signs them); run bin/sync-release --channel $channel after"
+"$here/publish" --channel "$channel" "${staged[@]}"
