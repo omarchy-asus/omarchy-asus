@@ -11,6 +11,9 @@
 #   6. the holder process keeps no token; OMARCHY_ASUS_CI_LOCK unset: PR and release jobs refuse
 #   7. ci/kernel-preempt with gh stubbed: cancels only a run GitHub lists as build-pr.yml, and
 #      re-runs it (--failed) once finished, unless a newer run on its branch replaced it
+#   8. two runner accounts: the files next to the lock are 660 (the job's own state 600), a
+#      holder owned by another uid counts as alive, and a holder keeps the lock while its own
+#      job's build container is there (the other account's docker can't see it)
 # Usage: tests/ci/kernel-lock.sh [keep]
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -91,6 +94,12 @@ check "holder: records the job and workflow" \
 check "holder: records the build container" grep -qx "container=$(cname 201)" <<<"$out"
 hpid=$(sed -n 's/^pid=//p' <<<"$out")
 check "holder: records a live holder process" kill -0 "$hpid"
+check "holder: records its start time" grep -qx "start=$(sed 's/.*) //' "/proc/$hpid/stat" | awk '{ print $20 }')" <<<"$out"
+perms() { stat -c %a "$@" | tr '\n' ' '; }
+check "the lock, queue and record are group-readable and writable, for the other account" \
+    test "$(perms "$S/lock/kernel.lock" "$S/lock/kernel.lock.queue" "$S/lock/kernel.lock.holder")" = "660 660 660 "
+check "the job's own state stays private" \
+    test "$(perms "$S/state/a/lock.pid" "$S/state/a/lock.ready" "$S/state/a/lock.log")" = "600 600 600 "
 as b pr 202 acquire pr "$(cname 202)" 2>"$S/b.err" & bw=$!
 sleep 1
 check "a second job waits while the first holds it" bash -c '! [[ -s $1 ]]' _ "$S/state/b/lock.ready"
@@ -137,8 +146,8 @@ check "the job's Runner.Worker ends: the lock is let go" \
 check "...after its build container was removed" \
     bash -c 'grep -qx "docker rm --force $1" "$2" && [[ ! -e $3 ]]' _ "$(cname 305)" "$S/docker.log" "$S/containers/$(cname 305)"
 check "...and its record is kept (stale), naming the container" grep -qx "stale_container=$(cname 305)" <<<"$("$KL" holder)"
-# a container that won't go when the worker ends: the lock is let go after the wait, and the
-# next holder, finding the container in the record, waits for it and removes it before it builds
+# a container that won't go when the worker ends: the holder keeps the lock until it is gone
+# (the next holder may be the other account, whose docker can't see it), then lets go
 job e
 : >"$S/containers/$(cname 306)"
 cat >"$S/bin/docker" <<EOF2
@@ -150,17 +159,16 @@ case "\$1 \$2" in
     *) exit 1 ;;
 esac
 EOF2
-KERNEL_LOCK_CONTAINER_WAIT=1 as e pr 306 acquire pr "$(cname 306)" 2>/dev/null
+as e pr 306 acquire pr "$(cname 306)" 2>/dev/null
+: >"$S/docker.log"
 kill "${watch[e]}"
-wait_for 10 bash -c '"$1" holder | grep -qx state=free' _ "$KL"
-check "a container that won't go: still there when the worker's holder gives up" test -e "$S/containers/$(cname 306)"
+sleep 1.5
+check "a container that won't go when the job ends: the holder keeps the lock" grep -qx 'state=held' <<<"$("$KL" holder)"
+check "...and keeps trying to remove it" test "$(grep -cx "docker rm --force $(cname 306)" "$S/docker.log")" -gt 1
+touch "$S/unstick"
+check "...then lets go once it is gone" wait_for 5 bash -c '"$1" holder | grep -qx state=free' _ "$KL"
+check "...the container gone first" test ! -e "$S/containers/$(cname 306)"
 check "...its record is kept" grep -qx "stale_container=$(cname 306)" <<<"$("$KL" holder)"
-touch "$S/unstick"; : >"$S/docker.log"
-KERNEL_LOCK_CONTAINER_WAIT=1 as b pr 307 acquire pr "$(cname 307)" 2>"$S/b.err"
-check "...the next holder waits for it, then removes it, before it builds" \
-    bash -c 'grep -q "$1 is still there" "$2" && grep -qx "docker rm --force $1" "$3" && [[ ! -e $4 ]]' \
-    _ "$(cname 306)" "$S/b.err" "$S/docker.log" "$S/containers/$(cname 306)"
-as b pr 307 release 2>/dev/null
 rm -f "$S/unstick"
 
 echo "== 3. release removes the build container first"
@@ -241,6 +249,11 @@ hpid=$(cat "$S/state/a/lock.pid")
 check "the holder process has no GH_TOKEN or GITHUB_TOKEN" \
     bash -c '! tr "\0" "\n" <"/proc/$1/environ" | grep -qE "^(GH_TOKEN|GITHUB_TOKEN)="' _ "$hpid"
 as a pr 701 release 2>/dev/null
+RUNNER_TRACKING_ID=github_x as a pr 701 acquire pr "$(cname 701)" 2>/dev/null
+hpid=$(cat "$S/state/a/lock.pid")
+check "...nor RUNNER_TRACKING_ID (the runner doesn't end it with the job's leftovers)" \
+    bash -c '! tr "\0" "\n" <"/proc/$1/environ" | grep -q "^RUNNER_TRACKING_ID="' _ "$hpid"
+as a pr 701 release 2>/dev/null
 out=$(OMARCHY_ASUS_CI_LOCK='' as a pr 702 acquire pr "$(cname 702)" 2>&1); rc=$?
 check "no lock configured: a PR refuses too (it could overlap a release)" test "$rc" = 1
 check "...and says what is missing" has "OMARCHY_ASUS_CI_LOCK is not set" "$out"
@@ -300,6 +313,30 @@ check "rerun: a run that isn't build-pr.yml: refused" \
     bash -c '[[ $1 == 1 ]] && ! grep -q "run rerun" "$2"' _ "$rc" "$S/gh.log"
 kp rerun 'x' >/dev/null 2>&1; rc=$?
 check "rerun: not a run ID: refused" test "$rc" = 1
+
+echo "== 8. a holder owned by the other account"
+# The other account's holder: a flock held here, and a record naming pid 1, whose /proc entry
+# is there but which kill -0 can't signal (EPERM, unless this test runs as root).
+(exec 9>>"$OMARCHY_ASUS_CI_LOCK"; flock 9; exec sleep 1000) & other=$!; pids+=("$other")
+wait_for 5 bash -c '"$1" holder | grep -qx state=held' _ "$KL"
+start1=$(sed 's/.*) //' /proc/1/stat | awk '{ print $20 }')
+record() { printf 'kind=pr\nrun_id=901\njob=kernel\ncontainer=%s\npid=1\n%s' "$(cname 901)" "$1" >"$S/lock/kernel.lock.holder"; }
+ptf() { KERNEL_LOCK_FRESH=2 pt "$@"; }
+record "start=$start1"$'\n'
+check "a PR holder owned by another uid (kill -0 fails, /proc has it): preempted" test "$(ptf r release)" = 901
+record "start=1"$'\n'
+check "a record whose pid now belongs to another process (start time differs): not preempted" test -z "$(ptf r release)"
+record ""
+check "a record without a start time (an older holder): its /proc entry is enough" test "$(ptf r release)" = 901
+kill "$other"
+wait_for 5 bash -c '"$1" holder | grep -qx state=free' _ "$KL"
+# a holder of this account takes the lock after the other account's: the previous record names
+# a container its docker can't see, so it builds without waiting or removing anything
+: >"$S/docker.log"
+as a pr 902 acquire pr "$(cname 902)" 2>"$S/a.err"; rc=$?
+check "after the other account's holder: the lock is taken" test "$rc" = 0
+check "...with no wait for a container this docker can't see" bash -c '! grep -q "still there" "$1" && ! grep -q "rm --force" "$2"' _ "$S/a.err" "$S/docker.log"
+as a pr 902 release 2>/dev/null
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"

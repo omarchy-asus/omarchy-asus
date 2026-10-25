@@ -17,7 +17,8 @@ name: Release build
 #   kernel   linux-omarchy, named "build (linux-omarchy)" like the others (bin/release-sign
 #            looks for that job), on the build host's release runner (the repository variable
 #            RELEASE_RUNNER; the omarchy-asus-release registration, docs/kernel-runner.md),
-#            built exactly as the PR check's kernel job builds it there, under the host's
+#            built exactly as the PR check's kernel job builds it there (but with the release
+#            account's own compiler cache, which PR jobs can't write), under the host's
 #            kernel lock (ci/kernel-lock). A PR check's kernel build holding the lock is
 #            cancelled and re-run after this build (ci/kernel-preempt): the only steps with a
 #            token, which can cancel and re-run (actions: write); the build step has none.

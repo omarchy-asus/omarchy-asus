@@ -1,32 +1,44 @@
 #!/bin/bash
 # The build host's kernel lock (docs/kernel-runner.md, #258): the PR check's kernel job
 # (build-pr.yml, the omarchy-asus-kernel registration) and the release kernel job (release.yml,
-# the omarchy-asus-release registration) run under one runner account, and both take this lock
+# the omarchy-asus-release registration) run under two runner accounts, and both take this lock
 # around their build, so two kernel builds never overlap.
 #
 # The lock file's path comes from the runner's environment, OMARCHY_ASUS_CI_LOCK (its .env;
-# both registrations name the same file). Next to it:
+# both accounts' .env name the same file, in a directory of a group both accounts are in). The
+# files next to it are made group-readable and writable (660), so the other account can take
+# the same flock and read the record; the per-job state under $RUNNER_TEMP stays private (600).
+# Next to it:
 #   <lock>.queue   a release takes it first and keeps it until it is done: while it is held,
 #                  a PR job never takes the lock (releases come first; PR checks absorb the
 #                  wait), and a second release waits behind the first
 #   <lock>.holder  who holds the lock: kind (pr|release), run_id, run_attempt, workflow, job,
-#                  container, pid (the process holding it), since. Left behind by a holder that
-#                  was killed; the lock itself (flock) is free then, and `holder` says so.
+#                  container, pid (the process holding it), start (its start time, so a reused
+#                  pid isn't taken for it), since. Left behind by a holder that was killed; the
+#                  lock itself (flock) is free then, and `holder` says so.
+# The holder may be the other account's process: liveness is its /proc entry and start time,
+# never `kill -0`, which fails (EPERM) for another user's process.
 #
 # A flock lives as long as the process holding its file descriptor, and a job's steps are
 # separate processes, so the lock is held by a small background process of this script that
 # outlives the step: it lets go when `release` asks, or when the job's Runner.Worker is gone
-# (a cancelled or killed job; the runner also ends a job's leftover processes). It keeps no
-# token: it starts with GH_TOKEN and GITHUB_TOKEN removed from its environment.
+# (a cancelled or killed job). It keeps no token: it starts with GH_TOKEN and GITHUB_TOKEN
+# removed from its environment. It also starts without RUNNER_TRACKING_ID, the mark by which
+# the runner ends a job's leftover processes when the job is over: a holder keeping the lock
+# for a container that won't go must not be ended with it.
 #
-# A cancelled job must not leave its build container compiling while the lock looks free:
+# A cancelled job must not leave its build container compiling while the lock looks free.
+# Each account's rootless docker sees only its own containers, so the guarantee comes from the
+# holder's side, which can see its own job's container:
 #   - `release` force-removes this job's build container before letting go (the job's cleanup
-#     step normally has already);
+#     step normally has already), and keeps the lock if it won't go;
 #   - a holder whose job ended without `release` (its Runner.Worker is gone) removes the
-#     job's build container before letting go, and leaves its record for the next holder;
-#   - `acquire` looks at the previous holder's record: if its container still exists (its job
-#     was killed before its cleanup ran), it waits for it to go, then removes it, before the
-#     new build starts.
+#     job's build container and keeps the lock until it is gone, however long that takes, and
+#     leaves its record for the next holder;
+#   - `acquire` looks at the previous holder's record: if its container still exists (a holder
+#     of this account killed outright, before it could remove it), it waits for it to go, then
+#     removes it, before the new build starts. That check sees only this account's containers:
+#     the other account's are the first two's to cover.
 #
 # Usage (in a job on the build host's runner; state under $RUNNER_TEMP, or KERNEL_LOCK_STATE):
 #   ci/kernel-lock queue                      release jobs: take the release queue
@@ -41,8 +53,10 @@
 # Unset OMARCHY_ASUS_CI_LOCK: refused, PR and release jobs alike (a build without the lock
 # could overlap the other registration's).
 # Tests: KERNEL_LOCK_WATCH=<pid> stands in for the Runner.Worker; KERNEL_LOCK_POLL (seconds,
-# default 5, at most 10), KERNEL_LOCK_REPORT (default 60), KERNEL_LOCK_CONTAINER_WAIT (default 600).
+# default 5, at most 10), KERNEL_LOCK_REPORT (default 60), KERNEL_LOCK_CONTAINER_WAIT (default 600),
+# KERNEL_LOCK_FRESH (how long preempt-target waits for a fresh holder's record, default 30).
 set -euo pipefail
+umask 077
 LOCK=${OMARCHY_ASUS_CI_LOCK:-}
 STATE=${KERNEL_LOCK_STATE:-${RUNNER_TEMP:-/tmp}/omarchy-asus-kernel-lock}
 POLL=${KERNEL_LOCK_POLL:-5} REPORT=${KERNEL_LOCK_REPORT:-60} CWAIT=${KERNEL_LOCK_CONTAINER_WAIT:-600}
@@ -53,8 +67,25 @@ usage() { sed -n 's/^# \{0,1\}Usage[^:]*: /Usage: /p; /^#   ci\/kernel-lock /s/^
 
 # field <file> <key>: a key=value line's value
 field() { [[ -f $1 ]] && sed -n "s/^$2=//p" "$1" | head -1 || true; }
+# shared <file>: create a file next to the lock for both accounts (660, the directory's group)
+shared() { [[ -e $1 ]] || (umask 007 && : >>"$1"); }
 # lock_free <file>: nobody holds the flock on it (taken and given back at once)
-lock_free() { (exec 7>>"$1" && flock -n 7); }
+lock_free() { shared "$1"; (exec 7>>"$1" && flock -n 7); }
+# proc_start <pid>: the process's start time (/proc/<pid>/stat field 22), or fail if there is none
+proc_start() {
+    local s
+    s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    s=${s##*) }
+    read -r -a s <<<"$s"
+    echo "${s[19]}"
+}
+# alive <pid> [<start>]: the process exists, whichever account it runs as, and is the one that
+# started at <start> when the record has one (not kill -0: EPERM for the other account's)
+alive() {
+    local now
+    [[ $1 =~ ^[0-9]+$ ]] && now=$(proc_start "$1") || return 1
+    [[ -z ${2:-} || $2 == "$now" ]]
+}
 # worker: the pid whose end ends the hold, the job's Runner.Worker
 worker() {
     if [[ -n ${KERNEL_LOCK_WATCH:-} ]]; then echo "$KERNEL_LOCK_WATCH"; return; fi
@@ -71,10 +102,12 @@ container_exists() { command -v docker >/dev/null && docker container inspect "$
 hold() {
     local what=$1 kind=$2 container=$3 watch=$4 file=$LOCK
     [[ $what == queue ]] && file=$LOCK.queue
+    shared "$file"
     exec 9>>"$file"
     if [[ $what == queue ]]; then
         until flock -n 9; do kill -0 "$watch" 2>/dev/null || exit 0; sleep "$POLL"; done
     else
+        shared "$LOCK.queue"
         exec 8>>"$LOCK.queue"
         while :; do
             kill -0 "$watch" 2>/dev/null || exit 0
@@ -89,6 +122,7 @@ hold() {
             sleep "$POLL"
         done
         exec 8>&-
+        local me=$BASHPID
         [[ -f $LOCK.holder ]] && cp "$LOCK.holder" "$STATE/prev"
         {
             echo "kind=$kind"
@@ -98,8 +132,10 @@ hold() {
             echo "job=${GITHUB_JOB:-}"
             echo "container=$container"
             echo "pid=$BASHPID"
+            echo "start=$(proc_start "$me")"
             echo "since=$(date -u +%FT%TZ)"
         } >"$LOCK.holder.$BASHPID"
+        chmod 660 "$LOCK.holder.$BASHPID"
         mv -f "$LOCK.holder.$BASHPID" "$LOCK.holder"
     fi
     echo "$BASHPID" >"$STATE/$what.ready"
@@ -111,13 +147,17 @@ hold() {
         exit 0
     fi
     # The job's Runner.Worker is gone (cancelled or killed) and its cleanup may not have run:
-    # remove its build container while still holding the lock, and keep the record either way,
-    # so the next holder checks that container again before it builds.
-    if [[ $container =~ $CONTAINER_RE ]] && container_exists "$container"; then
-        echo "the job ended with its build container $container still there: removing it"
-        docker rm --force "$container" >/dev/null 2>&1 || true
-        waited=0
-        while container_exists "$container" && (( waited < CWAIT )); do sleep 1; waited=$((waited + 1)); done
+    # remove its build container while still holding the lock, and keep holding it until the
+    # container is gone (the next holder may be the other account, which can't see it). Keep
+    # the record either way, so a next holder of this account checks that container again.
+    if [[ $container =~ $CONTAINER_RE ]]; then
+        n=0
+        while container_exists "$container"; do
+            (( n++ % 60 )) || echo "the job ended with its build container $container still there: removing it, keeping the lock until it is gone"
+            docker rm --force "$container" >/dev/null 2>&1 || true
+            container_exists "$container" || break
+            sleep "$POLL"
+        done
     fi
     exit 0
 }
@@ -128,7 +168,7 @@ start() {
     watch=$(worker)
     [[ -e $STATE/$what.pid ]] && kill -0 "$(cat "$STATE/$what.pid")" 2>/dev/null && die "this job already holds the $what"
     rm -f "$STATE/$what.ready" "$STATE/$what.release"
-    env -u GH_TOKEN -u GITHUB_TOKEN KERNEL_LOCK_STATE="$STATE" "$0" _hold "$what" "$kind" "$container" "$watch" \
+    env -u GH_TOKEN -u GITHUB_TOKEN -u RUNNER_TRACKING_ID KERNEL_LOCK_STATE="$STATE" "$0" _hold "$what" "$kind" "$container" "$watch" \
         </dev/null >>"$STATE/$what.log" 2>&1 &
     pid=$!
     echo "$pid" >"$STATE/$what.pid"
@@ -171,7 +211,8 @@ case $cmd in
         echo "$container" >"$STATE/container"
         rm -f "$STATE/prev"
         start lock "$kind" "$container"
-        # the previous holder's build container, if its job ended before its cleanup did
+        # the previous holder's build container, if its job ended before its cleanup did (only
+        # this account's: the other account's docker is out of sight, and its holder covers it)
         prev=$(field "$STATE/prev" container)
         if [[ $prev =~ $CONTAINER_RE && $prev != "$container" ]] && container_exists "$prev"; then
             say "the previous holder's build container $prev is still there: waiting up to ${CWAIT}s for it to go"
@@ -219,10 +260,10 @@ case $cmd in
         # a PR job never preempts anything
         [[ $kind == release && -n $LOCK ]] || exit 0
         # The holder writes its record just after it takes the lock: give a fresh holder a moment.
-        for _ in $(seq 1 30); do
+        for _ in $(seq 1 "${KERNEL_LOCK_FRESH:-30}"); do
             lock_free "$LOCK" && exit 0
             pid=$(field "$LOCK.holder" pid)
-            if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            if alive "$pid" "$(field "$LOCK.holder" start)"; then
                 hk=$(field "$LOCK.holder" kind) run=$(field "$LOCK.holder" run_id)
                 # a release never preempts a release
                 [[ $hk == pr ]] || { say "held by a release (run $run): waiting, not preempting"; exit 0; }

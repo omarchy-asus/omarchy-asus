@@ -154,7 +154,8 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   `omarchy-asus-release` registration, named by `RELEASE_RUNNER`), in a job named
   `build (linux-omarchy)` like the others, exactly as the PR check's kernel job builds it there:
   the same container with `--release`, the runner's distcc helper and compiler cache, a low CPU
-  weight. It takes the build host's kernel lock first, so it never overlaps a PR check's kernel
+  weight. Release kernel builds use their own compiler cache, under a second runner account,
+  which PR jobs cannot write. It takes the build host's kernel lock first, so it never overlaps a PR check's kernel
   build; a PR check holding the lock is cancelled and re-run after the release build (PR checks
   absorb the wait, not releases). docs/kernel-runner.md has the lock, the preemption and the
   runner's setup.

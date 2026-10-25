@@ -6,8 +6,8 @@
 # (only a release preempts, only a PR check's kernel job, never a release).
 #
 # These are the only steps of the job with a token that can cancel and re-run (GH_TOKEN,
-# actions: write); the lock, build and upload steps get none. The holder record is written by
-# the runner account, which also runs PR code, so it is not trusted on its own: a run is only
+# actions: write); the lock, build and upload steps get none. The holder record may be written
+# by the PR runner account, which runs PR code, so it is not trusted on its own: a run is only
 # cancelled or re-run when GitHub says it is this repository's build-pr.yml.
 #
 # Usage: ci/kernel-preempt cancel        cancel the PR holder's run, if any; prints cancelled=<id>
