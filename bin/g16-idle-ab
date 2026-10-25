@@ -951,12 +951,13 @@ load_start() {
   else
     for enc in libx264 libx265; do
       "${E[@]}" ffmpeg -nostdin -hide_banner -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=30 -t 10 \
-        -c:v "$enc" -preset veryfast -pix_fmt yuv420p -g 60 "$LOAD_DIR/clip.mp4" >"$LOAD_DIR/ffmpeg.log" 2>&1 && { ok=1; break; }
+        -c:v "$enc" -preset veryfast -pix_fmt "${G16_AB_CLIP_PIX_FMT:-yuv420p}" -g 60 "$LOAD_DIR/clip.mp4" >"$LOAD_DIR/ffmpeg.log" 2>&1 && { ok=1; break; }
     done
     if ((!ok)); then DECODE="not available (no H.264 or HEVC encoder for the test clip): the load runs without video decode"
-    # hwaccel_output_format vaapi: a decode VA-API can't do fails, never falls back to the CPU
+    # When VA-API can't set up the codec, ffmpeg decodes on the CPU instead; format=vaapi
+    # accepts VA-API frames only, so such a decode fails here and in the workload.
     elif ! "${E[@]}" LIBVA_DRIVER_NAME=radeonsi ffmpeg -nostdin -hide_banner -loglevel error -hwaccel vaapi -hwaccel_device "$RENDER" \
-        -hwaccel_output_format vaapi -i "$LOAD_DIR/clip.mp4" -frames:v 30 -an -f null - >"$LOAD_DIR/ffmpeg.log" 2>&1; then
+        -hwaccel_output_format vaapi -i "$LOAD_DIR/clip.mp4" -frames:v 30 -an -vf format=vaapi -f null - >"$LOAD_DIR/ffmpeg.log" 2>&1; then
       DECODE="not available (VA-API decode failed on ${RENDER##*/}: $(tail -n1 "$LOAD_DIR/ffmpeg.log" | cut -c1-120)): the load runs without video decode"
     else DECODE="${enc#lib} 1080p30 clip decoded in real time through VA-API on ${RENDER##*/}"
     fi
@@ -967,7 +968,7 @@ load_start() {
   LOAD_PIDS+=($!)
   if [[ $DECODE == *"through VA-API"* ]]; then
     load_watch $$ "${E[@]}" LIBVA_DRIVER_NAME=radeonsi ffmpeg -nostdin -hide_banner -loglevel error -hwaccel vaapi -hwaccel_device "$RENDER" \
-      -hwaccel_output_format vaapi -stream_loop -1 -re -i "$LOAD_DIR/clip.mp4" -an -f null - >>"$LOAD_DIR/load.log" 2>&1 &
+      -hwaccel_output_format vaapi -stream_loop -1 -re -i "$LOAD_DIR/clip.mp4" -an -vf format=vaapi -f null - >>"$LOAD_DIR/load.log" 2>&1 &
     LOAD_PIDS+=($!)
   fi
 }
@@ -1036,7 +1037,9 @@ measure() { # name tweak round [design row signs]
   PHASES+=("$out")
   printf '%s  round %s  %-10s settle %ss, measure %ss%s\n' "$(date +%H:%M)" "$round" "$name" "$SETTLE" "$MEASURE" "${design:+  on: ${tweak//,/ }}"
   kbd_off || note "${Y}a keyboard LED is still lit; this phase will be left out${N}"
-  if [[ $LOAD == light ]] && ! load_alive; then die "the light load stopped ($(tail -n2 "$LOAD_DIR/load.log" 2>/dev/null | tr '\n' ' ')); stopping the run"; fi
+  if [[ $LOAD == light ]] && ! load_alive; then
+    PHASES=("${PHASES[@]:0:${#PHASES[@]}-1}"); load_stopped "before $name in round $round"; return 1
+  fi
   sleep "$SETTLE"
   if ((DRY == 0)); then
     [[ $(bat_status) == Discharging ]] || die "the charger is back ($(bat_status)); stopping the run"
@@ -1167,6 +1170,16 @@ json.dump({"name": name, "tweak": tweak, "round": int(rnd), "design": design, "d
            "intr": (c1.get("intr", 0) - c0.get("intr", 0)) / dt if dt > 0 else None,
            "ctxt": (c1.get("ctxt", 0) - c0.get("ctxt", 0)) / dt if dt > 0 else None}, sys.stdout)
 PY
+  # A workload that stopped during the phase: the phase is left out, and the run ends.
+  if [[ $LOAD == light ]] && ! load_alive; then
+    printf '%s\n' "$out" >>"$WORK/load-stopped"; load_stopped "during $name in round $round"; return 1
+  fi
+  return 0
+}
+LOAD_STOPPED=''
+load_stopped() { # when
+  LOAD_STOPPED=$1
+  note "${R}the light load stopped $1 ($(tail -n2 "$LOAD_DIR/load.log" 2>/dev/null | tr '\n' ' ')); stopping the run, the report has the phases before it${N}"
 }
 
 # ------------------------------------------------------------------- start
@@ -1361,13 +1374,13 @@ if [[ $DESIGN == pb12 ]]; then
 fi
 AB_ROUNDS=$ROUNDS; [[ $DESIGN == pb12 ]] && AB_ROUNDS=0
 for ((round = 1; round <= AB_ROUNDS; round++)); do
-  if [[ -n $BOOT ]]; then measure baseline - "$round"; measure baseline - "$round"; continue; fi
+  if [[ -n $BOOT ]]; then { measure baseline - "$round" && measure baseline - "$round"; } || break; continue; fi
   mapfile -t order < <(shuffle $((SEED + round)) "${RUN[@]}")
-  measure baseline - "$round"
+  measure baseline - "$round" || break
   for t in "${order[@]}"; do
-    if apply_t "$t"; then measure "$t" "$t" "$round"; fi
+    if apply_t "$t"; then measure "$t" "$t" "$round" || { revert_t "$t"; break 2; }; fi
     revert_t "$t"
-    measure baseline - "$round"
+    measure baseline - "$round" || break 2
   done
 done
 
@@ -1390,6 +1403,9 @@ issues, descs = {}, {}
 for line in load(work + "/tweaks").splitlines():
     n, i, d = line.split("|", 2); issues[n], descs[n] = i, d
 phases = [json.loads(load(p)) for p in load(work + "/phases").split()]
+stopped = set(load(work + "/load-stopped").split())
+for p, path in zip(phases, load(work + "/phases").split()):
+    p["load_stopped"] = path in stopped
 types = json.loads(load(work + "/cpus.json") or "{}")
 bursts = []  # (scheduled, woke, done, CPU at start, CPU at end)
 for line in load(work + "/bursts").splitlines():
@@ -1436,6 +1452,7 @@ def summarize(p):
     bls = {x.get("bl") for x in s}
     if len(bls) > 1: bad.append("brightness changed")
     if dry != "1" and any(x.get("kbd") not in (None, 0) for x in s): bad.append("keyboard LED on")
+    if p.get("load_stopped"): bad.append("light load stopped")
     stt = {}
     for z in p["states"]:
         for k, v in z.items(): stt.setdefault(k, {}).setdefault(v, 0); stt[k][v] += 1
@@ -1638,6 +1655,10 @@ if [[ -n $BOOT && $DRY == 0 ]]; then
 fi
 say "done: report in ${REPORT/#$HOME/\~}"
 cat "$REPORT"
+if [[ -n $LOAD_STOPPED ]]; then
+  note "${R}not posted: the light load stopped $LOAD_STOPPED, so the run is incomplete${N}"
+  exit 1
+fi
 if ((POST)) && [[ -z $BOOT ]]; then
   post "$SUMMARY_ISSUE" "$REPORT" "the whole report"
   while IFS='|' read -r t _; do

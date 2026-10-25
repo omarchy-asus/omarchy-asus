@@ -447,10 +447,11 @@ def _per_policy(name):
 
 
 def _max_freq_set(h, v):
-    # only the policies whose own maximum is above the cap; the others are left alone
+    # every policy at the cap, or at its own maximum when that is lower, so a cap never
+    # depends on the one before it
     for p in _policies(h):
-        if int(rd(f"{p}/cpuinfo_max_freq") or 0) > int(v):
-            wr(f"{p}/scaling_max_freq", v)
+        top = int(rd(f"{p}/cpuinfo_max_freq") or 0)
+        wr(f"{p}/scaling_max_freq", min(int(v), top) if top else v)
 
 
 _BOOST = lambda h: _need(os.path.join(h.sys, "devices/system/cpu/cpufreq/boost"), "cpufreq boost")  # noqa: E731
@@ -527,7 +528,7 @@ KNOBS = {
                       load=_boost_load),
     "cpu-epp": Knob("energy_performance_preference, every policy (#328)", _epp_choices,
                     *_per_policy("energy_performance_preference"), doc="from energy_performance_available_preferences"),
-    "cpu-max-freq": Knob("scaling_max_freq in kHz, on each policy whose cpuinfo_max_freq is above it (#328)", _max_freq_range,
+    "cpu-max-freq": Knob("scaling_max_freq in kHz, every policy (at most its own cpuinfo_max_freq) (#328)", _max_freq_range,
                          *_per_policy("scaling_max_freq")[:1], _max_freq_set, *_per_policy("scaling_max_freq")[2:],
                          doc="kHz, cpuinfo_min_freq..cpuinfo_max_freq"),
 }

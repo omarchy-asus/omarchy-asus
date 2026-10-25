@@ -38,7 +38,9 @@
 #      the amdgpu render node only), the report has the latency, Zen 5c share, clock and
 #      spike columns, the keyboard LED is forced off and put back, every workload stops
 #      and its run dir goes, even when the run is killed; without VA-API decode the
-#      report says so and nothing decodes.
+#      report says so and nothing decodes; the decode takes VA-API frames only (with a
+#      real ffmpeg on an amdgpu node, a 4:4:4 clip is refused, not decoded on the CPU);
+#      a workload that stops in the last phase leaves that phase out and ends the run.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -728,6 +730,8 @@ grep -q -- '- light load: bursts at about 8 Hz .*video decode: x264 1080p30 clip
 grep -q -- '- core types: Zen 5 CPUs 0,2; Zen 5c CPUs 1,3 (by cpuinfo_max_freq)' "$r" && ok "light: core types from cpuinfo_max_freq" || bad "light types: $(grep -- '- core types' "$r")"
 grep -q -- '-stream_loop -1 -re -i .*-f null -' "$ST/ffmpeg.log" && grep -q -- '-hwaccel vaapi -hwaccel_device /dev/dri/renderD128' "$ST/ffmpeg.log" && ! grep -q renderD129 "$ST/ffmpeg.log" &&
   ok "light: ffmpeg decodes looped, in real time, on renderD128 only" || bad "light ffmpeg: $(cat "$ST/ffmpeg.log")"
+grep -q -- '-frames:v 30 -an -vf format=vaapi -f null -' "$ST/ffmpeg.log" && grep -q -- '-stream_loop -1 -re -i .* -an -vf format=vaapi -f null -' "$ST/ffmpeg.log" &&
+  ok "light: the probe and the decode take VA-API frames only (format=vaapi)" || bad "light: no format=vaapi: $(cat "$ST/ffmpeg.log")"
 grep -q '^| tweak | issue | rounds | Δ battery W | ±2 SE | Δ SoC W | Δ p95 response ms | Δ p95 % | Δ Zen 5c share pp | Δ spikes >4 GHz pp | verdict |' "$r" &&
   grep -q '^| nmi | #225 | 2/2 |' "$r" && grep -q '^| baseline noise (sd, B to B) |' "$r" && ok "light: the tweak table with latency, Zen 5c share, spikes and noise" || bad "light table: $(grep -A3 '^| tweak' "$r")"
 row=$(grep -E '^\| 0 \| 1 \| baseline \| 9\.00 \|' "$r" | tail -n1)
@@ -766,6 +770,39 @@ main=$(pgrep -P "$pid" | head -n1)
 [[ -n $main ]] && kill -KILL "$main"; wait "$pid" 2>/dev/null
 for _ in $(seq 1 100); do leftover || break; sleep 0.1; done
 leftover && bad "killed light run: a workload outlived it: $(pgrep -af "$T/tmp")" || ok "killed light run: the workloads stopped on their own"
+# a workload that stops during the final phase: that phase is left out, the run ends, nothing is posted
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+TMPDIR=$T/tmp run --load light --only nmi --rounds 1 --measure 4 --settle 0 --interval 1 --seed 3 >"$T/out" 2>&1 &
+pid=$!
+for _ in $(seq 1 300); do (( $(grep -c ' settle 0s' "$T/out") >= 3 )) && break; sleep 0.1; done
+sleep 1
+pkill -TERM -f "$T/tmp.*bursts.log"
+wait "$pid"; rc=$?
+r=$T/home/report.md
+((rc == 1)) && grep -q 'the light load stopped during baseline in round 1' "$T/out" && ok "light: a workload stopping in the last phase ends the run (exit 1)" || bad "load stopped: rc=$rc $(cat "$T/out")"
+grep -qE '^\| 2 \| 1 \| baseline \| .*light load stopped \|$' "$r" && ok "light: the phase it stopped in is left out" || bad "load stopped row: $(grep -E '^\| 2 \| 1 \|' "$r")"
+grep -qE '^\| nmi \| #225 \| 0/1 \|' "$r" && ok "light: the tweak before it gets no delta from that baseline" || bad "load stopped nmi: $(grep '^| nmi |' "$r")"
+ls "$ST"/posted-* >/dev/null 2>&1 && bad "an incomplete light run posted" || ok "light: an incomplete run posts nothing"
+[[ $(orig_state) == "$WANT" ]] && ok "light stopped: every setting back" || bad "light stopped left: $(orig_state)"
+
+# with the real ffmpeg on an amdgpu render node (skipped elsewhere): a clip VA-API can't
+# decode (4:4:4) must not fall back to a CPU decode
+real_ffmpeg=$(PATH=${PATH#"$B:"} command -v ffmpeg)
+if [[ -n $real_ffmpeg && -r /dev/dri/renderD128 && $(cat /sys/class/drm/renderD128/device/vendor 2>/dev/null) == 0x1002 ]] &&
+   LIBVA_DRIVER_NAME=radeonsi "$real_ffmpeg" -nostdin -hide_banner -loglevel error -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 \
+     -hwaccel_output_format vaapi -f lavfi -i testsrc2=size=320x240:rate=30 -t 0.1 -an -f null - >/dev/null 2>&1; then
+  mv "$B/ffmpeg" "$B/ffmpeg.stub"
+  for fmt in yuv420p yuv444p; do
+    reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+    G16_AB_CLIP_PIX_FMT=$fmt run_light --load light --dry-run --only nmi --rounds 1 --measure 1 --settle 0 --interval 1 >/dev/null 2>&1
+    d=$(grep -o 'video decode: [^.]*' "$T/home/report.md")
+    if [[ $fmt == yuv420p ]]; then [[ $d == *"through VA-API on renderD128"* ]] && ok "real ffmpeg: a 4:2:0 clip decodes through VA-API" || bad "real ffmpeg 4:2:0: $d"
+    else [[ $d == *"not available (VA-API decode failed on renderD128"* ]] && ok "real ffmpeg: a 4:4:4 clip VA-API can't decode is refused, not decoded on the CPU" || bad "real ffmpeg 4:4:4: $d"; fi
+  done
+  mv "$B/ffmpeg.stub" "$B/ffmpeg"
+else
+  echo "skip: no ffmpeg with VA-API on an amdgpu render node here (the real-ffmpeg fallback check)"
+fi
 out=$(run --load light --design pb12 --dry-run "${FAST[@]}" 2>&1); rc=$?
 ((rc == 2)) && ok "--load light refuses --design pb12" || bad "light pb12: rc=$rc"
 

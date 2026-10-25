@@ -508,9 +508,11 @@ class Session(unittest.TestCase):
             self.assertEqual(rc, 0, (k, out))
         c = "sys/devices/system/cpu/cpufreq"
         self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["3000000"] * 2)
-        # a cap above a policy's own maximum leaves that policy alone
-        self.assertEqual(self.g("call", "knob-set", "cpu-max-freq", "4000000")[0], 0)
-        self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["4000000", "3000000"])
+        # each cap stands alone: a policy whose maximum is below it goes to its maximum
+        for cap, want in (("4000000", ["4000000", "3506494"]), ("3506494", ["3506494", "3506494"]),
+                          ("5090910", ["5090910", "3506494"]), ("3000000", ["3000000", "3000000"])):
+            self.assertEqual(self.g("call", "knob-set", "cpu-max-freq", cap)[0], 0)
+            self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], want, cap)
 
         self.assertEqual([get(self.root, f"{c}/policy{n}/energy_performance_preference") for n in (0, 1)], ["power"] * 2)
         self.assertEqual(get(self.root, "sys/class/platform-profile/platform-profile-1/profile"), "low-power")

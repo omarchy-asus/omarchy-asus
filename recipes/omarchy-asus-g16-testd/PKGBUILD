@@ -26,9 +26,9 @@ source=('g16-testd'
         'io.github.omarchy-asus.g16-testd.policy'
         'README.md'
         'LICENSE')
-sha256sums=('5f114cc839a6a0e41660cb226a55d9f5bba23c0ef09f7e62e9d2d3053a780218'
+sha256sums=('b225662cd7ce4742adc965cf4fcc9eb388ac16bacfb91796cb6fb2ff1035350c'
             '98424253c91ae055dbabaa132b62544024766c8ac639a96a94680da01e98b491'
-            'b4dd143d41c3860676aeb728db94614fb6b29955823749f6fc3e7e5e794a3121'
+            'db5d2afd600ca1530d8c5f404ff03f4ffc0551a2cf3d9ea0b0863d2037fa23c9'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 package() {
