@@ -186,7 +186,7 @@ def pb12_phases(data):
             for n, p in enumerate(data["phases"])]
 
 
-def settled(phases, design="ab", load="idle", run=()):
+def settled(phases, design="ab", load="idle", run=None):
     """g16-idle-ab --settled on these phases -> its answer ("settled", or "open" and the tweaks)."""
     with tempfile.TemporaryDirectory() as work:
         paths = []
@@ -196,6 +196,8 @@ def settled(phases, design="ab", load="idle", run=()):
                 json.dump(p, f)
         with open(os.path.join(work, "phases"), "w") as f:
             f.write("\n".join(paths) + "\n")
+        if run is None:  # the tweaks the phases measured
+            run = list(dict.fromkeys(p["tweak"] for p in phases if p["tweak"] != "-"))
         with open(os.path.join(work, "run"), "w") as f:
             f.write("\n".join(run) + "\n")
         rnd = str(max(p["round"] for p in phases))
@@ -226,6 +228,13 @@ class EarlyStop(unittest.TestCase):
         p = ab_phases({"nmi": -0.50}, 2, noise=(0.01, -0.01))
         p[4]["samples"][0]["status"] = "Charging"
         self.assertEqual(settled(p), "open nmi")
+
+    def test_ab_a_tweak_not_applied_yet(self):
+        # voxtype failed to apply in rounds 1 and 2: no phase, no verdict. nmi is
+        # settled, but round 3 may still measure voxtype, so the run goes on.
+        p = ab_phases({"nmi": -0.50}, 2, noise=(0.01, -0.01))
+        self.assertEqual(settled(p, run=["nmi", "voxtype"]), "open voxtype")
+        self.assertEqual(settled(p, run=["nmi"]), "settled")
 
     def test_light_load(self):
         d = {"boost-off": -0.40, "epp-power": 0.05}

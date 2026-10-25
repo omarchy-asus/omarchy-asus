@@ -51,7 +51,8 @@
 #  17. the early stop: on the fake's steady battery every verdict is settled after
 #      round 2, so a 3-round A/B, pb12 or --load light run stops there and says so
 #      (and so in the posts); --no-early-stop runs all 3; the start line gives both
-#      lengths. Settled vs ambiguous data: tests/test_g16_idle_ab_pb12.py.
+#      lengths; a tweak refused every round keeps it from stopping. Settled vs
+#      ambiguous data: tests/test_g16_idle_ab_pb12.py.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -1020,6 +1021,12 @@ out=$(run --only nmi,wifi-ps --rounds 3 --measure 1 --settle 0 --interval 1 --se
 grep -q '^- method: 3 rounds' "$T/home/report.md" && ! grep -q 'stopped after' "$T/home/report.md" && grep -qE '^\| nmi \| #[0-9]+ \| 3/3 \|' "$T/home/report.md" &&
   ok "--no-early-stop runs every round" || bad "--no-early-stop: $(grep -E -- '^- (stopped|method)|^\| nmi \|' "$T/home/report.md")"
 grep -q ' 15 phases, about' <<<"$out" && ! grep -q 'at most' <<<"$out" && ok "--no-early-stop: one length on the start line" || bad "no-early-stop start: $(grep phases <<<"$out")"
+# A tweak refused in every round has no verdict: the run doesn't stop for the others.
+reset
+touch "$ST/td-open" "$ST/td-fail-wifi-ps"
+out=$(run_td --only wifi-ps,nmi --rounds 3 --measure 1 --settle 0 --interval 1 --seed 7 --no-post 2>&1)
+grep -q '^- method: 3 rounds' "$T/home/report.md" && ! grep -q 'stopped after' "$T/home/report.md" &&
+  ok "early stop: waits for a tweak not measured yet" || bad "early stop with wifi-ps refused: $(grep -E -- '^- (stopped|method)' "$T/home/report.md")"
 reset
 out=$(run --design pb12 --only nmi,wifi-ps --rounds 3 --measure 1 --settle 0 --interval 1 --seed 5 --no-post 2>&1); rc=$?
 r=$T/home/report.md

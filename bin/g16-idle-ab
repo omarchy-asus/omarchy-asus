@@ -755,12 +755,15 @@ pb12() { python3 -I -c "$PB12_PY" "$@"; }
 # The report, from the phases in WORK: `report_py WORK REV SETTLE MEASURE INTERVAL
 # ROUNDS SEED DRY BOOT SUMMARY DESIGN ROOT LOAD STOP`. STOP is empty, "N of M" (the
 # run stopped early after round N of M), or check: print only whether every verdict
-# is settled ("settled", or "open" and the tweaks that aren't), for the early stop.
+# is settled for every tweak in WORK/run ("settled", or "open" and the tweaks that
+# aren't, a tweak not measured yet included), for the early stop.
 # `g16-idle-ab --settled WORK DESIGN LOAD ROUND` runs the check (for the tests).
 report_inputs() {
   printf '%s\n' "${PHASES[@]}" >"$WORK/phases"
   printf '%s\n' "${TWEAKS[@]}" >"$WORK/tweaks"
   printf '%s\n' "$PB12_PY" >"$WORK/g16pb.py"
+  [[ -v RUN ]] && printf '%s\n' "${RUN[@]}" >"$WORK/run"
+  return 0
 }
 report_py() {
 python3 -I - "$@" <<'PY'
@@ -978,7 +981,9 @@ elif per:
         o.append(f"| {t} | #{issues.get(t, '?')} | {len(dv)}/{len(ds)} | {f(mean, 2) if mean is None else f'{mean:+.2f}'} | {f(se2)} | {pr} | "
                  f"{'–' if not ds_ else f'{st.mean(ds_):+.2f}'} | **{v}** |")
 if stop == "check":
-    open_ = [t for t, (v, mean, se2) in verdicts.items() if not settled(mean, se2)]
+    # Every tweak of the run: one that hasn't applied yet has no verdict, and a
+    # further round may still measure it.
+    open_ = [t for t in load(work + "/run").split() if t not in verdicts or not settled(*verdicts[t][1:])]
     print("settled" if verdicts and not open_ else " ".join(["open"] + open_))
     sys.exit(0)
 if base:
