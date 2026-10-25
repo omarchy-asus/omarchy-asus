@@ -1,0 +1,68 @@
+#!/bin/bash
+# Is each recipe of a release build one the daily rebase would build and publish now? The same
+# decision, made by the same scripts: bin/check-upstream (this channel's upstream dbs, and the
+# channel's published db as the local repo) and bin/auto-update-state plan. A recipe passes when
+# its action is build (not in the release, or the release holds another version) or current;
+# rebase (upstream moved past it: rebase it first), attention (upstream-older, bad-pkgrel,
+# not-upstream, dep-mismatch, held, an expired upstream db...) and anything else fail.
+# Upstream PR states are not read (--no-prs: no GitHub API from here).
+# Run as root inside ghcr.io/archlinux/archlinux:base-devel (the repo may be read-only).
+# bin/check-upstream runs `makepkg --printsrcinfo` in bin/recipe-sandbox (bubblewrap), so the
+# container needs user namespaces (.github/workflows/release.yml, eligibility job); it runs
+# as the unprivileged builder user, with no credentials in the container.
+# Usage: ci/release-eligibility --channel rc <recipe>...
+# Env: RELEASE_DB, a db file to use instead of fetching the channel's (tests)
+# Exit: 0 every recipe eligible, 1 one is not or a check failed, 2 usage.
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/.." && pwd)
+[[ ${1:-} == --channel && -n ${2:-} && -n ${3:-} ]] || { echo "usage: ci/release-eligibility --channel rc <recipe>..." >&2; exit 2; }
+channel=$2; shift 2
+
+if [[ ${RELEASE_ELIGIBILITY_SETUP:-1} == 1 ]]; then
+    "$repo/ci/setup-arch" --channel "$channel" bubblewrap python
+fi
+work=$(mktemp -d); chmod 755 "$work"
+db=${RELEASE_DB:-}
+[[ -n $db ]] || db=$("$repo/ci/fetch-release" --channel "$channel" --db "$work/fetched")
+
+# The channel's state dir, with its published db as the local repo (bin/env.sh's REPO_DIR).
+data=$work/data
+repo_dir=$(OMARCHY_ASUS_DATA=$data OMARCHY_ASUS_CHANNEL=$channel OMARCHY_ASUS_WORKSPACE=$repo \
+    bash -c 'source "$1/bin/env.sh" && echo "$REPO_DIR"' _ "$repo")
+mkdir -p "$repo_dir"
+cp "$db" "$repo_dir/omarchy-asus.db"
+as_builder() {
+    if [[ $EUID -eq 0 ]]; then
+        chown -R builder: "$work"
+        runuser -u builder -- env -i PATH=/usr/bin HOME="$work" OMARCHY_ASUS_DATA="$data" \
+            OMARCHY_ASUS_CHANNEL="$channel" OMARCHY_ASUS_WORKSPACE="$repo" "$@"
+    else
+        env OMARCHY_ASUS_DATA="$data" OMARCHY_ASUS_CHANNEL="$channel" OMARCHY_ASUS_WORKSPACE="$repo" "$@"
+    fi
+}
+
+args=()
+for r; do args+=(--recipe "$r"); done
+rc=0
+as_builder python3 -I "$repo/bin/check-upstream" --json --no-prs "${args[@]}" >"$work/check.json" || rc=$?
+((rc == 0 || rc == 10)) || { echo "::error::bin/check-upstream failed (exit $rc)"; exit 1; }
+inv=$(python3 -I -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1])).get("inventory_errors") or []))' "$work/check.json")
+[[ -z $inv ]] || echo "::error::makepkg --printsrcinfo failed for: $inv (bin/check-upstream)"
+echo '{"recipes": {}}' >"$work/status.json"
+plan=$(python3 -I "$repo/bin/auto-update-state" plan "$work/check.json" "$work/status.json")
+echo "==> plan (bin/auto-update-state; recipe action target repo_names all_names note):"
+sed 's/^/    /' <<<"$plan"
+
+fail=0
+[[ -z $inv ]] || fail=1
+for r; do
+    line=$(awk -F'\t' -v r="$r" '$1 == r' <<<"$plan")
+    action=$(cut -f2 <<<"$line") note=$(cut -f6 <<<"$line")
+    case $action in
+        build | current) echo "==> $r: $action, eligible" ;;
+        rebase) echo "::error::$r: upstream moved past this recipe ($(cut -f3 <<<"$line")): rebase it first"; fail=1 ;;
+        "") echo "::error::$r: not in bin/auto-update-state's plan"; fail=1 ;;
+        *) echo "::error::$r: $action: $note"; fail=1 ;;
+    esac
+done
+exit "$fail"

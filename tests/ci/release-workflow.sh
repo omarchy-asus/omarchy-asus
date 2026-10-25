@@ -2,7 +2,8 @@
 # The release build (.github/workflows/release.yml) and its guards, offline:
 #   1. ci/release-plan, in a throwaway repo: main only, rc only (Quattro frozen, #309),
 #      no linux-omarchy, no held recipe, no unknown or missing recipe; the plan it prints
-#   2. the workflow: dispatch only; every job after the plan skipped off main; the build
+#   2. the workflow: dispatch only; the eligibility job (tests/ci/release-eligibility.sh has
+#      its decisions); every job after the plan skipped off main; the build
 #      step holds no token (tests/ci/build-recipe-no-secrets.sh has the rest); id-token and
 #      attestations only in the attest job, which runs no recipe code; the attest action
 #      pinned by commit; nothing signs, publishes or uploads to a release
@@ -75,8 +76,8 @@ check "no default permissions" grep -qx 'permissions: {}' "$WF"
 # job name -> its block
 jobs=$(awk '/^jobs:/ { j = 1; next } j && /^  [a-z][a-z0-9_-]*:$/ { sub(/:$/, ""); sub(/^ +/, ""); print }' "$WF")
 job() { awk -v j="$1" '/^jobs:/ { in_jobs = 1; next } in_jobs && /^  [a-z][a-z0-9_-]*:$/ { cur = $1; sub(/:$/, "", cur) } in_jobs && cur == j' "$WF"; }
-check "jobs: plan build check nvidia-compat attest result" \
-    test "$(tr '\n' ' ' <<<"$jobs")" = "plan build check nvidia-compat attest result "
+check "jobs: plan build eligibility check nvidia-compat attest result" \
+    test "$(tr '\n' ' ' <<<"$jobs")" = "plan build eligibility check nvidia-compat attest result "
 for j in $jobs; do
     [[ $j == plan || $j == result ]] && continue
     check "$j: skipped off main (job-level if)" \
@@ -85,8 +86,14 @@ for j in $jobs; do
 done
 check "plan: ci/release-plan gets github.ref" \
     bash -c 'grep -q "REF: \${{ github.ref }}" <<<"$1" && grep -q "ci/release-plan \"\$REF\" \"\$CHANNEL\"" <<<"$1"' _ "$(job plan)"
-check "result: fails unless plan, build, check and attest passed" \
-    grep -qF 'for r in "$PLAN" "$BUILD" "$CHECK" "$ATTEST"' <<<"$(job result)"
+check "result: fails unless plan, eligibility, build, check and attest passed" \
+    grep -qF 'for r in "$PLAN" "$ELIGIBILITY" "$BUILD" "$CHECK" "$ATTEST"' <<<"$(job result)"
+check "eligibility: runs ci/release-eligibility with the plan's recipes" \
+    grep -qF '/repo/ci/release-eligibility --channel "$CHANNEL" "${recipes[@]}"' <<<"$(job eligibility)"
+check "eligibility: no token in the job" \
+    bash -c '! grep -qE "github\.token|GH_TOKEN|GITHUB_TOKEN|actions: read" <<<"$1"' _ "$(job eligibility)"
+check "eligibility: its container gets no env, docker socket or privilege" \
+    bash -c '! grep "docker run" <<<"$1" | grep -qE " -e |--env|--privileged|docker.sock"' _ "$(job eligibility)"
 check "build: runs on ubuntu-24.04" grep -q 'runs-on: ubuntu-24.04' <<<"$(job build)"
 check "build: no token in the job (no github.token, no actions: read)" \
     bash -c '! grep -qE "github\.token|GH_TOKEN|actions: read" <<<"$1"' _ "$(job build)"

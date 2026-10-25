@@ -127,6 +127,14 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   channel (frozen, #309), `linux-omarchy` (its release build will run on the build host's runner),
   a held recipe (`recipes/<r>/HOLD`), an unknown recipe, and release cohorts whose recipes disagree
   (`bin/release-cohort check-recipes`). Every later job is also skipped off `main`.
+- **Eligibility** (`ci/release-eligibility`): the daily rebase's own decision for the requested
+  recipes, made by its scripts: `bin/check-upstream` against the channel's upstream dbs, with the
+  channel's published db as the local repo, then `bin/auto-update-state plan`. Only `build` (not in
+  the release, or the release holds another version) and `current` pass; `rebase` (upstream
+  moved past the recipe) and `attention` (upstream-older, bad-pkgrel, dep-mismatch, held, an
+  expired upstream db, ...) fail the run. Upstream PR states are not read here. `check-upstream`
+  runs `makepkg --printsrcinfo` in `bin/recipe-sandbox`, so this job's container gets user
+  namespaces and its own `/proc` (it holds no token).
 - **Build:** one job per recipe on `ubuntu-24.04`, `ci/build-recipe --channel rc --release` in the
   PR check's container, so the channel's package sources (`build/pacman-rc.conf`), the devtools
   makepkg config and the packager (`omarchy-asus`) are the chroot's. As in the chroot, build dependencies come from the channel's Omarchy and Arch repos,

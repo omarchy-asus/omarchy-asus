@@ -13,6 +13,9 @@ name: Release build
 #            --channel) and the release chroot's packager.
 #            Uploads release-<channel>-<recipe>: the packages (no -debug ones) and their
 #            SHA256SUMS. Read-only token, kept out of the build step; no secret.
+#   eligibility  ci/release-eligibility: the daily rebase's decision for these recipes
+#            (bin/check-upstream against the channel's upstream dbs and published db, then
+#            bin/auto-update-state plan); only build or current passes
 #   check    ci/release-check on the artifacts: manifests, pkgrel range, release cohorts
 #            against the channel's published db, one file per name on every release
 #   nvidia-compat  when nvidia-open-dkms builds: its reverse-dependency check against the
@@ -128,6 +131,34 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+  # The daily rebase's own decision for these recipes (bin/check-upstream, then
+  # bin/auto-update-state plan): only build or current passes. check-upstream runs
+  # `makepkg --printsrcinfo` (recipe code) in bin/recipe-sandbox, whose bubblewrap needs user
+  # namespaces and its own /proc in the container: hence the sysctl (Ubuntu restricts them
+  # through AppArmor) and the security options. The container holds no token or secret.
+  eligibility:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Let bubblewrap make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Would the daily rebase build these recipes now?
+        env:
+          RECIPES: ${{ needs.plan.outputs.recipes }}
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: |
+          set -euo pipefail
+          mapfile -t recipes < <(jq -r '.[]' <<<"$RECIPES")
+          docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
+            -v "$PWD:/repo:ro" "$BUILDER_IMAGE" /repo/ci/release-eligibility --channel "$CHANNEL" "${recipes[@]}"
+
   check:
     needs: [plan, build]
     if: github.ref == 'refs/heads/main'
@@ -200,20 +231,21 @@ jobs:
           subject-path: pkgs/*/*.pkg.tar.zst
 
   result:
-    needs: [plan, build, check, nvidia-compat, attest]
+    needs: [plan, eligibility, build, check, nvidia-compat, attest]
     if: always()
     runs-on: ubuntu-24.04
     permissions: {}
     steps:
       - env:
           PLAN: ${{ needs.plan.result }}
+          ELIGIBILITY: ${{ needs.eligibility.result }}
           BUILD: ${{ needs.build.result }}
           CHECK: ${{ needs.check.result }}
           NVIDIA: ${{ needs.nvidia-compat.result }}
           ATTEST: ${{ needs.attest.result }}
         run: |
-          echo "plan=$PLAN build=$BUILD check=$CHECK nvidia-compat=$NVIDIA attest=$ATTEST"
-          for r in "$PLAN" "$BUILD" "$CHECK" "$ATTEST"; do
+          echo "plan=$PLAN eligibility=$ELIGIBILITY build=$BUILD check=$CHECK nvidia-compat=$NVIDIA attest=$ATTEST"
+          for r in "$PLAN" "$ELIGIBILITY" "$BUILD" "$CHECK" "$ATTEST"; do
             [[ $r == success ]] || { echo "::error::a release build job did not pass (nothing is published either way)"; exit 1; }
           done
           [[ $NVIDIA == success || $NVIDIA == skipped ]] || { echo "::error::the nvidia-open-dkms reverse-dependency check did not pass"; exit 1; }
