@@ -1,0 +1,1831 @@
+#!/usr/bin/env python3
+"""g16-idlemask-bisect: which devices hold the G16's not-idle idlemask bits (#249).
+
+amd_pmc's idlemask (debugfs amd_pmc/amd_pmc_idlemask) sits at 0xffce9add on the G16
+at idle: bits 1, 5, 8, 10, 13, 14, 16, 20 and 21 read 0, not idle. This kit takes the
+removable PCI devices off the bus (sysfs remove) in halves and reads the idlemask at
+10 Hz after each change, so each bit ends up with the device, or the devices together,
+holding it. A bit that stays not idle with every removable device gone, the screen off
+and the apps frozen is either waiting for a quieter machine or held by firmware: the
+question for AMD (drm/amd#5863).
+
+  g16-idlemask-bisect               run it (one root prompt, then hands off; 6-11 min)
+  g16-idlemask-bisect --list        the removable groups found, the preflight, nothing changed
+  g16-idlemask-bisect --dry-run     change nothing, simulate the devices and bits (no root)
+  g16-idlemask-bisect --post        post the report to #249 with bin/issue at the end
+  options: --settle S (3) --settle-rescan S (5) --measure S (3)       pass 1 phases
+           --watts-settle S (10) --watts-measure S (30)               pass 2 phases
+           --quiet S (60)                                             the quiet phase
+           --skip a,b --only a,b --no-screen --no-follow --out DIR --sim MODEL.json (dry run)
+
+Groups (found at run time by driver, class and vendor; the BDFs are the G16's):
+  rtx        the RTX's root port (00:03.1) and everything behind it; skipped while
+             anything holds the RTX's DRM node or /dev/nvidia* (Hyprland does on the
+             G16: removing it there would take the compositor down)
+  wifi       mt7925e (63:00.0)            sd        GL9767 SD reader (62:00.0)
+  usb4       the USB4 NHI (67:00.5)       xhci-kbd  the xHCI with the keyboard (USB
+  xhci-cam   the xHCI with the camera               0b05:19b6) and Bluetooth (67:00.0)
+             (65:00.4)                    xhci-*    each other xHCI (67:00.3, 67:00.4)
+  audio      the SoC's HDA (65:00.6)      hdmi-audio  the AMD GPU's HDMI audio (65:00.1)
+  acp        the audio coprocessor (65:00.5)          npu  the NPU, amdxdna (66:00.1)
+  psp        ccp/PSP (65:00.2)            smbus     piix4 SMBus (00:14.0): its driver is
+                                                    unbound instead (on the root bus, a
+                                                    rescan would reach the RTX's port)
+  Never: the NVMe (the root disk), the AMD GPU, bridges and host bridges, anything
+  without a driver. A group whose camera or NPU node is open is skipped. Only the
+  removed device's own bus is rescanned, with its port held awake; the global rescan is
+  a fallback for a device that doesn't come back.
+
+Pass 1, the bits (short phases: 3 s settle, 5 s after a rescan, then 3 s of reads at
+10 Hz; a bit counts as not idle at >= 80 % of reads, idle at <= 20 %):
+  baseline; everything off (the first split). If no bit goes idle there, the bisect is
+  skipped. Otherwise: for a set whose removal lets bits go idle, remove half A, then
+  half B, and recurse into each half for the bits that went idle there (both halves
+  when they free different bits). A bit that goes idle with the whole set off but with
+  neither half alone needs devices from both: it is bisected in B with A off and in A
+  with B off, and reported as "needs X + Y together". Then the screen off (DPMS, through
+  hyprctl) with everything on, and with everything off.
+  The quiet phase, held 60 s: every removable device off, the screen off and the app
+  scopes frozen (cgroup freezer, app.slice scopes only: never services, the compositor,
+  the shell, audio or polkit) all at once, with the wakeups/s (/proc/interrupts), the
+  deepest cpuidle state's residency, gpu_metrics and the display -> SMU probes (the
+  DCN's SMU messages, Z-state decisions, idle-optimization allows and DML
+  StutterPeriod). A bit that goes idle only here wants a quieter machine; one still
+  stuck is firmware. The report says which.
+Pass 2, the watts (10 s settle + 30 s measured): baseline, everything off, each device
+  or device set pass 1 tied to a bit (its idlemask confirms pass 1), and the baseline
+  again; each against the mean of the two baselines. Battery watts are BAT current_now x
+  voltage_now every second; socket power is gpu_metrics' average_socket_power (struct
+  gpu_metrics_v3_0, natural alignment: offset 112) every 0.5 s.
+
+Preflight (it refuses and changes nothing if any holds): on AC or not discharging;
+the GPU MUX not in hybrid mode (asus-armoury gpu_mux_mode must be 1: the internal
+panel on the AMD GPU); an external display connected (HDMI or DP); the RTX not
+runtime-suspended or its video memory awake (/proc/driver/nvidia). The RTX is never
+woken to check: only its runtime_status and /proc/driver/nvidia are read, never
+nvidia-smi, sensors, its config space or the nvidia_0 backlight.
+
+Root: one pkexec prompt at the start, through the desktop's polkit agent
+(G16_POLKIT_REASON=<wrapper> runs `<wrapper> run REASON -- pkexec ...` for a dialog
+with a reason; G16_ROOT=sudo is the other way). g16-testd (#277) can't remove PCI
+devices, freeze scopes or load these probes (its allowlist has the SD reader), so it
+isn't used. The run itself is a root transient unit (g16-idlemask-bisect-run), outside
+app.slice so the freezer never reaches it, and it carries on when the keyboard,
+touchpad, Wi-Fi and the terminal drop out; this command follows its log.
+
+Restore: on exit, error or signal it thaws the apps, removes the probes, turns the
+screen back on, rescans the removed devices' buses, re-binds any driver that didn't
+come back and puts the keyboard light back. A watchdog unit
+(g16-idlemask-bisect-watchdog-*) does the same if the run dies, or stops it after 25
+minutes. If anything is still missing afterwards, a reboot brings every device back:
+nothing here persists across a reboot. After the psp group, amd-pmf's policy session
+may stay stale until the next boot.
+
+Output: ~/omarchy-asus-249-bisect/ (report.md, bisect.json with every phase's reads,
+run.log). The report is written to be posted on #249 as it is; --post does that
+through bin/issue next to this script (its personal-information scan applies).
+
+Exit status: 0 when the run finished, 1 on a refusal or a problem, 2 on bad usage.
+"""
+import argparse
+import glob
+import json
+import os
+import pwd
+import random
+import re
+import signal
+import stat
+import statistics
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+SYS = os.environ.get("G16_BISECT_SYS", "/sys")  # overrides for the offline tests only
+PROC = os.environ.get("G16_BISECT_PROC", "/proc")
+ISSUE = 249
+SELF = os.path.realpath(__file__)
+UNIT_USER, UNIT_RUN, UNIT_WATCHDOG = "g16-idlemask-bisect", "g16-idlemask-bisect-run", "g16-idlemask-bisect-watchdog"
+BDF_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
+STUCK, IDLE = 0.8, 0.2       # share of reads with the bit not idle
+DEADLINE_S = 25 * 60
+# Estimated costs for the dry run's time estimate (seconds).
+T_REMOVE, T_RESCAN, T_DPMS, T_START, T_END = 1.0, 5.0, 1.5, 40.0, 20.0
+
+
+def rd(p, d=None, n=4096):
+    try:
+        with open(p, errors="replace") as f:
+            return f.read(n).strip()
+    except OSError:
+        return d
+
+
+def wr(p, v):
+    try:
+        with open(p, "w") as f:
+            f.write(str(v) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+LOGF = None
+
+
+def log(*a):
+    line = time.strftime("%H:%M:%S ") + " ".join(str(x) for x in a)
+    try:
+        print(line, flush=True)
+    except OSError:
+        pass
+    if LOGF:
+        try:
+            with open(LOGF, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------- the idlemask
+def parse_mask(text):
+    """The idlemask's value from the debugfs file (it may carry a label)."""
+    m = re.search(r"0x[0-9a-fA-F]+", text or "")
+    return int(m.group(0), 16) if m else None
+
+
+def not_idle_bits(mask, width=32):
+    """Bits that read 0: not idle."""
+    return [b for b in range(width) if not (mask >> b) & 1]
+
+
+def bit_shares(masks, width=32):
+    """bit -> share of the reads with it not idle (reads that failed are left out)."""
+    good = [m for m in masks if m is not None]
+    if not good:
+        return {}
+    return {b: sum(1 for m in good if not (m >> b) & 1) / len(good) for b in range(width)}
+
+
+# ----------------------------------------------------------------- gpu_metrics
+# struct gpu_metrics_v3_0 (drivers/gpu/drm/amd/include/kgd_pp_interface.h), up to
+# average_all_core_power, with C natural alignment: 264 bytes in all.
+GM_V3_0 = [
+    ("structure_size", "H", 1), ("format_revision", "B", 1), ("content_revision", "B", 1),
+    ("temperature_gfx", "H", 1), ("temperature_soc", "H", 1), ("temperature_core", "H", 16),
+    ("temperature_skin", "H", 1), ("average_gfx_activity", "H", 1), ("average_vcn_activity", "H", 1),
+    ("average_ipu_activity", "H", 8), ("average_core_c0_activity", "H", 16),
+    ("average_dram_reads", "H", 1), ("average_dram_writes", "H", 1),
+    ("average_ipu_reads", "H", 1), ("average_ipu_writes", "H", 1),
+    ("system_clock_counter", "Q", 1),
+    ("average_socket_power", "I", 1), ("average_ipu_power", "H", 1), ("average_apu_power", "I", 1),
+    ("average_gfx_power", "I", 1), ("average_dgpu_power", "I", 1), ("average_all_core_power", "I", 1),
+    ("average_core_power", "H", 16), ("average_sys_power", "H", 1),
+    ("stapm_power_limit", "H", 1), ("current_stapm_power_limit", "H", 1),
+    ("average_gfxclk_frequency", "H", 1), ("average_socclk_frequency", "H", 1),
+    ("average_vpeclk_frequency", "H", 1), ("average_ipuclk_frequency", "H", 1),
+    ("average_fclk_frequency", "H", 1), ("average_vclk_frequency", "H", 1),
+    ("average_uclk_frequency", "H", 1), ("average_mpipu_frequency", "H", 1),
+    ("current_coreclk", "H", 16), ("current_core_maxfreq", "H", 1), ("current_gfx_maxfreq", "H", 1),
+    ("throttle_residency_prochot", "I", 1), ("throttle_residency_spl", "I", 1),
+    ("throttle_residency_fppt", "I", 1), ("throttle_residency_sppt", "I", 1),
+    ("throttle_residency_thm_core", "I", 1), ("throttle_residency_thm_gfx", "I", 1),
+    ("throttle_residency_thm_soc", "I", 1), ("time_filter_alphavalue", "I", 1),
+]
+
+
+def layout(fields):
+    """name -> (offset, struct code); and the size, padded to the largest alignment."""
+    off, out, big = 0, {}, 1
+    for name, code, n in fields:
+        sz = struct.calcsize("<" + code)
+        big = max(big, sz)
+        off = (off + sz - 1) // sz * sz
+        out[name] = (off, code, n)
+        off += sz * n
+    return out, (off + big - 1) // big * big
+
+
+GM_LAYOUT, GM_SIZE = layout(GM_V3_0)
+GM_POWER = {"socket_mw": "average_socket_power", "ipu_mw": "average_ipu_power", "apu_mw": "average_apu_power",
+            "gfx_mw": "average_gfx_power", "dgpu_mw": "average_dgpu_power", "core_mw": "average_all_core_power"}
+
+
+def parse_gpu_metrics(b):
+    """The power fields (mW) and the clock counter of a v3.0 table; None for another format.
+    0xffff / 0xffffffff (not reported) come back as None."""
+    if len(b) < 4:
+        return None
+    size, fmt, content = struct.unpack_from("<HBB", b, 0)
+    if fmt != 3 or content != 0 or len(b) < GM_LAYOUT["average_all_core_power"][0] + 4:
+        return None
+    out = {"size": size}
+    off, code, _ = GM_LAYOUT["system_clock_counter"]
+    out["clock_counter"] = struct.unpack_from("<" + code, b, off)[0]
+    for k, name in GM_POWER.items():
+        off, code, _ = GM_LAYOUT[name]
+        v = struct.unpack_from("<" + code, b, off)[0]
+        out[k] = None if v == (0xFFFF if code == "H" else 0xFFFFFFFF) else v
+    return out
+
+
+# ------------------------------------------------------------------ discovery
+def pci_devices():
+    out = {}
+    for p in sorted(glob.glob(SYS + "/bus/pci/devices/*")):
+        bdf = os.path.basename(p)
+        real = os.path.realpath(p)
+        parent = os.path.basename(os.path.dirname(real))
+        drv = os.path.basename(os.path.realpath(p + "/driver")) if os.path.lexists(p + "/driver") else ""
+        out[bdf] = {"bdf": bdf, "vendor": rd(p + "/vendor", ""), "device": rd(p + "/device", ""),
+                    "cls": rd(p + "/class", ""), "driver": drv, "path": real,
+                    "parent": parent if BDF_RE.match(parent) else ""}
+    return out
+
+
+def below(devs, top):
+    base = devs[top]["path"] + "/"
+    return [b for b in sorted(devs) if devs[b]["path"].startswith(base)]
+
+
+def usb_below(pci_path):
+    """USB devices below a PCI device: (vendor:product, interface classes)."""
+    out = []
+    for u in sorted(glob.glob(SYS + "/bus/usb/devices/*")):
+        if not os.path.exists(u + "/idVendor") or not os.path.realpath(u).startswith(pci_path + "/"):
+            continue
+        vid, pid = rd(u + "/idVendor", ""), rd(u + "/idProduct", "")
+        if vid == "1d6b":  # the root hubs
+            continue
+        ifc = {rd(i + "/bInterfaceClass", "") for i in glob.glob(os.path.realpath(u) + "/*:*")}
+        out.append((f"{vid}:{pid}", ifc))
+    return out
+
+
+def root_disk_bdfs():
+    """PCI devices on the path of the block device holding / (never touched)."""
+    out = set()
+    for line in (rd(PROC + "/self/mountinfo", "", 1 << 20) or "").splitlines():
+        f = line.split()
+        if len(f) > 4 and f[4] == "/":
+            p = os.path.realpath(f"{SYS}/dev/block/{f[2]}")
+            out.update(x for x in p.split("/") if BDF_RE.match(x))
+    return out
+
+
+KBD_USB = "0b05:19b6"
+
+
+def classify(d, devs):
+    """(group kind, label) for a device, or (None, why it is left alone)."""
+    c, v, drv = d["cls"][2:6], d["vendor"], d["driver"]
+    if c.startswith("06"):
+        return None, "bridge"
+    if c.startswith("01"):
+        return None, "storage (the NVMe)"
+    if drv == "amdgpu" or (v == "0x1002" and c.startswith("03")):
+        return None, "the AMD GPU"
+    if v == "0x10de":
+        return None, "behind the RTX's port (the rtx group)"
+    if not drv:
+        return None, "no driver"
+    if drv == "mt7925e" or c == "0280":
+        return "wifi", f"Wi-Fi ({drv})"
+    if c == "0805" or (v, d["device"]) == ("0x17a0", "0x9767"):
+        return "sd", f"SD reader ({drv})"
+    if drv == "thunderbolt" or d["cls"] == "0x0c0340":
+        return "usb4", "USB4 NHI (thunderbolt)"
+    if d["cls"] == "0x0c0330":
+        usb = usb_below(d["path"])
+        ids = ", ".join(i for i, _ in usb)
+        if any(i == KBD_USB for i, _ in usb):
+            bt = [i for i, ifc in usb if "e0" in ifc]
+            return "xhci-kbd", f"xHCI with the keyboard ({KBD_USB})" + (f" and Bluetooth ({', '.join(bt)})" if bt else "")
+        cam = [i for i, ifc in usb if "0e" in ifc]
+        if cam:
+            return "xhci-cam", f"xHCI with the camera ({', '.join(cam)})"
+        return "xhci", "xHCI" + (f" ({ids})" if ids else " (nothing plugged in)")
+    if c == "0403":
+        if v == "0x1002":
+            return "hdmi-audio", f"the AMD GPU's HDMI audio ({drv})"
+        return "audio", f"HDA ({drv})"
+    if drv.startswith("snd_acp") or (c == "0480" and v == "0x1022"):
+        return "acp", f"audio coprocessor ({drv})"
+    if drv == "amdxdna" or c == "1180":
+        return "npu", f"NPU ({drv})"
+    if drv == "ccp" or c == "1080":
+        return "psp", f"PSP ({drv})"
+    if c == "0c05":
+        return "smbus", f"SMBus ({drv})"
+    return None, f"not a removable kind ({drv})"
+
+
+def discover(devs=None):
+    """The removable groups (by address) and the devices left alone, with why."""
+    devs = pci_devices() if devs is None else devs
+    disk = root_disk_bdfs()
+    groups, left, used = [], {}, set()
+
+    def add(name, label, top):
+        members = [top] + below(devs, top)
+        if disk & set(members):
+            left[top] = "on the root disk's path"
+            return
+        used.update(members)
+        bus = top.rsplit(":", 1)[0]
+        # On the root bus (the SMBus) the driver is unbound instead: getting it back would
+        # take a rescan of the root bus, which reads the RTX's port and probes behind it.
+        method = "unbind" if not devs[top]["parent"] and name != "rtx" else "remove"
+        groups.append({"name": name, "label": label + (" (driver unbound, not removed)" if method == "unbind" else ""),
+                       "top": top, "members": members, "drivers": {m: devs[m]["driver"] for m in members},
+                       "port": devs[top]["parent"], "bus": bus, "method": method})
+
+    rtx = next((d for d in devs.values() if d["vendor"] == "0x10de" and d["cls"].startswith("0x03")), None)
+    if rtx and rtx["parent"] and devs.get(rtx["parent"], {}).get("cls", "").startswith("0x0604"):
+        add("rtx", "the RTX's root port and everything behind it", rtx["parent"])
+    for bdf, d in sorted(devs.items()):
+        if bdf in used:
+            continue
+        kind, why = classify(d, devs)
+        if kind is None:
+            left[bdf] = why
+            continue
+        name = kind if kind != "xhci" else "xhci-" + bdf[5:]
+        if any(g["name"] == name for g in groups):
+            name = f"{kind}-{bdf[5:]}"
+        add(name, why, bdf)
+    # By address: functions of one bus (one USB4 complex, the GPU's audio blocks) sit
+    # together, so a bit they share is less often split between the bisect's halves.
+    groups.sort(key=lambda g: g["top"])
+    return groups, left
+
+
+# ------------------------------------------------------------------ preflight
+def find_rtx(devs):
+    return next((b for b, d in sorted(devs.items()) if d["vendor"] == "0x10de" and d["cls"].startswith("0x03")), None)
+
+
+def battery():
+    for s in sorted(glob.glob(SYS + "/class/power_supply/*")):
+        if rd(s + "/type") == "Battery" and rd(s + "/scope") != "Device":
+            return s
+    return None
+
+
+def bat_w(bat):
+    """Battery watts: current_now x voltage_now, else power_now."""
+    if not bat:
+        return None
+    c, v = rd(bat + "/current_now"), rd(bat + "/voltage_now")
+    if c and v and c.lstrip("-").isdigit() and v.isdigit() and int(c) != 0:
+        return abs(int(c)) * int(v) / 1e12
+    p = rd(bat + "/power_now")
+    if p and p.lstrip("-").isdigit():
+        return abs(int(p)) / 1e6
+    return None
+
+
+def mux_mode():
+    for p in sorted(glob.glob(SYS + "/class/firmware-attributes/*/attributes/gpu_mux_mode/current_value")) + \
+            [SYS + "/devices/platform/asus-nb-wmi/gpu_mux_mode"]:
+        v = rd(p)
+        if v is not None:
+            return v
+    return None
+
+
+def card_driver(card):
+    return os.path.basename(os.path.realpath(f"{SYS}/class/drm/{card}/device/driver"))
+
+
+def preflight(devs, as_root=False):
+    """(refusals, facts). Reads only cached sysfs and /proc/driver/nvidia."""
+    bad, facts = [], {}
+    prod = (rd(SYS + "/class/dmi/id/product_name", "") or "") + " " + (rd(SYS + "/class/dmi/id/board_name", "") or "")
+    facts["machine"] = prod.strip()
+    if "GA605" not in prod:
+        bad.append(f"this is not a ROG Zephyrus G16 GA605 ({prod.strip() or 'unknown'})")
+    for s in sorted(glob.glob(SYS + "/class/power_supply/*")):
+        if rd(s + "/type") in ("Mains", "USB", "USB_C", "USB_PD") and rd(s + "/online") == "1":
+            bad.append(f"on AC ({os.path.basename(s)} online): unplug the charger, it must run on battery")
+    bat = battery()
+    st = rd(bat + "/status") if bat else None
+    facts["battery"] = f"{st}, {rd(bat + '/capacity', '?')} %" if bat else "none"
+    if not bat:
+        bad.append("no battery found")
+    elif st != "Discharging":
+        bad.append(f"the battery is not discharging ({st}): unplug the charger")
+    mux = mux_mode()
+    facts["gpu_mux_mode"] = mux
+    if mux is None:
+        bad.append("can't read the GPU MUX mode (asus-armoury gpu_mux_mode)")
+    elif mux != "1":
+        bad.append(f"the GPU MUX is not in hybrid mode (gpu_mux_mode={mux}): the internal panel must be on the AMD GPU")
+    for c in sorted(glob.glob(SYS + "/class/drm/card*-*")):
+        n = os.path.basename(c)
+        conn = n.split("-", 1)[1]
+        if rd(c + "/status") != "connected":
+            continue
+        if conn.startswith("eDP"):
+            drv = card_driver(n.split("-", 1)[0])
+            facts["panel"] = f"{conn} on {drv}"
+            if drv != "amdgpu":
+                bad.append(f"the internal panel ({conn}) is driven by {drv}, not the AMD GPU")
+        elif conn.startswith(("HDMI", "DP", "DVI")):
+            bad.append(f"an external display is connected ({conn}): unplug it")
+    rtx = find_rtx(devs)
+    if rtx:
+        rs = rd(f"{SYS}/bus/pci/devices/{rtx}/power/runtime_status", "?")
+        facts["rtx"] = rs
+        if rs != "suspended":
+            bad.append(f"the RTX is {rs}, not runtime-suspended: close what uses it (an external display, a game) and wait")
+        pw = rd(f"{PROC}/driver/nvidia/gpus/{rtx}/power", "", 4096) or ""
+        m = re.search(r"Video Memory:\s*(\S+)", pw)
+        if m:
+            facts["rtx_video_memory"] = m.group(1)
+            if m.group(1) != "Off":
+                bad.append(f"the RTX's video memory is {m.group(1)} (/proc/driver/nvidia): something is running on it")
+    if as_root and parse_mask(rd(SYS + "/kernel/debug/amd_pmc/amd_pmc_idlemask", "", 200)) is None:
+        bad.append("can't read amd_pmc_idlemask (debugfs, amd_pmc)")
+    return bad, facts
+
+
+# ------------------------------------------------------- open device nodes
+def open_char_devs():
+    """(major, minor) -> ["comm[pid]", ...] for every open character device; plus /dev/nvidia* holders."""
+    out, nv = {}, []
+    for p in glob.glob(PROC + "/[0-9]*"):
+        comm = rd(p + "/comm", "?")
+        try:
+            fds = os.listdir(p + "/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            f = f"{p}/fd/{fd}"
+            try:
+                tgt = os.readlink(f)
+                if not tgt.startswith("/dev/"):
+                    continue
+                s = os.stat(f)
+            except OSError:
+                continue
+            if stat.S_ISCHR(s.st_mode):
+                out.setdefault((os.major(s.st_rdev), os.minor(s.st_rdev)), set()).add(f"{comm}[{os.path.basename(p)}]")
+                if tgt.startswith("/dev/nvidia"):
+                    nv.append(f"{comm} {tgt}")
+    return out, sorted(set(nv))
+
+
+def group_nodes(g, devs):
+    """(major, minor, name) of the DRM, video and accel nodes below a group (sysfs dev files only)."""
+    out = []
+    for m in g["members"]:
+        top = devs.get(m, {}).get("path")
+        if not top:
+            continue
+        for root, dirs, files in os.walk(top):
+            dirs[:] = [d for d in dirs if "backlight" not in d and not d.startswith("nvidia_")]
+            if os.path.basename(os.path.dirname(root)) in ("drm", "video4linux", "accel") and "dev" in files:
+                v = rd(root + "/dev", "")
+                if re.match(r"^\d+:\d+$", v):
+                    a, b = v.split(":")
+                    out.append((int(a), int(b), os.path.basename(root)))
+    return out
+
+
+def busy_groups(groups, devs):
+    """name -> why it can't be removed now (a holder of its DRM, camera or NPU node)."""
+    held, nv = open_char_devs()
+    out = {}
+    for g in groups:
+        who = []
+        for a, b, n in group_nodes(g, devs):
+            for h in sorted(held.get((a, b), ())):
+                who.append(f"{h} has {n} open")
+        if g["name"] == "rtx" and nv:
+            who += [f"{x} open" for x in nv]
+        if who:
+            out[g["name"]] = "; ".join(sorted(set(who))[:4])
+    return out
+
+
+# ------------------------------------------------------------------ the bisect
+class Budget(Exception):
+    pass
+
+
+class Bisect:
+    """Group testing over removable groups. released(removed) -> the bits that go idle when
+    exactly those groups are off the bus. A bit is assumed held not idle while any of its
+    holders is present, so it goes idle once all of them are removed."""
+
+    def __init__(self, names, released, budget=80):
+        self.names, self.released, self.budget = list(names), released, budget
+        self.holders, self.calls = {}, 0
+
+    def rel(self, removed):
+        self.calls += 1
+        if self.calls > self.budget:
+            raise Budget()
+        return set(self.released(frozenset(removed)))
+
+    def run(self, bits):
+        """bits: those that go idle with every group removed."""
+        self.solve(self.names, frozenset(), set(bits))
+        return {b: sorted(h, key=self.names.index) for b, h in self.holders.items()}
+
+    def solve(self, c, z, s):
+        if not s:
+            return
+        if len(c) == 1:
+            for b in s:
+                self.holders.setdefault(b, set()).add(c[0])
+            return
+        a, b = c[:len(c) // 2], c[len(c) // 2:]
+        sa = self.rel(z | set(a)) & s
+        self.solve(a, z, sa)
+        rest = s - sa
+        if not rest:
+            return
+        sb = self.rel(z | set(b)) & rest
+        self.solve(b, z, sb)
+        split = rest - sb
+        if split:  # one holder in each half (at least)
+            self.solve(b, z | set(a), split)
+            self.solve(a, z | set(b), split)
+
+
+# ------------------------------------------------------------ the quiet phase
+def counters():
+    """Interrupt counts, per-CPU cpuidle time and usage, context switches (/proc, sysfs)."""
+    c = {"mono": time.monotonic(), "irq": {}, "cpuidle": {}, "deepest": None}
+    lines = (rd(PROC + "/interrupts", "", 1 << 20) or "").splitlines()
+    ncols = len(lines[0].split()) if lines else 0
+    for line in lines[1:]:
+        f = line.split()
+        if not f or not f[0].endswith(":"):
+            continue
+        counts, rest = [], f[1:]
+        while rest and rest[0].isdigit() and len(counts) < ncols:
+            counts.append(int(rest.pop(0)))
+        key = f[0][:-1]
+        label = key if not key.isdigit() else (key + " " + " ".join(rest[-1:]))
+        c["irq"][label[:48]] = sum(counts)
+    deepest = -1
+    for st in glob.glob(SYS + "/devices/system/cpu/cpu[0-9]*/cpuidle/state[0-9]*"):
+        cpu, idx = st.split("/")[-3], int(st.rsplit("state", 1)[1])
+        name = rd(st + "/name", "?")
+        t, u = rd(st + "/time"), rd(st + "/usage")
+        if t and t.isdigit():
+            c["cpuidle"][(cpu, name)] = (int(t), int(u or 0))
+            if idx > deepest:
+                deepest, c["deepest"] = idx, name
+    for line in (rd(PROC + "/stat", "", 1 << 16) or "").splitlines():
+        f = line.split()
+        if f and f[0] == "ctxt":
+            c["ctxt"] = int(f[1])
+    return c
+
+
+def rates(c0, c1):
+    """Wakeups/s (LOC + CAL + RES + device IRQs), the top IRQs, cpuidle residency % per state."""
+    dt = c1["mono"] - c0["mono"]
+    if dt <= 0:
+        return {}
+    irq = {k: (v - c0["irq"].get(k, 0)) / dt for k, v in c1["irq"].items()}
+    dev = sum(v for k, v in irq.items() if k.split()[0].isdigit())
+    per, ncpu = {}, len({k[0] for k in c1["cpuidle"]}) or 1
+    for k, (t, u) in c1["cpuidle"].items():
+        t0, u0 = c0["cpuidle"].get(k, (t, u))
+        a = per.setdefault(k[1], [0.0, 0.0])
+        a[0] += (t - t0) / 1e6 / dt / ncpu * 100
+        a[1] += (u - u0) / dt
+    w = irq.get("LOC", 0) + irq.get("CAL", 0) + irq.get("RES", 0) + dev
+    pct = {k: round(v[0], 1) for k, v in per.items()}
+    return {"dt": round(dt, 1), "wakeups": round(w), "LOC": round(irq.get("LOC", 0)), "CAL": round(irq.get("CAL", 0)),
+            "RES": round(irq.get("RES", 0)), "devirq": round(dev),
+            "ctxt": round((c1.get("ctxt", 0) - c0.get("ctxt", 0)) / dt) if "ctxt" in c1 else None,
+            "cpuidle_pct": pct, "deepest": c1["deepest"], "deepest_pct": pct.get(c1["deepest"]),
+            "top_irq": sorted(((round(v, 1), k) for k, v in irq.items() if v >= 1), reverse=True)[:8]}
+
+
+# The display -> SMU Z-state decisions (the probes of the #249 kit's snapshot): the DCN's
+# messages to the SMU, the Z-state decision at each clock update, and each idle
+# optimization allow/disallow with the live Z-state setting and DML StutterPeriod.
+PROBE_GROUP = "g16_249b"
+PROBES = [
+    "f:{g}/smumsg dcn35_smu_send_msg_with_param msg=msg_id:u32 param=param:u32",
+    "f:{g}/clk dcn35_update_clocks lower=safe_to_lower:u8 cur=clk_mgr_base->clks.zstate_support:u32 "
+    "new=context->bw_ctx.bw.dcn.clk.zstate_support:u32 nstr=context->stream_count:u8",
+    "f:{g}/idle dc_allow_idle_optimizations_internal allow=allow:u8 zs=dc->clk_mgr->clks.zstate_support:u32 "
+    "nstr=dc->current_state->stream_count:u8 st=dc->current_state->bw_ctx.dml.vba.StutterPeriod:x64",
+]
+ZS = {0: "UNKNOWN", 1: "ALLOW(Z8+Z9+Z10)", 2: "Z8_ONLY", 3: "Z8_Z10_ONLY", 4: "Z10_ONLY", 5: "DISALLOW"}
+
+
+class Probes:
+    """BTF fprobes in a private tracefs instance; any that the kernel refuses are noted, not fatal."""
+
+    def __init__(self):
+        tr = SYS + "/kernel/tracing"
+        self.base = tr if os.path.isdir(tr + "/instances") else SYS + "/kernel/debug/tracing"
+        self.inst = self.base + "/instances/" + PROBE_GROUP
+        self.ok, self.errors = [], []
+
+    def _dyn(self, line):
+        fd = os.open(self.base + "/dynamic_events", os.O_WRONLY | os.O_APPEND)
+        try:
+            os.write(fd, (line + "\n").encode())
+        finally:
+            os.close(fd)
+
+    def start(self):
+        self.stop()
+        for p in PROBES:
+            line = p.format(g=PROBE_GROUP)
+            try:
+                self._dyn(line)
+                self.ok.append(line.split()[0].split("/")[1])
+            except OSError as e:
+                self.errors.append(f"{line.split()[0]}: {e}")
+        if not self.ok:
+            return False
+        try:
+            os.mkdir(self.inst)
+        except FileExistsError:
+            pass
+        except OSError as e:
+            self.errors.append(f"instance: {e}")
+            return False
+        wr(self.inst + "/buffer_size_kb", 4096)
+        for e in self.ok:
+            wr(f"{self.inst}/events/{PROBE_GROUP}/{e}/enable", 1)
+        wr(self.inst + "/tracing_on", 1)
+        return True
+
+    def collect(self):
+        wr(self.inst + "/tracing_on", 0)
+        return rd(self.inst + "/trace", "", 32 << 20) or ""
+
+    def stop(self):
+        if os.path.isdir(self.inst):
+            wr(self.inst + "/tracing_on", 0)
+            for e in glob.glob(f"{self.inst}/events/{PROBE_GROUP}/*/enable"):
+                wr(e, 0)
+            try:
+                os.rmdir(self.inst)
+            except OSError:
+                pass
+        for e in ("smumsg", "clk", "idle"):
+            try:
+                self._dyn(f"-:{PROBE_GROUP}/{e}")
+            except OSError:
+                pass
+
+
+def summarize_trace(txt, secs):
+    """-> report lines, counts."""
+    smu, clk, idle, st_vals = {}, {}, {}, []
+    for line in txt.splitlines():
+        if line.startswith("#"):
+            continue
+        m = re.search(r" (smumsg|clk|idle): \(.*?\) (.*)$", line) or re.search(r" (smumsg|clk|idle): (.*)$", line)
+        if not m:
+            continue
+        kind, kv = m.group(1), dict(re.findall(r"(\w+)=(\S+)", m.group(2)))
+        if kind == "smumsg":
+            k = (int(kv.get("msg", "0"), 0), int(kv.get("param", "0"), 0))
+            smu[k] = smu.get(k, 0) + 1
+        elif kind == "clk":
+            k = (kv.get("lower"), kv.get("cur"), kv.get("new"), kv.get("nstr"))
+            clk[k] = clk.get(k, 0) + 1
+        else:
+            k = (kv.get("allow"), kv.get("zs"), kv.get("nstr"))
+            idle[k] = idle.get(k, 0) + 1
+            try:
+                st_vals.append(struct.unpack("<d", struct.pack("<Q", int(kv.get("st", "0"), 16)))[0])
+            except (ValueError, struct.error):
+                pass
+
+    def zs(v):
+        return ZS.get(int(v), v) if v and v.isdigit() else v
+    out = [f"display->SMU messages in {secs:g} s: " + (", ".join(f"0x{a:02x}/0x{b:x} x{n}" for (a, b), n in
+                                                          sorted(smu.items(), key=lambda x: -x[1])) or "none")]
+    out.append("clock updates: " + ("; ".join(f"lower={lo} cur={zs(c)} new={zs(nw)} streams={ns} x{n}" for (lo, c, nw, ns), n in
+                                              sorted(clk.items(), key=lambda x: -x[1])) or "none"))
+    out.append("idle optimizations: " + ("; ".join(f"allow={a} zstate={zs(z)} streams={ns} x{n}" for (a, z, ns), n in
+                                                   sorted(idle.items(), key=lambda x: -x[1])) or "none"))
+    if st_vals:
+        out.append(f"DML StutterPeriod (us): min {min(st_vals):.0f} median {statistics.median(st_vals):.0f} "
+                   f"max {max(st_vals):.0f} (Z8 needs > minimum_z8_residency_time, Z10 > 5000 unless PSR)")
+    return out, {"smu": {f"0x{a:02x}/0x{b:x}": n for (a, b), n in smu.items()},
+                 "clk": [list(k) + [n] for k, n in clk.items()], "idle": [list(k) + [n] for k, n in idle.items()],
+                 "stutter_us": st_vals[:50]}
+
+
+class Freezer:
+    """Freeze the user's app scopes (cgroup v2 freezer) in app.slice: never services, never the
+    compositor, the shell, audio, polkit or this kit. What is frozen is listed in a file, so the
+    watchdog can thaw it if this process dies."""
+    KEEP_COMM = re.compile(r"^(Hyprland|hyprland|quickshell|qs|omarchy-shell|pipewire.*|wireplumber|polkit.*|hyprpolkit.*|"
+                           r"xdg-desktop-por.*|uwsm.*|dbus.*|pkexec|systemd.*|g16.*|ssh.*|sshd.*)$")
+
+    def __init__(self, uid, state):
+        self.state, self.frozen = state, []
+        self.app = f"{SYS}/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
+        mine = (rd(PROC + "/self/cgroup") or "").split("::")[-1].strip()
+        self.mine = SYS + "/fs/cgroup" + mine
+
+    def units(self):
+        out = []
+        for root, dirs, _ in os.walk(self.app):
+            base = os.path.basename(root)
+            if root == self.app:
+                continue
+            dirs[:] = []
+            if not base.endswith(".scope") or base.startswith(("g16", "run-")) or \
+                    re.search(r"polkit|portal|keyring|dbus|at-spi|pipewire|wireplumber", base):
+                continue
+            if self.mine == root or self.mine.startswith(root + "/"):
+                continue
+            procs = (rd(root + "/cgroup.procs", "", 1 << 16) or "").split()
+            comms = {rd(f"{PROC}/{x}/comm", "") for x in procs}
+            if not procs or any(self.KEEP_COMM.match(c) for c in comms if c):
+                continue
+            out.append(root)
+        return out
+
+    def apply(self):
+        self.frozen = []
+        for root in self.units():
+            if rd(root + "/cgroup.freeze") == "1":
+                continue
+            self.frozen.append(root)
+            with open(self.state, "w") as f:
+                f.write("\n".join(self.frozen) + "\n")
+            wr(root + "/cgroup.freeze", 1)
+        return len(self.frozen)
+
+    def revert(self):
+        n = sum(1 for root in self.frozen if wr(root + "/cgroup.freeze", 0))
+        self.frozen = []
+        try:
+            os.unlink(self.state)
+        except OSError:
+            pass
+        return n
+
+
+def thaw_from_file(state):
+    for root in (rd(state, "", 1 << 16) or "").split():
+        wr(root + "/cgroup.freeze", 0)
+    try:
+        os.unlink(state)
+    except OSError:
+        pass
+
+
+# ------------------------------------------------------------------- hardware
+class Hw:
+    """The G16: groups off and on the bus, the screen, and the readings. All writes go
+    through _write, so the offline tests can stand in for the kernel."""
+
+    def __init__(self, groups, state_path, display=None, uid=None):
+        self.groups = {g["name"]: g for g in groups}
+        self.removed, self.screen_off, self.frozen = frozenset(), False, False
+        self.freezer = Freezer(uid, os.path.join(os.path.dirname(state_path), "frozen.txt")) if uid is not None else None
+        self.state_path, self.display = state_path, display
+        self.state = {"touched": {}, "ports": {}, "screen_off": False, "leds": {}, "done": False}
+        self.bat = battery()
+        self.amdgpu = next((os.path.realpath(c + "/device") for c in sorted(glob.glob(SYS + "/class/drm/card*"))
+                            if re.search(r"card\d+$", c) and card_driver(os.path.basename(c)) == "amdgpu"), None)
+        self.rtx = find_rtx(pci_devices())
+        self.leds = sorted(glob.glob(SYS + "/class/leds/*kbd_backlight*/brightness"))
+        for f in self.leds:
+            self.state["leds"][os.path.basename(os.path.dirname(f))] = rd(f)
+
+    # primitives (the tests override these)
+    def _write(self, path, value, timeout=30):
+        """A sysfs write in a thread: a remove that hangs in the kernel can't hang the run."""
+        res = []
+        t = threading.Thread(target=lambda: res.append(wr(path, value)), daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise RuntimeError(f"the write to {path} did not return in {timeout} s (a reboot brings the device back)")
+        return bool(res and res[0])
+
+    def _exists(self, bdf):
+        return os.path.exists(f"{SYS}/bus/pci/devices/{bdf}")
+
+    def _driver(self, bdf):
+        p = f"{SYS}/bus/pci/devices/{bdf}/driver"
+        return os.path.basename(os.path.realpath(p)) if os.path.lexists(p) else ""
+
+    def sleep(self, s):
+        time.sleep(s)
+
+    def save(self):
+        self.state["screen_off"] = self.screen_off
+        tmp = self.state_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.state, f)
+        os.replace(tmp, self.state_path)
+
+    # changes
+    def is_on(self, g):
+        """On the bus (and, for an unbind group, bound to its driver)."""
+        if not self._exists(g["top"]):
+            return False
+        return g["method"] != "unbind" or self._driver(g["top"]) == g["drivers"][g["top"]]
+
+    def remove(self, g):
+        if not self.is_on(g):
+            return
+        self.state["touched"][g["name"]] = {k: g[k] for k in ("top", "members", "drivers", "method", "bus", "port")}
+        self.save()
+        if g["method"] == "unbind":
+            ok = self._write(f"{SYS}/bus/pci/drivers/{g['drivers'][g['top']]}/unbind", g["top"])
+        else:
+            ok = self._write(f"{SYS}/bus/pci/devices/{g['top']}/remove", 1)
+        if not ok:
+            raise RuntimeError(f"taking {g['name']} ({g['top']}) off was refused")
+        for _ in range(50):
+            if not self.is_on(g):
+                return
+            self.sleep(0.1)
+        raise RuntimeError(f"{g['name']} ({g['top']}) is still there after {g['method']}")
+
+    def rescan(self, names):
+        """Bring groups back: rescan each one's bus (never the root bus but for the RTX's
+        own port) with its port held awake; bind the unbind groups. Then wait for every
+        member and its driver, binding a driver that doesn't come by itself."""
+        gs = [self.groups[n] for n in names]
+        for g in gs:
+            if g["method"] == "unbind" and self._exists(g["top"]) and not self.is_on(g):
+                self._write(f"{SYS}/bus/pci/drivers/{g['drivers'][g['top']]}/bind", g["top"])
+        gs_bus = [g for g in gs if g["method"] != "unbind"]
+        ports = sorted({g["port"] for g in gs_bus if g["port"] and self._exists(g["port"])})
+        for p in ports:
+            ctl = rd(f"{SYS}/bus/pci/devices/{p}/power/control")
+            if ctl and ctl != "on":
+                self.state["ports"][p] = ctl
+                self.save()
+                self._write(f"{SYS}/bus/pci/devices/{p}/power/control", "on")
+        for b in sorted({g["bus"] for g in gs_bus}):
+            f = f"{SYS}/class/pci_bus/{b}/rescan"
+            if not (os.path.exists(f) and self._write(f, 1)):
+                self._write(SYS + "/bus/pci/rescan", 1)
+        missing = self.wait_back(gs)
+        for p in ports:
+            if p in self.state["ports"]:
+                self._write(f"{SYS}/bus/pci/devices/{p}/power/control", self.state["ports"].pop(p))
+        self.save()
+        return missing
+
+    def wait_back(self, gs, secs=15):
+        want = [(m, g["drivers"].get(m, "")) for g in gs for m in g["members"]]
+        t = 0.0
+        while t < secs and not all(self._exists(m) for m, _ in want):
+            self.sleep(0.25)
+            t += 0.25
+        for m, drv in want:
+            if not drv or not self._exists(m):
+                continue
+            w = 0.0
+            while w < 10 and self._driver(m) != drv:
+                self.sleep(0.25)
+                w += 0.25
+            if self._driver(m) != drv:
+                self._write(f"{SYS}/bus/pci/drivers/{drv}/bind", m) or self._write(SYS + "/bus/pci/drivers_probe", m)
+        return [m for m, drv in want if not self._exists(m) or (drv and self._driver(m) != drv)]
+
+    def set_state(self, removed, screen_off, frozen=False):
+        """Go to exactly these groups removed, this screen state and the apps frozen or not. -> what it did."""
+        removed = frozenset(removed)
+        info = {"rescanned": [], "removed": [], "missing": [], "screen": None, "frozen": None}
+        if self.frozen and not frozen:
+            info["frozen"] = f"thawed {self.freezer.revert()}"
+            self.frozen = False
+        add = self.removed - removed
+        if add:
+            info["missing"] = self.rescan(sorted(add))
+            info["rescanned"] = sorted(add)
+            self.removed = self.removed - add
+        for n in sorted(removed - self.removed, key=list(self.groups).index):
+            self.remove(self.groups[n])
+            info["removed"].append(n)
+        # A rescan of a shared bus brings back siblings that are to stay removed.
+        for n in sorted(removed):
+            if self.is_on(self.groups[n]):
+                self.remove(self.groups[n])
+        self.removed = removed
+        if screen_off != self.screen_off and self.display:
+            ok = self.display.set(not screen_off)
+            info["screen"] = ("off" if screen_off else "on") + ("" if ok else " (not confirmed)")
+            self.screen_off = screen_off
+            self.save()
+        self.leds_off()
+        if frozen and not self.frozen and self.freezer:
+            info["frozen"] = f"froze {self.freezer.apply()} app scopes"
+            self.frozen = True
+        return info
+
+    def leds_off(self):
+        for f in sorted(glob.glob(SYS + "/class/leds/*kbd_backlight*/brightness")):
+            if rd(f) not in ("0", None):
+                self._write(f, 0, timeout=5)
+
+    def restore(self):
+        """Everything back: the screen, the bus (the global rescan only for what the
+        bus rescans missed), the drivers, the keyboard light."""
+        errs = []
+        if self.frozen:
+            self.freezer.revert()
+            self.frozen = False
+        if self.state.get("probes"):
+            Probes().stop()
+        if self.screen_off and self.display and not self.display.set(True):
+            errs.append("the screen did not come back on (hyprctl): press a key")
+        self.screen_off = False
+        gs = [n for n in self.state["touched"] if n in self.groups]
+        if gs:
+            missing = self.rescan(gs)
+            if missing:
+                self._write(SYS + "/bus/pci/rescan", 1)
+                missing = self.wait_back([self.groups[n] for n in gs], secs=10)
+            if missing:
+                errs.append("not back on the bus or without their driver: " + ", ".join(missing) + " (a reboot brings them back)")
+        self.removed = frozenset()
+        for name, v in self.state["leds"].items():
+            if v is not None:
+                self._write(f"{SYS}/class/leds/{name}/brightness", v, timeout=5)
+        self.state["done"] = not errs
+        self.save()
+        return errs
+
+    # readings
+    def idlemask(self):
+        return parse_mask(rd(SYS + "/kernel/debug/amd_pmc/amd_pmc_idlemask", "", 200))
+
+    def gpu_metrics(self):
+        if not self.amdgpu:
+            return None
+        try:
+            with open(self.amdgpu + "/gpu_metrics", "rb") as f:
+                return parse_gpu_metrics(f.read())
+        except OSError:
+            return None
+
+    def sample(self, secs, probes=False):
+        """Idlemask at 10 Hz; gpu_metrics every 0.5 s; battery, its status and the RTX every second;
+        wakeups and cpuidle over the whole phase; the display -> SMU probes if asked."""
+        out = {"masks": [], "gm": [], "bat": [], "status": set(), "rtx": set(), "trace": None}
+        pr = None
+        if probes:
+            self.state["probes"] = True
+            self.save()
+            pr = Probes()
+            if not pr.start():
+                out["trace"] = {"lines": ["probes refused: " + "; ".join(pr.errors)], "data": {}}
+                pr.stop()
+                pr = None
+        c0 = counters()
+        t0 = time.monotonic()
+        k = 0
+        while time.monotonic() - t0 < secs:
+            out["masks"].append(self.idlemask())
+            if k % 5 == 0:
+                out["gm"].append(self.gpu_metrics())
+            if k % 10 == 0:
+                out["bat"].append(bat_w(self.bat))
+                out["status"].add(rd(self.bat + "/status") if self.bat else None)
+                if self.rtx:
+                    out["rtx"].add(rd(f"{SYS}/bus/pci/devices/{self.rtx}/power/runtime_status", "gone"))
+            k += 1
+            time.sleep(max(0.0, t0 + k * 0.1 - time.monotonic()))
+        out["rates"] = rates(c0, counters())
+        if pr:
+            lines, data = summarize_trace(pr.collect(), secs)
+            pr.stop()
+            out["trace"] = {"lines": lines + [f"probe refused: {e}" for e in pr.errors], "data": data}
+        out["status"], out["rtx"] = sorted(x for x in out["status"] if x), sorted(out["rtx"])
+        return out
+
+    def clock(self):
+        return time.monotonic()
+
+
+class Display:
+    """DPMS of every output through the user's Hyprland (Lua dispatch first, then the old one)."""
+
+    def __init__(self, user, uid, sig):
+        self.base = ["runuser", "-u", user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                     f"HYPRLAND_INSTANCE_SIGNATURE={sig}", "hyprctl"]
+
+    def _ctl(self, *a):
+        try:
+            r = subprocess.run(self.base + list(a), capture_output=True, text=True, timeout=10)
+            return r.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def state_ok(self, on):
+        try:
+            mons = json.loads(self._ctl("monitors", "-j") or "x")
+        except ValueError:
+            return None
+        return all(bool(m.get("dpmsStatus")) == on for m in mons if not m.get("disabled"))
+
+    def set(self, on):
+        """-> True when every output reads back in the wanted state (or, with no read-back,
+        when a dispatch said ok)."""
+        lua = 'hl.dsp.dpms({ action = "%s" })' % ("enable" if on else "disable")
+        said = self._ctl("dispatch", lua) == "ok"
+        time.sleep(1)
+        got = self.state_ok(on)
+        if got is False or (got is None and not said):
+            said = self._ctl("dispatch", "dpms", "on" if on else "off") == "ok"
+            time.sleep(1)
+            got = self.state_ok(on)
+        return said if got is None else got
+
+
+class SimHw:
+    """The dry run: devices and bits from a model, a virtual clock, nothing touched."""
+
+    def __init__(self, groups, model, seed=249):
+        self.groups = {g["name"]: g for g in groups}
+        self.model, self.rng = model, random.Random(seed)
+        self.removed, self.screen_off, self.t, self.display, self.frozen = frozenset(), False, 0.0, True, False
+
+    def set_state(self, removed, screen_off, frozen=False):
+        removed = frozenset(removed)
+        self.frozen = frozen
+        add, rem = self.removed - removed, removed - self.removed
+        # siblings of a rescanned bus come back and go again
+        buses = {self.groups[n]["bus"] for n in add}
+        again = {n for n in removed & self.removed if self.groups[n]["bus"] in buses}
+        scr = None if screen_off == self.screen_off else ("off" if screen_off else "on")
+        self.t += T_RESCAN * bool(add) + T_REMOVE * (len(rem) + len(again)) + T_DPMS * bool(scr)
+        self.removed, self.screen_off = removed, screen_off
+        return {"rescanned": sorted(add), "removed": sorted(rem | again), "missing": [], "screen": scr,
+                "frozen": "froze 12 app scopes (simulated)" if frozen else None}
+
+    def held(self, holders):
+        for h in holders:
+            if h == "quiet":  # only with everything off, the screen off and the apps frozen
+                if not (self.frozen and self.screen_off and self.removed == set(self.groups)):
+                    return True
+            elif h == "display":
+                if not self.screen_off:
+                    return True
+            elif h not in self.groups or h not in self.removed:
+                return True
+        return False
+
+    def sample(self, secs, probes=False):
+        n = max(1, int(round(secs * 10)))
+        base = int(self.model.get("base", "0xffffffff"), 16)
+        masks = []
+        for _ in range(n):
+            m = base
+            for b, hs in self.model.get("holders", {}).items():
+                m = m & ~(1 << int(b)) if self.held(hs) else m | (1 << int(b))
+            for b, p in self.model.get("flicker", {}).items():
+                if self.rng.random() < p:
+                    m &= ~(1 << int(b))
+            masks.append(m)
+        w = self.model.get("watts", {})
+        saved = sum(w.get(g, 0.0) for g in self.removed) + (w.get("display", 0.0) if self.screen_off else 0.0)
+        bat = [w.get("base", 6.5) - saved + self.rng.gauss(0, 0.05) for _ in range(max(1, int(secs)))]
+        gm = [{"socket_mw": int((w.get("socket", 4.4) - 0.6 * saved) * 1000), "apu_mw": None, "gfx_mw": 200,
+               "core_mw": 200, "dgpu_mw": 0, "ipu_mw": None} for _ in range(max(1, int(secs * 2)))]
+        self.t += secs
+        quiet = self.frozen and self.screen_off
+        r = {"dt": secs, "wakeups": 150 if quiet else 850, "deepest": "C3", "deepest_pct": 99.6 if quiet else 98.4,
+             "cpuidle_pct": {"C3": 99.6 if quiet else 98.4}, "top_irq": []}
+        tr = {"lines": ["(simulated) idle optimizations: allow=1 zstate=Z8_Z10_ONLY streams=0 x3"], "data": {}} if probes else None
+        return {"masks": masks, "gm": gm, "bat": bat, "status": ["Discharging"], "rtx": ["suspended"],
+                "rates": r, "trace": tr}
+
+    def sleep(self, s):
+        self.t += s
+
+    def clock(self):
+        return self.t
+
+    def restore(self):
+        self.removed, self.screen_off, self.frozen = frozenset(), False, False
+        self.t += T_RESCAN
+        return []
+
+
+DEFAULT_SIM = {
+    "_note": "made up for the dry run: not the G16's map",
+    "base": "0xffce9add", "flicker": {"7": 0.4},
+    "holders": {"1": ["wifi"], "5": ["xhci-kbd"], "8": ["audio", "acp"], "10": ["sd"], "13": ["soc"],
+                "14": ["quiet"], "16": ["display"], "20": ["soc"], "21": ["usb4", "xhci-67:00.3"]},
+    "watts": {"base": 6.5, "socket": 4.4, "wifi": 0.15, "sd": 0.1, "xhci-kbd": 0.12, "audio": 0.05, "display": 0.8},
+}
+
+
+# ------------------------------------------------------------------- the run
+class Abort(Exception):
+    pass
+
+
+def mean(v):
+    v = [x for x in v if x is not None]
+    return sum(v) / len(v) if v else None
+
+
+class Runner:
+    def __init__(self, hw, groups, args, base_bits=None):
+        self.hw, self.args = hw, args
+        self.names = [g["name"] for g in groups]
+        self.phases, self.cache = [], {}
+        self.target = set(base_bits or ())
+        self.t0 = hw.clock()
+
+    def measure(self, removed, screen_off=False, why="", secs=None, fresh=False, settle=None, frozen=False, probes=False):
+        key = (frozenset(removed), screen_off, frozen)
+        if key in self.cache and not fresh:
+            return self.cache[key]
+        if len(self.phases) >= self.args.max_phases:
+            raise Budget()
+        info = self.hw.set_state(removed, screen_off, frozen)
+        if settle is None:
+            settle = self.args.settle_rescan if info["rescanned"] else self.args.settle
+        self.hw.sleep(settle)
+        s = self.hw.sample(secs or self.args.measure, probes=probes)
+        shares = bit_shares(s["masks"])
+        hist = {}
+        for m in s["masks"]:
+            k = f"0x{m:08x}" if m is not None else "unread"
+            hist[k] = hist.get(k, 0) + 1
+        gm = [g for g in s["gm"] if g]
+        p = {"n": len(self.phases) + 1, "why": why, "removed": sorted(key[0], key=self.names.index),
+             "screen_off": screen_off, "t": round(self.hw.clock() - self.t0, 1), "settle": settle,
+             "change": info, "reads": len(s["masks"]), "masks": dict(sorted(hist.items(), key=lambda x: -x[1])),
+             "not_idle": sorted(b for b, v in shares.items() if v >= STUCK),
+             "flicker": sorted(b for b, v in shares.items() if IDLE < v < STUCK),
+             "shares": {str(b): round(v, 3) for b, v in shares.items() if v > 0},
+             "bat_w": mean(s["bat"]), "bat_n": len([x for x in s["bat"] if x is not None]),
+             "status": s["status"], "rtx": s["rtx"], "frozen": frozen, "rates": s.get("rates") or {},
+             "trace": s.get("trace")}
+        for k in ("socket_mw", "apu_mw", "gfx_mw", "core_mw", "dgpu_mw", "ipu_mw"):
+            v = mean([g.get(k) for g in gm])
+            p[k.replace("_mw", "_w")] = v / 1000 if v is not None else None
+        p["valid"] = p["status"] == ["Discharging"]
+        p["released"] = sorted(b for b in self.target if shares.get(b, 1.0) <= IDLE)
+        self.phases.append(p)
+        self.cache[key] = p
+        rem = ",".join(p["removed"]) or "-"
+        log(f"phase {p['n']:2d} {why:<10} removed={rem}{' screen-off' if screen_off else ''}{' frozen' if frozen else ''} "
+            f"not-idle={p['not_idle']} released={p['released']} bat={fmt(p['bat_w'])} W sock={fmt(p['socket_w'])} W "
+            f"wakeups={p['rates'].get('wakeups', '-')}/s")
+        if info.get("missing"):
+            log("  not back after the rescan: " + ", ".join(info["missing"]))
+        if not p["valid"]:
+            raise Abort(f"the battery is {'/'.join(p['status']) or 'unknown'}: the charger came back")
+        return p
+
+    def released(self, removed):
+        return set(self.measure(removed, why="bisect")["released"])
+
+    def run(self):
+        """Pass 1, the bits (short phases), then pass 2, the watts (long phases)."""
+        res = {"holders": {}, "display": [], "internal": [], "unresolved": [], "with_screen": [],
+               "verified": {}, "notes": [], "watts": [], "pass1": "run", "quiet_only": []}
+        base = self.measure((), why="baseline")
+        self.target = set(base["not_idle"])
+        base["released"] = []
+        res["target"] = sorted(self.target)
+        if not self.target:
+            res["notes"].append("no bit was not idle at the baseline: nothing to map")
+        s_all = set()
+        try:
+            if self.target:
+                # the first split: everything off
+                s_all = set(self.measure(self.names, why="all-off")["released"])
+                if s_all:
+                    bis = Bisect(self.names, self.released, budget=10 ** 6)
+                    try:
+                        res["holders"] = {str(b): h for b, h in sorted(bis.run(s_all).items())}
+                    except Budget:
+                        res["holders"] = {str(b): sorted(h, key=self.names.index) for b, h in sorted(bis.holders.items())}
+                        raise
+                else:
+                    res["pass1"] = "skipped: no bit went idle with every removable device off"
+                screen = bool(self.args.screen and self.hw.display)
+                if screen:
+                    res["display"] = self.measure((), True, why="screen-off")["released"]
+                    res["with_screen"] = sorted(set(self.measure(self.names, True, why="all+screen")["released"])
+                                                - s_all - set(res["display"]))
+                # Everything quiet at once, held: every removable device off, the screen off, the
+                # app scopes frozen. A bit that goes idle only here wants a quieter machine.
+                q = self.measure(self.names, screen, why="quiet", frozen=True, probes=True,
+                                 settle=self.args.settle_rescan, secs=self.args.quiet)
+                res["quiet_phase"] = q["n"]
+                res["quiet_only"] = sorted(set(q["released"]) - s_all - set(res["display"]) - set(res["with_screen"]))
+            self.pass2(res)
+        except Budget:
+            res["notes"].append(f"stopped at {self.args.max_phases} phases: the map is incomplete")
+        res["unresolved"] = sorted(s_all - {int(b) for b in res["holders"]})
+        res["internal"] = sorted(self.target - s_all - set(res["display"]) - set(res["with_screen"])
+                                 - set(res.get("quiet_only", [])))
+        return res
+
+    def pass2(self, res):
+        """Watts: baseline, everything off, each holder set from pass 1, the baseline again;
+        long phases, and each holder set's idlemask confirms pass 1."""
+        sets = []
+        for b, h in res["holders"].items():
+            if tuple(h) not in [x for x, _ in sets]:
+                sets.append((tuple(h), []))
+            dict(sets)[tuple(h)].append(int(b))
+        plan = [("baseline", ()), ("all-off", tuple(self.names))] + [("+".join(h), h) for h, _ in sets] + [("baseline", ())]
+        got = []
+        for i, (label, rem) in enumerate(plan):
+            p = self.measure(rem, why="watts", fresh=True, settle=self.args.watts_settle, secs=self.args.watts_measure,
+                             probes=i == 0)  # the first baseline's probes: the quiet phase's comparison
+            got.append((label, p))
+        for h, bits in sets:
+            p = next(p for label, p in got if label == "+".join(h))
+            for b in bits:
+                res["verified"][str(b)] = b in p["released"]
+        bases = [p for label, p in got if label == "baseline"]
+        b_bat, b_sock = mean([p["bat_w"] for p in bases]), mean([p["socket_w"] for p in bases])
+        bits_of = {"+".join(h): bits for h, bits in sets}
+        for label, p in got:
+            res["watts"].append({"label": label, "removed": p["removed"], "bits": sorted(bits_of.get(label, [])),
+                                 "bat_w": p["bat_w"], "socket_w": p["socket_w"], "phase": p["n"],
+                                 "d_bat": None if label == "baseline" else none_sub(p["bat_w"], b_bat),
+                                 "d_sock": None if label == "baseline" else none_sub(p["socket_w"], b_sock)})
+
+
+def fmt(v, f=".2f"):
+    return "-" if v is None else format(v, f)
+
+
+def bits_txt(bits):
+    return ", ".join(str(b) for b in bits) if bits else "none"
+
+
+# ------------------------------------------------------------------- report
+def report(res, phases, groups, left, skipped, facts, args, sim=False, minutes=None):
+    lab = {g["name"]: f"{g['label']}, {g['top'][5:]}" for g in groups}
+    base = [p for p in phases if p["why"] == "baseline"]
+    o = ["## idlemask bisect: which devices hold the G16's not-idle bits (#249)", ""]
+    if sim:
+        o += ["**DRY RUN: simulated devices and bits, not a measurement.**", ""]
+    m0 = next(iter(base[0]["masks"])) if base and base[0]["masks"] else "?"
+    p1 = [p for p in phases if p["why"] != "watts"]
+    p2 = [p for p in phases if p["why"] == "watts"]
+    o.append(f"We took the G16's removable PCI devices off the bus in halves (sysfs `remove`, then `rescan`) and read "
+             f"amd_pmc's idlemask at 10 Hz after each change: on battery, the RTX runtime-suspended, hands off. "
+             f"Kernel {facts.get('kernel', '?')}; {fmt(minutes, '.1f')} min in all. Pass 1 (the bits): {len(p1)} phases, "
+             f"{args.settle} s settle ({args.settle_rescan} s after a rescan) and {args.measure} s of reads each"
+             + (f" ({res['pass1']})" if res.get("pass1", "run") != "run" else "") + ". Pass 2 (the watts): "
+             f"{len(p2)} phases of {args.watts_settle:g} s settle and {args.watts_measure:g} s measured.")
+    o.append("")
+    o.append(f"Baseline idlemask {m0}: not idle {bits_txt(res.get('target', []))}.")
+    o.append("")
+    o += ["| bit | held by | confirmed |", "|---|---|---|"]
+    for b in res.get("target", []):
+        h = res["holders"].get(str(b))
+        if h:
+            who = (("needs " + " + ".join(lab.get(n, n) for n in h) + " together (no one of them alone lets it go idle)")
+                   if len(h) > 1 else lab.get(h[0], h[0]))
+            conf = {True: "yes", False: "**no** (did not go idle in pass 2 with only these removed)"}.get(res["verified"].get(str(b)), "-")
+        elif b in res["display"]:
+            who, conf = "the display: idle with the screen off (DPMS)", "-"
+        elif b in res.get("quiet_only", []):
+            who, conf = ("idle **only in the quiet phase** (every removable device off, the screen off, the apps "
+                         "frozen, held): the machine is otherwise never quiet long enough"), "-"
+        elif b in res["with_screen"]:
+            who, conf = "idle only with every removable device removed **and** the screen off", "-"
+        elif b in res["unresolved"]:
+            who, conf = "idle with every removable device removed, but no subset pinned it down (flicker, or a rescan that didn't settle)", "-"
+        else:
+            who, conf = ("**stuck**: not idle even in the quiet phase (every removable device off, the screen off, "
+                         "the apps frozen): firmware or the SoC itself, the NVMe, the AMD GPU or the bridges"), "-"
+        o.append(f"| {b} | {who} | {conf} |")
+    o.append("")
+    q = next((p for p in phases if p["why"] == "quiet"), None)
+    if q:
+        if res.get("quiet_only"):
+            o.append(f"**Quiet:** bits {bits_txt(res['quiet_only'])} go idle only when everything is quiet at once: "
+                     "the machine is otherwise never quiet long enough for them.")
+        if res.get("internal"):
+            o.append(f"**Firmware:** bits {bits_txt(res['internal'])} stay not idle even when everything is quiet at "
+                     "once: it isn't a lack of quiet.")
+        o.append("")
+    if res.get("internal"):
+        o.append(f"**For AMD (drm/amd#5863):** bits {bits_txt(res['internal'])} stay not idle with every removable "
+                 "device gone, the screen off and the apps frozen. What do they stand for, and what keeps them set?")
+        o.append("")
+    if q:
+        b0 = next((p for p in phases if p["why"] == "watts" and p.get("trace")), base[0] if base else None)
+        qr, br = q.get("rates") or {}, (b0 or {}).get("rates") or {}
+        o += [f"### Quiet phase (held {args.quiet:g} s)", ""]
+        o.append(f"Every removable device off, {'the screen off, ' if q['screen_off'] else 'the screen on (no Hyprland session), '}"
+                 f"the app scopes frozen ({q['change'].get('frozen') or 'none'}). Against the baseline (phase {b0['n'] if b0 else '-'}):")
+        o.append("")
+        o += ["| | quiet | baseline |", "|---|---|---|"]
+        o.append(f"| idlemask | {', '.join(f'{k} x{v}' for k, v in list(q['masks'].items())[:2])} | "
+                 f"{', '.join(f'{k} x{v}' for k, v in list((b0 or {}).get('masks', {}).items())[:2])} |")
+        o.append(f"| not idle | {bits_txt(q['not_idle'])} | {bits_txt((b0 or {}).get('not_idle', []))} |")
+        o.append(f"| wakeups/s | {qr.get('wakeups', '-')} | {br.get('wakeups', '-')} |")
+        o.append(f"| deepest cpuidle ({qr.get('deepest') or '-'}) residency % | {fmt(qr.get('deepest_pct'), '.1f')} | "
+                 f"{fmt(br.get('deepest_pct'), '.1f')} |")
+        o.append(f"| socket W | {fmt(q['socket_w'])} | {fmt((b0 or {}).get('socket_w'))} |")
+        o.append(f"| battery W | {fmt(q['bat_w'])} | {fmt((b0 or {}).get('bat_w'))} |")
+        o.append("")
+        for p, name in ((q, "quiet"), (b0, "baseline")):
+            if p and p.get("trace"):
+                o += [f"Display -> SMU, {name}:", "", "```"] + p["trace"]["lines"] + ["```", ""]
+        if qr.get("top_irq"):
+            o.append("Top IRQs/s in the quiet phase: " + "; ".join(f"{k} {v}" for v, k in qr["top_irq"]) + ".")
+            o.append("")
+    if skipped:
+        o.append("Not removed: " + "; ".join(f"{n} ({why})" for n, why in skipped.items()) + ".")
+        o.append("")
+    # watts
+    o += ["### Watts (pass 2)", ""]
+    if res.get("watts"):
+        o += ["Each against the mean of the two baselines.", "",
+              "| removed | for bits | battery W | Δ battery W | socket W | Δ socket W |", "|---|---|---|---|---|---|"]
+        for w in res["watts"]:
+            what = {"baseline": "nothing (baseline)", "all-off": "every removable device"}.get(
+                w["label"], " + ".join(w["removed"]))
+            o.append(f"| {what} | {bits_txt(w['bits']) if w['bits'] else '-'} | {fmt(w['bat_w'])} | "
+                     f"{fmt(w['d_bat'], '+.2f')} | {fmt(w['socket_w'])} | {fmt(w['d_sock'], '+.2f')} |")
+        o.append("")
+    else:
+        o += ["Pass 2 did not run.", ""]
+    both = next((p for p in phases if p["why"] == "all+screen"), None)
+    if both and base:
+        o.append(f"Pass 1, everything removed and the screen off: battery {fmt(both['bat_w'])} W, socket "
+                 f"{fmt(both['socket_w'])} W (short phase; baseline {fmt(base[0]['bat_w'])} / {fmt(base[0]['socket_w'])} W).")
+    if len(p2) > 1:
+        o.append(f"Idlemask at the first and last baseline: {next(iter(p2[0]['masks']), '?')} / "
+                 f"{next(iter(p2[-1]['masks']), '?')}.")
+    for nt in res.get("notes", []):
+        o.append(f"- {nt}")
+    o.append("")
+    o += ["<details><summary>Every phase</summary>", "", "```"]
+    for p in phases:
+        masks = ", ".join(f"{k} x{v}" for k, v in list(p["masks"].items())[:3])
+        fl = f" flicker={p['flicker']}" if p["flicker"] else ""
+        o.append(f"{p['n']:2d} {p['why']:<10} t={p['t']:6.1f}s removed={','.join(p['removed']) or '-'}"
+                 f"{' screen-off' if p['screen_off'] else ''}{' frozen' if p.get('frozen') else ''} "
+                 f"not-idle={p['not_idle']}{fl} wakeups={(p.get('rates') or {}).get('wakeups', '-')} "
+                 f"bat={fmt(p['bat_w'])} sock={fmt(p['socket_w'])} gfx={fmt(p.get('gfx_w'))} core={fmt(p.get('core_w'))} "
+                 f"rtx={'/'.join(p['rtx']) or '-'} [{masks}]")
+    o += ["```", "", "Groups:", ""]
+    for g in groups:
+        o.append(f"- {g['name']}: {g['label']} ({', '.join(x[5:] for x in g['members'])})")
+    if left:
+        o.append("- left alone: " + "; ".join(f"{b[5:]} {w}" for b, w in sorted(left.items())))
+    o += ["", "</details>", "", "<sub>bin/g16-idlemask-bisect</sub>"]
+    return "\n".join(o) + "\n"
+
+
+def none_sub(a, b):
+    return None if a is None or b is None else a - b
+
+
+# ------------------------------------------------------------------- stages
+def parse(argv):
+    ap = argparse.ArgumentParser(prog="g16-idlemask-bisect", add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--post", action="store_true")
+    ap.add_argument("--settle", type=float, default=3.0)
+    ap.add_argument("--settle-rescan", type=float, default=5.0)
+    ap.add_argument("--measure", type=float, default=3.0)
+    ap.add_argument("--watts-settle", type=float, default=10.0)
+    ap.add_argument("--quiet", type=float, default=60.0)
+    ap.add_argument("--watts-measure", type=float, default=30.0)
+    ap.add_argument("--max-phases", type=int, default=60)
+    ap.add_argument("--skip", default="")
+    ap.add_argument("--only", default="")
+    ap.add_argument("--no-screen", dest="screen", action="store_false")
+    ap.add_argument("--no-follow", dest="follow", action="store_false")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--sim", default=None)
+    # internal stages
+    ap.add_argument("--stage", choices=["detached", "root", "run", "watchdog"], default=None)
+    ap.add_argument("--uid", type=int, default=None)
+    ap.add_argument("--hypr", default="")
+    ap.add_argument("--pid", type=int, default=None)
+    a = ap.parse_args(argv)
+    if not (0 < a.measure <= 60 and 0 <= a.settle <= 60 and 0 <= a.settle_rescan <= 60 and 1 < a.max_phases <= 200
+            and 0 < a.watts_measure <= 300 and 0 <= a.watts_settle <= 120 and 0 < a.quiet <= 300):
+        ap.error("--measure, --settle and --settle-rescan are seconds up to 60, --watts-measure up to 300, "
+                 "--watts-settle up to 120; --max-phases 2..200")
+    if a.hypr and not re.match(r"^[A-Za-z0-9_]+$", a.hypr):
+        ap.error("bad --hypr")
+    return a
+
+
+def pass_args(a):
+    """The options the later stages need, as arguments."""
+    out = ["--settle", str(a.settle), "--settle-rescan", str(a.settle_rescan), "--measure", str(a.measure),
+           "--watts-settle", str(a.watts_settle), "--watts-measure", str(a.watts_measure), "--quiet", str(a.quiet),
+           "--max-phases", str(a.max_phases), "--out", a.out]
+    for k, v in (("--skip", a.skip), ("--only", a.only)):
+        if v:
+            out += [k, v]
+    out += ["--no-screen"] * (not a.screen)
+    out += ["--post"] * a.post
+    return out
+
+
+def select(groups, a):
+    only = {x for x in a.only.split(",") if x}
+    skip = {x for x in a.skip.split(",") if x}
+    unknown = (only | skip) - {g["name"] for g in groups}
+    if unknown:
+        raise SystemExit(f"g16-idlemask-bisect: no such group: {', '.join(sorted(unknown))} "
+                         f"(found: {', '.join(g['name'] for g in groups)})")
+    keep = [g for g in groups if (not only or g["name"] in only) and g["name"] not in skip]
+    return keep, {g["name"]: "--skip" for g in groups if g not in keep}
+
+
+def kernel():
+    return rd(PROC + "/sys/kernel/osrelease", "") or os.uname().release
+
+
+def show_groups(groups, left, bad, facts):
+    print("Removable groups:")
+    for g in groups:
+        print(f"  {g['name']:<14} {g['label']} ({', '.join(x[5:] for x in g['members'])})")
+    print("Left alone: " + ("; ".join(f"{b[5:]} {w}" for b, w in sorted(left.items())) or "nothing"))
+    print("Facts: " + ", ".join(f"{k} {v}" for k, v in facts.items()))
+    print("Preflight: " + ("ok" if not bad else "would refuse:\n  - " + "\n  - ".join(bad)))
+
+
+def write_out(out, res, phases, groups, left, skipped, facts, a, sim, minutes):
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "bisect.json"), "w") as f:
+        json.dump({"result": res, "phases": phases, "groups": groups, "left": left, "skipped": skipped,
+                   "facts": facts, "minutes": minutes, "simulated": sim}, f, indent=1, default=list)
+    md = report(res, phases, groups, left, skipped, facts, a, sim=sim, minutes=minutes)
+    with open(os.path.join(out, "report.md"), "w") as f:
+        f.write(md)
+    return md
+
+
+def stage_dry(a):
+    devs = pci_devices()
+    groups, left = discover(devs)
+    bad, facts = preflight(devs)
+    if "GA605" not in facts["machine"]:  # not the G16: its groups as hints, for the simulation only
+        left = {}
+        groups = [{"name": n, "label": n, "top": t, "members": [t], "drivers": {t: "?"}, "port": "",
+                   "bus": t.rsplit(":", 1)[0], "method": "remove"}
+                  for n, t in (("wifi", "0000:63:00.0"), ("sd", "0000:62:00.0"), ("usb4", "0000:67:00.5"),
+                               ("xhci-kbd", "0000:67:00.0"), ("xhci-cam", "0000:65:00.4"), ("xhci-67:00.3", "0000:67:00.3"),
+                               ("xhci-67:00.4", "0000:67:00.4"), ("audio", "0000:65:00.6"), ("hdmi-audio", "0000:65:00.1"),
+                               ("acp", "0000:65:00.5"), ("npu", "0000:66:00.1"), ("psp", "0000:65:00.2"), ("smbus", "0000:00:14.0"))]
+    groups, skipped = select(groups, a)
+    facts["kernel"] = kernel()
+    model = DEFAULT_SIM
+    if a.sim:
+        with open(a.sim) as f:
+            model = json.load(f)
+    hw = SimHw(groups, model)
+    hw.display = a.screen
+    r = Runner(hw, groups, a)
+    res = r.run()
+    hw.restore()
+    minutes = (hw.clock() + T_START + T_END) / 60
+    out = a.out or os.path.expanduser("~/omarchy-asus-249-bisect-dry")
+    write_out(out, res, r.phases, groups, left, skipped, facts, a, True, minutes)
+    print(f"dry run: nothing was changed. {len(r.phases)} phases, about {minutes:.1f} min on the G16")
+    if bad:
+        print("the real run would refuse here:\n  - " + "\n  - ".join(bad))
+    print(f"report: {out}/report.md")
+    return 0
+
+
+def hypr_instance():
+    """The running Hyprland's instance signature: from the environment, else the newest socket."""
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if re.match(r"^[A-Za-z0-9_]+$", sig):
+        return sig
+    run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    socks = [x for x in glob.glob(run + "/hypr/*/.socket.sock")
+             if re.match(r"^[A-Za-z0-9_]+$", os.path.basename(os.path.dirname(x)))]
+    return os.path.basename(os.path.dirname(max(socks, key=os.path.getmtime))) if socks else ""
+
+
+def stage_front(a):
+    """As the user: preflight, then start the detached unit and follow its log."""
+    devs = pci_devices()
+    groups, left = discover(devs)
+    bad, facts = preflight(devs)
+    if a.list:
+        show_groups(groups, left, bad, facts)
+        return 0
+    if bad:
+        print("g16-idlemask-bisect: not starting, nothing was changed:\n  - " + "\n  - ".join(bad), file=sys.stderr)
+        return 1
+    select(groups, a)
+    if subprocess.run(["systemctl", "--user", "-q", "is-active", UNIT_USER]).returncode == 0:
+        print(f"g16-idlemask-bisect: {UNIT_USER} is already running", file=sys.stderr)
+        return 1
+    os.makedirs(a.out, exist_ok=True)
+    logf = os.path.join(a.out, "run.log")
+    open(logf, "w").close()
+    env = []
+    for k in ("G16_POLKIT_REASON", "G16_ROOT", "SUDO_ASKPASS"):
+        if os.environ.get(k):
+            env += ["-E", f"{k}={os.environ[k]}"]
+    cmd = ["systemd-run", "--user", "-q", "--collect", "-u", UNIT_USER, *env,
+           "-p", f"StandardOutput=append:{logf}", "-p", f"StandardError=append:{logf}",
+           sys.executable, "-I", SELF, "--stage", "detached", "--hypr", hypr_instance(),
+           *pass_args(a)]
+    if subprocess.run(cmd).returncode != 0:
+        print("g16-idlemask-bisect: could not start the unit", file=sys.stderr)
+        return 1
+    print(f"started {UNIT_USER}: approve the root prompt, then hands off (6 to 11 minutes; the keyboard, "
+          f"touchpad and Wi-Fi drop out for a while). Log: {logf}")
+    if not a.follow:
+        return 0
+    pos = 0
+    while True:
+        try:
+            with open(logf) as f:
+                f.seek(pos)
+                chunk = f.read()
+                pos = f.tell()
+            if chunk:
+                print(chunk, end="", flush=True)
+        except OSError:
+            pass
+        if subprocess.run(["systemctl", "--user", "-q", "is-active", UNIT_USER]).returncode != 0:
+            break
+        time.sleep(1)
+    rc = 0 if os.path.exists(os.path.join(a.out, "report.md")) else 1
+    print(f"\noutput: {a.out}" if rc == 0 else f"\nno report: see {logf}")
+    return rc
+
+
+def set_stay_awake(on):
+    f = os.path.expanduser("~/.local/state/omarchy/indicators/stay-awake")
+    have = os.path.exists(f)
+    if on == have:
+        return False
+    try:
+        subprocess.run(["omarchy-toggle-idle", "stay-awake" if on else "allow-idle"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if on and not os.path.exists(f):
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        open(f, "w").close()
+    elif not on and os.path.exists(f):
+        os.unlink(f)
+    return True
+
+
+def stage_detached(a):
+    """The user unit: keep the screen awake, take root once, then post if asked."""
+    stay = set_stay_awake(True)
+    why = ("G16 idle-power diagnostics (#249): take removable PCI devices off the bus and back, "
+           "switch the screen off and freeze the apps for a minute, 6 to 11 minutes in all; everything is put back")
+    args = [sys.executable, "-I", SELF, "--stage", "root", "--hypr", a.hypr, *pass_args(a)]
+    root = os.environ.get("G16_ROOT", "pkexec")
+    if os.environ.get("G16_POLKIT_REASON"):
+        cmd = [os.environ["G16_POLKIT_REASON"], "run", why, "--", "pkexec", *args]
+    elif root == "sudo":
+        cmd = ["sudo"] + (["-A"] if os.environ.get("SUDO_ASKPASS") else []) + args
+    else:
+        cmd = ["pkexec", "--disable-internal-agent", *args]
+    rc = subprocess.run(cmd).returncode
+    if stay:
+        set_stay_awake(False)
+    rep = os.path.join(a.out, "report.md")
+    if rc == 0 and a.post and os.path.exists(rep):
+        helper = os.path.join(os.path.dirname(SELF), "issue")
+        if os.access(helper, os.X_OK):
+            r = subprocess.run([helper, "comment", str(ISSUE), "--agent", "laptop-claude", "--body-file", rep])
+            print(f"posted to #{ISSUE}" if r.returncode == 0 else f"not posted (bin/issue refused it); the text is in {rep}")
+        else:
+            print(f"not posted: no bin/issue next to this script; the text is in {rep}")
+    return rc
+
+
+def stage_root(a):
+    """Root, from pkexec or sudo: check again, then hand the run to a root transient unit."""
+    if os.geteuid() != 0:
+        print("g16-idlemask-bisect: the root stage needs root", file=sys.stderr)
+        return 1
+    uid = int(os.environ.get("PKEXEC_UID") or os.environ.get("SUDO_UID") or -1)
+    try:
+        pw = pwd.getpwuid(uid)
+    except (KeyError, OverflowError):
+        print("g16-idlemask-bisect: can't tell who asked (no PKEXEC_UID/SUDO_UID)", file=sys.stderr)
+        return 1
+    out = os.path.realpath(a.out)
+    if not out.startswith(pw.pw_dir.rstrip("/") + "/") or os.stat(out).st_uid != uid:
+        print("g16-idlemask-bisect: the output directory must be the user's own, in their home", file=sys.stderr)
+        return 1
+    bad, _ = preflight(pci_devices(), as_root=True)
+    if bad:
+        print("g16-idlemask-bisect: not starting, nothing was changed:\n  - " + "\n  - ".join(bad))
+        return 1
+    if subprocess.run(["systemctl", "-q", "is-active", UNIT_RUN]).returncode == 0:
+        print(f"g16-idlemask-bisect: {UNIT_RUN} is already running")
+        return 1
+    cmd = ["systemd-run", "--wait", "-q", "-P", "--collect", "-u", UNIT_RUN, "-p", "TimeoutStopSec=120",
+           sys.executable, "-I", SELF, "--stage", "run", "--uid", str(uid), "--hypr", a.hypr, *pass_args(a)]
+    return subprocess.run(cmd).returncode
+
+
+def start_watchdog(out, deadline):
+    cmd = [sys.executable, "-I", SELF, "--stage", "watchdog", "--pid", str(os.getpid()), "--out", out]
+    r = subprocess.run(["systemd-run", "-q", "--collect", "-u", f"{UNIT_WATCHDOG}-{os.getpid()}",
+                        "-p", f"RuntimeMaxSec={deadline + 300}", *cmd])
+    if r.returncode == 0:
+        return
+    if os.fork() == 0:  # no systemd-run: a child of our own, in its own session
+        os.setsid()
+        os.execv(sys.executable, cmd)
+
+
+def load_state(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def stage_watchdog(a):
+    """Restore when the run is gone without finishing, or stop it after the deadline."""
+    state, t0 = os.path.join(a.out, "state.json"), time.monotonic()
+    while True:
+        time.sleep(2)
+        st = load_state(state)
+        if st.get("done") or os.path.exists(state + ".finished"):
+            return 0
+        alive = os.path.exists(f"/proc/{a.pid}")
+        if alive and time.monotonic() - t0 < DEADLINE_S:
+            continue
+        if alive:
+            os.kill(a.pid, signal.SIGTERM)
+            for _ in range(60):
+                time.sleep(1)
+                if not os.path.exists(f"/proc/{a.pid}"):
+                    break
+            else:
+                os.kill(a.pid, signal.SIGKILL)
+            st = load_state(state)
+            if st.get("done") or os.path.exists(state + ".finished"):
+                return 0
+        restore_from_state(st, a.out)
+        return 0
+
+
+def restore_from_state(st, out):
+    """The watchdog's restore: the apps thawed, the probes gone, the screen on, every touched
+    device back (its own bus first, the global rescan only when that missed), drivers bound,
+    the keyboard light."""
+    thaw_from_file(os.path.join(out, "frozen.txt"))
+    if st.get("probes"):
+        Probes().stop()
+    if st.get("screen_off") and st.get("display"):
+        d = st["display"]
+        Display(d["user"], d["uid"], d["sig"]).set(True)
+    touched = list(st.get("touched", {}).values())
+    for g in touched:
+        top, drv = g.get("top", ""), g.get("drivers", {}).get(g.get("top", ""), "")
+        if g.get("method") == "unbind" and drv and not os.path.lexists(f"{SYS}/bus/pci/devices/{top}/driver"):
+            wr(f"{SYS}/bus/pci/drivers/{drv}/bind", top)
+    for p in st.get("ports", {}):
+        wr(f"{SYS}/bus/pci/devices/{p}/power/control", "on")
+    for b in sorted({g.get("bus", "") for g in touched if g.get("method") != "unbind"}):
+        if not (b and wr(f"{SYS}/class/pci_bus/{b}/rescan", 1)):
+            wr(SYS + "/bus/pci/rescan", 1)
+    time.sleep(5)
+    gone = [m for g in touched for m in g.get("members", []) if not os.path.exists(f"{SYS}/bus/pci/devices/{m}")]
+    if gone:
+        wr(SYS + "/bus/pci/rescan", 1)
+        time.sleep(5)
+    for g in touched:
+        for m, drv in g.get("drivers", {}).items():
+            if drv and os.path.exists(f"{SYS}/bus/pci/devices/{m}") and not os.path.lexists(f"{SYS}/bus/pci/devices/{m}/driver"):
+                wr(f"{SYS}/bus/pci/drivers/{drv}/bind", m)
+    for p, ctl in st.get("ports", {}).items():
+        wr(f"{SYS}/bus/pci/devices/{p}/power/control", ctl)
+    for name, v in st.get("leds", {}).items():
+        if v is not None:
+            wr(f"{SYS}/class/leds/{name}/brightness", v)
+
+
+def stage_run(a):
+    """The root transient unit: the whole run, restore, the report."""
+    global LOGF
+    out = a.out
+    LOGF = os.path.join(out, "controller.log")
+    pw = pwd.getpwuid(a.uid)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+    def stop(sig, _):
+        raise Abort(f"stopped by signal {sig}")
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, stop)
+    devs = pci_devices()
+    bad, facts = preflight(devs, as_root=True)
+    if bad:
+        log("not starting, nothing was changed: " + "; ".join(bad))
+        return 1
+    facts["kernel"] = kernel()
+    groups, left = discover(devs)
+    groups, skipped = select(groups, a)
+    for n, why in busy_groups(groups, devs).items():
+        skipped[n] = why
+    groups = [g for g in groups if g["name"] not in skipped]
+    display = None
+    if a.screen and a.hypr:
+        display = Display(pw.pw_name, a.uid, a.hypr)
+    elif a.screen:
+        skipped["screen"] = "no Hyprland session"
+        a.screen = False
+    try:
+        os.unlink(os.path.join(out, "state.json.finished"))
+    except OSError:
+        pass
+    hw = Hw(groups, os.path.join(out, "state.json"), display, uid=a.uid)
+    if display:
+        hw.state["display"] = {"user": pw.pw_name, "uid": a.uid, "sig": a.hypr}
+    hw.save()
+    start_watchdog(out, DEADLINE_S)
+    log(f"groups: {', '.join(g['name'] for g in groups)}; not removed: "
+        + ("; ".join(f"{n} ({w})" for n, w in skipped.items()) or "none"))
+    r = Runner(hw, groups, a)
+    res, rc, err = {"holders": {}, "display": [], "internal": [], "unresolved": [], "with_screen": [],
+                    "verified": {}, "notes": [], "target": []}, 0, None
+    try:
+        res = r.run()
+    except (Abort, RuntimeError, Budget) as e:
+        err, rc = str(e) or "stopped", 1
+        log(f"stopped: {err}")
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            errs = hw.restore()
+            open(os.path.join(out, "state.json.finished"), "w").close()
+        except (RuntimeError, OSError) as e:  # the watchdog tries again once this process is gone
+            errs = [f"restore failed: {e}"]
+    for e in errs:
+        log("RESTORE: " + e)
+    if err:
+        res.setdefault("notes", []).append(f"the run stopped early: {err}")
+    if errs:
+        res.setdefault("notes", []).append("after the run: " + "; ".join(errs))
+        rc = 1
+    minutes = (hw.clock() - r.t0) / 60
+    write_out(out, res, r.phases, groups, left, skipped, facts, a, False, minutes)
+    for f in os.listdir(out):
+        try:
+            os.chown(os.path.join(out, f), a.uid, pw.pw_gid)
+        except OSError:
+            pass
+    log(f"done in {minutes:.1f} min: {out}/report.md" + (" (incomplete)" if rc else ""))
+    if errs:
+        log("a reboot brings every device back")
+    return rc
+
+
+def main(argv):
+    a = parse(argv)
+    if a.help:
+        print(__doc__)
+        return 0
+    if a.out is None:
+        a.out = os.path.expanduser("~/omarchy-asus-249-bisect" + ("-dry" if a.dry_run else ""))
+    a.out = os.path.abspath(a.out)
+    if a.stage == "detached":
+        return stage_detached(a)
+    if a.stage == "root":
+        return stage_root(a)
+    if a.stage == "run":
+        return stage_run(a)
+    if a.stage == "watchdog":
+        return stage_watchdog(a)
+    if a.dry_run:
+        return stage_dry(a)
+    return stage_front(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
