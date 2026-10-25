@@ -576,6 +576,8 @@ class Daemon:
             fail("instance name: lowercase letters, digits and dashes, up to 32")
         if name in self.rec["traces"]:
             fail(f"trace {name} is already running")
+        if os.path.exists(os.path.join(self.outdir(), f"{name}.trace")):
+            fail(f"trace {name} was stopped by the watchdog and is not collected yet (trace-stop {name})")
         ev = [] if events == "-" else events.split(",")
         kp = [] if kprobes == "-" else kprobes.split(",")
         bad = [e for e in ev if e not in EVENTS] + [k for k in kp if k not in KPROBES]

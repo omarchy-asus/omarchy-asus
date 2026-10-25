@@ -6,7 +6,9 @@
 #      panel-power-savings with the kit's reason, the exit is its knob-restore, step 1
 #      runs through the helper's dmub-cacp-set-level trace (the handed-over trace files
 #      are removed), step 2's table is written, and nothing asks for root; with a
-#      helper whose allowlist lacks that kprobe, step 1 is reported as skipped;
+#      helper whose allowlist lacks that kprobe, step 1 is reported as skipped; a
+#      failed trace-stop or restart gives no verdict (CAPTURE FAILED), and the exit
+#      retries a stop that failed;
 #   3. a panel-power-savings another test changed in the session is refused, untouched;
 #   4. with no session it falls back to pkexec, and G16_ROOT=testd refuses.
 set -u
@@ -38,7 +40,10 @@ case $1 in
     while (($#)); do if [[ $1 == --reason ]]; then r=$2; shift 2; else a+=("$1"); shift; fi; done
     [[ -n $r && -e $STUB/td-open ]] || exit 3
     echo "$m ${a[*]} | $r" >>"$STUB/td.log"
-    if [[ $m == trace-stop ]]; then
+    if [[ $m == trace-stop && -e $STUB/td-stop-fail ]]; then echo "g16-testd: stop failed"; exit 1
+    elif [[ $m == trace-start && -e $STUB/td-restart-fail && $(grep -c '^trace-start ' "$STUB/td.log") -gt 1 ]]; then
+      echo "g16-testd: start failed"; exit 1
+    elif [[ $m == trace-stop ]]; then
       # the levels written since the trace started reach the firmware at once
       f=$STUB/trace-$(wc -l <"$STUB/td.log")
       tac "$STUB/td.log" | awk '/^trace-start / {exit} /^knob-set panel-power-savings/ {print "  <idle>-0 [000] g16testd/dmub_cacp_set_level: (dmub_cacp_set_level+0x0/0x80) level=" $3}' >"$f"
@@ -104,6 +109,21 @@ out=$(run --rounds 1 --measure 1 --settle 1 2>&1); rc=$?
 R=$(ls -t "$T"/home/omarchy-asus-cacp-check-*.md 2>/dev/null | head -1)
 ((rc == 0)) && grep -q "SKIP: err the dmub_cacp_set_level kprobe is not on this g16-testd's allowlist" "${R:-/dev/null}" &&
   ! grep -q '^trace-' "$ST/td.log" && ok "old helper: step 1 reported as skipped" || bad "old helper: rc=$rc $(grep -A2 'Step 1' "${R:-/dev/null}")"
+
+# 2c. capture failures: no firmware verdict, and the exit still stops the trace
+for want in "stop|g16-testd trace-stop: g16-testd: stop failed" "restart|g16-testd trace-start: g16-testd: start failed"; do
+  mode=${want%%|*}
+  reset
+  touch "$ST/td-open" "$ST/td-$mode-fail"
+  out=$(run --verify-only 2>&1); rc=$?
+  R=$(ls -t "$T"/home/omarchy-asus-cacp-check-*.md 2>/dev/null | head -1)
+  grep -qF "CAPTURE FAILED, no verdict: ${want#*|}" "${R:-/dev/null}" && ! grep -qE 'NO CACP COMMAND|PASS:|BUG CONFIRMED' "$R" &&
+    ok "$mode failure: no verdict" || bad "$mode failure: rc=$rc $(grep -A3 'Step 1' "${R:-/dev/null}") $out"
+done
+reset
+touch "$ST/td-open" "$ST/td-stop-fail"
+run --verify-only >/dev/null 2>&1
+(($(grep -c '^trace-stop ' "$ST/td.log") >= 3)) && ok "stop failure: probe-off and the exit retry the stop" || bad "stop failure: $(grep '^trace-' "$ST/td.log")"
 
 # 3. another test's setting
 reset

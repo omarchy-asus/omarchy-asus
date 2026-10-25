@@ -84,18 +84,19 @@ fi
 # The same protocol, run as you inside an open g16-testd session: a level is the
 # helper's knob-set panel-power-savings, and EOF its knob-restore. The kprobe is the
 # helper's dmub-cacp-set-level trace; the helper hands a trace over only when it
-# stops, so hits stops it, keeps its levels and starts it again.
+# stops, so hits stops it, keeps its levels and starts it again. A failed stop or
+# restart answers err, never counts: step 1 then has no verdict.
 if [[ ${1:-} == --testd-helper ]]; then
   dry=${2:-0} why=${3:-}
-  TD=${G16_TESTD:-g16-testd} SET=0 TRN='' LEVELS='' TERR=''
+  TD=${G16_TESTD:-g16-testd} SET=0 TRN='' LEVELS='' TERR='' PROBING=0
   td() { local out rc; out=$("$TD" call "$@" --reason "$why" 2>&1); rc=$?; printf '%s' "${out##*$'\n'}"; return $rc; }
   trace_on() { TERR=$(td trace-start "cacp-$$" - dmub-cacp-set-level 1024) || return 1; TRN=cacp-$$; }
-  trace_off() { # stop the trace, keeping the levels it caught
-    local f
+  trace_off() { # stop the trace, keeping the levels it caught; TRN stays set until
+    local f    # the helper has stopped it, so the exit still stops it after a failure
     [[ -n $TRN ]] || return 0
+    f=$(td trace-stop "$TRN") || { TERR="g16-testd trace-stop: $f"; return 1; }
     TRN=''
-    f=$(td trace-stop "cacp-$$") || return 1
-    [[ -r $f ]] || return 0
+    [[ -r $f ]] || { TERR="g16-testd trace-stop handed over no trace ($f)"; return 1; }
     LEVELS+=$(grep -o 'level=[0-9]*' "$f")$'\n'
     rm -f "$f"
   }
@@ -119,12 +120,13 @@ if [[ ${1:-} == --testd-helper ]]; then
         if ((dry)); then echo ok
         elif ! "$TD" list 2>/dev/null | grep -q '^  dmub-cacp-set-level '; then
           echo "err the dmub_cacp_set_level kprobe is not on this g16-testd's allowlist (G16_ROOT=pkexec runs step 1)"
-        elif trace_on; then echo ok
+        elif trace_on; then PROBING=1; echo ok
         else echo "err g16-testd trace-start: $TERR"; fi ;;
       hits)
-        [[ -z $TRN ]] || { trace_off; trace_on; }
-        grep . <<<"$LEVELS" | sort | uniq -c | awk '{printf "%s%s x%s", (NR>1?", ":""), $2, $1} END {print ""}' ;;
-      probe-off) trace_off; echo ok ;;
+        if ((PROBING)) && ! trace_off; then echo "err $TERR"
+        elif ((PROBING)) && ! trace_on; then echo "err g16-testd trace-start: $TERR"
+        else grep . <<<"$LEVELS" | sort | uniq -c | awk '{printf "%s%s x%s", (NR>1?", ":""), $2, $1} END {print ""}'; fi ;;
+      probe-off) PROBING=0; if trace_off; then echo ok; else echo "err $TERR"; fi ;;
       dmub) v=$(dmesg 2>/dev/null | grep -o 'DMUB firmware, version: [^ ]*' | tail -1 | sed 's/.*: //'); echo "${v:-?}" ;;
       ping) "$TD" available >/dev/null 2>&1 && echo ok || echo err ;;
       quit) exit 0 ;;
@@ -282,7 +284,11 @@ if [[ $r == ok ]] && ((!DRY)); then
   say "after one DPMS off/on: ${B:-no CACP command sent}"
   setlevel 0; dpms_cycle
   C=$(ask hits)
-  if [[ $A == *level=3* ]]; then
+  CAPTURE=''
+  for h in "$A" "$B" "$C"; do [[ $h == err* && -z $CAPTURE ]] && CAPTURE=${h#err }; done
+  if [[ -n $CAPTURE ]]; then
+    VERIFY="CAPTURE FAILED, no verdict: $CAPTURE (G16_ROOT=pkexec runs step 1)"
+  elif [[ $A == *level=3* ]]; then
     VERIFY="PASS: the write alone reached the firmware (level 3 sent within 5 s). The 0810 behaviour."
   elif [[ $B == *level=3* ]]; then
     VERIFY="BUG CONFIRMED: the write did not reach the firmware until the DPMS modeset (level 3 sent only after it). Kernel 0810 fixes this."
