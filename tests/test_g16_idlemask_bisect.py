@@ -734,7 +734,7 @@ class Bus(Fake):
         errs = hw.restore()
         self.assertEqual(len(errs), 1)
         self.assertIn("the write to", errs[0])
-        self.assertIn("is stuck in the kernel", errs[0])
+        self.assertIn("did not return", errs[0])
         after = [w for w, _ in hw.writes[n:]]
         self.assertFalse([w for w in after if "pci" in w], after)  # no rescan, not of the root bus, not global
         self.assertIn("class/leds/asus::kbd_backlight/brightness", after)
@@ -744,6 +744,62 @@ class Bus(Fake):
         self.assertFalse(st["done"])
         with self.assertRaises(B.Stuck):  # and nothing else gets written to the bus
             hw._write(f"{B.SYS}/class/pci_bus/0000:63/rescan", 1)
+
+    def test_a_signal_during_a_blocked_write_keeps_the_guard(self):
+        hw, _ = self.hw()
+        real = hw._timed_write
+
+        def interrupted(path, value, timeout):
+            if path.endswith("0000:00:03.1/remove"):
+                raise B.Abort("stopped by signal 15")  # SIGTERM while the child is blocked
+            return real(path, value, timeout)
+        hw._timed_write = interrupted
+        with self.assertRaises(B.Abort):
+            hw.set_state({"rtx"}, False)
+        self.assertTrue(hw.stuck.endswith("0000:00:03.1/remove"))
+        n = len(hw.writes)
+        hw.restore()
+        self.assertFalse([w for w, _ in hw.writes[n:] if "pci" in w])
+
+    def test_the_run_dying_mid_write_leaves_the_marker_for_the_watchdog(self):
+        hw, _ = self.hw()
+        seen, real = {}, hw._timed_write
+
+        def dies(path, value, timeout):  # what the watchdog finds if the run dies right here
+            with open(os.path.join(self.tmp, "state.json")) as f:
+                seen.setdefault(path, json.load(f).get("stuck"))
+            return real(path, value, timeout)
+        hw._timed_write = dies
+        hw.set_state({"wifi"}, False)
+        p = f"{B.SYS}/bus/pci/devices/0000:63:00.0/remove"
+        self.assertEqual(seen[p], p)
+        with open(os.path.join(self.tmp, "state.json")) as f:
+            self.assertNotIn("stuck", json.load(f))  # cleared once the write returned
+        self.assertIsNone(hw.stuck)
+
+    def test_a_real_write_interrupted_by_a_signal(self):
+        import signal
+        hw, _ = self.hw()
+        hw._timed_write = lambda p, v, t: B.Hw._timed_write(hw, p, v, t)
+        d = os.path.join(self.tmp, "pcidev", "bus", "pci", "devices", "x")
+        os.makedirs(d)
+        fifo = os.path.join(d, "remove")
+        os.mkfifo(fifo)  # blocks like a stuck remove
+
+        def stop(*_):
+            raise B.Abort("stopped by signal 14")
+        old = signal.signal(signal.SIGALRM, stop)
+        signal.setitimer(signal.ITIMER_REAL, 0.2)
+        try:
+            with self.assertRaises(B.Abort):
+                hw._write(fifo, 1, timeout=5)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+            os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+        self.assertEqual(hw.stuck, fifo)
+        with open(os.path.join(self.tmp, "state.json")) as f:
+            self.assertEqual(json.load(f)["stuck"], fifo)
 
     def test_a_write_that_blocks_times_out(self):
         hw, _ = self.hw()

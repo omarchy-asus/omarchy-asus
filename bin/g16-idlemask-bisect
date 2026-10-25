@@ -837,12 +837,25 @@ class Hw:
         pci = any(x in path for x in PCI_PATHS)
         if pci and self.stuck:
             raise Stuck(f"not writing {path}: the write to {self.stuck} is still stuck in the kernel")
-        ok = self._timed_write(path, value, timeout)
+        if pci:  # saved before the write, cleared once it returned: a signal or the run dying
+            self.state["stuck"] = path  # mid-write leaves it set, for restore() and the watchdog
+            self.save()
+        done = False
+        try:
+            ok = self._timed_write(path, value, timeout)
+            done = ok is not None
+        except BaseException as e:
+            done = getattr(e, "write_done", False)
+            raise
+        finally:
+            if pci and done:
+                self.state.pop("stuck", None)
+                self.save()
+            elif pci:
+                self.stuck = path
         if ok is not None:
             return ok
         if pci:
-            self.stuck = self.state["stuck"] = path
-            self.save()
             raise Stuck(f"the write to {path} did not return in {timeout} s")
         raise RuntimeError(f"the write to {path} did not return in {timeout} s")
 
@@ -858,13 +871,20 @@ class Hw:
             except BaseException:
                 os._exit(1)
         end = time.monotonic() + timeout
-        while True:
-            done, status = os.waitpid(pid, os.WNOHANG)
-            if done:
-                return os.waitstatus_to_exitcode(status) == 0
-            if time.monotonic() >= end:
-                return None
-            time.sleep(0.01)
+        try:
+            while True:
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    return os.waitstatus_to_exitcode(status) == 0
+                if time.monotonic() >= end:
+                    return None
+                time.sleep(0.01)
+        except BaseException as e:  # a signal mid-wait: did the write finish anyway?
+            try:
+                e.write_done = os.waitpid(pid, os.WNOHANG)[0] != 0
+            except (OSError, AttributeError):
+                pass
+            raise
 
     def _exists(self, bdf):
         return os.path.exists(f"{SYS}/bus/pci/devices/{bdf}")
@@ -1031,7 +1051,7 @@ class Hw:
         gs = [n for n in self.state["touched"] if n in self.groups]
         if self.stuck:
             # No rescan, not even of the root bus: it would hang behind the stuck write.
-            errs.append(f"the write to {self.stuck} is stuck in the kernel, so nothing more was written to the PCI "
+            errs.append(f"the write to {self.stuck} did not return (it may be stuck in the kernel), so nothing more was written to the PCI "
                         f"bus: {', '.join(gs)} may still be off, and the stuck write holds the bus until a reboot")
         elif gs:
             missing = self.rescan(gs)
@@ -1850,7 +1870,7 @@ def restore_from_state(st, out):
         d = st["display"]
         Display(d["user"], d["uid"], d["sig"]).set(True)
     touched = list(st.get("touched", {}).values())
-    if st.get("stuck"):  # every PCI write would hang behind the stuck one: a reboot brings the devices back
+    if st.get("stuck"):  # a PCI write in flight or stuck: every other would hang behind it; a reboot brings them back
         touched, st["ports"] = [], {}
     for g in touched:
         top, drv = g.get("top", ""), g.get("drivers", {}).get(g.get("top", ""), "")
