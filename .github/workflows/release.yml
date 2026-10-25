@@ -222,10 +222,37 @@ jobs:
         with:
           pattern: release-${{ needs.plan.outputs.channel }}-*
           path: pkgs
-      - name: Check the packages against SHA256SUMS
+      # download-artifact puts each artifact in pkgs/<artifact>/ only when the pattern
+      # matches more than one; a single match is extracted straight into pkgs/. Give that one
+      # its own directory too, then check every artifact against its own SHA256SUMS.
+      - name: One directory per artifact, checked against its SHA256SUMS
+        env:
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+          RECIPES: ${{ needs.plan.outputs.recipes }}
         run: |
           set -euo pipefail
-          for d in pkgs/*/; do (cd "$d" && sha256sum --strict -c SHA256SUMS); done
+          shopt -s nullglob
+          mapfile -t recipes < <(jq -r '.[]' <<<"$RECIPES")
+          if [[ -e pkgs/SHA256SUMS ]]; then
+            (( ${#recipes[@]} == 1 )) || { echo "::error::one artifact downloaded for ${#recipes[@]} recipes"; exit 1; }
+            d=pkgs/release-$CHANNEL-${recipes[0]}
+            mkdir -- "$d"
+            mv -- pkgs/SHA256SUMS pkgs/*.pkg.tar.zst "$d/"
+          fi
+          loose=(pkgs/*.pkg.tar.zst)
+          (( ${#loose[@]} == 0 )) || { echo "::error::packages outside an artifact directory: ${loose[*]}"; exit 1; }
+          sums=(pkgs/*/SHA256SUMS)
+          (( ${#sums[@]} )) || { echo "::error::no SHA256SUMS under pkgs: nothing was downloaded"; exit 1; }
+          dirs=(pkgs/*/)
+          (( ${#dirs[@]} == ${#recipes[@]} && ${#sums[@]} == ${#recipes[@]} )) ||
+            { echo "::error::${#recipes[@]} recipes planned, ${#dirs[@]} artifacts downloaded, ${#sums[@]} with SHA256SUMS"; exit 1; }
+          for s in "${sums[@]}"; do
+            d=${s%/SHA256SUMS}
+            (cd "$d" && sha256sum --strict -c SHA256SUMS)
+            listed=$(awk '{sub(/^\*/, "", $2); print $2}' "$s" | sort)
+            here=$(cd "$d" && printf '%s\n' *.pkg.tar.zst | sort)
+            [[ -n $here && $listed == "$here" ]] || { echo "::error::$d: SHA256SUMS does not list exactly its packages"; exit 1; }
+          done
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: pkgs/*/*.pkg.tar.zst

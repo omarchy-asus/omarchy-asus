@@ -13,7 +13,10 @@
 #      (bin/publish, bin/sync-release): bump pkgrel. Read with publish-lib's
 #      pub_release_assets; a release that can't be read fails the check.
 # The reverse-dependency check is ci/nvidia-compat, its own job (it needs the container).
-# Usage: ci/release-check --channel rc <dir>   (<dir>/<artifact>/{*.pkg.tar.zst,SHA256SUMS})
+# Usage: ci/release-check --channel rc <dir>
+#   <dir>/<artifact>/{*.pkg.tar.zst,SHA256SUMS}, one directory per artifact; or, when the
+#   download matched a single artifact (download-artifact then extracts it straight into
+#   <dir>), <dir>/{*.pkg.tar.zst,SHA256SUMS}. Each artifact's SHA256SUMS is checked on its own.
 # Env: GH_TOKEN (read-only); RELEASE_CHECK_DB, a db file to use instead of fetching one (tests)
 # Exit: 0 all passed, 1 a check failed (each failure is an ::error:: line), 2 usage.
 set -uo pipefail
@@ -31,7 +34,8 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 echo "==> 1. manifests"
 pkgs=()
 shopt -s nullglob
-for d in "$dir"/*/; do
+if [[ -e $dir/SHA256SUMS ]]; then artifacts=("$dir"); else artifacts=("$dir"/*/); fi
+for d in "${artifacts[@]}"; do
     d=${d%/}
     if [[ ! -f $d/SHA256SUMS ]]; then err "$(basename "$d"): no SHA256SUMS"; continue; fi
     (cd "$d" && sha256sum --quiet --strict -c SHA256SUMS) || err "$(basename "$d"): a package does not match SHA256SUMS"
