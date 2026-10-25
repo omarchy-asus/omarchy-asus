@@ -40,7 +40,6 @@ SYS=${G16_HDMI_SYS:-/sys}     # the overrides are for tests only
 PROC=${G16_HDMI_PROC:-/proc}
 STATE=${G16_HDMI_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-asus/hdmi}
 TESTD=${G16_HDMI_TESTD:-g16-testd}
-TESTD_OUT=${G16_HDMI_TESTD_OUT:-/run/omarchy-asus-g16-testd/out}  # where testd keeps a stopped trace
 HPD_PIN=16 OTHER_PIN=5
 # nvidia's display warnings (and 0004's, #213) that matter here
 KPAT='Flip event timeout|Unable to read EDID|FRL link training failed|D-Notifier|No EDID on connected HDMI|NVRM: Xid|nvidia-modeset: (ERROR|WARNING)'
@@ -222,13 +221,10 @@ trace() {
     stop)
       find_rtx
       local out='' tl
-      ((session)) && out=$("$TESTD" call trace-stop hdmi --reason "#158: HDMI hotplug trace done" 2>/dev/null)
-      if [[ -z $out || ! -r $out ]]; then
-        # testd's 30-minute watchdog (or the session's end) already stopped it and kept the file.
-        out=$TESTD_OUT/hdmi.trace
-        [[ -r $out ]] || { echo "g16-hdmi: no trace to collect (none running, none kept in $TESTD_OUT)" >&2; exit 3; }
-        echo "the trace had already been stopped (testd stops a trace after 30 min); collecting the kept file"
-      fi
+      ((session)) || { echo "g16-hdmi: no g16-testd session open: the session's end discarded the trace" >&2; exit 3; }
+      # A trace testd's 30-minute watchdog stopped is handed over here too (#284).
+      out=$("$TESTD" call trace-stop hdmi --reason "#158: HDMI hotplug trace done" 2>&1)
+      [[ -r $out ]] || { echo "g16-hdmi: no trace to collect (${out:-no answer})" >&2; exit 3; }
       mkdir -p "$STATE" || die "cannot create $STATE"
       tl=$STATE/trace-$(date +%Y%m%d-%H%M%S).txt
       # The RTX (and its HDA function) and the system suspend phases, nothing else.

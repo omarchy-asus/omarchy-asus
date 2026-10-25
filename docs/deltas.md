@@ -1506,21 +1506,29 @@ it is installed.
 <a id="pkg-omarchy-asus-g16-testd"></a>
 ### G16 test-session helper (omarchy-asus-g16-testd, held)
 
-- **Component:** `omarchy-asus-g16-testd` 0.1.0-106. **Held** (`recipes/omarchy-asus-g16-testd/HOLD`):
+- **Component:** `omarchy-asus-g16-testd` 0.1.0-107. **Held** (`recipes/omarchy-asus-g16-testd/HOLD`):
   CI builds it, nothing publishes it, until the maintainer agrees to install it on the G16 and its
   G16 test passes (#277; allowlist gaps in #284).
 - **What:** one root helper per G16 hardware test session: one polkit approval, then fixed
-  allowlisted operations (EC reads, tracefs instances, A/B knobs, module swaps, boot drop-ins,
-  freezing an app scope), each logged with a reason.
+  allowlisted operations (EC reads, RAPL energy counter reads, tracefs instances, A/B knobs,
+  module swaps, boot drop-ins, freezing an app scope), each logged with a reason. `rapl-read`
+  (0.1.0-107, #284) reads only the `package-0` powercap zone and its `core` subzone, their
+  `energy_uj` and `max_energy_range_uj`, takes no arguments, and serves `bin/g16-idle-power`
+  inside a session (its CACP levels go through the `panel-power-savings` knob).
 - **Test:** offline, `tests/channel/g16-testd.sh` runs
   `recipes/omarchy-asus-g16-testd/tests/test_g16_testd.py`: the helper against a fake root
   (`--fake`, every command only logged); the allowlists refuse what isn't on them; everything is
   put back on stop, expiry, SIGTERM and after a crash; another uid is refused; calls fail with no
-  session open; `package()` installs exactly the expected files. On the G16 (its queued test):
+  session open; `rapl-read` reads only package-0 and its core subzone and takes no arguments
+  (`test_rapl_read_*`); `tests/ci/g16-idle-power.sh` runs the kit against a g16-testd stand-in;
+  `package()` installs exactly the expected files. On the G16 (its queued test):
   `g16-testd session start` shows one polkit dialog; `g16-testd call knob-set nmi-watchdog 0
   --reason test` then `g16-testd session stop` puts the knob back
   (`cat /proc/sys/kernel/nmi_watchdog`); `journalctl -u omarchy-asus-g16-testd` logs each call
-  with its reason; `g16-testd available` exits non-zero once the session is stopped.
+  with its reason; `g16-testd available` exits non-zero once the session is stopped; inside a
+  session, `g16-idle-power --measure 20 --settle 5 --no-post` shows no dialog, its report has
+  RAPL package and core watts and the CACP rows, and `panel_power_savings` is back at its level
+  afterwards.
 - **Upstream: ours-only.**
 - **Drop when:** the G16 test kits no longer need root steps (or move to another mechanism); a
   test helper with no kit using it is removed with its recipe.

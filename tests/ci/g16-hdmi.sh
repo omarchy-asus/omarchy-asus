@@ -96,18 +96,18 @@ echo "$*" >>"$STUB/testd.args"
 case $1 in
   available) [[ -e $STUB/session ]] ;;
   call) if [[ $2 == trace-stop ]]; then
-          [[ -e $STUB/watchdog-stopped ]] && { echo "g16-testd: no trace hdmi running" >&2; exit 1; }
+          [[ -e $STUB/no-trace ]] && { echo "g16-testd: no trace hdmi running" >&2; exit 1; }
           echo "$STUB/hdmi.trace"
         fi; exit 0 ;;
 esac
 EOF
 chmod +x "$B"/*
 run() { env PATH="$B:$PATH" HOME="$H" USER=tester STUB="$T" G16_HDMI_SYS="$S" G16_HDMI_PROC="$P" \
-  G16_HDMI_STATE="$H/state" G16_HDMI_TESTD="$B/g16-testd" G16_HDMI_TESTD_OUT="$T/testd-out" "$SCRIPT" "$@"; }
+  G16_HDMI_STATE="$H/state" G16_HDMI_TESTD="$B/g16-testd" "$SCRIPT" "$@"; }
 # A watch in the background, its pid the script's own (so a TERM reaches it).
 watch_bg() { local out=$1; shift; (run_exec "$@" >"$out" 2>&1) & wp=$!; }
 run_exec() { exec env PATH="$B:$PATH" HOME="$H" USER=tester STUB="$T" G16_HDMI_SYS="$S" G16_HDMI_PROC="$P" \
-  G16_HDMI_STATE="$H/state" G16_HDMI_TESTD="$B/g16-testd" G16_HDMI_TESTD_OUT="$T/testd-out" "$SCRIPT" "$@"; }
+  G16_HDMI_STATE="$H/state" G16_HDMI_TESTD="$B/g16-testd" "$SCRIPT" "$@"; }
 
 # ------------------------------------------------------------------ 1. snapshot
 run snapshot >"$T/snap" 2>&1; rc=$?
@@ -215,19 +215,14 @@ tl=$(ls "$H"/state/trace-*.txt 2>/dev/null | head -1)
 [[ -n $tl ]] && has "$tl" '^100\.000100 kworker/6:1-120 rpm_resume: 0000:64:00\.0' "timeline lines start with the timestamp"
 [[ -n $tl ]] && has "$tl" 'rpm_suspend: 0000:64:00\.1' "timeline keeps the RTX's HDA function"
 [[ -n $tl ]] && hasnt "$tl" '0000:65:00' "timeline drops other devices"
-# testd's 30-minute watchdog stopped the trace and kept it: stop still collects it,
-# with the session open or already closed.
-rm -f "$H"/state/trace-*.txt; touch "$T/watchdog-stopped"; mkdir -p "$T/testd-out"; cp "$T/hdmi.trace" "$T/testd-out/hdmi.trace"
+# Nothing to collect (no trace running, none the watchdog kept): testd's own error, exit 3.
+touch "$T/no-trace"
 run trace stop >"$T/tr3" 2>&1; rc=$?
-((rc == 0)) && ok "trace stop after the watchdog exits 0" || { bad "trace stop after the watchdog exits $rc"; cat "$T/tr3"; }
-has "$T/tr3" 'already been stopped' "trace stop says the watchdog had stopped it"
-has "$T/tr3" 'RTX runtime resumes 1, suspends 1' "trace stop collects the watchdog's file"
+((rc == 3)) && ok "trace stop with nothing to collect exits 3" || bad "trace stop with nothing to collect exits $rc"
+has "$T/tr3" 'no trace to collect .g16-testd: no trace hdmi running' "trace stop passes testd's refusal on"
 rm -f "$T/session"
 run trace stop >"$T/tr4" 2>&1; rc=$?
-((rc == 0)) && ok "trace stop with the session closed collects the kept file" || bad "trace stop with the session closed exits $rc"
-rm -f "$T/testd-out/hdmi.trace"
-run trace stop >"$T/tr5" 2>&1; rc=$?
-((rc == 3)) && ok "trace stop with nothing to collect exits 3" || bad "trace stop with nothing to collect exits $rc"
+((rc == 3)) && ok "trace stop with the session closed exits 3" || bad "trace stop with the session closed exits $rc"
 
 # ------------------------------------------------------------------ 5. usage
 for a in "bogus" "snapshot --x" "watch --hours 0" "watch --interval 99" "log --boot x" "trace"; do

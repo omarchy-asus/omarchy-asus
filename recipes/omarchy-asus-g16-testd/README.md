@@ -16,6 +16,7 @@ g16-testd session start            # the one dialog; 4 h (--hours, at most 12)
 g16-testd call knob-set nmi-watchdog 0 --reason "#225 A/B"
 g16-testd call trace-start w timer/hrtimer_expire_entry,ipi/ipi_send_cpu - --reason "#239"
 g16-testd call trace-stop w --reason "#239"   # prints the trace file, yours, mode 0600
+g16-testd call rapl-read --reason "#198"       # package and core energy counters
 g16-testd session status
 g16-testd session stop             # everything back; the helper is gone
 ```
@@ -32,6 +33,7 @@ Nothing a caller sends is run as a command.
 | call | does | limits |
 |---|---|---|
 | `ec-read OFFSET LEN` | loads `ec_sys write_support=0` and reads EC RAM (FTBL, #185/#244) | 256 bytes; refuses when `ec_sys` is loaded with write support |
+| `rapl-read` | the RAPL energy counters of the package and its cores, read-only (`bin/g16-idle-power`, #198/#284): `PKG_UJ PKG_MAX CORE_UJ CORE_MAX`, `- -` for a zone that is absent | the `package-0` powercap zone and its `core` subzone, their `energy_uj` and `max_energy_range_uj` only; no arguments |
 | `trace-start NAME EVENTS [KPROBES] [BUFFER_KB]` / `trace-stop NAME` | a private tracefs instance `g16-testd-NAME` and named kprobes (#218, #239, #172); `trace-stop` hands the trace over as an open file and writes it to `$XDG_RUNTIME_DIR/omarchy-asus-g16-testd/NAME.trace`, yours to remove, so the helper keeps no copy (#284) | events and kprobes from the allowlist, each kprobe with its fixed fetch arguments (`dmub-cacp-set-level` records `level`); stopped after 30 min, then kept by the helper until `trace-stop NAME` collects it or the session ends |
 | `knob-set KNOB VALUE` / `knob-restore KNOB` | the A/B knobs: `nmi-watchdog`, `nvme-apst`, `sd-reader`, `sd-reader-pm`, `kbd-usb-pm`, `numlock-led`, `wifi-ps`, `bt-rfkill`, `panel-power-savings`, `platform-profile`; the Zen 5c-first knobs of kernel patch 9900 (#10) `hfi-ranking`, `hfi-wake-preferred`, `hfi-wake-pack`, `hfi-wlc-track`; and for the boost and clock tweaks (#328) `cpu-boost` (its restore also puts each policy's `scaling_max_freq` back, which the kernel can lower while boost is off), `cpu-epp` (every policy), `cpu-max-freq` (each policy whose `cpuinfo_max_freq` is above the cap; the others keep their own value from before the session, so a lower cap of their own survives; each put back to its own value) and `pmf-profile` (amd-pmf's own platform profile, so asus-wmi's stays as it is; `platform-profile` sets every handler) | each knob's own values or range (`g16-testd list`); knobs go back last-set first |
 | `module-swap NAME PATH` / `module-restore NAME` | swaps in a test build of a module (#226), then puts the stock one back | only builds whose sha256 was given at `session start --module NAME=SHA256`; the copy that is loaded is the one hashed |
