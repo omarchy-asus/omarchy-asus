@@ -225,7 +225,8 @@ check "the waiting PR still waits" waiting b lock
 # the second release looks at the queue only every 2 s, the waiting PR at the lock every
 # 0.1 s: when the first release lets go, the PR would get in first if the handover had a gap
 KERNEL_LOCK_POLL=2 as r2 release 504 queue 2>/dev/null & r2w=$!
-wait_for 10 waiting r2 queue
+# its holder is in line (it holds <lock>.wait) once it says so in its log
+wait_for 10 bash -c 'grep -q "in line for the release queue" "$1"' _ "$S/state/r2/queue.log"
 check "a second release waits for the queue" waiting r2 queue
 check "a release must queue before it takes the lock" \
     bash -c 'KERNEL_LOCK_STATE=$2 "$1" acquire release omarchy-asus-kernel-9-1 2>&1 | grep -q "takes the queue first"' _ "$KL" "$S/state/none"
