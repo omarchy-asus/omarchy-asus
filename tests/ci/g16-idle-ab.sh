@@ -770,20 +770,40 @@ main=$(pgrep -P "$pid" | head -n1)
 [[ -n $main ]] && kill -KILL "$main"; wait "$pid" 2>/dev/null
 for _ in $(seq 1 100); do leftover || break; sleep 0.1; done
 leftover && bad "killed light run: a workload outlived it: $(pgrep -af "$T/tmp")" || ok "killed light run: the workloads stopped on their own"
-# a workload that stops during the final phase: that phase is left out, the run ends, nothing is posted
-reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
-TMPDIR=$T/tmp run --load light --only nmi --rounds 1 --measure 4 --settle 0 --interval 1 --seed 3 >"$T/out" 2>&1 &
-pid=$!
-for _ in $(seq 1 300); do (( $(grep -c ' settle 0s' "$T/out") >= 3 )) && break; sleep 0.1; done
-sleep 1
-pkill -TERM -f "$T/tmp.*bursts.log"
-wait "$pid"; rc=$?
-r=$T/home/report.md
-((rc == 1)) && grep -q 'the light load stopped during baseline in round 1' "$T/out" && ok "light: a workload stopping in the last phase ends the run (exit 1)" || bad "load stopped: rc=$rc $(cat "$T/out")"
-grep -qE '^\| 2 \| 1 \| baseline \| .*light load stopped \|$' "$r" && ok "light: the phase it stopped in is left out" || bad "load stopped row: $(grep -E '^\| 2 \| 1 \|' "$r")"
-grep -qE '^\| nmi \| #225 \| 0/1 \|' "$r" && ok "light: the tweak before it gets no delta from that baseline" || bad "load stopped nmi: $(grep '^| nmi |' "$r")"
-ls "$ST"/posted-* >/dev/null 2>&1 && bad "an incomplete light run posted" || ok "light: an incomplete run posts nothing"
-[[ $(orig_state) == "$WANT" ]] && ok "light stopped: every setting back" || bad "light stopped left: $(orig_state)"
+# load_alive itself, from the script: a workload that has just exited counts as stopped at
+# once, while its watcher (which polls once a second) is still running
+mkdir -p "$T/la"
+out=$(LOAD_DIR=$T/la bash -c '
+  eval "$(sed -n "/^load_watch() {/,/^}/p; /^load_alive() {/,/^}/p" "$1")"
+  LOAD_PIDS=()
+  load_watch $$ sleep 30 & LOAD_PIDS+=($!)
+  sleep 0.5
+  load_alive && echo alive-before
+  pkill -P "${LOAD_PIDS[0]}" -f "^sleep 30$"
+  sleep 0.05
+  kill -0 "${LOAD_PIDS[0]}" 2>/dev/null && echo watcher-still-up
+  load_alive || echo stopped-after
+  kill "${LOAD_PIDS[0]}" 2>/dev/null; wait' _ "$SCRIPT" 2>&1)
+[[ $out == $'alive-before\nwatcher-still-up\nstopped-after' ]] && ok "load_alive sees a workload that just exited, before its watcher notices" || bad "load_alive: $out"
+
+# a workload that stops during the final phase: that phase is left out, the run ends, nothing is posted.
+# End to end, killed 1 s and 3.6 s into the 4 s phase; the moment just before the check
+# after the phase is covered deterministically by the load_alive check above.
+for at in 1 3.6; do
+  reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+  TMPDIR=$T/tmp run --load light --only nmi --rounds 1 --measure 4 --settle 0 --interval 1 --seed 3 >"$T/out" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 300); do (( $(grep -c ' settle 0s' "$T/out") >= 3 )) && break; sleep 0.1; done
+  sleep "$at"
+  pkill -TERM -f "$T/tmp.*bursts.log"
+  wait "$pid"; rc=$?
+  r=$T/home/report.md
+  ((rc == 1)) && grep -q 'the light load stopped during baseline in round 1' "$T/out" && ok "light (killed at ${at} s): a workload stopping in the last phase ends the run (exit 1)" || bad "at ${at} s: load stopped: rc=$rc $(cat "$T/out")"
+  grep -qE '^\| 2 \| 1 \| baseline \| .*light load stopped \|$' "$r" && ok "light (killed at ${at} s): the phase it stopped in is left out" || bad "at ${at} s: load stopped row: $(grep -E '^\| 2 \| 1 \|' "$r")"
+  grep -qE '^\| nmi \| #225 \| 0/1 \|' "$r" && ok "light (killed at ${at} s): the tweak before it gets no delta from that baseline" || bad "at ${at} s: load stopped nmi: $(grep '^| nmi |' "$r")"
+  ls "$ST"/posted-* >/dev/null 2>&1 && bad "at ${at} s: an incomplete light run posted" || ok "light (killed at ${at} s): an incomplete run posts nothing"
+  [[ $(orig_state) == "$WANT" ]] && ok "light stopped (at ${at} s): every setting back" || bad "at ${at} s: light stopped left: $(orig_state)"
+done
 
 # with the real ffmpeg on an amdgpu render node (skipped elsewhere): a clip VA-API can't
 # decode (4:4:4) must not fall back to a CPU decode

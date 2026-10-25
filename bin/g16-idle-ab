@@ -933,6 +933,7 @@ load_watch() { # main-pid command...: run it until it ends, the run goes away, o
   local main=$1 c
   shift
   "$@" & c=$!
+  echo "$c" >"$LOAD_DIR/workload.$BASHPID"
   trap 'kill "$c" 2>/dev/null; wait "$c" 2>/dev/null; exit 0' TERM
   while kill -0 "$main" 2>/dev/null && kill -0 "$c" 2>/dev/null; do sleep 1 & wait $!; done
   kill "$c" 2>/dev/null; wait "$c" 2>/dev/null
@@ -972,7 +973,19 @@ load_start() {
     LOAD_PIDS+=($!)
   fi
 }
-load_alive() { local p; for p in "${LOAD_PIDS[@]}"; do kill -0 "$p" 2>/dev/null || return 1; done; }
+# Each workload itself, not only its watcher: one that exits stays a zombie, which kill -0
+# still finds, until its watcher reaps it up to a second later. Real /proc, not $PROC.
+load_alive() {
+  local p w st
+  for p in "${LOAD_PIDS[@]}"; do
+    kill -0 "$p" 2>/dev/null || return 1
+    w=''; read -r w 2>/dev/null <"$LOAD_DIR/workload.$p"
+    [[ $w =~ ^[0-9]+$ ]] || return 1
+    st=''; read -r st 2>/dev/null <"/proc/$w/stat" || return 1
+    st=${st##*) }
+    [[ ${st%% *} != [ZX] ]] || return 1
+  done
+}
 load_stop() {
   local p
   ((${#LOAD_PIDS[@]})) || return 0
