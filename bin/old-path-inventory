@@ -1,0 +1,444 @@
+#!/bin/bash
+# List everything the old (chroot) build path owns, with sizes, as Markdown (#258, section 4
+# "Cleanup", step 1 "Inventory first"). It only reads: nothing here is written, moved, stopped
+# or deleted, on this host or the helper. The cleanup itself is a separate, reviewed step.
+#
+# Usage: bin/old-path-inventory [--local] [--offline] [--helper SSH_TARGET]
+#   --local       print even when the PII scan fails or cannot run (for reading here, never
+#                 for posting)
+#   --offline     do not ask GitHub for the state and title of the issues the old path names
+#   --helper T    read the helper's authorized_keys over ssh (T logs in as the distcc
+#                 account; read-only, BatchMode): is the release key's line still there?
+#                 T is never printed.
+#
+# What it covers (the issue's list):
+#   build host   each channel's chroot ($CHROOT from bin/env.sh) and its build copies, the
+#                makepkg.conf.d files and distcc/ccache/openssh packages put in it by hand, the
+#                release ccache (CCACHE_HOST_DIR, default $DATA/ccache), the release distcc
+#                key dir (DISTCC_KEY_DIR, default $DATA/distcc), bin/build-pkg's work dirs,
+#                keyrings and logs, the runner's work dirs, $DATA entries no tracked file
+#                names, systemd units, sudoers and cron entries that call the old path, and
+#                devtools
+#   helper       the release key's line in the distcc account's authorized_keys (--helper)
+#   repo         bin/build-pkg, bin/mkchroot, bin/recipe-sandbox, build/no-ccache.conf,
+#                build/distcc-ssh, the chroot sections of docs/distcc.md, DISTCC_KEY_DIR and
+#                CCACHE_HOST_DIR, the tests that cover them, and the issues the old path names;
+#                each with the tracked files that still reference it
+#   duplicates   the two ccaches and the two distcc keys
+# Paths come from bin/env.sh. Home directories print as ~, the runner's as <runner home>; the
+# runner account, the helper and file names that are user names are never printed. Anything
+# that needs root to read says "needs root" unless run as root (BUILD_USER set, as for
+# bin/build-pkg, so $DATA is the build user's).
+#
+# Before printing, the whole report goes through bin/sync-release's PII scan (--pii-scan-text,
+# the denylist bin/issue uses too); a hit or a failed scan prints nothing and exits 1, unless
+# --local is given.
+# Test overrides: OMARCHY_ASUS_SYSROOT (prefix for /etc and /var paths), OMARCHY_ASUS_RUNNER_HOME
+# (the runner account's home), plus bin/env.sh's own (OMARCHY_ASUS_DATA, _WORKSPACE, _CHROOT).
+# Exit: 0 printed, 1 refused by the PII scan, 2 usage.
+set -uo pipefail
+usage() { sed -n 's/^# \{0,1\}Usage: /Usage: /p; /^#   --/,/^#$/s/^# \{0,1\}//p' "$0" >&2; exit "${1:-2}"; }
+local_out=0 offline=0 helper=''
+while (($#)); do
+    case $1 in
+        -h | --help) usage 0 ;;
+        --local) local_out=1; shift ;;
+        --offline) offline=1; shift ;;
+        --helper) [[ -n ${2:-} ]] || usage; helper=$2; shift 2 ;;
+        *) echo "unknown argument: $1" >&2; usage ;;
+    esac
+done
+lib=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)
+# shellcheck source=bin/env.sh
+source "$lib/env.sh" || exit 2
+SYS=${OMARCHY_ASUS_SYSROOT:-}
+is_root=0; [[ $EUID -eq 0 ]] && is_root=1
+
+# --- homes, for printing paths without them
+homes=()
+[[ -n ${HOME:-} ]] && homes+=("$HOME")
+if [[ -n ${BUILD_USER:-} ]]; then
+    h=$(getent passwd "$BUILD_USER" | cut -d: -f6) && [[ -n $h ]] && homes+=("$h")
+fi
+runner_home=${OMARCHY_ASUS_RUNNER_HOME:-}
+if [[ -z $runner_home && -n $RUNNER_USER ]]; then
+    runner_home=$(getent passwd "$RUNNER_USER" | cut -d: -f6)
+fi
+show() {  # show <path>: the path as printed (no sysroot, no home)
+    local p=${1#"$SYS"} h
+    [[ -n $runner_home ]] && runner_home_s=${runner_home#"$SYS"} || runner_home_s=''
+    if [[ -n $runner_home_s && ($p == "$runner_home_s" || $p == "$runner_home_s"/*) ]]; then
+        echo "<runner home>${p#"$runner_home_s"}"; return
+    fi
+    for h in "${homes[@]}"; do
+        h=${h#"$SYS"}
+        [[ $p == "$h" || $p == "$h"/* ]] && { echo "~${p#"$h"}"; return; }
+    done
+    echo "$p"
+}
+cell() { local s=${1//|/\\|}; echo "${s//$'\n'/ }"; }
+row() { printf '| %s | %s | %s | %s |\n' "$(cell "$1")" "$(cell "$2")" "$(cell "$3")" "$(cell "${4:-}")"; }
+table() { printf '| Item | Kind | Size | Referenced by / notes |\n|---|---|---|---|\n'; }
+hsize() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "$1 B"; }
+size() {  # size <path>: disk usage; "needs root" for what cannot be read
+    local p=$1 out st=0 b
+    [[ -e $p || -L $p ]] || { echo "absent"; return; }
+    out=$(du -s -B1 -- "$p" 2>/dev/null) || st=$?
+    b=${out%%[[:space:]]*}
+    [[ $b =~ ^[0-9]+$ ]] || { echo "needs root"; return; }
+    if ((st == 0)); then hsize "$b"
+    elif ((is_root)); then echo "$(hsize "$b") (du could not read all of it)"
+    else echo "at least $(hsize "$b") (needs root for the rest)"; fi
+}
+readable_dir() { [[ -d $1 && -r $1 && -x $1 ]]; }
+# refs <fixed string> [path to leave out]: the tracked files that mention it, comma-separated
+refs() {
+    local out
+    out=$(grep -rlIF --exclude-dir=.git -- "$1" "$WORKSPACE" 2>/dev/null | sed "s|^$WORKSPACE/||" | grep -vx bin/old-path-inventory |
+        { if [[ -n ${2:-} ]]; then grep -vxF -- "$2"; else cat; fi; } | sort | paste -sd, - | sed 's/,/, /g')
+    echo "${out:-nothing else}"
+}
+# fingerprint <private key>: its SHA256 fingerprint (from the .pub, else derived), or nothing
+fingerprint() {
+    local k=$1
+    command -v ssh-keygen >/dev/null || return 0
+    if [[ -r $k.pub ]]; then ssh-keygen -lf "$k.pub" 2>/dev/null
+    elif [[ -r $k ]]; then ssh-keygen -y -P '' -f "$k" </dev/null 2>/dev/null | ssh-keygen -lf - 2>/dev/null
+    fi | awk '{print $2}'
+}
+# pubblob <private key>: the key's base64 blob, as authorized_keys holds it
+pubblob() {
+    local k=$1
+    if [[ -r $k.pub ]]; then awk '{print $2}' "$k.pub"
+    elif [[ -r $k ]] && command -v ssh-keygen >/dev/null; then
+        ssh-keygen -y -P '' -f "$k" </dev/null 2>/dev/null | awk '{print $2}'
+    fi
+}
+keydesc() {  # keydesc <key dir>: "key SHA256:..." or why not
+    local d=$1 fp
+    [[ -e $d ]] || { echo "absent"; return; }
+    readable_dir "$d" || { echo "needs root"; return; }
+    [[ -e $d/id_ed25519 ]] || { echo "no id_ed25519"; return; }
+    fp=$(fingerprint "$d/id_ed25519")
+    echo "key ${fp:-(fingerprint unreadable)}"
+}
+envval() {  # envval <runner .env> <name>: its value, empty when unset or unreadable
+    [[ -r $1 ]] && sed -n "s/^$2=//p" "$1" | tail -n1
+}
+
+# The chroots: one per channel, from bin/env.sh (a shared OMARCHY_ASUS_CHROOT lists one)
+chroots=() chroot_chans=()
+for c in "${CHANNELS[@]}"; do
+    d=$(OMARCHY_ASUS_CHANNEL=$c; source "$lib/env.sh" >/dev/null 2>&1 && echo "$CHROOT")
+    [[ -n $d ]] || continue
+    found=0
+    for i in "${!chroots[@]}"; do
+        [[ ${chroots[$i]} == "$d" ]] && { chroot_chans[$i]+=", $c"; found=1; }
+    done
+    ((found)) || { chroots+=("$d"); chroot_chans+=("$c"); }
+done
+
+release_cc=${CCACHE_HOST_DIR-$DATA/ccache}
+release_key=${DISTCC_KEY_DIR-$DATA/distcc}
+runner_env='' runner_cc='' runner_key=''
+if [[ -n $runner_home ]]; then
+    runner_env=$runner_home/actions-runner/.env
+    runner_cc=$(envval "$runner_env" OMARCHY_ASUS_CI_CCACHE)
+    runner_key=$(envval "$runner_env" OMARCHY_ASUS_CI_DISTCC)
+    runner_cc=${runner_cc:-$runner_home/ccache}
+    runner_key=${runner_key:-$runner_home/distcc}
+fi
+# The old path's own scripts and files (repo, relative to $WORKSPACE)
+OLD_FILES=(bin/build-pkg bin/mkchroot bin/recipe-sandbox build/no-ccache.conf build/distcc-ssh)
+OLD_ONLY_RE='bin/build-pkg|bin/mkchroot|build-pkg|mkchroot'
+NEW_RE='ci/build-recipe|release\.yml|build-pr\.yml|bin/release-sign|bin/publish|bin/sync-release|bin/compare-build-paths|bin/rebase-recipe|bin/check-upstream'
+
+host_section() {
+    echo "## Build host"
+    echo
+    table
+    local i d e n k copies=0 locks=0
+    for i in "${!chroots[@]}"; do
+        d=$SYS${chroots[$i]#"$SYS"}
+        row "$(show "$d")" "chroot (${chroot_chans[$i]})" "$(size "$d")" "made by bin/mkchroot; bin/build-pkg builds in copies of root/"
+        [[ -e $d ]] || continue
+        if ! readable_dir "$d"; then row "$(show "$d")/*" "chroot contents" "needs root" ""; continue; fi
+        [[ -e $d/root ]] && row "$(show "$d/root")" "chroot root" "$(size "$d/root")" "base-devel and what was added to it"
+        copies=0 locks=0
+        for e in "$d"/* "$d"/.[!.]*; do
+            [[ -e $e || -L $e ]] || continue
+            n=${e##*/}
+            [[ $n == root ]] && continue
+            if [[ $n == *.lock ]]; then locks=$((locks + 1)); continue; fi
+            copies=$((copies + 1))
+            # copies are named after the user that built in them: not printed
+            row "$(show "$d")/<copy $copies>" "build copy (makechrootpkg -c)" "$(size "$e")" ""
+        done
+        ((locks)) && row "$(show "$d")/*.lock" "lock files ($locks)" "" "makechrootpkg's"
+        local conf=$d/root/etc/makepkg.conf.d f
+        if [[ -d $conf ]]; then
+            if readable_dir "$conf"; then
+                for f in "$conf"/*; do
+                    [[ -e $f ]] || continue
+                    case ${f##*/} in
+                        packager.conf) k="made by bin/mkchroot" ;;
+                        distcc.conf) k="put there by hand (docs/distcc.md); names the helper, not shown" ;;
+                        ccache.conf) k="put there by hand (docs/distcc.md, Persistent ccache)$(sed -n 's/^export CCACHE_MAXSIZE=\(.*\)/; CCACHE_MAXSIZE \1/p' "$f" 2>/dev/null | tail -n1)" ;;
+                        *) k="put there by hand" ;;
+                    esac
+                    row "$(show "$f")" "chroot makepkg config" "$(size "$f")" "$k"
+                done
+            else
+                row "$(show "$conf")" "chroot makepkg config" "needs root" ""
+            fi
+        fi
+        local db=$d/root/var/lib/pacman/local
+        if [[ -d $db ]]; then
+            if readable_dir "$db"; then
+                # name, version, size, reason per installed package
+                local name ver sz why
+                while IFS=$'\t' read -r name ver sz why; do
+                    case $name in
+                        distcc | ccache | openssh) k="added by hand (docs/distcc.md)" ;;
+                        base-devel) continue ;;
+                        *) [[ $why == explicit ]] || continue; k="installed explicitly: not from bin/mkchroot (base-devel)" ;;
+                    esac
+                    row "${d##*/}: $name $ver" "package in the chroot" "$(hsize "${sz:-0}")" "$k ($why)"
+                done < <(awk 'FNR == 1 { if (n != "") print n "\t" v "\t" s "\t" r; n = v = s = p = ""; r = "explicit" }
+                    p == "%NAME%" { n = $0 } p == "%VERSION%" { v = $0 } p == "%SIZE%" { s = $0 }
+                    p == "%REASON%" { r = ($0 == "1" ? "dependency" : "explicit") } { p = $0 }
+                    END { if (n != "") print n "\t" v "\t" s "\t" r }' "$db"/*/desc 2>/dev/null | sort)
+            else
+                row "$(show "$db")" "chroot package db" "needs root" ""
+            fi
+        fi
+    done
+
+    if [[ -z $release_cc ]]; then
+        row "release ccache" "compiler cache" "" "off (CCACHE_HOST_DIR is empty)"
+    else
+        row "$(show "$release_cc")" "release ccache" "$(size "$release_cc")" "bin/build-pkg mounts it at /ccache"
+    fi
+    if [[ -z $release_key ]]; then
+        row "release distcc key dir" "ssh key" "" "off (DISTCC_KEY_DIR is empty)"
+    else
+        row "$(show "$release_key")" "release distcc key dir" "$(size "$release_key")" "$(keydesc "$release_key"); bin/build-pkg mounts it at /distcc"
+    fi
+
+    # scratch: bin/build-pkg's work dirs, keyrings and logs
+    for e in "$DATA"/work-*; do
+        [[ -e $e ]] || continue
+        row "$(show "$e")" "bin/build-pkg work dir" "$(size "$e")" "left by KEEP_WORK=1 or a build that was killed"
+    done
+    [[ -e $DATA/verify-gnupg ]] &&
+        row "$(show "$DATA/verify-gnupg")" "bin/build-pkg recipe keyrings" "$(size "$DATA/verify-gnupg")" "bin/build-pkg's PGP source checks"
+    local logs=()
+    for e in "$LOG_DIR"/*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].log*; do
+        [[ -f $e ]] && logs+=("$e")
+    done
+    if ((${#logs[@]})); then
+        n=$(du -c -B1 -- "${logs[@]}" 2>/dev/null | tail -n1 | cut -f1)
+        row "$(show "$LOG_DIR")/<recipe>-<date>.log*" "bin/build-pkg logs (${#logs[@]} files)" "$(hsize "${n:-0}")" ""
+    fi
+    # the runner's work dirs (the new path's scratch)
+    if [[ -n $runner_home ]]; then
+        if readable_dir "$runner_home"; then
+            for e in "$runner_home"/actions-runner*/_work; do
+                [[ -e $e ]] && row "$(show "$e")" "runner work dir (new path)" "$(size "$e")" "the runner's own; cleans itself per job"
+            done
+        else
+            row "<runner home>/actions-runner*/_work" "runner work dirs (new path)" "needs root" ""
+        fi
+    else
+        row "runner work dirs (new path)" "" "" "runner account not configured here (OMARCHY_ASUS_RUNNER_USER or \$DATA/runner-user)"
+    fi
+    # $DATA entries no tracked file names: stray test or build output, to look at
+    local known=" work-* verify-gnupg logs ccache distcc "
+    for e in "$DATA"/* "$DATA"/.[!.]*; do
+        [[ -e $e ]] || continue
+        n=${e##*/}
+        [[ $n == work-* || $known == *" $n "* ]] && continue
+        [[ -e $release_cc && $e -ef $release_cc ]] && continue
+        [[ -e $release_key && $e -ef $release_key ]] && continue
+        grep -rqIF --exclude-dir=.git -- "$n" "$WORKSPACE" 2>/dev/null && continue
+        row "$(show "$e")" "not named by any tracked file" "$(size "$e")" "stray test or build output? check before keeping"
+    done
+
+    # units, timers, sudoers and cron entries that call the old path
+    local pat='bin/build-pkg|build-pkg |bin/mkchroot|makechrootpkg|mkarchroot'
+    local where=() w hit
+    where=("$SYS/etc/systemd/system" "$SYS/etc/systemd/user")
+    for w in "${homes[@]}"; do where+=("$w/.config/systemd/user"); done
+    local any=0
+    for w in "${where[@]}"; do
+        [[ -d $w ]] || continue
+        if ! readable_dir "$w"; then row "$(show "$w")" "systemd units" "needs root" ""; any=1; continue; fi
+        while IFS= read -r hit; do
+            row "$(show "$hit")" "systemd unit or timer" "$(size "$hit")" "calls the old path"; any=1
+        done < <(grep -rlE -- "$pat" "$w" 2>/dev/null | sort)
+    done
+    for w in "$SYS/etc/sudoers" "$SYS/etc/sudoers.d" "$SYS/etc/cron.d" "$SYS/var/spool/cron"; do
+        [[ -e $w ]] || continue
+        if [[ ! -r $w ]] || { [[ -d $w ]] && ! readable_dir "$w"; }; then
+            row "$(show "$w")" "sudoers/cron" "needs root" "not read"; any=1; continue
+        fi
+        while IFS= read -r hit; do
+            # a crontab is named after its user: not printed
+            [[ $w == */var/spool/cron ]] && hit="$(show "$w")/<a crontab>" || hit=$(show "$hit")
+            row "$hit" "sudoers/cron entry" "" "calls the old path"; any=1
+        done < <(grep -rlE -- "$pat" "$w" 2>/dev/null | sort)
+    done
+    ((any)) || row "units, timers, sudoers, cron" "" "" "nothing found that calls the old path"
+
+    # devtools
+    local qi ver isz req users
+    users=$(grep -rlIE --exclude-dir=.git -- 'mkarchroot|makechrootpkg|arch-nspawn' "$WORKSPACE" 2>/dev/null |
+        sed "s|^$WORKSPACE/||" | grep -vxE 'bin/build-pkg|bin/mkchroot|bin/old-path-inventory|docs/distcc\.md|tests/ci/(build-pkg-.*|mkchroot-.*|old-path-inventory)\.sh' |
+        sort | paste -sd, - | sed 's/,/, /g')
+    if ! command -v pacman >/dev/null; then
+        row "devtools" "package" "" "no pacman here; repo users besides the old path: ${users:-none}"
+    elif qi=$(LC_ALL=C pacman -Qi devtools 2>/dev/null); then
+        ver=$(sed -n 's/^Version *: //p' <<<"$qi")
+        isz=$(sed -n 's/^Installed Size *: //p' <<<"$qi")
+        req=$(sed -n 's/^Required By *: //p' <<<"$qi")
+        row "devtools $ver" "package" "$isz" "required by: ${req:-None}; repo users besides the old path: ${users:-none}"
+    else
+        row "devtools" "package" "" "not installed"
+    fi
+    echo
+}
+
+present() { if [[ -n $1 ]]; then echo "present, line $1"; else echo absent; fi; }
+helper_section() {
+    echo "## Helper"
+    echo
+    table
+    local blob rblob keys st=0 at
+    if [[ -z $helper ]]; then
+        row "release key in the distcc account's authorized_keys" "ssh key line" "" "not checked (--helper not given)"
+        echo; return
+    fi
+    blob=$(pubblob "$release_key/id_ed25519")
+    [[ -n $runner_key ]] && rblob=$(pubblob "$runner_key/id_ed25519") || rblob=''
+    keys=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -- "$helper" cat .ssh/authorized_keys </dev/null 2>/dev/null) || st=$?
+    if ((st)); then
+        row "release key in the distcc account's authorized_keys" "ssh key line" "" "helper not reachable or not readable (ssh exit $st)"
+    elif [[ -z $blob ]]; then
+        row "release key in the distcc account's authorized_keys" "ssh key line" "" "release key unreadable here ($(keydesc "$release_key"))"
+    else
+        at=$(grep -nF -- "$blob" <<<"$keys" | cut -d: -f1 | paste -sd, -)
+        row "release key ($(fingerprint "$release_key/id_ed25519"))" "authorized_keys line" "" "$(present "$at")"
+    fi
+    if ((st == 0)) && [[ -n $rblob ]]; then
+        at=$(grep -nF -- "$rblob" <<<"$keys" | cut -d: -f1 | paste -sd, -)
+        row "runner key ($(fingerprint "$runner_key/id_ed25519"))" "authorized_keys line" "" "stays; $(present "$at")"
+    fi
+    echo
+}
+
+repo_section() {
+    echo "## Repo"
+    echo
+    table
+    local f n t issues=() old_tests=()
+    for f in "${OLD_FILES[@]}"; do
+        [[ -e $WORKSPACE/$f ]] || continue
+        n=$(wc -l <"$WORKSPACE/$f")
+        row "$f" "file ($n lines)" "$(size "$WORKSPACE/$f")" "$(refs "${f##*/}" "$f")"
+    done
+    # docs/distcc.md: the sections that mention the chroot (headings outside code blocks)
+    local doc=$WORKSPACE/docs/distcc.md
+    if [[ -f $doc ]]; then
+        while IFS=$'\t' read -r t n; do
+            row "docs/distcc.md: $t" "doc section ($n)" "" "mentions the chroot"
+        done < <(awk 'function out() { if (h != "" && c) printf "%s\tlines %d-%d, the chroot on %d line%s\n", h, a, NR - 1, c, (c == 1 ? "" : "s") }
+            /^```/ { code = !code }
+            !code && /^#+ / { out(); h = $0; sub(/^#+ /, "", h); a = NR; c = 0; next }
+            /chroot/ { c++ }
+            END { NR++; out() }' "$doc")
+    fi
+    for t in DISTCC_KEY_DIR CCACHE_HOST_DIR; do
+        row "$t" "variable" "" "$(refs "$t")"
+    done
+    for f in "$WORKSPACE"/tests/ci/*.sh "$WORKSPACE"/tests/channel/*.sh "$WORKSPACE"/tests/*.py; do
+        [[ -f $f ]] || continue
+        n=${f#"$WORKSPACE"/}
+        [[ $n == tests/ci/old-path-inventory.sh ]] && continue
+        grep -qE -- "$OLD_ONLY_RE" "$f" || continue
+        if grep -qE -- "$NEW_RE" "$f"; then
+            row "$n" "test (both paths)" "" "covers the old path and more: edit, don't drop"
+        else
+            row "$n" "test (old path only)" "" "$(refs "${n##*/}" "$n")"
+            old_tests+=("$f")
+        fi
+    done
+    # issues the old path's own files name (#258 itself left out)
+    local srcs=()
+    for f in bin/build-pkg bin/mkchroot build/no-ccache.conf; do [[ -f $WORKSPACE/$f ]] && srcs+=("$WORKSPACE/$f"); done
+    mapfile -t issues < <({
+        ((${#srcs[@]} + ${#old_tests[@]})) && cat -- "${srcs[@]}" "${old_tests[@]}"
+        [[ -f $doc ]] && awk '/^```/ { code = !code } !code && /^#+ / { keep = 0 } /chroot/ { keep = 1 } keep' "$doc"
+    } 2>/dev/null | grep -oE '#[0-9]+' | tr -d '#' | sort -nu | grep -vx 258)
+    local states=''
+    if ((${#issues[@]})) && ((!offline)) && command -v gh >/dev/null; then
+        states=$(gh issue list -R "$GH_REPO" --state all --limit 1000 --json number,state,title \
+            --jq '.[] | "\(.number)\t\(.state)\t\(.title)"' 2>/dev/null) || states=''
+    fi
+    local s
+    for n in "${issues[@]}"; do
+        s=$(awk -F'\t' -v n="$n" '$1 == n { print $2 ": " $3 }' <<<"$states")
+        row "#$n" "issue the old path names" "" "${s:-state not looked up}"
+    done
+    echo
+}
+
+dup_section() {
+    echo "## Duplicates"
+    echo
+    table
+    local rmax
+    rmax=$(sed -n 's/^export CCACHE_MAXSIZE=//p' "$WORKSPACE/ci/build-recipe" 2>/dev/null | tail -n1)
+    row "$( [[ -n $release_cc ]] && show "$release_cc" || echo "release ccache (off)")" "ccache (release, old path)" \
+        "$( [[ -n $release_cc ]] && size "$release_cc")" "goes"
+    if [[ -n $runner_home ]]; then
+        if [[ -n $runner_env && ! -r $runner_env ]] && ((!is_root)); then
+            row "<runner home>/ccache (as its .env says)" "ccache (runner, new path)" "needs root" "stays, the only one: size it for every recipe${rmax:+ (ci/build-recipe sets $rmax)}"
+        else
+            row "$(show "$runner_cc")" "ccache (runner, new path)" "$(size "$runner_cc")" "stays, the only one: size it for every recipe${rmax:+ (ci/build-recipe sets $rmax)}"
+        fi
+    else
+        row "runner ccache" "ccache (runner, new path)" "" "runner account not configured here"
+    fi
+    row "$( [[ -n $release_key ]] && show "$release_key" || echo "release distcc key (off)")" "distcc key (release, old path)" "" \
+        "$( [[ -n $release_key ]] && keydesc "$release_key"); goes"
+    if [[ -n $runner_home ]]; then
+        if [[ -n $runner_env && ! -r $runner_env ]] && ((!is_root)); then
+            row "<runner home>/distcc (as its .env says)" "distcc key (runner, new path)" "" "needs root; stays"
+        else
+            row "$(show "$runner_key")" "distcc key (runner, new path)" "" "$(keydesc "$runner_key"); stays"
+        fi
+    fi
+    echo
+}
+
+report() {
+    echo "# Old build path inventory"
+    echo
+    echo "What the chroot build path (bin/build-pkg) owns, for #258's cleanup. Read-only: nothing was changed."
+    ((is_root)) || echo "Run without root: rows that say \"needs root\" were not read."
+    echo
+    host_section
+    helper_section
+    repo_section
+    dup_section
+}
+
+out=$(report)
+if ((!local_out)); then
+    # the same scan bin/sync-release runs on posted text; it prints only denylist line numbers
+    if ! "$lib/sync-release" --pii-scan-text <(printf '%s\n' "$out") >/dev/null; then
+        echo "old-path-inventory: the report failed the PII scan (above); nothing printed. --local prints it here." >&2
+        exit 1
+    fi
+fi
+printf '%s\n' "$out"
