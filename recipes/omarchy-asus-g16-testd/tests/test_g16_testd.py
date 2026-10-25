@@ -473,6 +473,21 @@ class Session(unittest.TestCase):
         log = open(os.path.join(self.root, "daemon.log")).read()
         self.assertNotIn("restore:", log)
 
+    def test_max_freq_keeps_a_lower_cap_of_its_own(self):
+        """A policy whose own maximum is at or below the cap is left at its own (lower)
+        scaling_max_freq through knob-set, a lower cap after it, and knob-restore."""
+        self.zen5c_and_cpufreq()
+        c = "sys/devices/system/cpu/cpufreq"
+        put(self.root, f"{c}/policy1/cpuinfo_max_freq", "3400000")
+        put(self.root, f"{c}/policy1/scaling_max_freq", "2800000")
+        self.start()
+        for cap, want in (("3500000", ["3500000", "2800000"]), ("3000000", ["3000000", "3000000"]),
+                          ("2500000", ["2500000", "2500000"]), ("3500000", ["3500000", "2800000"])):
+            self.assertEqual(self.g("call", "knob-set", "cpu-max-freq", cap)[0], 0)
+            self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], want, cap)
+        self.assertEqual(self.g("call", "knob-restore", "cpu-max-freq")[0], 0)
+        self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["5090910", "2800000"])
+
     def test_boost_restore_puts_scaling_max_freq_back(self):
         self.zen5c_and_cpufreq()
         c = "sys/devices/system/cpu/cpufreq"
@@ -508,9 +523,10 @@ class Session(unittest.TestCase):
             self.assertEqual(rc, 0, (k, out))
         c = "sys/devices/system/cpu/cpufreq"
         self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["3000000"] * 2)
-        # each cap stands alone: a policy whose maximum is below it goes to its maximum
+        # each cap stands alone: a policy whose maximum is at or below it keeps its own value
         for cap, want in (("4000000", ["4000000", "3506494"]), ("3506494", ["3506494", "3506494"]),
-                          ("5090910", ["5090910", "3506494"]), ("3000000", ["3000000", "3000000"])):
+                          ("5090910", ["5090910", "3506494"]), ("3000000", ["3000000", "3000000"]),
+                          ("3600000", ["3600000", "3506494"])):
             self.assertEqual(self.g("call", "knob-set", "cpu-max-freq", cap)[0], 0)
             self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], want, cap)
 

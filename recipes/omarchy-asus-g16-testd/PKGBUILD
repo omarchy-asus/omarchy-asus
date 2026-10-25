@@ -12,7 +12,7 @@
 
 pkgname=omarchy-asus-g16-testd
 pkgver=0.1.0
-pkgrel=104
+pkgrel=105
 pkgdesc='One root helper per G16 test session: fixed, allowlisted root steps, all put back at the end (EXPERIMENTAL)'
 arch=('any')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -26,9 +26,9 @@ source=('g16-testd'
         'io.github.omarchy-asus.g16-testd.policy'
         'README.md'
         'LICENSE')
-sha256sums=('b225662cd7ce4742adc965cf4fcc9eb388ac16bacfb91796cb6fb2ff1035350c'
+sha256sums=('d87659bc65bff3d6a74e0c49fd46a64a916aaba4d7750ed974948d4bd7b0069b'
             '98424253c91ae055dbabaa132b62544024766c8ac639a96a94680da01e98b491'
-            'db5d2afd600ca1530d8c5f404ff03f4ffc0551a2cf3d9ea0b0863d2037fa23c9'
+            'a674b35e41aabd4939fa5363191ad6a841b112bfe5d5eafa5fa083c3c50d0ecd'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 package() {

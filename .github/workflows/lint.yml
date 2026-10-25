@@ -19,7 +19,9 @@ permissions:
 jobs:
   scripts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # The offline tests alone take about 15 minutes on a hosted runner (the G16 kit's
+    # A/B tests, tests/ci/g16-idle-ab.sh, about 9 of them), so 15 cancelled them.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -446,12 +446,16 @@ def _per_policy(name):
     return get, set_, save, load
 
 
-def _max_freq_set(h, v):
-    # every policy at the cap, or at its own maximum when that is lower, so a cap never
-    # depends on the one before it
+def _max_freq_set(h, v, orig=None):
+    # The cap on each policy whose own maximum is above it. A policy at or below it keeps
+    # its value from before the session (orig, recorded at the first set), so a lower cap
+    # of its own survives, and no cap depends on the one set before it.
+    before = (orig or {}).get("policies", {})
     for p in _policies(h):
-        top = int(rd(f"{p}/cpuinfo_max_freq") or 0)
-        wr(f"{p}/scaling_max_freq", min(int(v), top) if top else v)
+        if int(rd(f"{p}/cpuinfo_max_freq") or 0) > int(v):
+            wr(f"{p}/scaling_max_freq", v)
+        elif before.get(p) and rd(f"{p}/scaling_max_freq") != before[p]:
+            wr(f"{p}/scaling_max_freq", before[p])
 
 
 _BOOST = lambda h: _need(os.path.join(h.sys, "devices/system/cpu/cpufreq/boost"), "cpufreq boost")  # noqa: E731
@@ -528,7 +532,7 @@ KNOBS = {
                       load=_boost_load),
     "cpu-epp": Knob("energy_performance_preference, every policy (#328)", _epp_choices,
                     *_per_policy("energy_performance_preference"), doc="from energy_performance_available_preferences"),
-    "cpu-max-freq": Knob("scaling_max_freq in kHz, every policy (at most its own cpuinfo_max_freq) (#328)", _max_freq_range,
+    "cpu-max-freq": Knob("scaling_max_freq in kHz, on each policy whose cpuinfo_max_freq is above it; the others keep their own (#328)", _max_freq_range,
                          *_per_policy("scaling_max_freq")[:1], _max_freq_set, *_per_policy("scaling_max_freq")[2:],
                          doc="kHz, cpuinfo_min_freq..cpuinfo_max_freq"),
 }
@@ -642,6 +646,8 @@ class Daemon:
             self.save()
         if name == "sd-reader":
             _sd_set(self.h, value, self.rec["knobs"][name])
+        elif name == "cpu-max-freq":
+            _max_freq_set(self.h, value, self.rec["knobs"][name])
         else:
             k.set(self.h, value)
         return k.get(self.h)
