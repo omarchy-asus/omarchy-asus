@@ -1,16 +1,12 @@
 #!/bin/bash
 # Print the release channel a branch builds for, and the chroot pacman.conf of that channel
 # (README.md "Release channels", bin/env.sh): main is the RC channel's trunk, built against
-# Omarchy's rc repos (build/pacman-rc.conf), and so is next/omarchy-4.5 while it exists. Quattro
-# (build/pacman.conf) is frozen until the Omarchy 4.5 stable switch (#309): no branch builds it.
+# Omarchy's rc repos (build/pacman-rc.conf), and every branch is on main's line (#309), so
+# every branch, and every PR stacked on another PR's branch, is rc. Quattro (build/pacman.conf)
+# is frozen until the Omarchy 4.5 stable switch: no branch builds it.
 # CI passes it to ci/find-build and ci/build-recipe, so a PR builds against the package sources
 # of the channel it will be published to.
-# Any other branch is a stacked PR's base: it is on the channel branch it is fewest commits
-# ahead of (GitHub's compare API, as $GITHUB_REPOSITORY; CI's checkouts are shallow), so a PR
-# stacked on an RC fix is linted and built as RC. If that can't be settled it fails rather
-# than guess.
-# Usage: ci/channel <branch>          prints quattro|rc
-#        ci/channel --base <branch>   prints the channel branch it is on (main, next/omarchy-4.5)
+# Usage: ci/channel <branch>          prints rc
 #        ci/channel --conf <channel>  prints the channel's pacman.conf path (repo-relative)
 #        ci/channel --tag <channel>   prints the channel's release tag (x86_64, rc-x86_64)
 set -euo pipefail
@@ -29,24 +25,6 @@ case ${1:?usage: ci/channel <branch> | --conf <channel> | --tag <channel>} in
             *) echo "ci/channel: unknown channel '$2' (quattro, rc)" >&2; exit 1 ;;
         esac
         ;;
-    --base)
-        b=${2:?usage: ci/channel --base <branch>}
-        case $b in main | next/omarchy-4.5) echo "$b"; exit 0 ;; esac
-        repo=${GITHUB_REPOSITORY:-omarchy-asus/omarchy-asus}
-        best='' least=''
-        for c in main next/omarchy-4.5; do
-            if ! n=$(gh api "repos/$repo/compare/$c...$b" --jq .ahead_by 2>/dev/null) ||
-                [[ ! $n =~ ^[0-9]+$ ]]; then
-                echo "ci/channel: can't compare '$b' with $c in $repo (gh api, GH_TOKEN)" >&2
-                exit 1
-            fi
-            if [[ -z $least ]] || ((n < least)); then best=$c least=$n; fi
-        done
-        echo "$best"
-        ;;
-    main | next/omarchy-4.5) echo rc ;;
-    *)
-        base=$("$0" --base "$1")
-        "$0" "$base"
-        ;;
+    -*) echo "usage: ci/channel <branch> | --conf <channel> | --tag <channel>" >&2; exit 2 ;;
+    *) echo rc ;;
 esac

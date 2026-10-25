@@ -57,23 +57,21 @@ On top of clud's caps, these hold across all stages:
   the release refuses a filename it already has with different bytes, and pacman caches by
   filename.
 - **Publishing goes through Steward only.** The daily rebase onto upstream, its builds and its
-  publishes are Steward's Rebase onto upstream workflow, scheduled once per channel, so every run
+  publishes are Steward's Rebase onto upstream workflow, scheduled for the RC channel (Quattro's is disabled while it is frozen), so every run
   shows on its page (docs/releases.md). No systemd timer, service or cron job builds or
   publishes: never add, install or start one. A one-off build or publish by hand
   (`bin/build-pkg`, `bin/publish`, `bin/sync-release`) is still fine.
 - **Held recipes** (`recipes/<r>/HOLD`, first line the reason) are merged but not built or
   published, by hand or by the daily rebase, until the hold is removed in its own PR.
-- **One channel per branch.** `main` is the Quattro channel (the `x86_64` release, Omarchy
-  stable); `next/omarchy-4.5` is the RC channel (the `rc-x86_64` release, Omarchy rc). Stage 6
-  for an RC change passes `--channel rc` to `bin/mkchroot`, `bin/build-pkg`, `bin/publish` and
-  `bin/sync-release`; the default is Quattro. The daily rebase onto upstream publishes both
-  channels (docs/releases.md).
-  README.md "Release channels" has the pairing.
-- **`main` drives the release channels.** Release tooling (the publish and release gates,
-  `bin/env.sh`'s channel-to-branch map, `bin/check-upstream`, `bin/auto-update-state`) serves both
-  channels from `main`, so a change to it targets `main` (that is not a backport). Omarchy software, recipes and patches go forward
-  first, on the newest channel's branch, and are backported to Quattro only when asked or
-  needed.
+- **`main` is the trunk for the RC channel** (the `rc-x86_64` release, Omarchy rc, #309): every
+  recipe, patch and all the tooling live on `main`, and a change is one PR into it. Stage 6
+  passes `--channel rc` to `bin/mkchroot`, `bin/build-pkg`, `bin/publish` and
+  `bin/sync-release`. The daily rebase onto upstream publishes RC from `main`
+  (docs/releases.md). README.md "Release channels" has the pairing.
+- **Quattro is frozen** (the `x86_64` release, Omarchy stable) on what it serves until the
+  Omarchy 4.5 stable switch: nothing is rebuilt or published to it, and the build and publish
+  scripts refuse `--channel quattro` (their default) unless `OMARCHY_ASUS_ALLOW_QUATTRO=1`.
+  At the switch Quattro picks up the trunk (#309).
 - **Findings outside the task** (a flaky test, an unrelated bug) are filed with `bin/issue`,
   not fixed in passing.
 - **Never** publish from a branch, publish a build made outside the chroot, or put

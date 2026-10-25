@@ -2,7 +2,7 @@ name: Build changed packages
 
 # Build every recipe a PR touches, one job per recipe, in a stock Arch
 # container set up with the production package sources of the channel the PR
-# targets (ci/channel: a PR into main, the RC trunk, or next/omarchy-4.5 builds
+# targets (ci/channel: every PR is on main's line, the RC trunk, and builds
 # against Omarchy rc, build/pacman-rc.conf; Quattro is frozen, #309)
 # and the devtools makepkg.conf. Shaped after omarchy-pkgs' build-pr.yml
 # (changes -> build matrix -> result).
@@ -81,7 +81,6 @@ jobs:
       - id: channel
         env:
           BRANCH: ${{ github.base_ref || github.ref_name }}
-          GH_TOKEN: ${{ github.token }} # ci/channel: a stacked PR's base, by compare API
         run: |
           set -euo pipefail
           ch=$(ci/channel "$BRANCH")

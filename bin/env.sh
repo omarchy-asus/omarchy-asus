@@ -6,10 +6,11 @@
 #   OMARCHY_ASUS_CHROOT     the channel's chroot parent dir (default /var/lib/omarchy-asus/chroot,
 #                           chroot-rc for rc; the offline tests point it at a temp dir)
 #   OMARCHY_ASUS_CHANNEL    release channel (default quattro; the scripts' --channel sets it):
+#     rc       the rc-x86_64 release, built against Omarchy's rc channel from main, the
+#              trunk: every recipe and all the tooling (#309)
 #     quattro  the x86_64 release, built against Omarchy's stable channel; frozen on what it
-#              serves until the Omarchy 4.5 stable switch (#309): quattro_frozen, below
-#     rc       the rc-x86_64 release, built against Omarchy's rc channel from main, the RC
-#              channel's trunk (next/omarchy-4.5 was its branch before #309)
+#              serves until the Omarchy 4.5 stable switch, when it picks up the trunk (#309):
+#              quattro_frozen, below
 #   A channel has its own chroot, pacman.conf, stage dir, local repo and release, and its own
 #   sync journal and publisher record ($CHANNEL_DATA): nothing built or staged for one
 #   reaches the other.
