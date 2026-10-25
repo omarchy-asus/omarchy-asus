@@ -73,7 +73,9 @@ An upstream state that changes is updated here, with the date it was checked.
 | [floating mode waits for the app's redraw](#omarchy-general-0001-floating-redraw) | omarchy | general-0001 | RC only | not submitted |
 | [the sleep lock's monitor survives suspends](#omarchy-general-0002-sleep-monitor) | omarchy | general-0002 | RC only | not submitted |
 | [app library rescans only on real changes](#omarchy-general-0004-app-library) | omarchy | general-0004 | RC only | open |
-| [omarchy PKGBUILD changes](#omarchy-pkgbuild) | omarchy, omarchy-settings | `pkgbuild-*.diff` | both | ours-only |
+| [omarchy pins omarchy-settings to its release](#omarchy-pkgbuild-pin-settings) | omarchy | `pkgbuild-pin-settings-release.diff` | both | ours-only |
+| [omarchy-settings ships the charger-swap monitor unit](#omarchy-pkgbuild-source-monitor-unit) | omarchy-settings | `pkgbuild-source-monitor-unit.diff` | both | not submitted |
+| [the "(omarchy-asus build)" label](#pkgbuild-pkgdesc-label) | omarchy, omarchy-settings, hyprland, hyprpm | `pkgbuild-pkgdesc-label.diff` | both | ours-only |
 | [touchpad wake (ASUF1209)](#g16-touchpad-wake) | omarchy-asus-g16 | udev rule | both | not submitted |
 | [HibernateMode=shutdown](#g16-hibernate-mode) | omarchy-asus-g16 | sleep.conf.d drop-in | both | not submitted |
 | [nvidia-powerd start limit](#g16-nvidia-powerd-start-limit) | omarchy-asus-g16 | unit drop-in | both | not submitted |
@@ -531,7 +533,7 @@ are numbered `0001...`; fixes to Omarchy's own software that don't help the hard
 
 - **Component:** `omarchy`/`omarchy-settings`, patch 0002, plus `omarchy-settings`'
   `pkgbuild-source-monitor-unit.diff` (ships the charger-swap monitor user unit; see
-  [PKGBUILD changes](#omarchy-pkgbuild)). Both channels. Fork branch `asus/usbc-power`; pkgs
+  [its entry](#omarchy-pkgbuild-source-monitor-unit)). Both channels. Fork branch `asus/usbc-power`; pkgs
   branch [`omarchy-settings-source-monitor`](https://github.com/omarchy-asus/omarchy-pkgs/tree/omarchy-settings-source-monitor).
 - **Fixes:** ROG laptops on a USB-C charger (lower wattage than the barrel adapter) kept running
   at full power and could drain or barely charge. The change adds a USB-C charger policy
@@ -1262,21 +1264,57 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
   race) is still there; see the plan under [0018](#omarchy-0018-launcher-icon-index).
 - **Drop when:** #14992 is in an Omarchy release we build from.
 
-<a id="omarchy-pkgbuild"></a>
-### Omarchy PKGBUILD changes
+<a id="omarchy-pkgbuild-pin-settings"></a>
+### omarchy pins omarchy-settings to its release
 
-- **Component:** `recipes/omarchy` and `recipes/omarchy-settings` (`pkgbuild-patch` lines in
-  `DELTA`). Both channels.
-- **What:** `pkgbuild-pkgdesc-label.diff` adds `(omarchy-asus build)` to `pkgdesc` (also in
-  `recipes/hyprland`). `pkgbuild-pin-settings-release.diff` (omarchy) adds
-  `depends+=("omarchy-settings=${pkgver}-${pkgrel}")` in `package()`, so stock's omarchy-settings of
-  the same pkgver can't satisfy the patched omarchy (#83). `pkgbuild-source-monitor-unit.diff`
-  (omarchy-settings) installs the charger-swap monitor user unit from
-  [0002](#omarchy-0002-usbc-power) in `/usr/lib/systemd/user` (same change as pkgs branch
-  `omarchy-settings-source-monitor`).
-- **Upstream: ours-only** for the label and the pin; the unit belongs with #15668's pkgs
-  companion.
-- **Drop when:** the recipes are dropped (the unit: when the pkgs companion is released).
+- **Component:** `recipes/omarchy`, `pkgbuild-pin-settings-release.diff` (a `pkgbuild-patch` line
+  in `DELTA`). Both channels.
+- **Fixes:** upstream's `depends=()` asks only for `omarchy-settings=${pkgver}`, so stock's
+  omarchy-settings of the same pkgver could satisfy the patched omarchy, and the two halves of the
+  cohort could be installed or published apart (#83). The diff adds
+  `depends+=("omarchy-settings=${pkgver}-${pkgrel}")` in `package()`, so only the patched
+  omarchy-settings of the same release satisfies it. It is set in `package()`, not in
+  `depends=()`, so the clean chroot and CI (which only have stock omarchy-settings) still build.
+- **Test:** `pacman -Qip <omarchy package file> | grep 'Depends On'` (or `pacman -Qi omarchy` on
+  an installed system) lists `omarchy-settings=<pkgver>-<pkgrel>`, e.g. `omarchy-settings=4.5.0rc1-1.110`;
+  `pacman -U` of that omarchy next to stock omarchy-settings of the same pkgver fails on the
+  dependency. `bin/release-cohort check-recipes` checks that the pin is present
+  (`tests/ci/release-cohort.sh`).
+- **Upstream: ours-only.** Only a downstream that rebuilds one half needs it.
+- **Drop when:** the omarchy recipes are dropped.
+
+<a id="omarchy-pkgbuild-source-monitor-unit"></a>
+### omarchy-settings ships the charger-swap monitor unit
+
+- **Component:** `recipes/omarchy-settings`, `pkgbuild-source-monitor-unit.diff` (a
+  `pkgbuild-patch` line in `DELTA`). Both channels. Same change as pkgs branch
+  [`omarchy-settings-source-monitor`](https://github.com/omarchy-asus/omarchy-pkgs/tree/omarchy-settings-source-monitor).
+- **Fixes:** omarchy-settings installs user units from an explicit list, so the charger-swap
+  monitor that [0002](#omarchy-0002-usbc-power) adds would land only in
+  `/usr/share/omarchy/default/systemd/user`, where systemd doesn't find it, and first-run and
+  migration `1792174852` would enable a unit that doesn't exist. The diff installs
+  `omarchy-powerprofiles-source-monitor.service` in `/usr/lib/systemd/user` when the source has
+  it (inert off ROG laptops through its `ConditionPathExists`).
+- **Test:** `pacman -Ql omarchy-settings | grep omarchy-powerprofiles-source-monitor.service`
+  lists `/usr/lib/systemd/user/omarchy-powerprofiles-source-monitor.service`;
+  `systemctl --user cat omarchy-powerprofiles-source-monitor.service` finds it; Omarchy's
+  `config-test.sh`, run with the patched PKGBUILDs as the omarchy-pkgs checkout, no longer
+  reports it as not shipped.
+- **Upstream: not submitted.** It is the omacom/omarchy-pkgs companion of omacom/omarchy#15668,
+  not opened yet (a human decides; see [0002](#omarchy-0002-usbc-power)).
+- **Drop when:** 0002 drops, or an omarchy-settings release ships the unit.
+
+<a id="pkgbuild-pkgdesc-label"></a>
+### The "(omarchy-asus build)" label
+
+- **Component:** `pkgbuild-pkgdesc-label.diff` in `recipes/omarchy`, `recipes/omarchy-settings`
+  and `recipes/hyprland` (a `pkgbuild-patch` line in each `DELTA`). Both channels.
+- **What:** appends `(omarchy-asus build)` to `pkgdesc` (in hyprland, for both `hyprland` and
+  `hyprpm`), so `pacman -Qi` shows at once that a package is our patched build and not stock's.
+- **Test:** `pacman -Qi omarchy omarchy-settings hyprland hyprpm | grep Description`: every line
+  ends with `(omarchy-asus build)`.
+- **Upstream: ours-only.**
+- **Drop when:** each recipe is dropped (the label goes with it).
 
 ## G16 system files: omarchy-asus-g16
 
@@ -1469,7 +1507,18 @@ it is installed.
 - **What:** one root helper per G16 hardware test session: one polkit approval, then fixed
   allowlisted operations (EC reads, tracefs instances, A/B knobs, module swaps, boot drop-ins,
   freezing an app scope), each logged with a reason.
+- **Test:** offline, `tests/channel/g16-testd.sh` runs
+  `recipes/omarchy-asus-g16-testd/tests/test_g16_testd.py`: the helper against a fake root
+  (`--fake`, every command only logged); the allowlists refuse what isn't on them; everything is
+  put back on stop, expiry, SIGTERM and after a crash; another uid is refused; calls fail with no
+  session open; `package()` installs exactly the expected files. On the G16 (its queued test):
+  `g16-testd session start` shows one polkit dialog; `g16-testd call knob-set nmi-watchdog 0
+  --reason test` then `g16-testd session stop` puts the knob back
+  (`cat /proc/sys/kernel/nmi_watchdog`); `journalctl -u omarchy-asus-g16-testd` logs each call
+  with its reason; `g16-testd available` exits non-zero once the session is stopped.
 - **Upstream: ours-only.**
+- **Drop when:** the G16 test kits no longer need root steps (or move to another mechanism); a
+  test helper with no kit using it is removed with its recipe.
 
 <a id="pkg-proton-experimental-asus"></a>
 ### Proton Experimental fullscreen fix (proton-experimental-asus, held)
@@ -1482,9 +1531,20 @@ it is installed.
   for a ConfigureNotify answering `_NET_WM_FULLSCREEN_MONITORS`, which Hyprland never sends, so
   pointer positions map through the wrong monitor (clicks about 80 px off on the G16). The fix waits
   only when the window manager lists that hint in `_NET_SUPPORTED`.
+- **Test:** offline, `python3 -I recipes/proton-experimental-asus/tests/launcher.test.py` (the
+  launcher against a fake Proton), and the build's `check()` fails unless both `winex11.so` builds
+  load exactly the libraries Valve's do. Without a game: `recipes/proton-experimental-asus/tests/repro/`
+  (README.md, "Reproducer") runs a test program in a private headless sway with two outputs laid
+  out like the G16's; with the pointer at HDMI (400,400), (1280,720), (2000,1300), `./run.sh
+  HEADLESS-2 <Proton files dir> -- 0 2560 1440 8 bc` logs clicks at 2559,320 2559,640 2559,1220 on
+  stock Proton Experimental and at 400,400 1280,720 2000,1300 with the fix. On the G16 (#266): a
+  game in exclusive fullscreen on the HDMI monitor with **Proton Experimental (omarchy-asus)**
+  selected: hover and clicks land under the pointer, and the bottom edge is reachable.
 - **Upstream: not submitted.** Valve's Proton 11.0 has the same code (wine commit `a63f42b3`);
   upstream wine doesn't wait there.
-- **Drop when:** Valve ships an equivalent.
+- **Drop when:** Valve's Proton Experimental ships the fix or reverts `a63f42b3` (then stock
+  behaves the same). Until then the pin must follow each Proton Experimental update, or the fix
+  is off (README.md, "Updating to a new Proton Experimental").
 
 ## Not carried
 
