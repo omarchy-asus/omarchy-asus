@@ -14,8 +14,9 @@
 #   8. inside an open g16-testd session (stand-in) the RAPL reads are its rapl-read and
 #      the CACP levels its knob-set panel-power-savings, the exit its knob-restore,
 #      powertop is left out with a line in the report, and nothing asks for root; a
-#      session that already changed panel-power-savings, or G16_ROOT=testd with no
-#      session, stops before anything changes.
+#      session that already changed panel-power-savings stops a run that would write
+#      it before anything changes (--no-cacp and --dry-run still run, leaving it
+#      alone), and G16_ROOT=testd with no session refuses.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -300,6 +301,13 @@ out=$(tdrun "${FAST[@]}" --no-post 2>&1); rc=$?
 ((rc == 1)) && grep -q 'g16-testd helper did not start (panel-power-savings is already changed in this g16-testd session)' <<<"$out" &&
   [[ ! -e $ST/td.log && ! -s $ST/log ]] &&
   ok "testd: panel-power-savings already changed in the session: stops first" || bad "testd pre-set: rc=$rc $out $(cat "$ST/log")"
+for opt in --no-cacp --dry-run; do
+  reset
+  touch "$ST/td-open" "$ST/td-pre"
+  out=$(tdrun "${FAST[@]}" --no-post "$opt" 2>&1); rc=$?
+  ((rc == 0)) && ! grep -q '^knob-' "$ST/td.log" && [[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 2 ]] &&
+    ok "testd: knob already changed in the session, $opt: runs and leaves the knob alone" || bad "testd pre-set $opt: rc=$rc $out $(cat "$ST/td.log" 2>/dev/null)"
+done
 reset
 out=$(TD_ROOT=testd tdrun "${FAST[@]}" --no-post 2>&1); rc=$?
 ((rc == 1)) && grep -q 'no g16-testd session is open' <<<"$out" && ok "G16_ROOT=testd with no session refuses" || bad "G16_ROOT=testd: rc=$rc $out"

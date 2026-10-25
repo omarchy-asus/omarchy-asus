@@ -109,7 +109,7 @@ fi
 # its knob-restore. powertop runs as root, which the helper doesn't do, so it is
 # not asked for here (G16_ROOT=pkexec runs it).
 if [[ ${1:-} == --testd-helper ]]; then
-  sys=${2:?} dry=${3:-0} why=${4:-}
+  sys=${2:?} dry=${3:-0} why=${4:-} cacp=${5:-1}
   TD=${G16_TESTD:-g16-testd} SET=0
   td() { local out rc; out=$("$TD" call "$@" --reason "$why" 2>&1); rc=$?; printf '%s' "${out##*$'\n'}"; return $rc; }
   cacp_orig=-
@@ -117,8 +117,9 @@ if [[ ${1:-} == --testd-helper ]]; then
     s=''; read -r s 2>/dev/null <"$c/status"
     [[ $s == connected && -f $c/amdgpu/panel_power_savings ]] && { read -r cacp_orig 2>/dev/null <"$c/amdgpu/panel_power_savings" || cacp_orig=-; break; }
   done
-  # Another test's setting in this session would be undone by the knob-restore.
-  if "$TD" session status 2>/dev/null | grep -q '"panel-power-savings"'; then
+  # Another test's setting in this session would be undone by the knob-restore; a
+  # run that won't write the knob (--no-cacp, --dry-run) leaves it alone.
+  if ((cacp && !dry)) && "$TD" session status 2>/dev/null | grep -q '"panel-power-savings"'; then
     echo "panel-power-savings is already changed in this g16-testd session"; exit 1
   fi
   # shellcheck disable=SC2329 # the EXIT trap calls it
@@ -132,6 +133,7 @@ if [[ ${1:-} == --testd-helper ]]; then
         if r=$(td rapl-read) && [[ $r =~ ^[0-9-]+\ [0-9-]+\ [0-9-]+\ [0-9-]+$ ]]; then echo "rapl $r"; else echo 'rapl - - - -'; fi ;;
       cacp)
         if [[ ! $arg =~ ^[0-4]$ ]]; then echo "err bad level"
+        elif ((!cacp)); then echo "err --no-cacp"
         elif [[ $cacp_orig == - ]]; then echo "err absent"
         elif ((dry)); then echo "ok dry"
         elif SET=1 && r=$(td knob-set panel-power-savings "$arg"); then echo "ok $r"
@@ -237,7 +239,7 @@ fi
 case $ROOT in
   testd)
     "$TESTD" available >/dev/null 2>&1 || die "G16_ROOT=testd, but no g16-testd session is open for you (g16-testd session start)"
-    HELPER_CMD=(env G16_TESTD="$TESTD" "$SELF" --testd-helper "$SYS" "$DRY" "g16-idle-power: $WHY") ;;
+    HELPER_CMD=(env G16_TESTD="$TESTD" "$SELF" --testd-helper "$SYS" "$DRY" "g16-idle-power: $WHY" "$CACP") ;;
   pkexec)
     if [[ -n ${G16_POLKIT_REASON:-} ]]; then
       HELPER_CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "$SELF" --root-helper "$SYS" "$DRY")
