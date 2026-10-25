@@ -99,7 +99,16 @@ ensure, for its own job's container:
   other account is out of its docker's sight, which is why the two above keep
   the lock rather than leave the container to the next holder. Both count a
 container as gone only when docker confirms it: if docker can't answer (its
-daemon is down), they keep the lock.
+daemon is down), they keep the lock, with no time limit: letting go after a
+timeout could start a build that overlaps one the next holder can't see.
+
+A stuck lock is rare and shows in the waiting job's log, every minute until
+that job's own timeout: `kernel lock: waiting for the lock: held by <kind>
+run <id> attempt <n> (<job>, container <name>, since <time>) ...`. If that run
+is over, its holder is waiting for that container (or its account's docker):
+remove it as the runner account that ran the run (`docker rm --force <name>`
+with that account's `DOCKER_HOST`, or restart its docker service), and the
+holder lets go.
 
 The lock keeps two builds from overlapping; it is not a security boundary.
 Branch code runs as the PR account and could skip it, as it always could.

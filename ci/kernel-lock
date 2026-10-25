@@ -183,18 +183,21 @@ start() {
     until [[ -s $STATE/$what.ready ]]; do
         kill -0 "$pid" 2>/dev/null || die "the $what holder exited before it held the $what ($(tail -3 "$STATE/$what.log" | tr '\n' ' '))"
         if (( waited % REPORT == 0 )); then
-            if [[ $what == queue ]]; then say "waiting for the release queue (another release is building)"
+            if [[ $what == queue ]]; then say "waiting for the release queue (another release is queued or building; the lock: $(describe))"
             else say "waiting for the lock: $(describe)"; fi
         fi
         sleep 1; waited=$((waited + 1))
     done
 }
 
-# describe: one line on who holds the lock
+# describe: one line on who holds the lock, naming what a person would clear if it is stuck (a
+# holder keeps the lock, with no time limit, while its job's build container won't go)
 describe() {
     if lock_free "$LOCK"; then echo "free"; return; fi
     if [[ -f $LOCK.holder ]]; then
-        echo "held by $(field "$LOCK.holder" kind) run $(field "$LOCK.holder" run_id) ($(field "$LOCK.holder" job), container $(field "$LOCK.holder" container), since $(field "$LOCK.holder" since))"
+        local c
+        c=$(field "$LOCK.holder" container)
+        echo "held by $(field "$LOCK.holder" kind) run $(field "$LOCK.holder" run_id) attempt $(field "$LOCK.holder" run_attempt) ($(field "$LOCK.holder" job), container $c, since $(field "$LOCK.holder" since)). If that run is over, its holder is keeping the lock until $c is gone (or its account's docker answers): remove that container as the runner account that ran it"
     else
         echo "held (no record yet)"
     fi

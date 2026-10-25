@@ -105,7 +105,8 @@ check "the job's own state stays private" \
 as b pr 202 acquire pr "$(cname 202)" 2>"$S/b.err" & bw=$!
 sleep 1
 check "a second job waits while the first holds it" bash -c '! [[ -s $1 ]]' _ "$S/state/b/lock.ready"
-check "the waiter says who holds it" has "held by pr run 201" "$(cat "$S/b.err")"
+check "the waiter says who holds it" has "held by pr run 201 attempt 1" "$(cat "$S/b.err")"
+check "...and names the container to clear if it is stuck" has "until $(cname 201) is gone" "$(cat "$S/b.err")"
 as a pr 201 release 2>/dev/null
 wait "$bw"
 check "the second job gets it once the first lets go" held b
