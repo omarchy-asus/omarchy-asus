@@ -29,6 +29,25 @@
 #  13. pb12 verdicts come from the fit alone; a failed DPMS cycle fails the CACP
 #      apply; a run killed with a CACP level on puts it back and cycles the panel
 #      on; a testd dry run doesn't trace, and a killed testd helper stops its trace.
+#  14. the Zen 5c-first tweaks (#10): listed under #10; skipped without patch 9900's
+#      knobs or when one is off its stock value; applied between baselines and put
+#      back (zen5c-all sets ranking, wake_preferred, wake_pack and g16-testd restores
+#      them in reverse); one tweak per knob; wake-class and wlc-track only by name with
+#      --unverified-msr, never in a default set; pb12 takes at most one of them.
+#  15. --load light: the workload starts once (bursts, browser-like, a VA-API decode on
+#      the amdgpu render node only), the report has the latency, Zen 5c share, clock and
+#      spike columns, the keyboard LED is forced off and put back, every workload stops
+#      and its run dir goes, even when the run is killed; without VA-API decode the
+#      report says so and nothing decodes; the decode takes VA-API frames only (with a
+#      real ffmpeg on an amdgpu node, a 4:4:4 clip is refused, not decoded on the CPU);
+#      a workload that stops in the last phase leaves that phase out and ends the run.
+#  16. the CPU tweaks (#328): listed, left out of idle runs unless --only names them,
+#      in the --load light default set; each applies on every policy it should (a cap
+#      at or above a policy's top leaves it alone) and goes back; epp-dynamic is
+#      skipped with a line when a policy doesn't list it; a CPU setting written back
+#      (the tweak's, a baseline's, asus-wmi's under pmf-low-power) drops the phase,
+#      and a baseline that drops takes its deltas with it; through g16-testd each is
+#      its knob; tweaks that share an issue share one post.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -103,6 +122,23 @@ build_fake() {
   ln -s "$S/bus/pci/drivers/thunderbolt" "$S/devices/pci0000:00/0000:00:08.3/0000:67:00.5/driver"
   mkdir -p "$S/class/drm/card1-eDP-1/amdgpu"
   echo 0 >"$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings"
+  # cpufreq (#328): amd-pstate-epp, boost on, EPP balance_power; two Zen 5 policies
+  # (5.09 GHz), a Zen 5c one (3.51 GHz) and one whose top is 3.5 GHz, which a 3.5 GHz
+  # cap must leave alone. asus-wmi quiet + amd-pmf balanced.
+  local c=$S/devices/system/cpu/cpufreq q m
+  mkdir -p "$c"; echo 1 >"$c/boost"
+  for q in 0:5090000 1:5090000 4:3510000 5:3500000; do
+    m=${q#*:}; mkdir -p "$c/policy${q%%:*}"
+    echo amd-pstate-epp >"$c/policy${q%%:*}/scaling_driver"
+    echo "$m" >"$c/policy${q%%:*}/cpuinfo_max_freq"; echo "$m" >"$c/policy${q%%:*}/scaling_max_freq"
+    echo balance_power >"$c/policy${q%%:*}/energy_performance_preference"
+    echo "default performance balance_performance balance_power power dynamic" >"$c/policy${q%%:*}/energy_performance_available_preferences"
+  done
+  mkdir -p "$S/class/platform-profile/platform-profile-0" "$S/class/platform-profile/platform-profile-1"
+  echo asus-wmi >"$S/class/platform-profile/platform-profile-0/name"; echo quiet >"$S/class/platform-profile/platform-profile-0/profile"
+  echo "quiet balanced performance" >"$S/class/platform-profile/platform-profile-0/choices"
+  echo amd-pmf >"$S/class/platform-profile/platform-profile-1/name"; echo balanced >"$S/class/platform-profile/platform-profile-1/profile"
+  echo "low-power balanced performance" >"$S/class/platform-profile/platform-profile-1/choices"
   echo 1 >"$P/sys/kernel/nmi_watchdog"
   echo "BOOT_IMAGE=/vmlinuz quiet" >"$P/cmdline"
   printf 'cpu  1 2 3 4\nintr 1000 0\nctxt 5000\n' >"$P/stat"
@@ -116,6 +152,17 @@ orig_state() {
     "$(cat "$S/class/rfkill/rfkill7/soft")" "$( [[ -e $ST/active/voxtype.service ]] && echo vox-on || echo vox-off)" \
     "$(cat "$S/bus/pci/devices/0000:67:00.5/power/control")" "$(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings")"
 }
+cpu_state() { # boost, then per policy max/EPP, then asus-wmi and amd-pmf
+  local c=$S/devices/system/cpu/cpufreq q
+  printf '%s ' "$(cat "$c/boost")"
+  for q in 0 1 4 5; do printf '%s/%s ' "$(cat "$c/policy$q/scaling_max_freq")" "$(cat "$c/policy$q/energy_performance_preference")"; done
+  printf '%s %s' "$(cat "$S/class/platform-profile/platform-profile-0/profile")" "$(cat "$S/class/platform-profile/platform-profile-1/profile")"
+}
+CPU_WANT="1 5090000/balance_power 5090000/balance_power 3510000/balance_power 3500000/balance_power quiet balanced"
+CPU=(boost-off epp-power max-3500 max-3000 epp-dynamic pmf-low-power)
+# A stand-in power-profiles-daemon's write: only on a change, and whole (sysfs reads
+# never see a half-written value; `echo >` can, on a slow runner)
+put() { [[ $(cat "$2") == "$1" ]] || { echo "$1" >"$2.new" && mv -f "$2.new" "$2"; }; }
 WANT="1 100 2000 100000 on auto on off 1 0 vox-on on 0 "
 ALL=(nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle usb4 cacp3 cacp4)
 PB_DEFAULT=(nmi nvme-apst sd-off kbd-usb wifi-ps bt-off voxtype usb4 cacp3)
@@ -232,12 +279,12 @@ grep -qE '\| bt active; codec|bt active;.*kbd active;.*xhci D0' "$r" && ok "phas
 [[ -e $ST/posted-198 ]] && grep -q '^## G16 idle A/B' "$ST/posted-198" && ok "report posted to #198" || bad "not posted to #198"
 grep -qF "$T/home" "$ST"/posted-* && bad "home path in a post" || ok "posts have no home path"
 nposts=$(ls "$ST"/posted-* | wc -l)
-# Each tweak with an issue number gets its own post, plus #198.
-want_posts=$(( 1 + $("$SCRIPT" --list | awk '$2 != "#0" {print $2}' | sort -u | wc -l) ))
+# Each tweak that ran gets its own post, plus #198 (the Zen 5c tweaks are skipped: no patch 9900 here).
+want_posts=$(( 1 + $(for t in "${ALL[@]}"; do "$SCRIPT" --list | awk -v t="$t" '$1 == t {print $2}'; done | sort -u | wc -l) ))
 ((nposts == want_posts)) && ok "one post per tweak issue plus #198 ($nposts)" || bad "$nposts posts, want $want_posts"
 for f in "$ST"/posted-*; do
   [[ $f == */posted-198 ]] && continue
-  grep -q '^## A/B on the G16: ' "$f" && grep -q '^Verdict: ' "$f" && ok "${f##*/} has its row and verdict" || bad "${f##*/}: $(head -3 "$f")"
+  grep -q '^## A/B on the G16: ' "$f" && grep -qE '^Verdict( for [a-z0-9-]+)?: ' "$f" && ok "${f##*/} has its row and verdict" || bad "${f##*/}: $(head -3 "$f")"
 done
 
 # ---------------------------------------------------------- 3. the guards
@@ -595,5 +642,362 @@ pid=$!
 for _ in $(seq 1 50); do grep -q '^trace-start' "$ST/td.log" 2>/dev/null && break; sleep 0.1; done
 kill -TERM "$pid"; wait "$pid" 2>/dev/null
 grep -q '^trace-stop idle-ab-' "$ST/td.log" && ok "testd helper killed mid-trace stops the trace" || bad "testd trace left on: $(cat "$ST/td.log")"
+
+# --------------------------------------------- 14. the Zen 5c-first tweaks (#10)
+hfi_fake() { # the knobs of kernel patch 9900 on amd_hfi's platform device, at stock
+  H=$S/devices/platform/AMDI0104:00
+  mkdir -p "$H" "$S/bus/platform/devices"
+  ln -sfn "$H" "$S/bus/platform/devices/AMDI0104:00"
+  echo "[performance] efficiency inverted" >"$H/ranking"
+  echo off >"$H/wake_preferred"; echo 0 >"$H/wake_pack"; echo 0 >"$H/wlc_track"
+}
+hfi_state() { printf '%s|%s|%s|%s' "$(sed -E 's/.*\[([a-z]+)\].*/\1/' "$H/ranking")" "$(cat "$H/wake_preferred")" "$(cat "$H/wake_pack")" "$(cat "$H/wlc_track")"; }
+HFI_WANT="performance|off|0|0"
+ZEN=(hfi-eff hfi-inv wake-all wake-pack zen5c-all)
+out=$("$SCRIPT" --list)
+for t in "${ZEN[@]}" wake-class wlc-track; do grep -qE "^$t +#10 " <<<"$out" && ok "--list: $t under #10" || bad "--list: no $t"; done
+grep -q '^wake-pack .*null control' <<<"$out" && ok "--list: wake-pack is the null control" || bad "--list wake-pack: $(grep wake-pack <<<"$out")"
+grep -q '^wake-class .*only with --unverified-msr' <<<"$out" && ok "--list: wake-class needs --unverified-msr" || bad "--list wake-class: $(grep wake-class <<<"$out")"
+
+# a kernel without 9900: each Zen 5c tweak skipped with its reason, the rest still runs
+reset
+out=$(run --dry-run --only nmi,hfi-eff,zen5c-all "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && grep -q 'skipped: hfi-eff: no ranking under /sys/bus/platform/devices/AMDI0104:\* (a kernel without the Zen 5c-first patch 9900)' <<<"$out" &&
+  grep -q 'skipped: zen5c-all: no ranking, wake_preferred, wake_pack under' <<<"$out" && grep -q '^| nmi |' "$T/home/report.md" &&
+  ok "no patch 9900: the Zen 5c tweaks are skipped, the rest runs" || bad "no 9900: rc=$rc $out"
+# a knob not at its stock value: no stock baseline, skipped
+reset; hfi_fake; echo all >"$H/wake_preferred"
+out=$(run --dry-run --only hfi-eff,nmi "${FAST[@]}" 2>&1)
+grep -q 'skipped: hfi-eff: the Zen 5c-first knobs are not at their stock values (wake_preferred is all, not off)' <<<"$out" &&
+  ok "a Zen 5c knob off its stock value skips the tweak" || bad "non-stock: $out"
+
+# a real run through the root helper: each tweak applied between baselines, all back
+reset; hfi_fake
+out=$(run --only "$(IFS=,; echo "${ZEN[*]}")" "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && ok "Zen 5c run exits 0" || bad "Zen 5c run exit $rc: $out"
+[[ $(hfi_state) == "$HFI_WANT" ]] && ok "Zen 5c knobs back at stock" || bad "Zen 5c left: $(hfi_state)"
+for t in "${ZEN[@]}"; do
+  grep -qE "^\| $t \| #10 \| 2/2 \|" "$T/home/report.md" && ok "$t measured in both rounds" || bad "$t row: $(grep "^| $t |" "$T/home/report.md")"
+done
+grep -q '^zen5c-all ok ranking=efficiency wake_preferred=all wake_pack=1' "$T/home/report.md" && ok "zen5c-all sets all three" || bad "zen5c-all apply: $(grep zen5c-all "$T/home/report.md")"
+zl=$(grep '^## A/B on the G16: ' "$ST/posted-10" 2>/dev/null)
+nz=0; for t in "${ZEN[@]}"; do [[ $zl == *"$t"* ]] && grep -q "^| $t | #10 |" "$ST/posted-10" && nz=$((nz + 1)); done
+((nz == ${#ZEN[@]})) && [[ $(grep -c '^Verdict for ' "$ST/posted-10") == "${#ZEN[@]}" ]] && ok "the Zen 5c tweaks' rows posted to #10, one post" || bad "post to #10: $zl"
+# the root helper itself: one tweak per file, the MSR tweaks only when allowed, all back on EOF
+reset; hfi_fake
+reply=$(printf 'apply zen5c-all\napply wake-all\napply hfi-inv\napply wake-class\napply wlc-track\n' | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n +2)
+[[ $reply == $'ok ranking=efficiency wake_preferred=all wake_pack=1\nerr zen5c-all is applied (wake_preferred)\nerr zen5c-all is applied (ranking)\nerr wake-class reads the workload-class MSR (layout unverified): only with --unverified-msr\nerr wlc-track reads the workload-class MSR (layout unverified): only with --unverified-msr' ]] &&
+  ok "root helper: one tweak per knob, no MSR tweak without --unverified-msr" || bad "root helper replies: $reply"
+[[ $(hfi_state) == "$HFI_WANT" ]] && ok "root helper: Zen 5c knobs back on EOF" || bad "root helper left: $(hfi_state)"
+reply=$(printf 'apply wake-class\napply wlc-track\n' | "$SCRIPT" --root-helper "$S" "$P" 0 1 | tail -n +2)
+[[ $reply == $'ok wake_preferred=class\nok wlc_track=1' && $(hfi_state) == "$HFI_WANT" ]] && ok "root helper: MSR tweaks with unverified 1, then back" || bad "unverified: $reply / $(hfi_state)"
+# the MSR tweaks: refused by name without the flag, never in a default set
+reset; hfi_fake
+out=$(run --dry-run --only wake-class "${FAST[@]}" 2>&1); rc=$?
+((rc == 2)) && grep -q 'wake-class reads MSR_AMD_WORKLOAD_CLASS_ID on every context switch' <<<"$out" && ok "wake-class refused without --unverified-msr" || bad "wake-class: rc=$rc $out"
+run --dry-run --unverified-msr "${FAST[@]}" >/dev/null 2>&1
+grep -qE '^\| (wake-class|wlc-track) \|' "$T/home/report.md" && bad "an MSR tweak in the default set" || ok "MSR tweaks not in the default set, even with --unverified-msr"
+grep -q '^| zen5c-all |' "$T/home/report.md" && ok "the other Zen 5c tweaks are in the default set" || bad "zen5c-all not in the default set"
+run --dry-run --design pb12 "${FAST[@]}" >/dev/null 2>&1
+grep -qE '^\| (hfi-eff|hfi-inv|wake-all|wake-pack|zen5c-all|wake-class|wlc-track) \|' "$T/home/report.md" && bad "a Zen 5c tweak in the default pb12 set" || ok "no Zen 5c tweak in the default pb12 set"
+out=$(run --dry-run --unverified-msr --only wlc-track,nmi "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && grep -q '^| wlc-track |' "$T/home/report.md" && ok "wlc-track runs by name with --unverified-msr" || bad "wlc-track: rc=$rc $out"
+out=$(run --dry-run --design pb12 --only nmi,hfi-eff,wake-all "${FAST[@]}" 2>&1); rc=$?
+((rc == 2)) && grep -q 'interact by design' <<<"$out" && ok "pb12 refuses two Zen 5c tweaks" || bad "pb12 zen5c: rc=$rc $out"
+# through g16-testd: its hfi knobs, set in order and put back in reverse
+reset; hfi_fake
+touch "$ST/td-open"
+out=$(run_td --only zen5c-all,wake-pack --rounds 1 --measure 1 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+L=$ST/td.log
+seq=$(grep -E '^knob-(set|restore) hfi-' "$L" | awk '{print $1, $2, $3}' | paste -sd';')
+[[ $seq == *"knob-set hfi-ranking efficiency;knob-set hfi-wake-preferred all;knob-set hfi-wake-pack 1;knob-restore hfi-wake-pack |;knob-restore hfi-wake-preferred |;knob-restore hfi-ranking |"* ]] &&
+  ok "testd: zen5c-all sets ranking, wake_preferred, wake_pack and restores them in reverse" || bad "testd zen5c-all: $seq"
+grep -q '^knob-set hfi-wake-pack 1 |' "$L" && ((rc == 0)) && ok "testd: wake-pack through hfi-wake-pack" || bad "testd wake-pack: rc=$rc $(cat "$L")"
+[[ $(hfi_state) == "$HFI_WANT" ]] && ok "testd: the kit wrote no Zen 5c knob itself" || bad "testd wrote: $(hfi_state)"
+reset; hfi_fake
+touch "$ST/td-open"
+out=$(printf 'apply wake-class\n' | G16_TESTD="$B/g16-testd" STUB="$ST" "$SCRIPT" --testd-helper 0 30/500 test | tail -n +2)
+[[ $out == "err wake-class reads the workload-class MSR (layout unverified): only with --unverified-msr" && ! -e $ST/td.log ]] &&
+  ok "testd helper: no MSR tweak without --unverified-msr" || bad "testd wake-class: $out"
+
+# ------------------------------------------------------ 15. --load light
+cat >"$B/ffmpeg" <<'EOF'
+#!/bin/bash
+# the clip (lavfi in), the VA-API probe (-frames:v), the looped real-time decode; the
+# workloads run under env -i, so the stub finds the state next to itself
+STUB=$(dirname "$0")/../state
+echo "ffmpeg $*" >>"$STUB/ffmpeg.log"
+case " $* " in
+  *" lavfi "*) : >"${!#}" ;;
+  *" -frames:v "*) [[ -e $STUB/no-vaapi ]] && { echo "No VA display found for device" >&2; exit 1; }; exit 0 ;;
+  *" -stream_loop "*) echo $$ >"$STUB/decode.pid"; exec sleep 600 ;;
+esac
+EOF
+cat >"$B/brightnessctl" <<'EOF'
+#!/bin/bash
+# brightnessctl -q -d NAME set N, on the fake sysfs
+echo "brightnessctl $*" >>"$STUB/log"
+echo "$5" >"$G16_AB_SYS/class/leds/$3/brightness"
+EOF
+chmod +x "$B/ffmpeg" "$B/brightnessctl"
+light_fake() { # two core types (even CPUs Zen 5, odd Zen 5c), the iGPU's and the RTX's render nodes, a lit keyboard
+  local c
+  printf 'cpu  1 2 3 4\n' >"$P/stat"
+  for c in 0 1 2 3; do
+    mkdir -p "$S/devices/system/cpu/cpu$c/cpufreq"
+    if ((c % 2)); then echo 3506494 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq"; echo 2000000 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_avg_freq"
+    else echo 5090910 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq"; echo 4500000 >"$S/devices/system/cpu/cpu$c/cpufreq/cpuinfo_avg_freq"; fi
+    printf 'cpu%s 10 0 10 100 0 0 0 0 0 0\n' "$c" >>"$P/stat"
+  done
+  printf 'intr 1000 0\nctxt 5000\n' >>"$P/stat"
+  mkdir -p "$S/class/drm/renderD128" "$S/class/drm/renderD129"
+  ln -s "$S/devices/pci0000:00/0000:00:08.1/0000:65:00.0" "$S/class/drm/renderD128/device"
+  ln -s "$S/devices/pci0000:00/0000:00:01.1/0000:64:00.0" "$S/class/drm/renderD129/device"
+  mkdir -p "$S/class/leds/asus::kbd_backlight"; echo 2 >"$S/class/leds/asus::kbd_backlight/brightness"
+}
+leftover() { pgrep -f "$T/tmp" >/dev/null || { [[ -e $ST/decode.pid ]] && kill -0 "$(cat "$ST/decode.pid")" 2>/dev/null; }; }
+run_light() { TMPDIR=$T/tmp run "$@"; }
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+LIGHT=(--rounds 2 --measure 3 --settle 0 --interval 1 --seed 7)
+out=$(run_light --load light --dry-run --only nmi "${LIGHT[@]}" 2>&1); rc=$?
+r=$T/home/report.md
+((rc == 0)) && ok "light dry run exits 0" || bad "light dry run exit $rc: $out"
+grep -q '^## G16 A/B under a light load (dry run' "$r" && ok "light: the report says light load" || bad "light title: $(head -1 "$r")"
+grep -q -- '- light load: bursts at about 8 Hz .*video decode: x264 1080p30 clip decoded in real time through VA-API on renderD128' "$r" && ok "light: decode through VA-API on the iGPU" || bad "light decode: $(grep -- '- light load' "$r")"
+grep -q -- '- core types: Zen 5 CPUs 0,2; Zen 5c CPUs 1,3 (by cpuinfo_max_freq)' "$r" && ok "light: core types from cpuinfo_max_freq" || bad "light types: $(grep -- '- core types' "$r")"
+grep -q -- '-stream_loop -1 -re -i .*-f null -' "$ST/ffmpeg.log" && grep -q -- '-hwaccel vaapi -hwaccel_device /dev/dri/renderD128' "$ST/ffmpeg.log" && ! grep -q renderD129 "$ST/ffmpeg.log" &&
+  ok "light: ffmpeg decodes looped, in real time, on renderD128 only" || bad "light ffmpeg: $(cat "$ST/ffmpeg.log")"
+grep -q -- '-frames:v 30 -an -vf format=vaapi -f null -' "$ST/ffmpeg.log" && grep -q -- '-stream_loop -1 -re -i .* -an -vf format=vaapi -f null -' "$ST/ffmpeg.log" &&
+  ok "light: the probe and the decode take VA-API frames only (format=vaapi)" || bad "light: no format=vaapi: $(cat "$ST/ffmpeg.log")"
+grep -q '^| tweak | issue | rounds | Δ battery W | ±2 SE | Δ SoC W | Δ p95 response ms | Δ p95 % | Δ Zen 5c share pp | Δ spikes >4 GHz pp | verdict |' "$r" &&
+  grep -q '^| nmi | #225 | 2/2 |' "$r" && grep -q '^| baseline noise (sd, B to B) |' "$r" && ok "light: the tweak table with latency, Zen 5c share, spikes and noise" || bad "light table: $(grep -A3 '^| tweak' "$r")"
+row=$(grep -E '^\| 0 \| 1 \| baseline \| 9\.00 \|' "$r" | tail -n1)
+IFS='|' read -r _ _ _ _ _ _ _ _ nb _ lat _ p95 g5 g5c sp _ <<<"$row"
+((${nb// /} > 0)) && [[ $lat == */*/* && ${p95// /} != – ]] && ok "light: bursts and their latency per phase ($nb)" || bad "light bursts: $row"
+[[ ${g5// /} == 4.50 && ${g5c// /} == 2.00 && ${sp// /} == 50.0 ]] && ok "light: clocks per core type and the spike share" || bad "light clocks: $row"
+grep -qx -- '- keyboard backlight: 1 LED(s), forced off before every phase (dry run: left as it is)' "$r" && [[ $(cat "$S/class/leds/asus::kbd_backlight/brightness") == 2 ]] && ! grep -q brightnessctl "$ST/log" &&
+  ok "light dry run: the keyboard LED left alone" || bad "light dry kbd: $(grep -- '- keyboard' "$r") $(grep brightnessctl "$ST/log")"
+sleep 1.5
+leftover && bad "light: a workload left running: $(pgrep -af "$T/tmp")" || ok "light: every workload stopped at the end"
+[[ -z $(ls -A "$T/tmp") ]] && ok "light: the run dir is removed" || bad "light: left in TMPDIR: $(ls -A "$T/tmp")"
+
+# a real (short) light run: the keyboard LED forced off for the phases, then put back
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+out=$(run_light --load light --only nmi --rounds 1 --measure 2 --settle 0 --interval 1 --seed 3 --no-post 2>&1); rc=$?
+((rc == 0)) && ok "light run exits 0" || bad "light run exit $rc: $out"
+grep -q '^brightnessctl -q -d asus::kbd_backlight set 0' "$ST/log" && [[ $(grep '^brightnessctl' "$ST/log" | tail -n1) == "brightnessctl -q -d asus::kbd_backlight set 2" ]] &&
+  [[ $(cat "$S/class/leds/asus::kbd_backlight/brightness") == 2 ]] && ok "light: keyboard LED off for the run, back to 2 after" || bad "light kbd: $(grep brightnessctl "$ST/log")"
+[[ $(orig_state) == "$WANT" ]] && ok "light: every setting back" || bad "light left: $(orig_state)"
+sleep 1.5
+leftover && bad "light run: a workload left running" || ok "light run: every workload stopped"
+
+# no VA-API decode: said in the report, no decode at all (never a CPU decode)
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"; touch "$ST/no-vaapi"
+out=$(run_light --load light --dry-run --only nmi "${FAST[@]}" 2>&1); rc=$?
+((rc == 0)) && grep -q 'video decode: not available (VA-API decode failed on renderD128: No VA display found for device): the load runs without video decode' "$T/home/report.md" &&
+  ! grep -q -- '-stream_loop' "$ST/ffmpeg.log" && ok "light without VA-API: said so, and no decode runs" || bad "no vaapi: rc=$rc $(grep -i decode "$T/home/report.md") $(cat "$ST/ffmpeg.log")"
+
+# killed outright mid-run: the workloads stop on their own
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+TMPDIR=$T/tmp run --load light --only nmi --rounds 5 --measure 5 --settle 0 --interval 1 --no-post >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 100); do [[ -e $ST/decode.pid ]] && pgrep -f "$T/tmp.*bursts.log" >/dev/null && break; sleep 0.1; done
+# the script itself (run's env execs it below the backgrounded subshell), not its watchers
+main=$(pgrep -P "$pid" | head -n1)
+[[ -n $main ]] && kill -KILL "$main"; wait "$pid" 2>/dev/null
+for _ in $(seq 1 100); do leftover || break; sleep 0.1; done
+leftover && bad "killed light run: a workload outlived it: $(pgrep -af "$T/tmp")" || ok "killed light run: the workloads stopped on their own"
+# load_alive itself, from the script: a workload that has just exited counts as stopped at
+# once, while its watcher (which polls once a second) is still running
+mkdir -p "$T/la"
+out=$(LOAD_DIR=$T/la bash -c '
+  eval "$(sed -n "/^load_watch() {/,/^}/p; /^load_alive() {/,/^}/p" "$1")"
+  LOAD_PIDS=()
+  load_watch $$ sleep 30 & LOAD_PIDS+=($!)
+  sleep 0.5
+  load_alive && echo alive-before
+  pkill -P "${LOAD_PIDS[0]}" -f "^sleep 30$"
+  sleep 0.05
+  kill -0 "${LOAD_PIDS[0]}" 2>/dev/null && echo watcher-still-up
+  load_alive || echo stopped-after
+  kill "${LOAD_PIDS[0]}" 2>/dev/null; wait' _ "$SCRIPT" 2>&1)
+[[ $out == $'alive-before\nwatcher-still-up\nstopped-after' ]] && ok "load_alive sees a workload that just exited, before its watcher notices" || bad "load_alive: $out"
+
+# a workload that stops during the final phase: that phase is left out, the run ends, nothing is posted.
+# End to end, killed 1 s and 3.6 s into the 4 s phase; the moment just before the check
+# after the phase is covered deterministically by the load_alive check above.
+for at in 1 3.6; do
+  reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+  TMPDIR=$T/tmp run --load light --only nmi --rounds 1 --measure 4 --settle 0 --interval 1 --seed 3 >"$T/out" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 300); do (( $(grep -c ' settle 0s' "$T/out") >= 3 )) && break; sleep 0.1; done
+  sleep "$at"
+  pkill -TERM -f "$T/tmp.*bursts.log"
+  wait "$pid"; rc=$?
+  r=$T/home/report.md
+  ((rc == 1)) && grep -q 'the light load stopped during baseline in round 1' "$T/out" && ok "light (killed at ${at} s): a workload stopping in the last phase ends the run (exit 1)" || bad "at ${at} s: load stopped: rc=$rc $(cat "$T/out")"
+  grep -qE '^\| 2 \| 1 \| baseline \| .*light load stopped \|$' "$r" && ok "light (killed at ${at} s): the phase it stopped in is left out" || bad "at ${at} s: load stopped row: $(grep -E '^\| 2 \| 1 \|' "$r")"
+  grep -qE '^\| nmi \| #225 \| 0/1 \|' "$r" && ok "light (killed at ${at} s): the tweak before it gets no delta from that baseline" || bad "at ${at} s: load stopped nmi: $(grep '^| nmi |' "$r")"
+  ls "$ST"/posted-* >/dev/null 2>&1 && bad "at ${at} s: an incomplete light run posted" || ok "light (killed at ${at} s): an incomplete run posts nothing"
+  [[ $(orig_state) == "$WANT" ]] && ok "light stopped (at ${at} s): every setting back" || bad "at ${at} s: light stopped left: $(orig_state)"
+done
+
+# with the real ffmpeg on an amdgpu render node (skipped elsewhere): a clip VA-API can't
+# decode (4:4:4) must not fall back to a CPU decode
+real_ffmpeg=$(PATH=${PATH#"$B:"} command -v ffmpeg)
+if [[ -n $real_ffmpeg && -r /dev/dri/renderD128 && $(cat /sys/class/drm/renderD128/device/vendor 2>/dev/null) == 0x1002 ]] &&
+   LIBVA_DRIVER_NAME=radeonsi "$real_ffmpeg" -nostdin -hide_banner -loglevel error -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 \
+     -hwaccel_output_format vaapi -f lavfi -i testsrc2=size=320x240:rate=30 -t 0.1 -an -f null - >/dev/null 2>&1; then
+  mv "$B/ffmpeg" "$B/ffmpeg.stub"
+  for fmt in yuv420p yuv444p; do
+    reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+    G16_AB_CLIP_PIX_FMT=$fmt run_light --load light --dry-run --only nmi --rounds 1 --measure 1 --settle 0 --interval 1 >/dev/null 2>&1
+    d=$(grep -o 'video decode: [^.]*' "$T/home/report.md")
+    if [[ $fmt == yuv420p ]]; then [[ $d == *"through VA-API on renderD128"* ]] && ok "real ffmpeg: a 4:2:0 clip decodes through VA-API" || bad "real ffmpeg 4:2:0: $d"
+    else [[ $d == *"not available (VA-API decode failed on renderD128"* ]] && ok "real ffmpeg: a 4:4:4 clip VA-API can't decode is refused, not decoded on the CPU" || bad "real ffmpeg 4:4:4: $d"; fi
+  done
+  mv "$B/ffmpeg.stub" "$B/ffmpeg"
+else
+  echo "skip: no ffmpeg with VA-API on an amdgpu render node here (the real-ffmpeg fallback check)"
+fi
+out=$(run --load light --design pb12 --dry-run "${FAST[@]}" 2>&1); rc=$?
+((rc == 2)) && ok "--load light refuses --design pb12" || bad "light pb12: rc=$rc"
+
+# --------------------------------- 16. the CPU tweaks under light load (#328)
+reset
+out=$("$SCRIPT" --list)
+for t in "${CPU[@]}"; do grep -qE "^$t +#328 " <<<"$out" && ok "--list: $t with #328" || bad "--list $t: $(grep "^$t" <<<"$out")"; done
+# Idle mode leaves them out unless --only names them; --load light includes them.
+run --dry-run "${FAST[@]}" >/dev/null 2>&1
+grep -qE '^\| (boost-off|epp-power|max-3500|pmf-low-power) \|' "$T/home/report.md" && bad "idle run measured a CPU tweak" || ok "idle run: no CPU tweak by default"
+run --dry-run --only boost-off "${FAST[@]}" >/dev/null 2>&1
+grep -q '^| boost-off |' "$T/home/report.md" && ok "idle run: --only names a CPU tweak, it runs" || bad "idle --only boost-off: no row"
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+run_light --dry-run --load light --rounds 1 --measure 1 --settle 0 --interval 1 --seed 7 >/dev/null 2>&1
+miss=''; for t in "${CPU[@]}"; do grep -q "^| $t |" "$T/home/report.md" || miss+=" $t"; done
+[[ -z $miss ]] && ok "--load light: the CPU tweaks are in the default set" || bad "--load light default lacks:$miss"
+out=$(run --load heavy --dry-run 2>&1); rc=$?
+((rc == 2)) && ok "an unknown --load is refused" || bad "--load heavy: exit $rc"
+# The documented #328 command: 3 rounds of 30 s phases, about 30 minutes.
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+out=$(timeout 8 env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" TMPDIR="$T/tmp" G16_ROOT=none G16_AB_SYS="$S" G16_AB_PROC="$P" G16_AB_ISSUE="$B/issue" \
+  G16_AB_REPORT="$T/home/report.md" "$SCRIPT" --only "$(IFS=,; echo "${CPU[*]}")" --load light --no-post 2>&1)
+grep -q '39 phases, about 28 minutes' <<<"$out" && ok "the #328 run: 39 phases of 10 + 30 s, about 30 minutes" || bad "#328 run length: $(grep phases <<<"$out")"
+sleep 1.5
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "the #328 run stopped early: CPU settings back" || bad "stopped early, left: $(cpu_state)"
+leftover && bad "the #328 run stopped early: a workload left running" || ok "the #328 run stopped early: every workload stopped"
+
+# Each tweak applies on every policy it should and goes back on EOF.
+reset
+c=$S/devices/system/cpu/cpufreq
+mid() { # tweak -> the CPU state while it is applied, and the reply
+  { printf 'apply %s\n' "$1"; sleep 0.5; cpu_state >"$T/mid"; } | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n1
+}
+r=$(mid boost-off)
+[[ $r == "ok 0 on 1" && $(cat "$T/mid") == "0 ${CPU_WANT#1 }" ]] && ok "boost-off: boost 0" || bad "boost-off: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "boost-off: back on EOF" || bad "boost-off left: $(cpu_state)"
+r=$(mid epp-power)
+[[ $r == "ok power on 4" && $(cat "$T/mid") == "1 5090000/power 5090000/power 3510000/power 3500000/power quiet balanced" ]] && ok "epp-power: power on every policy" || bad "epp-power: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "epp-power: back on EOF" || bad "epp-power left: $(cpu_state)"
+r=$(mid epp-dynamic)
+[[ $r == "ok dynamic on 4" && $(cat "$T/mid") == "1 5090000/dynamic 5090000/dynamic 3510000/dynamic 3500000/dynamic quiet balanced" ]] && ok "epp-dynamic: dynamic on every policy" || bad "epp-dynamic: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "epp-dynamic: back on EOF" || bad "epp-dynamic left: $(cpu_state)"
+r=$(mid max-3500)
+[[ $r == "ok 3500000 on 3" && $(cat "$T/mid") == "1 3500000/balance_power 3500000/balance_power 3500000/balance_power 3500000/balance_power quiet balanced" ]] &&
+  ok "max-3500: capped where cpuinfo_max_freq is above it" || bad "max-3500: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "max-3500: back on EOF" || bad "max-3500 left: $(cpu_state)"
+r=$(mid max-3000)
+[[ $r == "ok 3000000 on 4" && $(cat "$T/mid") == "1 3000000/balance_power 3000000/balance_power 3000000/balance_power 3000000/balance_power quiet balanced" ]] && ok "max-3000: capped on every policy" || bad "max-3000: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "max-3000: back on EOF" || bad "max-3000 left: $(cpu_state)"
+r=$(mid pmf-low-power)
+[[ $r == "ok low-power on 1" && $(cat "$T/mid") == "${CPU_WANT% balanced} low-power" ]] && ok "pmf-low-power: amd-pmf low-power, asus-wmi quiet" || bad "pmf-low-power: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "pmf-low-power: back on EOF" || bad "pmf-low-power left: $(cpu_state)"
+# boost off can lower the caps (the kernel's doing): they go back after boost.
+{ printf 'apply boost-off\n'; sleep 0.3; echo 4000000 >"$c/policy0/scaling_max_freq"; printf 'revert boost-off\n'; } | "$SCRIPT" --root-helper "$S" "$P" 0 >/dev/null
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "boost-off: the caps go back after boost" || bad "boost-off caps: $(cpu_state)"
+r=$(printf 'apply epp-power\napply epp-dynamic\napply max-3000\napply max-3500\n' | "$SCRIPT" --root-helper "$S" "$P" 0 | sed -n '3p;5p' | paste -sd'|')
+[[ $r == "err epp-power is applied|err max-3000 is applied" ]] && ok "one EPP value and one cap at a time" || bad "conflicts: $r"
+out=$(run --design pb12 --only epp-power,epp-dynamic --dry-run 2>&1); rc=$?
+((rc == 2)) && ok "pb12 refuses epp-power with epp-dynamic" || bad "pb12 epp conflict: exit $rc"
+
+# A real light run: every CPU tweak in both rounds, each setting held, all back.
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+out=$(run_light --only "$(IFS=,; echo "${CPU[*]}")" --load light "${LIGHT[@]}" 2>&1); rc=$?
+((rc == 0)) && ok "light run exits 0" || bad "light run exit $rc: $out"
+r=$T/home/report.md
+for t in "${CPU[@]}"; do
+  grep -qE "^\| $t \| #328 \| 2/2 \|" "$r" && ok "$t measured in both rounds" || bad "$t row: $(grep "^| $t |" "$r")"
+done
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "light run: every CPU setting back" || bad "light run left: $(cpu_state)"
+grep -q 'CPU settings read back with every sample' "$r" && grep -qE 'policy0/EPP power \([0-9]+/[0-9]+ held\)' "$r" && ok "the readback is logged" || bad "readback: $(grep -A4 'read back' "$r")"
+grep -q -- '- cpufreq: amd-pstate-epp boost 1, scaling_max_freq 3.50/3.51/5.09 GHz' "$r" && ok "context: driver, boost and caps" || bad "cpufreq line: $(grep cpufreq "$r")"
+[[ -e $ST/posted-328 ]] && grep -c '^Verdict for ' "$ST/posted-328" | grep -qx 6 && ok "one post to #328 with the six verdicts" || bad "#328 post: $(cat "$ST/posted-328" 2>/dev/null | head -5)"
+
+# The dynamic skip: a policy that doesn't list it.
+reset
+echo "default performance balance_performance balance_power power" >"$S/devices/system/cpu/cpufreq/policy4/energy_performance_available_preferences"
+out=$(run --only epp-dynamic,epp-power "${FAST[@]}" --no-post 2>&1)
+grep -q "skipped: epp-dynamic: energy_performance_available_preferences doesn't list dynamic" <<<"$out" && ok "epp-dynamic skipped with a line" || bad "dynamic skip: $out"
+grep -q 'dynamic' "$ST/log" "$S"/devices/system/cpu/cpufreq/policy*/energy_performance_preference && bad "dynamic was written" || ok "epp-dynamic skipped: EPP never dynamic"
+grep -qE '^\| epp-power \| #328 \| 2/2 \|' "$T/home/report.md" && ok "the other tweak still runs" || bad "epp-power after the skip: $(grep '^| epp-power' "$T/home/report.md")"
+
+# power-profiles-daemon writes EPP back mid-phase: the phase is left out.
+reset
+( e=$S/devices/system/cpu/cpufreq/policy0/energy_performance_preference
+  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break; [[ $(cat "$e") == power ]] && put balance_power "$e"; sleep 0.01; done ) &
+ppd=$!
+# 2 s phases: three samples each, so the rewrite is seen whatever the timing.
+out=$(run --only epp-power,boost-off --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+touch "$ST/stop-ppd"; wait "$ppd"
+r=$T/home/report.md
+((rc == 0)) && ok "PPD rewrite: the run finishes" || bad "PPD rewrite: exit $rc: $out"
+grep -qE '^\| epp-power \| #328 \| 0/2 \|' "$r" && ok "PPD rewrite: both epp-power phases left out" || bad "PPD rewrite row: $(grep '^| epp-power' "$r")"
+grep -qE '\| epp-power \|.*setting did not hold \(policy0/EPP balance_power' "$r" && ok "PPD rewrite: the phase says which setting slipped" || bad "PPD note: $(grep -E '^\| [0-9]+ \| [12] \| epp-power' "$r")"
+grep -qE '^\| boost-off \| #328 \| 2/2 \|' "$r" && ok "PPD rewrite: the other tweak is kept" || bad "boost-off: $(grep '^| boost-off' "$r")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "PPD rewrite: everything back" || bad "PPD rewrite left: $(cpu_state)"
+
+# A rewrite during the baselines (from the first boost-off on, EPP moves whenever no
+# tweak is on): those baselines are left out, so is every delta that needs them.
+reset
+( c=$S/devices/system/cpu/cpufreq armed=0
+  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break
+    if [[ $(cat "$c/boost") == 0 ]]; then armed=1; put balance_power "$c/policy1/energy_performance_preference"
+    elif ((armed)); then put performance "$c/policy1/energy_performance_preference"; fi
+    sleep 0.01; done ) &
+ppd=$!
+out=$(run --only boost-off,nmi --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+touch "$ST/stop-ppd"; wait "$ppd"
+r=$T/home/report.md
+((rc == 0)) && ok "baseline rewrite: the run finishes" || bad "baseline rewrite: exit $rc: $out"
+nb=$(grep -cE '^\| [0-9]+ \| [12] \| baseline \|.*setting did not hold \(.*policy1/EPP performance' "$r")
+((nb >= 4)) && ok "baseline rewrite: the baselines after it left out ($nb)" || bad "baseline rewrite: $nb baselines left out: $(grep -E '^\| [0-9]+ \| [12] \| baseline' "$r")"
+grep -qE '^\| boost-off \| #328 \| 0/2 \|' "$r" && ! grep -qE '^\| nmi \| #225 \| 2/2 \|' "$r" && ok "baseline rewrite: no delta from a bad baseline" || bad "baseline rewrite rows: $(grep -E '^\| (boost-off|nmi) \|' "$r")"
+grep -qE '\| [0-9]+ \| [12] \| boost-off \|.*\|  \|$' "$r" && ok "baseline rewrite: the boost-off phases themselves held" || bad "boost-off phases: $(grep -E '^\| [0-9]+ \| [12] \| boost-off' "$r")"
+
+# asus-wmi moved while amd-pmf is low-power: those phases are left out.
+reset
+( d=$S/class/platform-profile
+  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break
+    if [[ $(cat "$d/platform-profile-1/profile") == low-power ]]; then put balanced "$d/platform-profile-0/profile"; else put quiet "$d/platform-profile-0/profile"; fi
+    sleep 0.01; done ) &
+ppd=$!
+out=$(run --only pmf-low-power,epp-power --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+touch "$ST/stop-ppd"; wait "$ppd"
+r=$T/home/report.md
+grep -qE '^\| pmf-low-power \| #328 \| 0/2 \|' "$r" && grep -qE '\| pmf-low-power \|.*setting did not hold \(platform-profile-0/profile balanced' "$r" &&
+  ok "asus-wmi moved under pmf-low-power: those phases left out" || bad "asus-wmi move: $(grep -E 'pmf-low-power \|' "$r")"
+grep -qE '^\| epp-power \| #328 \| 2/2 \|' "$r" && ok "asus-wmi move: the other tweak and the baselines kept" || bad "epp-power: $(grep '^| epp-power' "$r")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "asus-wmi move: everything back" || bad "asus-wmi move left: $(cpu_state)"
+
+# Through g16-testd: each CPU tweak is its knob.
+reset
+touch "$ST/td-open"
+run_td --only "$(IFS=,; echo "${CPU[*]}")" --rounds 1 --measure 1 --settle 0 --interval 1 --no-post >/dev/null 2>&1
+for k in "cpu-boost 0" "cpu-epp power" "cpu-epp dynamic" "cpu-max-freq 3500000" "cpu-max-freq 3000000" "pmf-profile low-power"; do
+  grep -q "^knob-set $k |" "$ST/td.log" && ok "testd: knob-set $k" || bad "testd: no knob-set $k"
+done
+nset=$(grep -c '^knob-set' "$ST/td.log") nres=$(grep -c '^knob-restore' "$ST/td.log")
+((nset == 6 && nres == 6)) && ok "testd: every CPU knob-set has its knob-restore" || bad "testd CPU: $nset sets, $nres restores"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "testd: nothing changed behind g16-testd's back" || bad "testd changed: $(cpu_state)"
 
 ((fails == 0)) && echo "PASS" || { echo "$fails failed"; exit 1; }

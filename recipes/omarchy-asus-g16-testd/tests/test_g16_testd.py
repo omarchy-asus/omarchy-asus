@@ -43,7 +43,9 @@ class Session(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="g16td")
         self.root = r = self.tmp.name
         self.sock = os.path.join(r, "s")
-        self.env = dict(os.environ, G16_TESTD_SOCKET=self.sock,
+        self.xdg = os.path.join(r, "xdg")
+        os.mkdir(self.xdg)
+        self.env = dict(os.environ, G16_TESTD_SOCKET=self.sock, XDG_RUNTIME_DIR=self.xdg,
                         G16_TESTD_STATE=os.path.join(r, "var/lib/omarchy-asus-g16-testd"))
         put(r, "proc/sys/kernel/random/boot_id", "boot-1")
         put(r, "proc/sys/kernel/nmi_watchdog", "1")
@@ -420,6 +422,113 @@ class Session(unittest.TestCase):
         self.assertEqual(get(self.root, "sys/class/leds/input3::numlock/brightness"), "1")
         self.assertEqual(get(self.root, "sys/class/leds/input9::numlock/brightness"), "0")
 
+    def zen5c_and_cpufreq(self):
+        """The Zen 5c-first knobs (kernel patch 9900, #10), two cpufreq policies of
+        different core types, boost, and amd-pmf next to asus-wmi's platform profile."""
+        hfi = "sys/bus/platform/devices/AMDI0104:00"
+        put(self.root, f"{hfi}/ranking", "[performance] efficiency inverted")
+        put(self.root, f"{hfi}/wake_preferred", "off")
+        put(self.root, f"{hfi}/wake_pack", "0")
+        put(self.root, f"{hfi}/wlc_track", "0")
+        for n, top, epp in ((0, "5090910", "balance_power"), (1, "3506494", "power")):
+            p = f"sys/devices/system/cpu/cpufreq/policy{n}"
+            put(self.root, f"{p}/cpuinfo_min_freq", "625000")
+            put(self.root, f"{p}/cpuinfo_max_freq", top)
+            put(self.root, f"{p}/scaling_max_freq", top)
+            put(self.root, f"{p}/energy_performance_preference", epp)
+            put(self.root, f"{p}/energy_performance_available_preferences",
+                "default performance balance_performance balance_power power")
+        put(self.root, "sys/devices/system/cpu/cpufreq/boost", "1")
+        for n, name, prof in ((0, "asus-wmi", "balanced"), (1, "amd-pmf", "balanced")):
+            put(self.root, f"sys/class/platform-profile/platform-profile-{n}/name", name)
+            put(self.root, f"sys/class/platform-profile/platform-profile-{n}/profile", prof)
+            put(self.root, f"sys/class/platform-profile/platform-profile-{n}/choices", "low-power balanced performance")
+        return hfi
+
+    def test_zen5c_knobs_set_refuse_restore(self):
+        hfi = self.zen5c_and_cpufreq()
+        self.start()
+        for args, why in [(("knob-set", "hfi-ranking", "fastest"), "not one of"),
+                          (("knob-set", "hfi-wake-preferred", "some"), "not one of"),
+                          (("knob-set", "hfi-wake-pack", "2"), "not one of"),
+                          (("knob-set", "hfi-wlc-track", "yes"), "not one of")]:
+            rc, out = self.g("call", *args)
+            self.assertEqual(rc, 1, args)
+            self.assertIn(why, out, args)
+        # zen5c-all's order: ranking, wake_preferred, wake_pack; the class knobs too
+        for k, v, f in [("hfi-ranking", "efficiency", "ranking"), ("hfi-wake-preferred", "all", "wake_preferred"),
+                        ("hfi-wake-pack", "1", "wake_pack"), ("hfi-wlc-track", "1", "wlc_track")]:
+            rc, out = self.g("call", "knob-set", k, v)
+            self.assertEqual((rc, out.strip()), (0, v), k)
+            self.assertEqual(get(self.root, f"{hfi}/{f}"), v)
+        status = json.loads(self.g("session", "status")[1])["knobs"]
+        self.assertEqual(status["hfi-ranking"], "performance")  # the bracketed value
+        rc, out = self.g("call", "knob-restore", "hfi-wake-pack")
+        self.assertEqual((rc, out.strip()), (0, "0"))
+        rc, out = self.stop()
+        self.assertEqual(rc, 0, out)
+        for f, v in [("ranking", "performance"), ("wake_preferred", "off"), ("wake_pack", "0"), ("wlc_track", "0")]:
+            self.assertEqual(get(self.root, f"{hfi}/{f}"), v, f)
+        # every knob went back without a failure
+        log = open(os.path.join(self.root, "daemon.log")).read()
+        self.assertNotIn("restore:", log)
+
+    def test_boost_restore_puts_scaling_max_freq_back(self):
+        self.zen5c_and_cpufreq()
+        c = "sys/devices/system/cpu/cpufreq"
+        self.start()
+        self.assertEqual(self.g("call", "knob-set", "cpu-boost", "0")[0], 0)
+        # with boost off the kernel can lower a policy's scaling_max_freq
+        put(self.root, f"{c}/policy0/scaling_max_freq", "3506494")
+        rc, out = self.g("call", "knob-restore", "cpu-boost")
+        self.assertEqual((rc, out.strip()), (0, "1"))
+        self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["5090910", "3506494"])
+
+    def test_zen5c_knobs_absent_without_patch_9900(self):
+        self.start()
+        rc, out = self.g("call", "knob-set", "hfi-ranking", "efficiency")
+        self.assertEqual(rc, 1)
+        self.assertIn("a kernel without patch 9900", out)
+
+    def test_cpufreq_and_pmf_knobs_set_refuse_restore(self):
+        self.zen5c_and_cpufreq()
+        self.start()
+        for args, why in [(("knob-set", "cpu-boost", "2"), "not one of"),
+                          (("knob-set", "cpu-epp", "turbo"), "not one of"),
+                          (("knob-set", "cpu-max-freq", "6000000"), "out of range 625000..5090910"),
+                          (("knob-set", "cpu-max-freq", "500000"), "out of range"),
+                          (("knob-set", "cpu-max-freq", "3.5GHz"), "out of range"),
+                          (("knob-set", "pmf-profile", "quiet"), "not one of")]:
+            rc, out = self.g("call", *args)
+            self.assertEqual(rc, 1, args)
+            self.assertIn(why, out, args)
+        for k, v in [("cpu-boost", "0"), ("cpu-epp", "power"), ("cpu-max-freq", "3000000"),
+                     ("pmf-profile", "low-power")]:
+            rc, out = self.g("call", "knob-set", k, v)
+            self.assertEqual(rc, 0, (k, out))
+        c = "sys/devices/system/cpu/cpufreq"
+        self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["3000000"] * 2)
+        # each cap stands alone: a policy whose maximum is below it goes to its maximum
+        for cap, want in (("4000000", ["4000000", "3506494"]), ("3506494", ["3506494", "3506494"]),
+                          ("5090910", ["5090910", "3506494"]), ("3000000", ["3000000", "3000000"])):
+            self.assertEqual(self.g("call", "knob-set", "cpu-max-freq", cap)[0], 0)
+            self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], want, cap)
+
+        self.assertEqual([get(self.root, f"{c}/policy{n}/energy_performance_preference") for n in (0, 1)], ["power"] * 2)
+        self.assertEqual(get(self.root, "sys/class/platform-profile/platform-profile-1/profile"), "low-power")
+        self.assertEqual(get(self.root, "sys/class/platform-profile/platform-profile-0/profile"), "balanced")
+        status = json.loads(self.g("session", "status")[1])["knobs"]
+        self.assertEqual(status["cpu-max-freq"], "5090910,3506494")
+
+        rc, out = self.stop()
+        self.assertEqual(rc, 0, out)
+        # each policy back to its own value
+        self.assertEqual(get(self.root, f"{c}/boost"), "1")
+        self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["5090910", "3506494"])
+        self.assertEqual([get(self.root, f"{c}/policy{n}/energy_performance_preference") for n in (0, 1)],
+                         ["balance_power", "power"])
+        self.assertEqual(get(self.root, "sys/class/platform-profile/platform-profile-1/profile"), "balanced")
+
     def test_scope_frozen_before_stays_frozen(self):
         f = f"{self.cg}/app-graphical.slice/app-Hyprland-firefox-123.scope/cgroup.freeze"
         put(self.root, f, "1")
@@ -569,10 +678,71 @@ class Session(unittest.TestCase):
         self.assertEqual(get(inst, "events/g16testd/pci_set_power_state/enable"), "1")
         rc, out = self.g("call", "trace-stop", "x")
         self.assertEqual(rc, 0, out)
+        # handed over: the file is the caller's, and the helper's run dir keeps no copy
+        self.assertEqual(out.strip(), os.path.join(self.xdg, "omarchy-asus-g16-testd/x.trace"))
         self.assertEqual(open(out.strip()).read().strip(), "<idle>-0 hrtimer_start")
         self.assertEqual(oct(os.stat(out.strip()).st_mode & 0o777), "0o600")
+        self.assertEqual(os.listdir(os.path.join(self.root, "run/omarchy-asus-g16-testd/out")), [])
         self.assertFalse(os.path.exists(inst))
         self.assertTrue(get(self.root, "sys/kernel/tracing/kprobe_events").endswith("-:g16testd/pci_set_power_state"))
+
+    def test_trace_kprobe_fetch_args_and_irq_work(self):
+        # #284: irq_work idle exits for bin/g16-wakeups; the CACP level for bin/g16-cacp-check
+        tpl = os.path.join(self.root, "fake-instance")
+        put(tpl, "events/irq_vectors/irq_work_entry/enable", "0")
+        put(tpl, "events/g16testd/dmub_cacp_set_level/enable", "0")
+        put(self.root, "proc/kallsyms", "ffffffffc1000010 t dmub_cacp_set_level\t[amdgpu]")
+        self.start()
+        rc, out = self.g("call", "trace-start", "c", "irq_vectors/irq_work_entry", "dmub-cacp-set-level")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(get(self.root, "sys/kernel/tracing/kprobe_events"),
+                         "p:g16testd/dmub_cacp_set_level dmub_cacp_set_level level=%si:u32")
+        inst = os.path.join(self.root, "sys/kernel/tracing/instances/g16-testd-c")
+        self.assertEqual(get(inst, "events/g16testd/dmub_cacp_set_level/enable"), "1")
+        self.assertEqual(get(inst, "events/irq_vectors/irq_work_entry/enable"), "1")
+        self.stop()
+        self.assertTrue(get(self.root, "sys/kernel/tracing/kprobe_events").endswith("-:g16testd/dmub_cacp_set_level"))
+
+    def test_trace_watchdog_kept_then_collected(self):
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("g16testd", TOOL)
+        m = module_from_spec(spec_from_loader("g16testd", loader))
+        loader.exec_module(m)
+        put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
+        put(self.root, "fake-instance/trace", "<idle>-0 hrtimer_start")
+        h = m.Host(self.root)
+        d = m.Daemon(h, UID, time.time() + 600, {})
+        d.trace_start("w", "timer/hrtimer_start")
+        d.trace_start("v", "timer/hrtimer_start")
+        for t in d.rec["traces"].values():
+            t["started"] -= m.TRACE_MAX_SECONDS + 1
+        d.watchdogs()
+        out = os.path.join(self.root, "run/omarchy-asus-g16-testd/out")
+        self.assertEqual(sorted(os.listdir(out)), ["v.trace", "w.trace"])
+        self.assertEqual(oct(os.stat(os.path.join(out, "w.trace")).st_mode & 0o777), "0o600")
+        # the next trace-stop hands it over and removes the helper's copy
+        self.assertEqual(d.trace_stop("w"), {"trace": "w"})
+        self.assertEqual(d.handover.read().strip(), b"<idle>-0 hrtimer_start")
+        d.handover.close()
+        self.assertEqual(os.listdir(out), ["v.trace"])
+        with self.assertRaises(m.Refused):
+            d.trace_stop("w")
+        # the name is free again once collected, and not before
+        with self.assertRaises(m.Refused) as e:
+            d.trace_start("v", "timer/hrtimer_start")
+        self.assertIn("not collected yet", str(e.exception))
+        self.assertNotIn("v", d.rec["traces"])
+        self.assertEqual(os.listdir(out), ["v.trace"])
+        put(self.root, "fake-instance/trace", "<idle>-0 newer")
+        d.trace_start("w", "timer/hrtimer_start")
+        self.assertEqual(d.trace_stop("w"), {"trace": "w"})
+        self.assertEqual(d.handover.read().strip(), b"<idle>-0 newer")
+        d.handover.close()
+        d.handover = None
+        # one nobody collected goes at the end of the session
+        d.restore_runtime(idle=False)
+        self.assertFalse(os.path.exists(out))
 
     def test_trace_kprobe_symbol_must_be_unique(self):
         put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
@@ -709,6 +879,11 @@ class Package(unittest.TestCase):
         p = subprocess.run([sys.executable, "-I", TOOL, "list"], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("nmi-watchdog", p.stdout)
+        for k in ("hfi-ranking", "hfi-wake-preferred", "hfi-wake-pack", "hfi-wlc-track", "cpu-boost", "cpu-epp",
+                  "cpu-max-freq", "pmf-profile"):
+            self.assertIn(f"  {k} ", p.stdout)
+        self.assertIn("irq_vectors/irq_work_entry", p.stdout)
+        self.assertIn("dmub-cacp-set-level    dmub_cacp_set_level level=%si:u32", p.stdout)
 
     def test_policy_points_at_the_installed_tool(self):
         pol = open(os.path.join(HERE, "..", "io.github.omarchy-asus.g16-testd.policy")).read()
