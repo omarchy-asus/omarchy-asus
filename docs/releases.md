@@ -116,8 +116,10 @@ Release builds are moving off the build host's chroots onto the same `ci/build-r
 container the PR check uses (#258). The first piece is `.github/workflows/release.yml`: it builds
 and records, and **publishes nothing**. No signing key, secret or release upload is anywhere in
 it. The second is the signer on the build host, `bin/release-sign` (below), which checks a run's
-record with GitHub before it hands the packages to `bin/publish`. Nothing runs it yet: the
-chroot path (`bin/build-pkg`, then `bin/publish`) stays the live publisher.
+record with GitHub before it hands the packages to `bin/publish`. The daily rebase onto upstream
+runs it only for the recipes `build/release-path.conf` lists, and it lists none yet, so the chroot
+path (`bin/build-pkg`, then `bin/publish`) stays the live publisher (below, "Switching a recipe to
+the release path").
 
 ```
 release workflow (GitHub)  ->  bin/release-sign (build host)  ->  bin/publish  ->  bin/sync-release
@@ -217,6 +219,52 @@ error, a missing or malformed field, no attestation) is a refusal.
   removed on exit. It is a command, run once per release: no unit, timer or cron job.
 
 `tests/ci/release-sign.sh` covers every refusal and the hand-off, offline, with `gh` stubbed.
+
+### Switching a recipe to the release path
+
+`build/release-path.conf` is the switch: one recipe per line. A recipe listed there is no longer
+built in the chroot by the daily rebase onto upstream; after its merge the release workflow builds
+it on `main` and `bin/release-sign` checks that run and publishes it. It holds only on the rc
+channel from `main`. With the file empty (as committed: comments only) or missing, every recipe
+builds in the chroot as before. A release cohort (`build/cohorts.conf`) is listed whole or not at
+all.
+
+A recipe is listed only after the two paths have been compared for it and match:
+
+1. **Build it on the new path:** run the release workflow for that recipe on `main`, and note the
+   run ID once it has succeeded.
+
+   ```bash
+   gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-keyring"
+   ```
+2. **Compare** that run with what the rc release serves today:
+
+   ```bash
+   bin/compare-build-paths --channel rc omarchy-asus-keyring <run ID>
+   ```
+
+   It downloads the run's `release-rc-<recipe>` artifact (its digest and `SHA256SUMS` checked,
+   into a directory of its own) and the packages the rc release serves from that recipe (through
+   `ci/fetch-release`: the signed db, then each package's signature), and compares each package:
+   the version first, then the `.PKGINFO` fields (dependencies, optdepends, provides, conflicts,
+   replaces, backup and the rest), the file list with type, mode, owner and link target, the
+   install scriptlet, and file sizes. A file whose size moved by more than 64 bytes and 1% is a
+   difference (`--size-bytes`, `--size-percent`); less is reproducibility noise. Build date,
+   packager, `.BUILDINFO` and file contents (build ID notes, embedded dates) are expected to
+   differ and aren't failed; the files whose contents differ are listed for information. A
+   package only one side has is a difference. When the release serves another version than the
+   run built, it says so first and compares the rest anyway; compare again once both are at the
+   same version. It only reads the archives (`bsdtar`), never runs anything from them, and
+   changes nothing. Exit 0: only expected differences; 1: differences, printed as a diff
+   (`- release`, `+ new path`); 3: it couldn't compare (the run isn't a successful release
+   workflow run on `main`, no such artifact, a digest or signature that doesn't check out).
+3. **Switch it** in a pull request that adds the recipe to `build/release-path.conf` and names the
+   run and the comparison's result. `linux-omarchy` also needs the build host's release runner
+   (docs/kernel-runner.md, "The release registration") and `RELEASE_RUNNER` naming it.
+
+`tests/ci/compare-build-paths.sh` covers it offline, with small fabricated packages: identical
+builds, a dropped file, a changed dependency, scriptlet or mode, a size beyond the threshold, a
+package on one side only, a version mismatch, and the refusals.
 
 ## Reverse-dependency checks
 

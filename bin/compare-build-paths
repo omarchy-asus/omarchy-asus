@@ -1,0 +1,273 @@
+#!/bin/bash
+# Compare what the two build paths make of one recipe (#258, before a recipe is switched): the
+# packages a release workflow run built (.github/workflows/release.yml, its
+# release-<channel>-<recipe> artifact) against the packages the channel's release serves today
+# (the signed chroot builds). A recipe goes into build/release-path.conf only after this passes
+# for it (docs/releases.md "Switching a recipe to the release path").
+#
+#   the run      the repo's run of exactly the release workflow, dispatched on main, succeeded
+#   new          its release-<channel>-<recipe> artifact, downloaded as a zip into a directory of
+#                its own (as bin/release-sign does): the zip's SHA-256 is the digest GitHub
+#                recorded, its entries are SHA256SUMS and exactly the packages it lists, each
+#                with the SHA-256 it lists
+#   old          the channel's release, through ci/fetch-release: its signed db, then every
+#                package the db serves from this recipe (the same pkgbase, or a name the run
+#                built), each with its own signature checked, each in a directory of its own
+#
+# Then, per package (matched by pkgname): the version (epoch:pkgver-pkgrel) first, then the
+# .PKGINFO fields (dependencies, optdepends, provides, conflicts, replaces, backup and the rest),
+# the file list with type, mode, owner and link target (from the archive's own headers, the
+# entries .MTREE records), the install scriptlet (.INSTALL), and file sizes: a file whose size
+# differs by more than --size-bytes and --size-percent of the release's size is a difference;
+# below that it is reproducibility noise, counted but not failed. A package only one side has
+# is a difference.
+#
+# Expected to differ, and not compared: builddate, packager and size in .PKGINFO, .BUILDINFO,
+# timestamps and file contents (build ID notes and embedded dates change compiled files; the
+# files whose contents differ are listed, for information).
+#
+# It only reads: the archives with bsdtar, never extracted to disk beyond the packages
+# themselves; no makepkg, no PKGBUILD, no scriptlet or other file from them is ever run. It
+# changes nothing, here or on GitHub.
+#
+# Usage: bin/compare-build-paths --channel rc [options] RECIPE RUN_ID
+#   --channel rc        the channel whose release is compared (Quattro is frozen, #309)
+#   --size-bytes N      a size difference up to N bytes is noise (default 64)
+#   --size-percent P    a size difference up to P% of the release's size is noise (default 1);
+#                       a file is flagged only when it is over both
+#   --full              print every line of each difference (default: 100 per section)
+# Exit: 0 only expected differences, 1 differences (printed), 2 usage, 3 could not compare.
+set -Eeuo pipefail
+usage() { sed -n 's/^# \{0,1\}Usage: /Usage: /p; /^#   --/s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+die() { echo "compare-build-paths: cannot compare: $*" >&2; exit 3; }
+# anything else that fails is a comparison that couldn't be made, never "differs"
+trap 'echo "compare-build-paths: cannot compare: unexpected failure at line $LINENO" >&2; exit 3' ERR
+
+channel='' recipe='' run_id='' size_bytes=64 size_pct=1 full=0
+while (($#)); do
+    case $1 in
+        --channel) (($# >= 2)) || usage; channel=$2; shift 2 ;;
+        --size-bytes) (($# >= 2)) || usage; size_bytes=$2; shift 2 ;;
+        --size-percent) (($# >= 2)) || usage; size_pct=$2; shift 2 ;;
+        --full) full=1; shift ;;
+        -h|--help) usage ;;
+        -*) usage ;;
+        *) if [[ -z $recipe ]]; then recipe=$1; elif [[ -z $run_id ]]; then run_id=$1; else usage; fi; shift ;;
+    esac
+done
+[[ -n $channel && -n $recipe && -n $run_id ]] || usage
+[[ $size_bytes =~ ^[0-9]+$ && $size_pct =~ ^[0-9]+$ ]] || usage
+case $channel in
+    rc) ;;
+    quattro) die "the Quattro channel is frozen until the Omarchy 4.5 stable switch (#309)" ;;
+    *) die "unknown channel '$channel' (rc only)" ;;
+esac
+[[ $recipe =~ ^[a-z0-9][a-z0-9@._+-]*$ ]] || die "'$recipe' is not a recipe name"
+[[ $run_id =~ ^[1-9][0-9]{0,19}$ ]] || die "run ID '$run_id' is not a number"
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/.." && pwd)
+# env.sh only for the repo's name: sourced in a subshell, so its GNUPGHOME (the signing key's
+# home) never reaches ci/fetch-release's gpg
+GH_REPO=$(OMARCHY_ASUS_CHANNEL=$channel bash -c 'source "$1" >/dev/null && echo "$GH_REPO"' _ "$here/env.sh") ||
+    die "cannot read the repo's name from bin/env.sh"
+WORKFLOW=.github/workflows/release.yml
+ART=release-$channel-$recipe
+T=$(mktemp -d "${TMPDIR:-/tmp}/compare-build-paths.XXXXXX")
+trap 'rm -rf "$T"' EXIT
+chmod 700 "$T"
+mkdir -m 700 "$T/new" "$T/old" "$T/list" "$T/a" "$T/b"
+
+api() {
+    local out
+    out=$(gh api "$@" 2>"$T/gh.err") || die "GitHub API call for $1 failed: $(tr '\n' ' ' <"$T/gh.err")"
+    printf '%s\n' "$out"
+}
+want() {   # want <json> <jq filter> <expected> <what>
+    local got
+    got=$(jq -er "$2 | strings" <<<"$1" 2>/dev/null) || die "the run's $4 is missing from GitHub's answer"
+    [[ $got == "$3" ]] || die "run $run_id's $4 is '$got', not '$3': only a release workflow run on main that succeeded is compared"
+}
+
+# --- the run
+run=$(api "repos/$GH_REPO/actions/runs/$run_id") || exit 3
+want "$run" '.repository.full_name' "$GH_REPO" repository
+want "$run" '.head_repository.full_name' "$GH_REPO" "head repository"
+want "$run" '.path' "$WORKFLOW" workflow
+want "$run" '.event' workflow_dispatch trigger
+want "$run" '.head_branch' main branch
+want "$run" '.status' completed status
+want "$run" '.conclusion' success conclusion
+head_sha=$(jq -er '.head_sha | strings' <<<"$run") || die "the run's commit is missing"
+
+# --- new: the run's artifact for this recipe
+all=$(api "repos/$GH_REPO/actions/runs/$run_id/artifacts?per_page=100" --paginate) || exit 3
+a=$(jq -sec --arg n "$ART" '
+    if all(.[]; (.artifacts | type) == "array") then [.[].artifacts[] | select(.name == $n)] else error("malformed") end
+    | if length == 1 then .[0] else error("count") end' <<<"$all" 2>/dev/null) ||
+    die "run $run_id has no single artifact named $ART (did it build $recipe for $channel?)"
+jq -e '.expired == false' <<<"$a" >/dev/null || die "artifact $ART has expired (kept 14 days): run the release workflow again"
+id=$(jq -er '.id | numbers | tostring' <<<"$a") || die "artifact $ART has no ID"
+digest=$(jq -er '.digest | strings' <<<"$a") || die "GitHub recorded no digest for artifact $ART"
+[[ $digest =~ ^sha256:([0-9a-f]{64})$ ]] || die "artifact $ART's digest '$digest' is not a SHA-256"
+digest=${BASH_REMATCH[1]}
+z=$T/list/$id.zip
+gh api "repos/$GH_REPO/actions/artifacts/$id/zip" >"$z" 2>"$T/gh.err" ||
+    die "downloading artifact $ART failed: $(tr '\n' ' ' <"$T/gh.err")"
+[[ $(sha256sum <"$z" | cut -d' ' -f1) == "$digest" ]] || die "artifact $ART: the download's SHA-256 is not the digest GitHub recorded"
+NAME_RE='^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*\.pkg\.tar\.zst$'
+bsdtar -tf "$z" >"$T/list/entries" 2>/dev/null || die "artifact $ART is not a readable zip"
+types=$(bsdtar -tvf "$z" 2>/dev/null) || die "artifact $ART is not a readable zip"
+[[ $(wc -l <"$T/list/entries") -eq $(grep -c '^-' <<<"$types") ]] || die "artifact $ART holds something other than regular files"
+while IFS= read -r e; do
+    [[ $e == SHA256SUMS || $e =~ $NAME_RE ]] || die "artifact $ART holds '$e', not a package or SHA256SUMS"
+done <"$T/list/entries"
+[[ -z $(sort "$T/list/entries" | uniq -d) ]] || die "artifact $ART holds a file twice"
+bsdtar -xOf "$z" SHA256SUMS >"$T/list/sums" 2>/dev/null || die "artifact $ART has no SHA256SUMS"
+nd=$T/new/$ART
+mkdir -m 700 "$nd"
+new_files=()
+while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^([0-9a-f]{64})\ \ (.+)$ ]] || die "artifact $ART's SHA256SUMS has a malformed line"
+    sum=${BASH_REMATCH[1]} f=${BASH_REMATCH[2]}
+    [[ $f =~ $NAME_RE ]] || die "artifact $ART's SHA256SUMS lists '$f', not a package name"
+    [[ ! -e $nd/$f ]] || die "artifact $ART's SHA256SUMS lists $f twice"
+    bsdtar -xOf "$z" "$f" >"$nd/$f" 2>/dev/null || die "cannot read $f from artifact $ART"
+    [[ $(sha256sum <"$nd/$f" | cut -d' ' -f1) == "$sum" ]] || die "$f's SHA-256 is not the one its SHA256SUMS lists"
+    new_files+=("$nd/$f")
+done <"$T/list/sums"
+((${#new_files[@]})) || die "artifact $ART's SHA256SUMS lists no package"
+[[ $(grep -vx SHA256SUMS "$T/list/entries" | sort) == $(printf '%s\n' "${new_files[@]##*/}" | sort) ]] ||
+    die "artifact $ART's files are not exactly the ones its SHA256SUMS lists"
+
+# pkginfo <package> <key>: every value of that key in its .PKGINFO
+pkginfo() { bsdtar -xOf "$1" .PKGINFO 2>/dev/null | sed -n "s/^$2 = //p"; }
+declare -A new_pkg=() old_pkg=()
+bases=()
+for f in "${new_files[@]}"; do
+    n=$(pkginfo "$f" pkgname)
+    [[ -n $n && $n != *$'\n'* ]] || die "${f##*/} has no single pkgname in its .PKGINFO"
+    [[ -z ${new_pkg[$n]:-} ]] || die "the run built $n twice"
+    new_pkg[$n]=$f
+    b=$(pkginfo "$f" pkgbase)
+    bases+=("${b:-$n}")
+done
+
+# --- old: what the channel's release serves from this recipe, signature-checked
+db=$("$repo/ci/fetch-release" --channel "$channel" --db "$T/list/db" 2>"$T/fetch.err") ||
+    die "the $channel release's db: $(tr '\n' ' ' <"$T/fetch.err")"
+mkdir -m 700 "$T/list/dbx"
+bsdtar -xf "$db" -C "$T/list/dbx" 2>/dev/null || die "the $channel release's db is not readable"
+want_names=" ${!new_pkg[*]} " want_bases=" $recipe ${bases[*]} "
+for desc in "$T"/list/dbx/*/desc; do
+    [[ -f $desc ]] || continue
+    n=$(awk '/^%NAME%$/{getline; print; exit}' "$desc")
+    b=$(awk '/^%BASE%$/{getline; print; exit}' "$desc")
+    [[ $want_names == *" $n "* || $want_bases == *" ${b:-$n} "* ]] || continue
+    [[ $n =~ ^[A-Za-z0-9@_+][A-Za-z0-9@._+-]*$ ]] || die "the $channel release's db names a package '$n'"
+    mkdir -m 700 "$T/old/$n"
+    old_pkg[$n]=$("$repo/ci/fetch-release" --channel "$channel" "$n" "$T/old/$n" 2>"$T/fetch.err") ||
+        die "$n from the $channel release: $(tr '\n' ' ' <"$T/fetch.err")"
+done
+
+# --- compare
+echo "Comparing $recipe on the $channel channel: release workflow run $run_id (main at ${head_sha:0:12}) against the release"
+fail=0 out=$T/report
+: >"$out"
+note() { printf '%s\n' "$*" >>"$out"; }
+# section <title> <release file> <new file>: their line diff, under the title, when they differ
+section() {
+    local d
+    d=$(diff --old-line-format='      - %L' --new-line-format='      + %L' --unchanged-line-format='' "$2" "$3") && return 0
+    fail=1
+    note "    $1 (- release, + new path):"
+    if ((!full)) && (($(wc -l <<<"$d") > 100)); then
+        head -100 <<<"$d" >>"$out"
+        note "      ... and $(($(wc -l <<<"$d") - 100)) more lines (--full prints them all)"
+    else
+        printf '%s\n' "$d" >>"$out"
+    fi
+}
+# fields <package>: its .PKGINFO without the version and the fields every build changes, sorted
+fields() {
+    bsdtar -xOf "$1" .PKGINFO 2>/dev/null |
+        { grep -Ev '^(#|$|(builddate|packager|size|pkgver) = )' || true; } | LC_ALL=C sort
+}
+# entries <package> <listing> <sizes> <digests>: one line per file from the archive's headers
+# (the package's own metadata files left out): "path type mode owner link" in the listing,
+# "path size" for regular files, "path sha256" for regular files
+entries() {
+    bsdtar -cf - --format=mtree --options='!all,type,mode,uid,gid,uname,gname,size,link,sha256,!use-set' "@$1" \
+        >"$T/mtree" 2>/dev/null || die "cannot list the files of ${1##*/}"
+    : >"$2"; : >"$3"; : >"$4"
+    awk -v L="$2" -v S="$3" -v D="$4" '
+            /^#/ || NF == 0 { next }
+            {
+                p = $1
+                if (p ~ /^\.\/\.(PKGINFO|MTREE|BUILDINFO|INSTALL|Changelog)$/) next
+                delete k
+                for (i = 2; i <= NF; i++) { split($i, kv, "="); k[kv[1]] = substr($i, length(kv[1]) + 2) }
+                line = p " type=" k["type"] " mode=" k["mode"] " owner=" k["uname"] "(" k["uid"] "):" k["gname"] "(" k["gid"] ")"
+                if (k["type"] == "link") line = line " link=" k["link"]
+                print line > L
+                if (k["type"] == "file") { print p, k["size"] > S; print p, k["sha256digest"] > D }
+            }' "$T/mtree"
+    for f in "$2" "$3" "$4"; do LC_ALL=C sort -o "$f" "$f"; done
+}
+
+mismatch=()
+mapfile -t names < <(printf '%s\n' "${!new_pkg[@]}" "${!old_pkg[@]}" | LC_ALL=C sort -u)
+for n in "${names[@]}"; do
+    o=${old_pkg[$n]:-} w=${new_pkg[$n]:-}
+    if [[ -z $o ]]; then
+        fail=1; note "  $n: built by the new path only; the release doesn't serve it"; continue
+    elif [[ -z $w ]]; then
+        fail=1; note "  $n: served by the release ($(pkginfo "$o" pkgver)); the new path didn't build it"; continue
+    fi
+    ov=$(pkginfo "$o" pkgver) wv=$(pkginfo "$w" pkgver)
+    if [[ $ov == "$wv" ]]; then
+        note "  $n $wv"
+    else
+        fail=1; mismatch+=("$n: the release serves $ov, the new path built $wv")
+        note "  $n: version $ov in the release, $wv from the new path (compared all the same)"
+    fi
+    fields "$o" >"$T/a/fields"; fields "$w" >"$T/b/fields"
+    section ".PKGINFO fields" "$T/a/fields" "$T/b/fields"
+    entries "$o" "$T/a/files" "$T/a/sizes" "$T/a/sums"
+    entries "$w" "$T/b/files" "$T/b/sizes" "$T/b/sums"
+    section "files (type, mode, owner, link)" "$T/a/files" "$T/b/files"
+    { bsdtar -xOf "$o" .INSTALL 2>/dev/null || echo "(no install scriptlet)"; } >"$T/a/install"
+    { bsdtar -xOf "$w" .INSTALL 2>/dev/null || echo "(no install scriptlet)"; } >"$T/b/install"
+    section "install scriptlet" "$T/a/install" "$T/b/install"
+    # sizes of the files both have
+    LC_ALL=C join "$T/a/sizes" "$T/b/sizes" | awk -v B="$size_bytes" -v P="$size_pct" -v F="$T/sizes-flagged" '
+        { d = $3 - $2; a = d < 0 ? -d : d }
+        a > B && a * 100 > $2 * P { printf "      %s: %d -> %d bytes (%+d)\n", $1, $2, $3, d > F; next }
+        a > 0 { noise++ }
+        END { print noise + 0 }' >"$T/noise"
+    if [[ -s $T/sizes-flagged ]]; then
+        fail=1
+        note "    file sizes beyond the threshold (over $size_bytes bytes and $size_pct%):"
+        cat "$T/sizes-flagged" >>"$out"
+        rm -f "$T/sizes-flagged"
+    fi
+    noise=$(cat "$T/noise")
+    mapfile -t changed < <(LC_ALL=C join "$T/a/sums" "$T/b/sums" | awk '$2 != $3 { print $1 }')
+    if ((${#changed[@]} || noise)); then
+        note "    expected: $noise file(s) differ in size within the threshold; ${#changed[@]} file(s) differ in content (not compared):"
+        ((${#changed[@]} == 0)) || printf '      %s\n' "${changed[@]:0:20}" >>"$out"
+        ((${#changed[@]} <= 20)) || note "      ... and $((${#changed[@]} - 20)) more"
+    fi
+done
+
+if ((${#mismatch[@]})); then
+    echo "VERSIONS DIFFER: the release serves another version than the run built, so the packages below"
+    echo "are compared across versions. Compare again once main and the release are at the same version."
+    printf '  %s\n' "${mismatch[@]}"
+fi
+cat "$out"
+if ((fail)); then
+    echo "compare-build-paths: $recipe DIFFERS between the two paths (above): do not switch it"
+    exit 1
+fi
+echo "compare-build-paths: $recipe: the same packages, only expected differences (build date, packager, contents, sizes within the threshold)"
