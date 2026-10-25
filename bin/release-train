@@ -422,8 +422,13 @@ def notes(env, issue):
 
 
 def cut(env, name, dry):
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) or ".." in name:
-        print(f"release-train: bad train name {name!r} (letters, digits, . _ -)", file=sys.stderr)
+    # git's own ref rules too (no trailing ".", no ".lock", ...): checked before the issue is
+    # marked, so a name git refuses never strands a train as "being cut"
+    ok = re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) and ".." not in name and subprocess.run(
+        ["git", "check-ref-format", f"refs/tags/train/{env['GH_TAG']}/{name}"], capture_output=True).returncode == 0
+    if not ok:
+        print(f"release-train: bad train name {name!r} (letters, digits, . _ -, and a valid git tag)",
+              file=sys.stderr)
         return 2
     number, body = find_issue(env)
     if not number:

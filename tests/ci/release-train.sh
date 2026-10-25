@@ -12,8 +12,9 @@
 #   g. cut: --dry-run changes nothing; cut tags the recorded commit train/<tag>/NAME, pushes
 #      it, comments and closes the issue; the next update opens a new train whose Changes
 #      list the recipe commits since that tag; a second cut of the same name is refused
-#   g also stops a cut at the push, the comment and the close: the issue is marked, an update
-#      leaves it alone, another name is refused, and rerunning the cut finishes it (one comment)
+#   g also refuses names git cannot tag (v1., v1.lock) before the issue is marked, and stops a
+#      cut at the push, the comment and the close: the issue is marked, an update leaves it
+#      alone, another name is refused, and rerunning the cut finishes it (one comment)
 #   h. updates run one at a time under the publication lock (three at once open one issue; a
 #      held lock is exit 75 for update and cut); a control character in the body posts nothing
 #   i. bin/sync-release's failure to update the issue is a warning, not a failed sync (the
@@ -202,6 +203,12 @@ out=$(train cut 2026-10-25 --dry-run); rc=$?
 check "dry run: exit 0" [ $rc = 0 ]
 check "dry run: no tag" [ -z "$(git -C "$S/ws" tag)" ]
 check "dry run: issue open" has "$S/issues/1.state" OPEN
+# names git refuses as a tag are refused before the issue is marked
+for bad in v1. v1.lock 'v1/x' .v1; do
+    out=$(train cut "$bad"); rc=$?
+    check "cut '$bad' is refused (exit 2)" [ $rc = 2 ]
+done
+check "and the issue is not marked" hasnt "$B" "release-train-cutting"
 # stop the cut at each step in turn, then resume it with the same name
 mv "$S/origin.git" "$S/origin.off"
 out=$(train cut 2026-10-25); rc=$?
