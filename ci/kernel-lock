@@ -12,6 +12,10 @@
 #   <lock>.queue   a release takes it first and keeps it until it is done: while it is held,
 #                  a PR job never takes the lock (releases come first; PR checks absorb the
 #                  wait), and a second release waits behind the first
+#   <lock>.wait    every release holds it shared from the moment it asks for the queue until it
+#                  is done; a PR job takes the lock only if it can take this one exclusively,
+#                  so a release waiting for the queue keeps PR jobs out too, and the queue's
+#                  handover from one release to the next leaves no gap a PR job could take
 #   <lock>.holder  who holds the lock: kind (pr|release), run_id, run_attempt, workflow, job,
 #                  container, pid (the process holding it), start (its start time, so a reused
 #                  pid isn't taken for it), since. Left behind by a holder that was killed; the
@@ -113,23 +117,29 @@ hold() {
     shared "$file"
     exec 9>>"$file"
     if [[ $what == queue ]]; then
+        # PR jobs give way from now on, before this release has the queue (a PR job holds it
+        # exclusively only for a moment, so this doesn't wait)
+        shared "$LOCK.wait"
+        exec 7>>"$LOCK.wait"
+        flock -s 7
         until flock -n 9; do kill -0 "$watch" 2>/dev/null || exit 0; sleep "$POLL"; done
     else
-        shared "$LOCK.queue"
-        exec 8>>"$LOCK.queue"
+        shared "$LOCK.queue"; shared "$LOCK.wait"
+        exec 8>>"$LOCK.queue" 7>>"$LOCK.wait"
         while :; do
             kill -0 "$watch" 2>/dev/null || exit 0
             if flock -n 9; then
-                # a PR job gives the lock back while a release is queued
-                if [[ $kind == release ]] || flock -n 8; then
-                    [[ $kind == pr ]] && flock -u 8
+                # a PR job gives the lock back while a release is queued or waiting for the
+                # queue (the queue alone is for a release that doesn't take <lock>.wait yet)
+                if [[ $kind == release ]] || { flock -n 7 && flock -n 8; }; then
+                    [[ $kind == pr ]] && flock -u 7 && flock -u 8
                     break
                 fi
-                flock -u 9
+                flock -u 7; flock -u 9
             fi
             sleep "$POLL"
         done
-        exec 8>&-
+        exec 7>&- 8>&-
         local me=$BASHPID
         [[ -f $LOCK.holder ]] && cp "$LOCK.holder" "$STATE/prev"
         {

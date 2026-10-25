@@ -5,7 +5,8 @@
 #      killed job's build container, then removes it; a job whose Runner.Worker is gone
 #      removes its build container, keeps its record and lets go
 #   3. release removes the job's own build container before letting go
-#   4. a queued release comes first: PR jobs give way to it
+#   4. a queued release comes first: PR jobs give way to it, also while one release hands
+#      the queue to the next
 #   5. the preemption decision: a release preempts a PR holder, a PR never preempts, a
 #      release never preempts a release, nothing to preempt on a free lock
 #   6. the holder process keeps no token; OMARCHY_ASUS_CI_LOCK unset: PR and release jobs refuse
@@ -98,8 +99,8 @@ hpid=$(sed -n 's/^pid=//p' <<<"$out")
 check "holder: records a live holder process" kill -0 "$hpid"
 check "holder: records its start time" grep -qx "start=$(sed 's/.*) //' "/proc/$hpid/stat" | awk '{ print $20 }')" <<<"$out"
 perms() { stat -c %a "$@" | tr '\n' ' '; }
-check "the lock, queue and record are group-readable and writable, for the other account" \
-    test "$(perms "$S/lock/kernel.lock" "$S/lock/kernel.lock.queue" "$S/lock/kernel.lock.holder")" = "660 660 660 "
+check "the lock, queue, wait file and record are group-readable and writable, for the other account" \
+    test "$(perms "$S/lock/kernel.lock" "$S/lock/kernel.lock.queue" "$S/lock/kernel.lock.wait" "$S/lock/kernel.lock.holder")" = "660 660 660 660 "
 check "the job's own state stays private" \
     test "$(perms "$S/state/a/lock.pid" "$S/state/a/lock.ready" "$S/state/a/lock.log")" = "600 600 600 "
 as b pr 202 acquire pr "$(cname 202)" 2>"$S/b.err" & bw=$!
@@ -208,28 +209,32 @@ wait_for 5 bash -c '"$1" holder | grep -qx state=free' _ "$KL"
 
 echo "== 4. a queued release comes first"
 job r; job r2
+# waiting <name> <what>: the job's holder process is running and has not got it yet
+waiting() { [[ -s $S/state/$1/$2.pid ]] && kill -0 "$(cat "$S/state/$1/$2.pid")" 2>/dev/null && [[ ! -s $S/state/$1/$2.ready ]]; }
 as a pr 501 acquire pr "$(cname 501)" 2>/dev/null
 as r release 502 queue 2>/dev/null
 check "release: queued while a PR holds the lock" test -s "$S/state/r/queue.ready"
 as b pr 503 acquire pr "$(cname 503)" 2>/dev/null & bw=$!
 as r release 502 acquire release "$(cname 502)" 2>/dev/null & rw=$!
-sleep 0.5
+wait_for 10 waiting b lock
+wait_for 10 waiting r lock
 as a pr 501 release 2>/dev/null
 wait "$rw"
 check "the PR lets go: the queued release gets the lock, not the waiting PR" grep -qx 'kind=release' <<<"$("$KL" holder)"
-check "the waiting PR still waits" bash -c '! [[ -s $1 ]]' _ "$S/state/b/lock.ready"
-as r2 release 504 queue 2>/dev/null & r2w=$!
-sleep 0.5
-check "a second release waits for the queue" bash -c '! [[ -s $1 ]]' _ "$S/state/r2/queue.ready"
+check "the waiting PR still waits" waiting b lock
+# the second release looks at the queue only every 2 s, the waiting PR at the lock every
+# 0.1 s: when the first release lets go, the PR would get in first if the handover had a gap
+KERNEL_LOCK_POLL=2 as r2 release 504 queue 2>/dev/null & r2w=$!
+wait_for 10 waiting r2 queue
+check "a second release waits for the queue" waiting r2 queue
 check "a release must queue before it takes the lock" \
     bash -c 'KERNEL_LOCK_STATE=$2 "$1" acquire release omarchy-asus-kernel-9-1 2>&1 | grep -q "takes the queue first"' _ "$KL" "$S/state/none"
 as r release 502 release 2>/dev/null
-wait "$r2w"
+wait_for 20 bash -c '[[ -s $1 || -s $2 ]]' _ "$S/state/r2/queue.ready" "$S/state/b/lock.ready"
 check "the first release done: the second takes the queue" test -s "$S/state/r2/queue.ready"
-sleep 0.5
-check "...and the PR still gives way while it is queued" bash -c '! [[ -s $1 ]]' _ "$S/state/b/lock.ready"
+check "...and the PR, waiting all along, doesn't get in between them" waiting b lock
 as r2 release 504 release 2>/dev/null
-wait "$bw"
+wait "$r2w" "$bw"
 check "no release queued: the PR gets the lock" grep -qx 'run_id=503' <<<"$("$KL" holder)"
 
 echo "== 5. who preempts whom"
