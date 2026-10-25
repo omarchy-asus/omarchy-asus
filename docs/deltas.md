@@ -489,7 +489,7 @@ For a human to post as a hyprwm/Hyprland Discussion.
 
 ## Omarchy: omarchy and omarchy-settings
 
-RC 4.5.0rc1-1.110 (`main`, from fork branch `asus/v4-5-0-rc1`), Quattro 4.0.6-1.3 (from
+RC 4.5.0rc1-1.111 (`main`, from fork branch `asus/v4-5-0-rc1`), Quattro 4.0.6-1.3 (from
 `asus/v4-0-5`). Both packages build from the same source tree and carry the **same** patch list
 (their `DELTA` files stay in lockstep, and they publish as one cohort). Their migrations apply the
 fixes that live in user config or `/etc` on `omarchy update`, and leave fixes made by hand alone.
@@ -987,12 +987,17 @@ bullets.)
 ### Webcam menu guard from udev (0014-0015)
 
 - **Component:** `omarchy`/`omarchy-settings`, patches 0014-0015 (`bin/omarchy-hw-webcam`). Both
-  channels. Fork branch `perf/webcam-guard-udev`.
+  channels, in different versions: RC's 0015 (since 4.5.0rc1-1.111, #330) is fork commits
+  `1c396770` + `5ba289be` + `ccd0f93d` on `asus/v4-5-0-rc1`, squashed, the last two being #15910's
+  fixes (its `b6080af8` and `e5437fda`) taken unchanged; Quattro's 0015 is `6c7d7001` alone. Fork
+  branch `perf/webcam-guard-udev`.
 - **Fixes:** Omarchy's webcam menu guard opens the camera devices to decide whether to show webcam
   entries, which powers up the camera (and on some systems wakes other devices). The change answers
   from udev data instead. 0015 (`6c7d7001`, "Read every udev record before asking the webcams")
   walks every node first, exits 0 on any recorded capture node, and asks the devices only if some
-  node had no record.
+  node had no record. On RC it also trusts a capture record only from a real camera (a node with a
+  parent device, so not a v4l2loopback node, whose role follows its producer) that this user can
+  read and write; anything else is asked live.
 - **Test:** open the Omarchy menu repeatedly: the webcam LED doesn't flicker, `sudo fuser
   /dev/video*` shows nothing while the menu opens, and the webcam entries still appear.
 - **Measurements (G16, at `6c7d7001`, 2026-10-18):** stock 125 ms per call with the camera awake
@@ -1010,9 +1015,9 @@ bullets.)
   `menu-test.sh`, `menu-guards-test.sh`, `menu-guard-budget-test.sh` and `./test/cli` pass. It
   notes an interaction with omacom/omarchy#15616 (udev's record doesn't carry I/O MC). Omarchy's
   review bot had two models disagree on bug fix versus enhancement; it waits on the maintainer.
-- **Next (pending refresh):** we still ship the loopback bug above. Cherry-pick #15910's fix commit
-  onto the fork branch, regenerate 0014/0015 (or add a patch on top) in both `recipes/omarchy` and
-  `recipes/omarchy-settings`, keep the `DELTA` files in lockstep, and bump pkgrel.
+- **Refreshed on RC (#330):** RC carries #15910's fixes, so the loopback bug above and the yes for
+  a camera the user can't open are gone there. Quattro (frozen) still ships both until it moves to
+  the 4.5 recipes.
 - **Drop when:** #15910 (or an equivalent) is in an Omarchy release we build from.
 - **Notes:** formerly tracked in issue #30.
 
@@ -1276,7 +1281,7 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
   omarchy-settings of the same release satisfies it. It is set in `package()`, not in
   `depends=()`, so the clean chroot and CI (which only have stock omarchy-settings) still build.
 - **Test:** `pacman -Qip <omarchy package file> | grep 'Depends On'` (or `pacman -Qi omarchy` on
-  an installed system) lists `omarchy-settings=<pkgver>-<pkgrel>`, e.g. `omarchy-settings=4.5.0rc1-1.110`;
+  an installed system) lists `omarchy-settings=<pkgver>-<pkgrel>`, e.g. `omarchy-settings=4.5.0rc1-1.111`;
   `pacman -U` of that omarchy next to stock omarchy-settings of the same pkgver fails on the
   dependency. `bin/release-cohort check-recipes` checks that the pin is present
   (`tests/ci/release-cohort.sh`).
