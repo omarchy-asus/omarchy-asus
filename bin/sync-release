@@ -94,6 +94,8 @@ if ((scan_only)); then
     (($#)) || { echo "no files to scan" >&2; usage >&2; exit 2; }
 fi
 source "$(dirname "$0")/env.sh"
+# a dry run only reads, and --pii-scan never touches a release
+((dry || scan_only)) || quattro_frozen sync-release
 run() { if ((dry)); then echo "would run: $*"; else "$@"; fi; }
 
 up=$(mktemp -d); trap 'rm -rf "$up"' EXIT

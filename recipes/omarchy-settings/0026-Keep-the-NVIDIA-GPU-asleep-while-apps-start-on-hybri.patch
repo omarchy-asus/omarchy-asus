@@ -1,0 +1,563 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe
+Date: Sat, 24 Oct 2026 13:14:30 -0400
+Subject: [PATCH 26/26] Keep the NVIDIA GPU asleep while apps start on hybrids
+
+The open NVIDIA driver resumes a runtime-suspended GPU for every call
+into it, even one that only asks which GPUs exist. On a hybrid laptop
+whose iGPU drives the display, any app that lists Vulkan devices or
+opens surfaceless or device EGL at startup (GTK, Chromium, Electron)
+woke the dGPU for about 20 seconds, whichever GPU it went on to use. On
+the Zephyrus G16 that was most of a day's unexplained wakes. A trace
+there showed Vulkan enumeration with NVIDIA's ICD present and
+surfaceless/device EGL in the stock vendor order waking it; Radeon's ICD
+alone, or Mesa first for surfaceless EGL, kept it asleep. Radeon first
+with NVIDIA still listed woke it too, and GLVND asks every listed EGL
+vendor for its devices whatever their order.
+
+Hyprland now sets VK_LOADER_DRIVERS_DISABLE=*nvidia* and lists only
+Mesa's EGL vendor there, on Turing and newer, for the desktop: the
+shell, the launcher, key bindings and the apps they start. Games get
+both back however they start:
+
+- autostart.lua takes the pins back out of the systemd user environment
+  after exporting the rest, so what systemd starts, a game launcher at
+  login included, has every GPU;
+- an interactive bash drops them (default/bash/envs), so anything run
+  from a terminal does too;
+- the app launcher starts game entries through the new
+  omarchy-launch-desktop-entry without them: the Game category,
+  PrefersNonDefaultGPU or X-KDE-RunOnDiscreteGpu, or an Exec that runs
+  steam, lutris, heroic, bottles, umu-run, gamescope, wine or proton
+  (desktop IDs of entries in subdirectories resolved as gtk-launch
+  does); installing Steam starts it the same way;
+- the new omarchy-launch-all-gpus runs anything else with every GPU.
+
+OMARCHY_DESKTOP_GPU_PINS names the pins for bash, so a value of the
+user's own is left alone. A migration asks for a reboot while the
+session predates the pins.
+
+Fork commits c02f91e3, 8769c24c, 02c9d61f and 6ef8e273 on asus/v4-5-0-rc1,
+squashed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bin/omarchy-install-gaming-steam          |   2 +-
+ bin/omarchy-launch-all-gpus               |  20 ++++
+ bin/omarchy-launch-desktop-entry          |  77 +++++++++++++++
+ default/bash/envs                         |   8 ++
+ default/hypr/autostart.lua                |   8 +-
+ default/hypr/nvidia.lua                   |  22 ++++-
+ migrations/1792823623.sh                  |  11 +++
+ shell/services/AppLibrary.qml             |   4 +-
+ test/shell.d/app-search-test.sh           |   4 +-
+ test/shell.d/desktop-entry-launch-test.sh |  10 +-
+ test/shell.d/hw-nvidia-test.sh            |  80 +++++++++++++---
+ test/shell.d/launch-all-gpus-test.sh      | 108 ++++++++++++++++++++++
+ 12 files changed, 329 insertions(+), 25 deletions(-)
+ create mode 100755 bin/omarchy-launch-all-gpus
+ create mode 100755 bin/omarchy-launch-desktop-entry
+ create mode 100644 migrations/1792823623.sh
+ create mode 100755 test/shell.d/launch-all-gpus-test.sh
+
+diff --git a/bin/omarchy-install-gaming-steam b/bin/omarchy-install-gaming-steam
+index 6837878b9..cc2d2d25d 100755
+--- a/bin/omarchy-install-gaming-steam
++++ b/bin/omarchy-install-gaming-steam
+@@ -20,4 +20,4 @@ omarchy-lifecycle-dispatch post-install steam
+ echo ""
+ echo "Steam will start automatically now. This might take a while..."
+ 
+-setsid uwsm-app -- gtk-launch steam >/dev/null 2>&1 &
++setsid uwsm-app -- omarchy-launch-desktop-entry steam >/dev/null 2>&1 &
+diff --git a/bin/omarchy-launch-all-gpus b/bin/omarchy-launch-all-gpus
+new file mode 100755
+index 000000000..191d42cb9
+--- /dev/null
++++ b/bin/omarchy-launch-all-gpus
+@@ -0,0 +1,20 @@
++#!/bin/bash
++
++# omarchy:summary=Run a command that can use the NVIDIA GPU of a hybrid laptop, for games and their launchers
++# omarchy:args=<command> [args...]
++
++# On a hybrid laptop whose iGPU drives the display, Hyprland keeps NVIDIA's
++# Vulkan driver and EGL vendor out of the desktop (default/hypr/nvidia.lua): the
++# open driver resumes the runtime-suspended dGPU whenever an app merely lists
++# GPUs. Games get them back however they start: from a shell, at login, or from
++# the app launcher as a game. This runs anything else with every GPU too: DXVK
++# and other Vulkan games then pick the dGPU themselves. A native OpenGL game
++# still needs PRIME render offload as well (__NV_PRIME_RENDER_OFFLOAD=1
++# __GLX_VENDOR_LIBRARY_NAME=nvidia).
++
++if (( $# == 0 )); then
++  echo "Usage: omarchy-launch-all-gpus <command> [args...]" >&2
++  exit 1
++fi
++
++exec env -u VK_LOADER_DRIVERS_DISABLE -u __EGL_VENDOR_LIBRARY_FILENAMES "$@"
+diff --git a/bin/omarchy-launch-desktop-entry b/bin/omarchy-launch-desktop-entry
+new file mode 100755
+index 000000000..69970ed59
+--- /dev/null
++++ b/bin/omarchy-launch-desktop-entry
+@@ -0,0 +1,77 @@
++#!/bin/bash
++
++# omarchy:summary=Launch a desktop entry, with every GPU for a game or game launcher
++# omarchy:args=<desktop-id>
++
++# On a hybrid laptop Hyprland keeps NVIDIA's Vulkan driver and EGL vendor out of
++# the desktop (default/hypr/nvidia.lua). A game, or a launcher that starts games,
++# starts through omarchy-launch-all-gpus instead, so it and every game it starts
++# can reach the dGPU: an entry in the Game category (Steam, Heroic, Lutris and
++# most games), one that prefers the discrete GPU (PrefersNonDefaultGPU=true or
++# KDE's X-KDE-RunOnDiscreteGpu=true), or one that runs a known game runner.
++# gtk-launch resolves and runs the entry either way.
++
++if (( $# != 1 )); then
++  echo "Usage: omarchy-launch-desktop-entry <desktop-id>" >&2
++  exit 1
++fi
++
++desktop_id=$1
++file_name=$desktop_id
++[[ $file_name == *.desktop ]] || file_name+=".desktop"
++
++# The entry file in one applications directory. A desktop ID names an entry in
++# a subdirectory with its path's slashes turned into dashes
++# (games/example.desktop is games-example.desktop).
++entry_file() {
++  local apps=$1 file
++  if [[ -f $apps/$file_name ]]; then
++    printf '%s\n' "$apps/$file_name"
++    return
++  fi
++  [[ $file_name == *-* && -d $apps ]] || return 1
++  while IFS= read -r -d '' file; do
++    file=${file#"$apps/"}
++    if [[ ${file//\//-} == "$file_name" ]]; then
++      printf '%s\n' "$apps/$file"
++      return
++    fi
++  done < <(find "$apps" -mindepth 2 -name '*.desktop' -print0 2>/dev/null)
++  return 1
++}
++
++# The first entry of that ID on the XDG data path is the one gtk-launch runs.
++is_game() {
++  local dir file
++  local IFS=:
++  for dir in "${XDG_DATA_HOME:-$HOME/.local/share}" ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
++    file=$(entry_file "$dir/applications") || continue
++    awk '
++      /^\[/ { in_entry = ($0 == "[Desktop Entry]"); next }
++      !in_entry { next }
++      /^(PrefersNonDefaultGPU|X-KDE-RunOnDiscreteGpu)[[:space:]]*=[[:space:]]*true[[:space:]]*$/ { found = 1; exit }
++      /^Categories[[:space:]]*=/ && /[=;][[:space:]]*Game[[:space:]]*(;|$)/ { found = 1; exit }
++      /^Exec[[:space:]]*=/ {
++        line = $0
++        sub(/^Exec[[:space:]]*=[[:space:]]*/, "", line)
++        n = split(line, words, /[[:space:]]+/)
++        for (i = 1; i <= n; i++) {
++          if (words[i] == "env" || words[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
++          base = words[i]; sub(/.*\//, "", base)
++          if (base ~ /^(steam|lutris|heroic|bottles|umu-run|gamescope|wine|wine64|proton)$/) found = 1
++          break
++        }
++        if (found) exit
++      }
++      END { exit !found }
++    ' "$file"
++    return
++  done
++  return 1
++}
++
++if is_game; then
++  exec omarchy-launch-all-gpus gtk-launch "$desktop_id"
++fi
++
++exec gtk-launch "$desktop_id"
+diff --git a/default/bash/envs b/default/bash/envs
+index ac608cb70..8cf2e4660 100644
+--- a/default/bash/envs
++++ b/default/bash/envs
+@@ -28,6 +28,14 @@ if [ -z "${LANG:-}" ]; then
+     LC_IDENTIFICATION
+ fi
+ 
++# On a hybrid laptop Hyprland keeps NVIDIA's Vulkan driver and EGL vendor out of
++# the desktop (default/hypr/nvidia.lua), and a terminal inherits that. What you
++# run from a shell gets every GPU again, so a game started here reaches the dGPU.
++if [ -n "${OMARCHY_DESKTOP_GPU_PINS:-}" ]; then
++  # shellcheck disable=SC2086 # a list of variable names
++  unset $OMARCHY_DESKTOP_GPU_PINS
++fi
++
+ case ":$PATH:" in
+   *":$HOME/.local/bin:"*) ;;
+   *) export PATH="$PATH:$HOME/.local/bin" ;;
+diff --git a/default/hypr/autostart.lua b/default/hypr/autostart.lua
+index cb49fc11e..336c0212b 100644
+--- a/default/hypr/autostart.lua
++++ b/default/hypr/autostart.lua
+@@ -9,7 +9,13 @@ hl.on("hyprland.start", function()
+ 
+   -- Slow app launch fix -- set systemd and D-Bus activation vars before
+   -- starting session services.
+-  hl.exec_cmd("dbus-update-activation-environment --systemd --all")
++  -- The desktop's GPU pins (nvidia.lua) stay out of it, so what systemd
++  -- starts, a game launcher at login included, has every GPU.
++  local activation = "dbus-update-activation-environment --systemd --all"
++  if o.desktop_gpu_pins then
++    activation = activation .. " && systemctl --user unset-environment " .. table.concat(o.desktop_gpu_pins, " ")
++  end
++  hl.exec_cmd(activation)
+ 
+   hl.exec_cmd("omarchy-launch-shell")
+   hl.exec_cmd("omarchy-provision-first-run")
+diff --git a/default/hypr/nvidia.lua b/default/hypr/nvidia.lua
+index 2349195f0..80220c3b0 100644
+--- a/default/hypr/nvidia.lua
++++ b/default/hypr/nvidia.lua
+@@ -58,6 +58,7 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+   -- VA-API/GLX drivers globally breaks Chromium-based browsers (black video).
+   -- Only apply those when NVIDIA actually drives the display.
+   local nvidia_is_display = o.shell_succeeds(o.shell_quote(nvidia_display))
++  local igpu_drives_display = o.shell_succeeds(o.shell_quote(igpu_render_node))
+   if o.shell_succeeds(o.shell_quote(nvidia_gsp)) then
+     hl.env("NVD_BACKEND", "direct")
+     -- An iGPU that is a non-VGA display controller (AMD Krackan) has no
+@@ -66,10 +67,29 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+     -- wakes the dGPU for every video and keeps it awake for any GLX app (the
+     -- Steam client). Games ask for the dGPU themselves: DXVK picks it, and
+     -- native OpenGL games run with PRIME render offload (prime-run).
+-    if nvidia_is_display and not o.shell_succeeds(o.shell_quote(igpu_render_node)) then
++    if nvidia_is_display and not igpu_drives_display then
+       hl.env("LIBVA_DRIVER_NAME", "nvidia")
+       hl.env("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+     end
++    -- The open driver resumes a runtime-suspended GPU for every call into it,
++    -- even one that only asks which GPUs exist. With the iGPU driving the
++    -- display, any app that lists Vulkan devices or opens surfaceless EGL at
++    -- startup (GTK, Chromium, Electron) woke the dGPU for about 20 seconds,
++    -- whichever GPU it went on to use. Keep NVIDIA's Vulkan driver and EGL
++    -- vendor out of the desktop: the shell, the launcher, key bindings and the
++    -- apps they start (GLVND asks every listed EGL vendor for its devices,
++    -- whatever their order). Games get them back however they start: the
++    -- variables stay out of the systemd user environment (autostart.lua), so
++    -- a game launcher started at login has every GPU; an interactive bash
++    -- drops them (default/bash/envs); the app launcher starts game entries
++    -- without them (omarchy-launch-desktop-entry); and anything else can run
++    -- through omarchy-launch-all-gpus. OMARCHY_DESKTOP_GPU_PINS names them.
++    if igpu_drives_display then
++      hl.env("VK_LOADER_DRIVERS_DISABLE", "*nvidia*")
++      hl.env("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/50_mesa.json")
++      hl.env("OMARCHY_DESKTOP_GPU_PINS", "VK_LOADER_DRIVERS_DISABLE __EGL_VENDOR_LIBRARY_FILENAMES")
++      o.desktop_gpu_pins = { "VK_LOADER_DRIVERS_DISABLE", "__EGL_VENDOR_LIBRARY_FILENAMES" }
++    end
+   elseif o.shell_succeeds(o.shell_quote(nvidia_without_gsp)) then
+     hl.env("NVD_BACKEND", "egl")
+     if nvidia_is_display then
+diff --git a/migrations/1792823623.sh b/migrations/1792823623.sh
+new file mode 100644
+index 000000000..69e1e0d99
+--- /dev/null
++++ b/migrations/1792823623.sh
+@@ -0,0 +1,11 @@
++echo "Keep the NVIDIA GPU asleep while apps start on hybrids whose iGPU drives the display"
++
++# Hyprland now keeps NVIDIA's Vulkan driver and EGL vendor out of the desktop
++# there, so listing GPUs at app startup no longer wakes the dGPU. Games still
++# get them: from a shell, at login, from the app launcher as a game, or through
++# omarchy-launch-all-gpus. Hyprland applies env at startup, so a running session
++# needs a reboot.
++if [[ -z ${OMARCHY_DESKTOP_GPU_PINS:-} ]] && omarchy-hw-nvidia-gsp && omarchy-hw-igpu-render-node >/dev/null; then
++  omarchy-state set reboot-required
++  echo "Reboot to keep the NVIDIA GPU asleep while apps start; games still use it."
++fi
+diff --git a/shell/services/AppLibrary.qml b/shell/services/AppLibrary.qml
+index f73a205ec..a1692d9f3 100644
+--- a/shell/services/AppLibrary.qml
++++ b/shell/services/AppLibrary.qml
+@@ -89,8 +89,10 @@ Item {
+     // Start gtk-launch inside a scope under app-graphical.slice so apps do not
+     // inherit wayland-wm@.service. Keeping gtk-launch as the desktop-entry
+     // resolver supports IDs with spaces and entries that UWSM rejects.
++    // omarchy-launch-desktop-entry runs it, giving a game or game launcher
++    // every GPU on a hybrid laptop.
+     // Keep the .desktop suffix or ids like org.telegram.desktop won't resolve.
+-    Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(id + ".desktop"))
++    Util.execDetached("uwsm-app -- omarchy-launch-desktop-entry " + Util.shellQuote(id + ".desktop"))
+   }
+ 
+   // The command a terminal entry runs, without the field codes it leaves for a
+diff --git a/test/shell.d/app-search-test.sh b/test/shell.d/app-search-test.sh
+index fed8c20e5..f5f6e9cd4 100644
+--- a/test/shell.d/app-search-test.sh
++++ b/test/shell.d/app-search-test.sh
+@@ -108,8 +108,8 @@ assert(
+ 
+ assert(
+   /function launch\(desktopId, name\) \{[\s\S]*?uwsm-app[\s\S]*?\n  \}/.test(appLibraryQml) &&
+-    appLibraryQml.includes('Util.execDetached("uwsm-app -- gtk-launch "'),
+-  'app library launches desktop entries through gtk-launch in their own scope'
++    appLibraryQml.includes('Util.execDetached("uwsm-app -- omarchy-launch-desktop-entry "'),
++  'app library launches desktop entries through omarchy-launch-desktop-entry in their own scope'
+ )
+ 
+ assert(
+diff --git a/test/shell.d/desktop-entry-launch-test.sh b/test/shell.d/desktop-entry-launch-test.sh
+index 16fe5a055..b58c0a5c0 100644
+--- a/test/shell.d/desktop-entry-launch-test.sh
++++ b/test/shell.d/desktop-entry-launch-test.sh
+@@ -60,13 +60,14 @@ wait_for_launch() {
+ assert_detached_installer_launch() {
+   local script="$1"
+   local desktop_id="$2"
++  local launcher="${3:-gtk-launch}"
+ 
+   : >"$OMARCHY_TEST_LOG"
+   bash "$ROOT/bin/$script"
+ 
+-  wait_for_launch "launch:uwsm-app -- gtk-launch $desktop_id" ||
+-    fail "$script launches its desktop entry through gtk-launch in a UWSM scope"
+-  grep -Fqx "setsid uwsm-app -- gtk-launch $desktop_id >/dev/null 2>&1 &" "$ROOT/bin/$script" ||
++  wait_for_launch "launch:uwsm-app -- $launcher $desktop_id" ||
++    fail "$script launches its desktop entry through $launcher in a UWSM scope"
++  grep -Fqx "setsid uwsm-app -- $launcher $desktop_id >/dev/null 2>&1 &" "$ROOT/bin/$script" ||
+     fail "$script detaches its scoped desktop-entry launch"
+   pass "$script detaches its scoped desktop-entry launch"
+ }
+@@ -75,7 +76,8 @@ assert_detached_installer_launch omarchy-install-editor-emacs emacsclient
+ assert_detached_installer_launch omarchy-install-editor-vscode code
+ assert_detached_installer_launch omarchy-install-editor-zed dev.zed.Zed
+ assert_detached_installer_launch omarchy-install-gaming-heroic heroic
+-assert_detached_installer_launch omarchy-install-gaming-steam steam
++# Steam prefers the discrete GPU, which a hybrid laptop hides from plain launches.
++assert_detached_installer_launch omarchy-install-gaming-steam steam omarchy-launch-desktop-entry
+ 
+ bash "$ROOT/bin/omarchy-install-and-launch" "Example App" "alpha beta" "Disk Usage"
+ presentation_command=$(<"$OMARCHY_TEST_PRESENTATION")
+diff --git a/test/shell.d/hw-nvidia-test.sh b/test/shell.d/hw-nvidia-test.sh
+index 37426149f..69f9f1259 100755
+--- a/test/shell.d/hw-nvidia-test.sh
++++ b/test/shell.d/hw-nvidia-test.sh
+@@ -12,7 +12,8 @@ export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_DRM_PATH="$tmp_dir/dr
+ export HOME="$tmp_dir/home"
+ mkdir -p "$HOME"
+ 
+-# Exit statuses, expected NVD_BACKEND/LIBVA/GLX values, then vendor:device:class[:boot_vga].
++# Exit statuses, expected NVD_BACKEND/LIBVA/GLX/Vulkan-disable/EGL-vendors values, then
++# vendor:device:class[:boot_vga].
+ while IFS='|' read -r description nvidia gsp without_gsp display expected_env devices; do
+   rm -rf "$tmp_dir/devices" "$tmp_dir/by-path"
+   mkdir -p "$tmp_dir/devices" "$tmp_dir/by-path"
+@@ -44,25 +45,32 @@ require("default.hypr.helpers")
+ local env = {}
+ hl = { env = function(key, value) env[key] = value end }
+ require("default.hypr.nvidia")
+-print(table.concat({ env.NVD_BACKEND or "-", env.LIBVA_DRIVER_NAME or "-", env.__GLX_VENDOR_LIBRARY_NAME or "-" }, " "))
++local egl = env.__EGL_VENDOR_LIBRARY_FILENAMES
++egl = egl and egl:gsub("/usr/share/glvnd/egl_vendor.d/", "")
++print(table.concat({ env.NVD_BACKEND or "-", env.LIBVA_DRIVER_NAME or "-", env.__GLX_VENDOR_LIBRARY_NAME or "-",
++  env.VK_LOADER_DRIVERS_DISABLE or "-", egl or "-" }, " "))
++-- The pins are named for bash and autostart.lua exactly when they are set.
++local named = env.OMARCHY_DESKTOP_GPU_PINS == "VK_LOADER_DRIVERS_DISABLE __EGL_VENDOR_LIBRARY_FILENAMES"
++  and o.desktop_gpu_pins ~= nil
++if named ~= (env.VK_LOADER_DRIVERS_DISABLE ~= nil) then print("pins named wrongly") end
+ LUA
+   )
+   [[ $actual_env == "$expected_env" ]] || fail "$description: driver environment" "expected $expected_env, got $actual_env"
+   pass "$description"
+ done <<'CASES'
+-AMD only|1|1|1|1|- - -|0x1002:0x15e7:0x030000:1
+-NVIDIA audio only|1|1|1|0|- - -|0x10de:0x228e:0x040300
+-No PCI devices|1|1|1|0|- - -|
+-Turing (first GSP)|0|0|1|0|direct nvidia nvidia|0x10de:0x1f91:0x030000
+-Volta (last without GSP)|0|1|0|0|egl - nvidia|0x10de:0x1d81:0x030000
+-Maxwell (first 580xx)|0|1|0|0|egl - nvidia|0x10de:0x1340:0x030000
+-Kepler (unsupported)|0|1|1|0|- - -|0x10de:0x1004:0x030000
+-AMD display with Ampere offload|0|0|1|1|direct - -|0x1002:0x15bf:0x030000:1 0x10de:0x25ac:0x030200:0
+-Intel display with Maxwell offload|0|1|0|1|egl - -|0x8086:0x46a6:0x030000:1 0x10de:0x1340:0x030000:0
+-NVIDIA display with inactive iGPU|0|0|1|0|direct nvidia nvidia|0x1002:0x15bf:0x030000:0 0x10de:0x2c02:0x030000:1
+-Hybrid without boot_vga|0|0|1|0|direct nvidia nvidia|0x1002:0x15e7:0x030000 0x10de:0x2560:0x030200
+-Non-VGA AMD display with Blackwell VGA offload|0|0|1|0|direct - -|0x1002:0x1114:0x038000 0x10de:0x2d59:0x030000:0
+-Non-VGA AMD display with Ampere 3D offload|0|0|1|0|direct nvidia nvidia|0x1002:0x1114:0x038000 0x10de:0x25ac:0x030200
++AMD only|1|1|1|1|- - - - -|0x1002:0x15e7:0x030000:1
++NVIDIA audio only|1|1|1|0|- - - - -|0x10de:0x228e:0x040300
++No PCI devices|1|1|1|0|- - - - -|
++Turing (first GSP)|0|0|1|0|direct nvidia nvidia - -|0x10de:0x1f91:0x030000
++Volta (last without GSP)|0|1|0|0|egl - nvidia - -|0x10de:0x1d81:0x030000
++Maxwell (first 580xx)|0|1|0|0|egl - nvidia - -|0x10de:0x1340:0x030000
++Kepler (unsupported)|0|1|1|0|- - - - -|0x10de:0x1004:0x030000
++AMD display with Ampere offload|0|0|1|1|direct - - *nvidia* 50_mesa.json|0x1002:0x15bf:0x030000:1 0x10de:0x25ac:0x030200:0
++Intel display with Maxwell offload|0|1|0|1|egl - - - -|0x8086:0x46a6:0x030000:1 0x10de:0x1340:0x030000:0
++NVIDIA display with inactive iGPU|0|0|1|0|direct nvidia nvidia - -|0x1002:0x15bf:0x030000:0 0x10de:0x2c02:0x030000:1
++Hybrid without boot_vga|0|0|1|0|direct nvidia nvidia - -|0x1002:0x15e7:0x030000 0x10de:0x2560:0x030200
++Non-VGA AMD display with Blackwell VGA offload|0|0|1|0|direct - - *nvidia* 50_mesa.json|0x1002:0x1114:0x038000 0x10de:0x2d59:0x030000:0
++Non-VGA AMD display with Ampere 3D offload|0|0|1|0|direct nvidia nvidia - -|0x1002:0x1114:0x038000 0x10de:0x25ac:0x030200
+ CASES
+ 
+ # A session started before this change still carries LIBVA_DRIVER_NAME=nvidia
+@@ -107,3 +115,45 @@ for glx in nvidia ""; do
+   fi
+ done
+ pass "the migration asks for a reboot only while the old NVIDIA GLX override is live"
++
++# A session started before the GPU pins doesn't carry them yet.
++migration=$(grep -l 'Keep the NVIDIA GPU asleep while apps start' "$ROOT"/migrations/*.sh)
++printf '0x2d59\n' >"$tmp_dir/devices/0000:64:00.0/device"
++mkdir -p "$tmp_dir/state-bin"
++cat >"$tmp_dir/state-bin/omarchy-state" <<'SH'
++#!/bin/bash
++printf '%s\n' "$*" >>"$OMARCHY_TEST_STATE_LOG"
++SH
++chmod +x "$tmp_dir/state-bin/omarchy-state"
++for pinned in "" "VK_LOADER_DRIVERS_DISABLE __EGL_VENDOR_LIBRARY_FILENAMES"; do
++  : >"$tmp_dir/state.log"
++  PATH="$tmp_dir/state-bin:$PATH" OMARCHY_TEST_STATE_LOG="$tmp_dir/state.log" OMARCHY_DESKTOP_GPU_PINS=$pinned \
++    bash -euo pipefail "$migration" >/dev/null
++  if [[ -z $pinned ]]; then
++    grep -Fxq "set reboot-required" "$tmp_dir/state.log" ||
++      fail "the GPU pin migration asks for a reboot while the session lacks the pins"
++  elif [[ -s $tmp_dir/state.log ]]; then
++    fail "the GPU pin migration leaves a pinned session alone"
++  fi
++done
++pass "the GPU pin migration asks for a reboot only while the session lacks the pins"
++
++# What systemd starts (a game launcher at login) gets every GPU: autostart
++# takes the desktop's pins back out of the activation environment.
++activation=$(lua <<'LUA'
++package.path = os.getenv("ROOT") .. "/?.lua;" .. package.path
++require("default.hypr.helpers")
++local handlers, cmds = {}, {}
++hl = { env = function() end, on = function(event, fn) handlers[event] = fn end,
++  exec_cmd = function(cmd) table.insert(cmds, cmd) end }
++require("default.hypr.nvidia")
++require("default.hypr.autostart")
++handlers["hyprland.start"]()
++for _, cmd in ipairs(cmds) do
++  if cmd:match("^dbus%-update%-activation%-environment") then print(cmd) end
++end
++LUA
++)
++[[ $activation == "dbus-update-activation-environment --systemd --all && systemctl --user unset-environment VK_LOADER_DRIVERS_DISABLE __EGL_VENDOR_LIBRARY_FILENAMES" ]] ||
++  fail "autostart keeps the desktop's GPU pins out of the systemd user environment" "$activation"
++pass "autostart keeps the desktop's GPU pins out of the systemd user environment"
+diff --git a/test/shell.d/launch-all-gpus-test.sh b/test/shell.d/launch-all-gpus-test.sh
+new file mode 100755
+index 000000000..c10a62e1d
+--- /dev/null
++++ b/test/shell.d/launch-all-gpus-test.sh
+@@ -0,0 +1,108 @@
++#!/bin/bash
++
++set -euo pipefail
++
++source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
++
++test_tmp=$(mktemp -d)
++trap 'rm -rf "$test_tmp"' EXIT
++
++mock_bin="$test_tmp/bin"
++mkdir -p "$mock_bin" "$test_tmp/home/.local/share/applications" "$test_tmp/share/applications"
++
++# gtk-launch reports what it was asked to run and the GPU pins it inherited.
++cat >"$mock_bin/gtk-launch" <<'SH'
++#!/bin/bash
++printf '%s vk=%s egl=%s\n' "$*" "${VK_LOADER_DRIVERS_DISABLE-unset}" "${__EGL_VENDOR_LIBRARY_FILENAMES-unset}"
++SH
++chmod +x "$mock_bin/gtk-launch"
++
++cat >"$test_tmp/share/applications/steam.desktop" <<'DESKTOP'
++[Desktop Entry]
++Name=Steam
++Exec=/usr/bin/steam %U
++PrefersNonDefaultGPU=true
++DESKTOP
++
++cat >"$test_tmp/share/applications/org.example.Editor.desktop" <<'DESKTOP'
++[Desktop Entry]
++Name=Editor
++Exec=editor
++
++[Desktop Action discrete]
++Name=On the discrete GPU
++PrefersNonDefaultGPU=true
++DESKTOP
++
++# A user's copy shadows the system entry, as it does for gtk-launch.
++cat >"$test_tmp/share/applications/org.example.Game.desktop" <<'DESKTOP'
++[Desktop Entry]
++Name=Game
++PrefersNonDefaultGPU=true
++DESKTOP
++cat >"$test_tmp/home/.local/share/applications/org.example.Game.desktop" <<'DESKTOP'
++[Desktop Entry]
++Name=Game
++PrefersNonDefaultGPU=false
++DESKTOP
++
++# An entry in a subdirectory has the path's slashes as dashes in its ID.
++mkdir -p "$test_tmp/share/applications/games"
++cat >"$test_tmp/share/applications/games/example.desktop" <<'DESKTOP'
++[Desktop Entry]
++Name=Nested game
++PrefersNonDefaultGPU=true
++DESKTOP
++
++# Games and game launchers known by their category or by what they run.
++for entry in "heroic|Categories=Game;" "org.example.Native|Categories=Game;ActionGame;" \
++  "org.example.Kde|X-KDE-RunOnDiscreteGpu=true" "lutris|Exec=env LUTRIS_SKIP_INIT=1 lutris %U" \
++  "org.example.Umu|Exec=/usr/bin/umu-run game.exe" "org.example.Tool|Categories=Development;GameTool;" \
++  "org.example.Viewer|Exec=gamescope-viewer %f"; do
++  printf '[Desktop Entry]\nName=%s\n%s\n' "${entry%%|*}" "${entry#*|}" >"$test_tmp/share/applications/${entry%%|*}.desktop"
++done
++
++launch() {
++  HOME="$test_tmp/home" XDG_DATA_HOME="" XDG_DATA_DIRS="$test_tmp/share" PATH="$ROOT/bin:$mock_bin:$PATH" \
++    VK_LOADER_DRIVERS_DISABLE='*nvidia*' __EGL_VENDOR_LIBRARY_FILENAMES=mesa:nvidia \
++    "$ROOT/bin/omarchy-launch-desktop-entry" "$1"
++}
++
++expect() {
++  local description="$1" expected="$2" actual="$3"
++  [[ $actual == "$expected" ]] || fail "$description" "expected '$expected', got '$actual'"
++  pass "$description"
++}
++
++expect "an entry that prefers the discrete GPU starts without the GPU pins" \
++  "steam.desktop vk=unset egl=unset" "$(launch steam.desktop)"
++for id in heroic org.example.Native org.example.Kde lutris org.example.Umu; do
++  expect "$id starts as a game, without the GPU pins" "$id.desktop vk=unset egl=unset" "$(launch "$id.desktop")"
++done
++for id in org.example.Tool org.example.Viewer; do
++  expect "$id is no game and keeps the pins" "$id.desktop vk=*nvidia* egl=mesa:nvidia" "$(launch "$id.desktop")"
++done
++expect "a desktop id given without its suffix is found too" \
++  "steam vk=unset egl=unset" "$(launch steam)"
++expect "an entry in a subdirectory is found by its desktop ID" \
++  "games-example.desktop vk=unset egl=unset" "$(launch games-example.desktop)"
++expect "an action's PrefersNonDefaultGPU is not the entry's" \
++  "org.example.Editor.desktop vk=*nvidia* egl=mesa:nvidia" "$(launch org.example.Editor.desktop)"
++expect "the user's copy of an entry decides" \
++  "org.example.Game.desktop vk=*nvidia* egl=mesa:nvidia" "$(launch org.example.Game.desktop)"
++expect "an entry that cannot be found keeps the pins" \
++  "missing.desktop vk=*nvidia* egl=mesa:nvidia" "$(launch missing.desktop)"
++
++# A shell started in a pinned terminal hands every GPU to what it runs.
++pins=$(OMARCHY_DESKTOP_GPU_PINS="VK_LOADER_DRIVERS_DISABLE __EGL_VENDOR_LIBRARY_FILENAMES" \
++  VK_LOADER_DRIVERS_DISABLE='*nvidia*' __EGL_VENDOR_LIBRARY_FILENAMES=mesa \
++  bash -c 'source "$1"; printf "%s|%s" "${VK_LOADER_DRIVERS_DISABLE-unset}" "${__EGL_VENDOR_LIBRARY_FILENAMES-unset}"' bash "$ROOT/default/bash/envs")
++expect "an interactive bash drops the desktop's GPU pins" "unset|unset" "$pins"
++pins=$(env -u OMARCHY_DESKTOP_GPU_PINS VK_LOADER_DRIVERS_DISABLE=mine \
++  bash -c 'source "$1"; printf "%s" "${VK_LOADER_DRIVERS_DISABLE-unset}"' bash "$ROOT/default/bash/envs")
++expect "bash leaves a VK_LOADER_DRIVERS_DISABLE of the user's own alone" "mine" "$pins"
++
++if "$ROOT/bin/omarchy-launch-all-gpus" 2>/dev/null; then
++  fail "omarchy-launch-all-gpus refuses to run without a command"
++fi
++pass "omarchy-launch-all-gpus refuses to run without a command"

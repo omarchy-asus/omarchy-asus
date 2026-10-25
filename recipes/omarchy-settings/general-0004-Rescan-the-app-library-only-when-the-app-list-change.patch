@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Altering Ux
+Date: Sun, 11 Oct 2026 19:00:12 +1100
+Subject: [PATCH] Rescan the app library only when the app list changes
+
+quickshell's DesktopEntries watches every ancestor of the XDG applications
+dirs, $HOME included, so any dotfile save in $HOME re-ran the hidden-entries
+scan and the icon index. Remember a key of (id, noDisplay, icon, name) for
+every entry and rescan only when that key changes.
+
+Measured on a 4-core host with two CLI agents writing ~/.claude.json:
+hidden-entries.sh plus icon finds cost 2.2% of a core (lower bound), with
+bursts at 33% CPU; with the key check the scans run only on real app changes.
+app-search-test.sh gains three assertions that fail on v4.0.2 and pass here.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LRgA37opxda4K7XSxPi4BE
+
+Upstream: omacom/omarchy#14992, its commit 00697bf8c3, taken as is.
+Fork commit f8df8d7a3 on asus/v4-5-0-rc1. Replaces our patch 0018,
+which throttled the rescan on launcher open instead.
+---
+ shell/services/AppLibrary.qml   | 23 +++++++++++++++++++++++
+ test/shell.d/app-search-test.sh | 16 ++++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/shell/services/AppLibrary.qml b/shell/services/AppLibrary.qml
+index 061fc269c..e008c12ae 100644
+--- a/shell/services/AppLibrary.qml
++++ b/shell/services/AppLibrary.qml
+@@ -269,9 +269,31 @@ Item {
+     onTriggered: root.closeLaunchFeedback(root.launchSerial)
+   }
+ 
++  // DesktopEntries watches every ancestor of the XDG applications dirs, $HOME
++  // included, so any dotfile save there (an editor, a shell history write, an
++  // agent's atomic config rename) emits valuesChanged with the same entries.
++  // Rescan only when an entry the scans depend on was added, removed or
++  // changed; a burst of identical emissions then costs one comparison each.
++  property string desktopAppsKey: ""
++
++  function computeDesktopAppsKey() {
++    var values = DesktopEntries.applications.values || []
++    var parts = []
++    for (var i = 0; i < values.length; i++) {
++      var entry = values[i]
++      if (!entry) continue
++      parts.push([entry.id, entry.noDisplay ? "1" : "0", entry.icon || "", entry.name || ""].join("\u001f"))
++    }
++    parts.sort()
++    return parts.join("\u001e")
++  }
++
+   Connections {
+     target: DesktopEntries.applications
+     function onValuesChanged() {
++      var key = root.computeDesktopAppsKey()
++      if (key === root.desktopAppsKey) return
++      root.desktopAppsKey = key
+       hiddenEntryScan.running = true
+       iconIndexDebounce.restart()
+       root.appsChanged()
+@@ -279,6 +301,7 @@ Item {
+   }
+ 
+   Component.onCompleted: {
++    root.desktopAppsKey = root.computeDesktopAppsKey()
+     hiddenEntryScan.running = true
+     iconIndexScan.running = true
+   }
+diff --git a/test/shell.d/app-search-test.sh b/test/shell.d/app-search-test.sh
+index 2cadd6a6a..822cc5880 100644
+--- a/test/shell.d/app-search-test.sh
++++ b/test/shell.d/app-search-test.sh
+@@ -148,6 +148,22 @@ assert(
+   'app library keeps owning an OSD a previous launch left on screen'
+ )
+ 
++// DesktopEntries watches every ancestor of the applications dirs, $HOME
++// included, so unrelated dotfile saves re-emit an unchanged app list. The
++// rescans must run only when the entries they read actually changed.
++const valuesChangedMatch = appLibraryQml.match(/target: DesktopEntries\.applications\s*function onValuesChanged\(\) \{([\s\S]*?)\n    \}/)
++assert(valuesChangedMatch, 'app library handles DesktopEntries valuesChanged')
++const guardAt = valuesChangedMatch[1].indexOf('if (key === root.desktopAppsKey) return')
++assert(
++  guardAt >= 0 && guardAt < valuesChangedMatch[1].indexOf('hiddenEntryScan.running = true'),
++  'app library skips the hidden-entry and icon rescans when the app list is unchanged'
++)
++const keyMatch = appLibraryQml.match(/function computeDesktopAppsKey\(\) \{([\s\S]*?)\n  \}/)
++assert(
++  keyMatch && ['entry.id', 'entry.noDisplay', 'entry.icon', 'entry.name'].every((field) => keyMatch[1].includes(field)),
++  'app library keys the app list by id, NoDisplay, icon and name'
++)
++
+ const openMatch = menuQml.match(/function openExistingMenu\(initialMenu\) \{([\s\S]*?)\n  \}/)
+ assert(openMatch, 'menu openExistingMenu function exists')
+ assert(
+-- 
+2.56.0
+

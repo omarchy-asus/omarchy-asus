@@ -42,7 +42,9 @@ The delta: recipes/<name>/DELTA, one directive per line (# comments):
 Always: pkgrel = upstream pkgrel + ".1", or + ".101" with --channel rc (default: the
 channel in OMARCHY_ASUS_CHANNEL, else quattro). The RC channel's subreleases start at
 .101 so a package rebuilt for it never shares a filename with Quattro's build of the same
-upstream release (Quattro keeps .1 to .99; a bump adds 1 on either). Checksums: every source file upstream also
+upstream release (Quattro keeps .1 to .99; a bump adds 1 on either). Quattro is frozen
+until the Omarchy 4.5 stable switch (#309): --channel quattro exits 1 unless
+OMARCHY_ASUS_ALLOW_QUATTRO=1. Checksums: every source file upstream also
 has gets upstream's checksum (so a changed upstream download fails verification
 instead of being re-hashed); our local files are hashed here. No download is needed
 for this step.
@@ -83,6 +85,9 @@ SUM_ALGOS = ("cksums", "md5sums", "sha1sums", "sha224sums", "sha256sums", "sha38
 DEFAULT_SKIP = (".git", ".SRCINFO", ".nvchecker.toml")
 # The first subrelease per release channel (bin/env.sh): filenames never repeat across channels.
 CHANNEL_SUBREL = {"quattro": 1, "rc": 101}
+# Quattro is frozen on what it serves until the Omarchy 4.5 stable switch (bin/env.sh quattro_frozen)
+QUATTRO_FROZEN_MSG = ("the Quattro channel is frozen until the Omarchy 4.5 stable switch (#309); "
+                      "OMARCHY_ASUS_ALLOW_QUATTRO=1 overrides")
 BUILD_JUNK = ("src", "pkg")
 SANDBOX = os.path.join(os.path.dirname(os.path.realpath(__file__)), "recipe-sandbox")
 # makepkg refuses to start unless BUILDDIR, PKGDEST and SRCDEST are writable (default: the
@@ -529,6 +534,10 @@ def main():
     args = ap.parse_args()
     if args.channel not in CHANNEL_SUBREL:  # a bad OMARCHY_ASUS_CHANNEL default
         ap.error(f"unknown release channel {args.channel!r} ({', '.join(sorted(CHANNEL_SUBREL))})")
+    if args.channel == "quattro" and os.environ.get("OMARCHY_ASUS_ALLOW_QUATTRO") != "1":
+        # bin/env.sh quattro_frozen
+        print(f"rebase-recipe: {QUATTRO_FROZEN_MSG}", file=sys.stderr)
+        sys.exit(1)
 
     report = {"recipe": args.recipe, "upstream_version": args.version, "channel": args.channel,
               "ok": False, "flags": []}

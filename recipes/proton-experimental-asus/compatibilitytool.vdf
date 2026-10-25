@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "proton-experimental-asus"
+    {
+      "install_path" "."
+      "display_name" "Proton Experimental (omarchy-asus)"
+      "from_oslist" "windows"
+      "to_oslist" "linux"
+    }
+  }
+}

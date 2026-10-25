@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 -0400
+Subject: [PATCH] drm/amd/display: Replay DMUB HPDs skipped during
+ suspend/resume
+
+dmub_hpd_callback() drops every DMUB HPD notification that arrives while
+adev->in_suspend is set, on the grounds that dm_resume() probes all
+connectors. That probe runs early in amdgpu_device_resume(), but
+in_suspend stays set until the end of it, so an HPD that arrives after
+the probe is lost.
+
+On a USB4 DPIA this happens whenever a dock's DP tunnels come up late in
+resume, for example a dock plugged in while the machine was suspended:
+the thunderbolt driver enumerates the dock and creates the DP tunnels
+after dm_resume() has probed the DPIA links and found nothing, the DPIA
+HPDs for the new tunnels arrive while in_suspend is still set and are
+skipped, and nothing reads the DPRX caps. The connection manager then
+times out the DPRX negotiation and tears the tunnels down:
+
+  [drm] Skip DMUB HPD IRQ callback in suspend/resume
+  [drm] Skip DMUB HPD IRQ callback in suspend/resume
+  thunderbolt 0000:67:00.5: 0:6 <-> 2:13 (DP): not active, tearing down
+  thunderbolt 0000:67:00.5: 0:7 <-> 2:14 (DP): not active, tearing down
+
+The thunderbolt driver only offers those DP IN adapters again after a
+hotplug of the DP IN adapter itself, so the dock's monitors stay dark
+through cable replugs until the next suspend.
+
+Keep the skip, but remember the link of each skipped HPD and replay
+them from a new DM .complete callback, which runs after
+amdgpu_device_resume() has cleared in_suspend. The replay runs on the
+HPD offload workqueue and goes through handle_hpd_irq_helper(), the
+same path the HPD would have taken outside suspend. A replay still
+pending when the next suspend starts is cancelled and its links are
+kept for the next resume.
+
+Seen on an ASUS ROG Zephyrus G16 GA605KM (Strix Point, DCN 3.5) with a
+USB4 dock and two DP monitors.
+
+Downstream carry for omarchy-asus. Not yet submitted upstream
+(amd-gfx); drop it once upstream handles HPDs that arrive late in
+resume.
+
+Assisted-by: LLM
+---
+ drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 81 ++++++++++++++++++++++-
+ drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h | 17 +++++
+ 2 files changed, 97 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+index b1a7903..c04a475 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -911,9 +911,16 @@ static void dmub_hpd_callback(struct amdgpu_device *adev,
+ 		return;
+ 	}
+ 
+-	/* Skip DMUB HPD IRQ in suspend/resume. We will probe them later. */
++	/*
++	 * Skip DMUB HPD IRQ in suspend/resume. dm_resume() probes every
++	 * connector, but an HPD that arrives after that probe (a USB4 DP
++	 * tunnel set up late in resume) would be lost, so remember the link
++	 * and replay the HPD from dm_complete().
++	 */
+ 	if (notify->type == DMUB_NOTIFICATION_HPD && adev->in_suspend) {
+ 		drm_info(adev_to_drm(adev), "Skip DMUB HPD IRQ callback in suspend/resume\n");
++		if (notify->link_index < BITS_PER_LONG)
++			set_bit(notify->link_index, &adev->dm.hpd_skipped_in_suspend);
+ 		return;
+ 	}
+ 
+@@ -954,6 +961,54 @@ static void dmub_hpd_callback(struct amdgpu_device *adev,
+ 	}
+ }
+ 
++/**
++ * dm_replay_skipped_hpd_work - Replay DMUB HPDs skipped during suspend/resume
++ * @work: work_struct embedded in &struct amdgpu_display_manager
++ *
++ * Runs HPD processing for every link whose HPD notification arrived while
++ * adev->in_suspend was set. Without it a sink that appears after dm_resume()
++ * probed the connectors (for example a DP tunnel the thunderbolt driver sets
++ * up for a dock plugged in during suspend) is never detected, and the USB4
++ * DPRX negotiation for that tunnel times out.
++ */
++static void dm_replay_skipped_hpd_work(struct work_struct *work)
++{
++	struct amdgpu_display_manager *dm =
++		container_of(work, struct amdgpu_display_manager, hpd_replay_work);
++	struct amdgpu_device *adev = drm_to_adev(dm->ddev);
++	struct amdgpu_dm_connector *aconnector;
++	struct drm_connector *connector;
++	struct drm_connector_list_iter iter;
++	unsigned long pending;
++
++	/* Suspending again: keep the links for the next dm_complete(). */
++	if (adev->in_suspend)
++		return;
++
++	pending = xchg(&dm->hpd_skipped_in_suspend, 0);
++	if (!pending)
++		return;
++
++	drm_connector_list_iter_begin(dm->ddev, &iter);
++	drm_for_each_connector_iter(connector, &iter) {
++		if (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK)
++			continue;
++
++		aconnector = to_amdgpu_dm_connector(connector);
++		if (!aconnector->dc_link || aconnector->mst_root)
++			continue;
++
++		if (aconnector->dc_link->link_index >= BITS_PER_LONG ||
++		    !test_bit(aconnector->dc_link->link_index, &pending))
++			continue;
++
++		drm_info(adev_to_drm(adev), "Replay DMUB HPD skipped in suspend/resume: link_index=%u\n",
++			 aconnector->dc_link->link_index);
++		handle_hpd_irq_helper(aconnector);
++	}
++	drm_connector_list_iter_end(&iter);
++}
++
+ /**
+  * dmub_hpd_sense_callback - DMUB HPD sense processing callback.
+  * @adev: amdgpu_device pointer
+@@ -2344,6 +2399,7 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
+ 			goto error;
+ 		}
+ 
++		INIT_WORK(&adev->dm.hpd_replay_work, dm_replay_skipped_hpd_work);
+ 		adev->dm.delayed_hpd_wq = create_singlethread_workqueue("amdgpu_dm_hpd_wq");
+ 		if (!adev->dm.delayed_hpd_wq) {
+ 			drm_err(adev_to_drm(adev), "failed to create hpd offload workqueue.\n");
+@@ -2485,6 +2541,7 @@ static void amdgpu_dm_fini(struct amdgpu_device *adev)
+ 		if (dc_enable_dmub_notifications(adev->dm.dc)) {
+ 			kfree(adev->dm.dmub_notify);
+ 			adev->dm.dmub_notify = NULL;
++			cancel_work_sync(&adev->dm.hpd_replay_work);
+ 			destroy_workqueue(adev->dm.delayed_hpd_wq);
+ 			adev->dm.delayed_hpd_wq = NULL;
+ 		}
+@@ -3545,6 +3602,10 @@ static int dm_suspend(struct amdgpu_ip_block *ip_block)
+ 		return 0;
+ 	}
+ 
++	/* A pending replay keeps its links for the next dm_complete(). */
++	if (dm->delayed_hpd_wq)
++		cancel_work_sync(&dm->hpd_replay_work);
++
+ 	if (!adev->dm.cached_state) {
+ 		int r = dm_cache_state(adev);
+ 
+@@ -4040,6 +4101,23 @@ static int dm_resume(struct amdgpu_ip_block *ip_block)
+  * The functions to do so are provided as hooks in &struct amd_ip_funcs.
+  */
+ 
++/*
++ * dm_complete - replay DMUB HPDs that dmub_hpd_callback() skipped while
++ * adev->in_suspend was set. Runs from the PM complete callback, after
++ * amdgpu_device_resume() has cleared in_suspend.
++ *
++ * Queued even when no link is recorded yet: an HPD work item that saw
++ * in_suspend set may still be about to record its link. The workqueue is
++ * ordered, so the replay runs after it and finds the link.
++ */
++static void dm_complete(struct amdgpu_ip_block *ip_block)
++{
++	struct amdgpu_display_manager *dm = &ip_block->adev->dm;
++
++	if (dm->delayed_hpd_wq)
++		queue_work(dm->delayed_hpd_wq, &dm->hpd_replay_work);
++}
++
+ static const struct amd_ip_funcs amdgpu_dm_funcs = {
+ 	.name = "dm",
+ 	.early_init = dm_early_init,
+@@ -4051,6 +4129,7 @@ static const struct amd_ip_funcs amdgpu_dm_funcs = {
+ 	.hw_fini = dm_hw_fini,
+ 	.suspend = dm_suspend,
+ 	.resume = dm_resume,
++	.complete = dm_complete,
+ 	.is_idle = dm_is_idle,
+ 	.wait_for_idle = dm_wait_for_idle,
+ 	.check_soft_reset = dm_check_soft_reset,
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+index d2602c0..ec92776 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+@@ -657,6 +657,23 @@ struct amdgpu_display_manager {
+ 	struct completion dmub_aux_transfer_done;
+ 	struct workqueue_struct *delayed_hpd_wq;
+ 
++	/**
++	 * @hpd_skipped_in_suspend:
++	 *
++	 * Bitmask of link indexes whose DMUB HPD notification arrived while
++	 * the device was suspended or resuming and was skipped. Replayed by
++	 * @hpd_replay_work once resume has completed.
++	 */
++	unsigned long hpd_skipped_in_suspend;
++
++	/**
++	 * @hpd_replay_work:
++	 *
++	 * Runs HPD processing on @delayed_hpd_wq for the links in
++	 * @hpd_skipped_in_suspend.
++	 */
++	struct work_struct hpd_replay_work;
++
+ 	/**
+ 	 * @brightness:
+ 	 *

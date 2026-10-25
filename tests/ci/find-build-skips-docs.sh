@@ -8,7 +8,7 @@
 #   4. a new file at the recipe root: new label
 #   5. build/pacman.conf: new label
 #   6. CHANNEL=rc: its own label, keyed on build/pacman-rc.conf; Quattro's ignores
-#      that file; ci/channel maps next/omarchy-4.5 to rc and the rest to quattro
+#      that file; ci/channel maps main and next/omarchy-4.5 to rc
 # Usage: tests/ci/find-build-skips-docs.sh [keep]
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -78,7 +78,7 @@ check "new rc label after build/pacman-rc.conf" [ "$(CHANNEL=rc label k)" != "$r
 check "Quattro label unchanged by build/pacman-rc.conf" [ "$(label k)" = "$k4" ]
 check "an unknown channel gives no label" [ -z "$(CHANNEL=edge label k)" ]
 check "ci/channel: next/omarchy-4.5 is rc" [ "$("$W/ci/channel" next/omarchy-4.5)" = rc ]
-check "ci/channel: main is quattro" [ "$("$W/ci/channel" main)" = quattro ]
+check "ci/channel: main is rc (the RC trunk, #309)" [ "$("$W/ci/channel" main)" = rc ]
 check "ci/channel: rc conf is build/pacman-rc.conf" [ "$("$W/ci/channel" --conf rc)" = build/pacman-rc.conf ]
 
 ((fail)) && { echo "FAILED"; exit 1; }

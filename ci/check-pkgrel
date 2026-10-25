@@ -2,7 +2,7 @@
 # Is a recipe's pkgrel in the range of the release channel it is built for? (#201)
 # pacman caches by filename and each release only refuses its own duplicates, so the two
 # channels must never build the same pkgver-pkgrel: Quattro keeps the subreleases .1 to .99
-# (pkgrel 1 to 99 for our own packages), the RC channel (next/omarchy-4.5) .101 and up (101
+# (pkgrel 1 to 99 for our own packages), the RC channel (main, #309) .101 and up (101
 # and up). bin/rebase-recipe --channel rc starts there; bin/publish refuses a clash.
 # The range is checked on the last number: 9.4 -> 4, 9.101 -> 101, 12 -> 12.
 # Usage: ci/check-pkgrel <quattro|rc> <pkgrel>   exit 0 in range, 1 out of it (says why),

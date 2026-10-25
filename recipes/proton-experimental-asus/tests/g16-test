@@ -1,0 +1,126 @@
+#!/bin/bash
+# G16 test for proton-experimental-asus (#266). Run on the laptop, in its Hyprland session,
+# with the external monitor connected.
+#   g16-test deploy <kit>   copy the kit (a directory, or an scp source such as host:path) to
+#                           ~/.cache/omarchy-asus/g16-266, check SHA256SUMS, install the
+#                           package (pacman -U, a sudo/polkit prompt)
+#   g16-test test           1. the reproducer (fsrepro.exe), on the external monitor, under
+#                              stock Proton Experimental and under the package's tool: the
+#                              Win32 window must stay on display 1 with stock (the bug) and
+#                              follow Hyprland to the external monitor with the fix
+#                           2. the game: asks you to try exclusive fullscreen on the external
+#                              monitor with "Proton Experimental (omarchy-asus)"
+#                           writes ~/.cache/omarchy-asus/g16-266/report.md
+#   g16-test undo           remove the package and its prepared copy of Proton Experimental
+# The kit holds the package, fsrepro.exe (tests/repro/fsrepro.c), this script and SHA256SUMS.
+set -euo pipefail
+KIT=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-asus/g16-266
+TOOL=${PROTON_ASUS_TOOL:-/usr/share/steam/compatibilitytools.d/proton-experimental-asus}
+STEAM=${STEAM_DIR:-$HOME/.local/share/Steam}
+COPY=${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-asus/proton-experimental-asus
+REPORT=$KIT/report.md
+die() { echo "g16-test: $*" >&2; exit 1; }
+say() { echo "==> $*"; }
+
+valve_dir() {
+    local lib name libs=("$STEAM")
+    # one library path per line: paths with spaces stay whole
+    mapfile -t -O 1 libs < <(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"/\1/p' "$STEAM/steamapps/libraryfolders.vdf" 2>/dev/null)
+    for lib in "${libs[@]}"; do
+        name=$(sed -n 's/^[[:space:]]*"installdir"[[:space:]]*"\(.*\)"/\1/p' "$lib/steamapps/appmanifest_1493710.acf" 2>/dev/null)
+        [[ -n $name && -f "$lib/steamapps/common/$name/proton" ]] && { echo "$lib/steamapps/common/$name"; return; }
+    done
+}
+
+deploy() {
+    local from=${1:?usage: g16-test deploy <kit dir or scp source>}
+    mkdir -p "$KIT"
+    if [[ -d $from ]]; then cp -a "${from%/}"/. "$KIT"/
+    else scp -q -r "${from%/}/." "$KIT"/ || die "cannot copy $from"; fi
+    (cd "$KIT" && sha256sum -c --quiet SHA256SUMS) || die "SHA256SUMS does not match"
+    local pkg
+    pkg=$(compgen -G "$KIT/proton-experimental-asus-*.pkg.tar.zst" | head -1)
+    [[ -n $pkg ]] || die "no package in the kit"
+    say "installing $(basename "$pkg")"
+    sudo pacman -U --noconfirm "$pkg"
+    say "installed. Restart Steam (Steam menu, Exit, then start it) so it lists the new tool."
+}
+
+# run fsrepro.exe through a tool's `proton runinprefix` in a throwaway prefix;
+# prints the reproducer's log path
+repro() {
+    local tool=$1 tag=$2 run
+    run=$(mktemp -d "$KIT/run-$tag.XXXX")
+    mkdir -p "$run/compat"
+    STEAM_COMPAT_DATA_PATH=$run/compat STEAM_COMPAT_CLIENT_INSTALL_PATH=$STEAM SteamAppId=0 SteamGameId=0 \
+        FSREPRO_LOG="Z:$run/repro.log" PROTON_LOG=0 \
+        timeout 300 python3 "$tool/proton" runinprefix "$KIT/fsrepro.exe" 0 2560 1440 8 b \
+        >"$run/proton.out" 2>&1 || true
+    WINEPREFIX=$run/compat/pfx "$(valve_dir)/files/bin/wineserver" -k 2>/dev/null || true
+    echo "$run/repro.log"
+}
+
+focus_monitor() {
+    hyprctl dispatch "hl.dsp.focus({ monitor = \"$1\" })" >/dev/null 2>&1 ||
+        hyprctl dispatch focusmonitor "$1" >/dev/null
+}
+
+test_() {
+    [[ -x $TOOL/proton ]] || die "the package isn't installed (g16-test deploy first)"
+    [[ -f $KIT/fsrepro.exe ]] || die "no fsrepro.exe in $KIT (g16-test deploy first)"
+    local valve pin build ext panel stock fixed s f answer notes
+    valve=$(valve_dir); [[ -n $valve ]] || die "Proton Experimental isn't installed in Steam"
+    pin=$(cat "$TOOL/PROTON_PIN"); build=$(awk '{print $2}' "$valve/version")
+    [[ $build == "$pin" ]] || die "Steam has Proton Experimental $build, the package is built for $pin: the fix is inactive, the package needs a rebuild"
+    ext=$(hyprctl monitors -j | python3 -c 'import json,sys; m=[x["name"] for x in json.load(sys.stdin) if not x["name"].startswith("eDP")]; print(m[0] if m else "")')
+    panel=$(hyprctl monitors -j | python3 -c 'import json,sys; m=[x["name"] for x in json.load(sys.stdin) if x["name"].startswith("eDP")]; print(m[0] if m else "")')
+    [[ -n $ext ]] || die "connect the external monitor first"
+    say "reproducer: a black window with a grid opens fullscreen on $ext for about 10 s, twice. Don't touch anything."
+    focus_monitor "$ext"; stock=$(repro "$valve" stock)
+    focus_monitor "$ext"; fixed=$(repro "$TOOL" fixed)
+    [[ -n $panel ]] && focus_monitor "$panel"
+    s=$(grep -m1 '^final' "$stock" 2>/dev/null || echo "no result (see ${stock%/*})")
+    f=$(grep -m1 '^final' "$fixed" 2>/dev/null || echo "no result (see ${fixed%/*})")
+    say "stock: $s"
+    say "fixed: $f"
+
+    cat <<EOF
+
+==> Now the game, about 3 minutes:
+    1. In Steam: Cities: Skylines II, Properties, Compatibility, force
+       "Proton Experimental (omarchy-asus)". Start it, focused on $ext (or move it there).
+    2. Options, Graphics, Display mode: Fullscreen (exclusive), keep the changes.
+    3. Hover and click menu buttons, including near the bottom of the screen, and
+       edge-scroll in a city: right at each screen edge, and NOT with the pointer mid-screen.
+    4. Quit the game, set Compatibility back to what you use (or keep this tool).
+EOF
+    read -r -p "Did hover, clicks and edge-scroll work in exclusive fullscreen on $ext? [y/n] " answer
+    read -r -p "Notes (anything odd, or Enter): " notes
+    {
+        echo "## G16 test: proton-experimental-asus (#266)"
+        echo
+        echo "- package: $(pacman -Q proton-experimental-asus 2>/dev/null), Proton Experimental $build"
+        echo "- monitors: panel $panel, external $ext"
+        echo "- reproducer, stock: \`$s\` (expected: on \\\\.\\DISPLAY1, the bug)"
+        echo "- reproducer, fixed: \`$f\` (expected: on \\\\.\\DISPLAY2)"
+        echo "- game, exclusive fullscreen on the external monitor: hover, clicks and edge-scroll work: $answer"
+        [[ -n $notes ]] && echo "- notes: $notes"
+        echo
+        echo "Hyprland $(hyprctl version -j 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag","?"))' 2>/dev/null)"
+    } >"$REPORT"
+    say "report: $REPORT"
+    cat "$REPORT"
+}
+
+undo() {
+    if pacman -Q proton-experimental-asus >/dev/null 2>&1; then sudo pacman -R --noconfirm proton-experimental-asus; fi
+    rm -rf "$COPY"
+    say "removed. Set the game's Compatibility back to Proton Experimental if it still names this tool."
+}
+
+case ${1:-} in
+    deploy) shift; deploy "$@" ;;
+    test) test_ ;;
+    undo) undo ;;
+    *) sed -n '2,17p' "$0"; exit 2 ;;
+esac

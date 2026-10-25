@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.4**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.103**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,9 +14,10 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.4` (kernel release string becomes `7.2.8-9.4-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.103` (kernel release string becomes `7.2.8-9.103-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
-   9.4 added 0773.
+   9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
+   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -32,7 +33,14 @@ Compared with upstream, only:
    (three amdgpu display backports, CACP default off; see "0481" below).
 6. New patch `0773-gpiolib-acpi-ignore-wake-on-gpio16-asus-ga605km.patch` after
    `0772-...` (GA605KM: ignore GPIO 16 wakeups; see "0773" below).
-7. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
+7. New patch `0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch` after
+   `0481-...` (USB4 dock monitors after a replug in suspend; see "0482" below).
+8. New patch `0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernation.patch`
+   after `0807-...` (asus-wmi writes its thermal policy and enabled fan curves
+   back after hibernation; see "0808" below).
+9. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
+   `0808-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
+10. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -208,6 +216,48 @@ the DC limits bite on battery has not been measured yet.
 for-next, then mainline) and reaches linux-omarchy. Revisit nv_tgp when
 upstream settles the offset-or-absolute question.
 
+## 0808: asus-wmi restores the thermal policy after hibernation (#185)
+
+**What.** `asus_hotk_restore()` (the `.restore` callback, run only on resume
+from hibernation) now calls `asus_wmi_restore_thermal_state()`: it writes
+`throttle_thermal_policy_mode` back with `throttle_thermal_policy_write()`,
+then re-enables and re-sends each custom fan curve that was enabled before
+(a policy write clears their enabled flags). `.thaw` (hibernation aborted, no
+power cycle) and `.resume` (s2idle) are unchanged.
+
+**Why.** Hibernation here is `HibernateMode=shutdown`: the machine powers off
+and the firmware boots again, so the EC starts from its own table. The restored
+kernel still holds the mode from before (quiet, from omarchy's patch 0004 on
+battery) but never sends it again, and userspace skips writing a value that
+already reads quiet. The G16 then runs the balanced table (fans at about
+2100/1800/3800 rpm on a 28 C idle, about 0.8 W) while every layer above the EC
+reports quiet. The DSDT's 0x00120075 handler writes the fan-table byte FTBL
+(EC RAM 0x06: 0 balanced, 1 turbo, 2 silent) on every call and `_WAK` never
+touches it; reading 0x00120075 back always returns 0x00010003, so the kernel
+cannot ask which table is active, only re-send it. Writing `quiet` over `quiet`
+did bring the quiet table back on the G16 (#185, 2026-10-22).
+
+Why only some resumes lose it (two clean hibernates kept quiet; a day of
+suspend-then-hibernate did not) is still open. The patch doesn't depend on the
+answer: after every hibernation resume the EC gets the kernel's state.
+
+**Cost.** Each write runs the firmware's `_QD4`, which pokes the NVIDIA driver:
+the RTX wakes for about 20 s once per hibernation resume.
+
+**Default behavior.** Changes resume from hibernation on every asus-wmi laptop
+with a throttle thermal policy: the policy the kernel already reports is sent
+again. Nothing changes at boot, on s2idle, or for machines without the policy.
+
+**Test on the laptop** (kit, see below): on battery with the quiet fan table,
+`test --ec-table` shows the asus-wmi profile next to FTBL (read only, through
+ec_sys's read-only debugfs file); `test --resume-profile --hibernates 6` must
+keep the quiet table (FTBL silent, fans 0 on a cool idle, about 31-34 W under
+load) after every hibernate.
+
+**Upstream.** Not in mainline (`torvalds/linux` master, 7.3) as of 2026-10-22:
+`asus_hotk_restore()` there has no thermal-policy write either. Not submitted
+yet (target: platform-driver-x86).
+
 ## G16 test kit (g16-test/)
 
 `g16-test/` holds the hardware test for this kernel. It travels with the kernel
@@ -216,12 +266,20 @@ across rebases. 7.2.8-9.3 passed it on 2026-10-20 (PR #8). It reads the
 expected version from the PKGBUILD, so it serves the next kernel's boot test
 as is.
 
+The kit installs the kernel next to whatever Omarchy channel the G16 is on, so test a build
+from the matching channel: a Quattro build (`main`, `bin/build-pkg`) on Omarchy stable with
+`[omarchy-asus]` on `x86_64`, an RC build (`next/omarchy-4.5`, `bin/build-pkg --channel rc`,
+staged in the rc stage dir) on Omarchy rc with `[omarchy-asus]` on `rc-x86_64`. Switch both with
+`omarchy-asus-setup --channel rc|quattro` first (README.md, "Release channels").
+
 On the G16, from a clone of this repo:
 
 ```sh
 gh pr checkout 8 && recipes/linux-omarchy/g16-test/deploy   # then reboot
 recipes/linux-omarchy/g16-test/test                         # after the reboot
 recipes/linux-omarchy/g16-test/test --temps                 # #42, on battery
+recipes/linux-omarchy/g16-test/test --ec-table              # #185, read only
+recipes/linux-omarchy/g16-test/test --resume-profile --hibernates 6   # #185, on battery
 ```
 
 - `deploy` checks the machine (GA605 DMI) and the fallback kernel (Arch `linux`
@@ -259,9 +317,9 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0568, 0569, 0807, 9900).
-2. Add them back to `source=()`: 0481 after `0480`, 0568 and 0569 after the last `056x` patch,
-   0807 after the last `080x` patch (renumber if upstream took the number),
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900).
+2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
+   0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
    9900 last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
@@ -308,6 +366,28 @@ for upstream**.
 - Remove it if the battery A/B testing shows no win, or move it to a
   separate `-experimental` kernel package.
 
+## 0810: panel_power_savings applies when written (#172)
+
+`0810-drm-amd-display-panel-power-savings-apply-now.patch` (ours, not upstream).
+`panel_power_savings_store()` only updates the connector state and sends a
+hotplug uevent; the level reaches the stream at the next commit that includes the
+connector. aquamarine 0.15 (Hyprland) leaves the connector out of page flips and
+only rescans connectors on a hotplug, so on the G16 a write (by hand or by
+power-profiles-daemon's `amdgpu_panel_power` action) took effect only at the next
+modeset: a DPMS cycle, a refresh-rate change or a resume. The first CACP
+measurement in #172 wrote the levels that way, so it most likely measured
+level 0 throughout.
+
+The patch commits the connector and its CRTC unchanged right after the write (not
+while the CRTC is off or during suspend). The connector state is the one just
+written, so there is no modeset; the CRTC takes the new level and DC gets it as a
+fast stream update. Mainline (7.4-rc1) has the same store function, so the patch
+stays until upstream changes it.
+
+Test: the g16-test kit's `0810` check puts a kprobe on `dmub_cacp_set_level`,
+writes 1, and expects the probe to fire within 3 s (then writes 0 back). A check
+that cannot run is a FAIL: the merge gate is this check passing.
+
 ## 0481: display power backports (dev build, default off)
 
 `0481-drm-amd-display-power-backports.patch` combines three amdgpu display
@@ -334,3 +414,55 @@ cat /sys/class/drm/card*-eDP-1/amdgpu/panel_power_savings   # expect 0
 # s0i3: suspend, resume, then check the residency counter grew
 sudo cat /sys/kernel/debug/amd_pmc/s0ix_stats
 ```
+
+## 0482: amdgpu replays DMUB HPDs skipped during resume (#205)
+
+**What.** `0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch`, after
+0481 (no later patch touches `amdgpu_dm.c`/`.h`). `dmub_hpd_callback()` still
+skips a DMUB HPD that arrives while `adev->in_suspend` is set, but now records
+its link in `dm->hpd_skipped_in_suspend`. A new DM `.complete` callback (it runs
+after `amdgpu_device_resume()` has cleared `in_suspend`) queues
+`dm->hpd_replay_work` on the HPD offload workqueue, which runs
+`handle_hpd_irq_helper()` for each recorded link: the same path the HPD takes
+outside suspend. It is queued on every resume, recorded links or not: an HPD
+work item that saw `in_suspend` set may not have recorded its link yet, and
+the workqueue is ordered, so the replay runs after it. `dm_suspend()` cancels a replay still pending; its links are
+kept for the next resume. A replay logs `Replay DMUB HPD skipped in
+suspend/resume: link_index=N`.
+
+**Why.** With the G16 docked on a USB4 dock (two DP monitors), unplugging the
+dock with the lid closed suspends it. Replugging the dock during suspend and
+resuming left both monitors dark until the next suspend. `dm_resume()` probes
+the connectors early in resume, when the thunderbolt driver has not set up the
+dock's DP tunnels yet. The DPIA HPDs for the new tunnels arrive later, while
+`in_suspend` is still set, and were dropped (`Skip DMUB HPD IRQ callback in
+suspend/resume`). Nothing read the DPRX caps, so 12 s later the connection
+manager tore the tunnels down (`(DP): not active, tearing down`) and dropped
+the DP IN adapters until their next hotplug, which only a suspend brings.
+Mainline and amd-staging-drm-next (2026-10-20) still drop these HPDs; there is
+no fix to backport.
+
+**Not covered.** #205's second failure (a DPIA link trained at RBR after a
+resume although HBR3 is verified) has no root cause yet; `test --dock` records
+every DP link's `link_settings` so the next occurrence has the data. The
+thunderbolt side (a DP IN dropped after a DPRX timeout is not offered again
+when a new DP OUT appears) is unchanged: with 0482 that timeout should no
+longer happen after resume.
+
+**Default behaviour and risk.** It changes behaviour only when an HPD was
+skipped during suspend or resume: one extra detection per such link once
+resume completes. On a link that did not change, detection finds the same
+sink and sends no hotplug event. Runtime PM resume (dGPUs) does not run
+`.complete`, so it behaves as before. Risk: low.
+
+**Test** (on the G16, booted on this kernel, docked with the DP monitors on):
+```bash
+recipes/linux-omarchy/g16-test/test --dock   # the 0482 line walks through #205's steps
+```
+By hand: close the lid, unplug the dock, wait for the suspend, plug the dock
+back in, open the lid. Then `journalctl -k -b | grep -E 'Skip DMUB HPD|Replay
+DMUB HPD|not active, tearing down'` shows skips followed by replays and no
+teardown, and both monitors are lit.
+
+**Upstream.** Not submitted (target: amd-gfx). A draft report is on #205.
+Drop it once upstream handles HPDs that arrive late in resume.

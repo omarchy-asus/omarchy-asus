@@ -118,6 +118,13 @@ Each of our channels is pinned to one of Omarchy's, and a machine switches both 
 | Quattro | `main` | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` | [`x86_64`](https://github.com/omarchy-asus/omarchy-asus/releases/tag/x86_64) (`.../releases/download/$arch`) |
 | RC | `next/omarchy-4.5` | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` | `rc-x86_64` (`.../releases/download/rc-$arch`) |
 
+**Moving to one trunk (#309):** `main` is now the RC channel's trunk: it carries the RC recipes
+and the RC channel builds and publishes from it. The Quattro channel (`x86_64`) is frozen on what
+it serves until the Omarchy 4.5 stable switch: `bin/build-pkg`, `bin/publish`, `bin/unpublish`,
+`bin/sync-release` (except `--dry-run`) and `bin/rebase-recipe` refuse it unless
+`OMARCHY_ASUS_ALLOW_QUATTRO=1`. Quattro keeps serving its current packages. The rest of this
+section still describes the two-branch layout until the docs are rewritten.
+
 Mixing them breaks upgrades: Omarchy 4.5's migrations install packages that may only exist in
 Omarchy's rc repo, and one failed migration holds back every later one, ours included. On a G16,
 switching is Omarchy's own `omarchy-channel-set rc` (or `stable`, which downgrades to the Quattro

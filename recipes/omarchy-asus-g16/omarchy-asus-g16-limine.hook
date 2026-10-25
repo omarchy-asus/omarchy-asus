@@ -1,0 +1,13 @@
+# omarchy-asus-g16: rebuild the Limine entries when the G16 kernel command-line
+# drop-in is installed or changed, so the next boot uses it. Removal is handled
+# by the package's post_remove (this hook is gone by then).
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/share/limine-entry-tool.d/omarchy-asus-g16-*.conf
+
+[Action]
+Description = Updating Limine entries for the G16 kernel command line...
+When = PostTransaction
+Exec = /bin/sh -c 'if command -v limine-update >/dev/null 2>&1; then limine-update; else echo "limine-update not found: the G16 command line applies at the next kernel update"; fi'

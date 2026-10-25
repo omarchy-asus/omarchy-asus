@@ -4,7 +4,7 @@
 #
 #   g16-check                 run every check and print a PASS/WARN/FAIL report
 #   g16-check --live[=SECS]   also wait SECS (default 15) for you to press Fn+Super
-#                             and confirm the Win-lock report reaches hidraw
+#                             and confirm g16-winlockd signals the Win-lock report
 #   g16-check --no-redact     print your user name and host name as they are
 #   g16-check --no-color
 #
@@ -15,8 +15,8 @@
 # the output can be pasted into an issue (bin/issue still scans it).
 #
 # Sections:
-#   1. Win-lock: kernel with patch 0568, in-tree hid-asus, the hidraw node, its
-#      access, the g16-winlock service and udev rule.
+#   1. Win-lock: kernel with patch 0568, in-tree hid-asus, the hidraw node (root
+#      only), the g16-winlockd service and its udev rule, the g16-winlock user service.
 #   2. Local workarounds that must be off before the patched omarchy (4.0.5-1.1)
 #      is installed: each is "present (turn off before omarchy 1.1)" or "clear";
 #      and unowned /etc files a repo package would install.
@@ -31,7 +31,9 @@ set -uo pipefail
 REPO=omarchy-asus
 FPR=0B44FF7CCDD929F61BE4A2E436FE6B28AB24EC88
 VIDPID=00000B05:000019B6
-UDEV_RULE=/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules
+UDEV_RULE=/usr/lib/udev/rules.d/60-g16-winlockd.rules
+OLD_UDEV_RULE=/usr/lib/udev/rules.d/70-g16-winlock-hidraw.rules # asus-rog-nkey-winlock 0.1.0-12 and older
+WINLOCKD=io.github.omarchy_asus.WinLock1
 APPLY_SHARE=/usr/share/omarchy-asus-g16-apply
 PACMAN_CONF=/etc/pacman.conf
 SRC_ROOT=${G16_CHECK_SRC_ROOT:-/usr/src} # DKMS source root; the override is for tests only
@@ -185,7 +187,7 @@ origin() {
 }
 
 # ---------------------------------------------------------------------------
-section "1. Win-lock (Fn+Super) - kernel patch 0568, hid-asus, hidraw, g16-winlock"
+section "1. Win-lock (Fn+Super) - kernel patch 0568, hid-asus, hidraw, g16-winlockd, g16-winlock"
 
 # Kernel release: ours ends in -<pkgrel with .N>-omarchy, e.g. 7.2.8-9.1-omarchy.
 if [[ $KREL =~ -[0-9]+\.[0-9]+-omarchy$ ]]; then
@@ -289,7 +291,7 @@ else
 fi
 
 # The hidraw node of the ROG N-Key keyboard whose descriptor declares report ID 0x5D
-# (same descriptor walk as g16-winlock's report_ids()).
+# (same descriptor walk as g16-winlockd's declares_5d()).
 NODE=''
 if have python3; then
   mapfile -t nodes < <(python3 -I - "$VIDPID" <<'PY'
@@ -348,40 +350,47 @@ else
   warn "python3 not found; can't parse the hidraw report descriptors"
 fi
 
-# Access to that node.
+# The node stays root-only: g16-winlockd is its one reader (asus-rog-nkey-winlock 0.1.0-13).
 if [[ -n $NODE ]]; then
   info "$(ls -l "$NODE" 2>&1)"
   if have getfacl; then
     while IFS= read -r l; do [[ -n $l && $l != \#* ]] && info "acl: $l"; done < <(getfacl -p "$NODE" 2>/dev/null)
   fi
-  probe() {
-    python3 -I -c 'import os, sys
-flags = os.O_RDWR if sys.argv[2] == "rw" else os.O_RDONLY
-try:
-    os.close(os.open(sys.argv[1], flags | os.O_NONBLOCK))
-except OSError as e:
-    print(e.strerror or e)
-    sys.exit(1)' "$NODE" "$1"
-  }
-  if err=$(probe ro); then
-    pass "you can open $NODE for reading (g16-winlock watch)"
+  if python3 -I -c 'import os, sys; os.close(os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK))' "$NODE" 2>/dev/null; then
+    warn "your user can open $NODE (the keyboard's raw stream): a udev rule or a leftover uaccess ACL still grants it; reboot after upgrading from 0.1.0-12, and see the local rules below"
   else
-    fail "you can't open $NODE for reading ($err): the udev rule's uaccess ACL is missing (log out and in, or sudo udevadm trigger --subsystem-match=hidraw)"
+    pass "$NODE is not open to your user (g16-winlockd owns it)"
   fi
-  if err=$(probe rw); then
-    pass "you can open $NODE for writing (lock/unlock and auto-unlock mode)"
+  if have systemctl; then
+    unit=g16-winlockd@${NODE#/dev/}.service
+    act=$(systemctl is-active "$unit" 2>/dev/null || true)
+    if [[ $act == active ]]; then
+      pass "$unit is active"
+    else
+      fail "$unit is ${act:-inactive}: sudo systemctl start $unit; see journalctl -u $unit"
+    fi
+  fi
+  # status exits 3 when the service answers but nothing has reported the lock since it
+  # started: the keyboard can't be asked, so that is normal until the first Fn+Super.
+  out='' rc=127
+  have g16-winlock && { out=$(g16-winlock status 2>&1); rc=$?; }
+  if ((rc == 0)); then
+    pass "g16-winlockd answers on the system bus: $out"
+  elif ((rc == 3)); then
+    warn "g16-winlockd answers, but the Win-lock state is not known until the first Fn+Super (or g16-winlock lock/unlock)"
   else
-    warn "you can't open $NODE for writing ($err): only toast mode will work"
+    fail "g16-winlockd does not answer ($WINLOCKD): ${out:-g16-winlock not installed}"
   fi
 fi
 
 if [[ -f $UDEV_RULE ]]; then
-  pass "packaged udev rule present: $UDEV_RULE"
+  pass "packaged udev rule present: $UDEV_RULE (starts g16-winlockd, grants nothing)"
 else
-  fail "packaged udev rule missing: $UDEV_RULE (install asus-rog-nkey-winlock)"
+  fail "packaged udev rule missing: $UDEV_RULE (install asus-rog-nkey-winlock 0.1.0-13 or later)"
 fi
+[[ -e $OLD_UDEV_RULE ]] && warn "$OLD_UDEV_RULE is still installed: asus-rog-nkey-winlock is older than 0.1.0-13"
 for f in /etc/udev/rules.d/*winlock*.rules /etc/udev/rules.d/*19b6*.rules; do
-  [[ -e $f ]] && warn "a local udev rule may duplicate the packaged one: $f"
+  [[ -e $f ]] && warn "a local udev rule may open the keyboard's raw node to users: $f"
 done
 
 # The helper and its user service.
@@ -422,37 +431,19 @@ else
   warn "systemctl not found"
 fi
 
-# Optional live test: the patched hid-asus passes the 5D BF 01 <state> report to hidraw.
-if ((LIVE)) && [[ -n $NODE ]]; then
+# Optional live test: the patched hid-asus passes the 5D BF 01 <state> report to hidraw,
+# and g16-winlockd turns it into LockChanged.
+if ((LIVE)) && [[ -n $NODE ]] && have gdbus; then
   printf '\n  %sPress Fn+Super now (twice, to end unlocked). Waiting %ss...%s\n' "$B" "$LIVE" "$N"
-  if out=$(python3 -I - "$NODE" "$LIVE" <<'PY'
-import os, select, sys, time
-fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK)
-end = time.monotonic() + int(sys.argv[2])
-seen = []
-while time.monotonic() < end:
-    r, _, _ = select.select([fd], [], [], max(0.0, end - time.monotonic()))
-    if not r:
-        break
-    try:
-        d = os.read(fd, 64)
-    except BlockingIOError:
-        continue
-    if len(d) >= 4 and d[:3] == bytes([0x5D, 0xBF, 0x01]):
-        seen.append("on" if d[3] else "off")
-        if len(seen) >= 2:
-            break
-os.close(fd)
-print(" ".join(seen))
-sys.exit(0 if seen else 1)
-PY
-  ); then
-    pass "Win-lock reports reach hidraw (seen: $out): patch 0568 works"
+  out=$(timeout "$LIVE" gdbus monitor --system --dest "$WINLOCKD" 2>/dev/null |
+    grep -m2 -oE 'LockChanged \((true|false)' | sed 's/.*(true/on/; s/.*(false/off/' | paste -sd' ')
+  if [[ -n $out ]]; then
+    pass "Win-lock reports reach g16-winlockd (seen: $out): patch 0568 works"
   else
-    fail "no Win-lock report on $NODE within ${LIVE}s (${out:-nothing seen}): the running hid-asus drops it, or the key wasn't pressed"
+    fail "no LockChanged from g16-winlockd within ${LIVE}s: the running hid-asus drops the report, g16-winlockd isn't running, or the key wasn't pressed"
   fi
 elif ((LIVE)); then
-  warn "--live skipped: no Win-lock hidraw node"
+  warn "--live skipped: no Win-lock hidraw node (or no gdbus)"
 fi
 
 # ---------------------------------------------------------------------------

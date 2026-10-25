@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Thu, 22 Oct 2026 00:00:00 -0400
+Subject: [PATCH] drm/amd/display: apply panel_power_savings when it is written
+
+panel_power_savings_store() writes the new ABM/CACP level into the
+current connector state and sends a hotplug uevent, relying on the
+compositor to make a commit that includes the connector. Only such a
+commit copies the level to the CRTC state and on to the stream:
+dm_update_crtc_state() takes it from the connector state, and
+amdgpu_dm_atomic_commit_tail() sends it to DC when the CRTC's level
+changed. A page flip that leaves the connector out of the atomic state
+never does.
+
+aquamarine 0.15 (Hyprland's backend) stopped adding connector
+properties to page flips, and on a hotplug uevent only rescans the
+connectors. So on Hyprland the written level reaches the panel only at
+the next modeset (DPMS, refresh-rate change, resume), and
+power-profiles-daemon's amdgpu_panel_power action and manual writes
+appear to do nothing.
+
+After updating the connector state, commit the connector and its CRTC
+unchanged. The connector state is the one just written, so the
+connector does not count as changed and no modeset is needed; the CRTC
+picks up the new level and the commit sends it to DC as a fast stream
+update, as a compositor's commit would. Nothing is committed while the
+CRTC is off or during suspend; the next modeset applies the level then.
+The hotplug uevent is kept for compositors that expect it.
+
+Not upstream; tracked in omarchy-asus #172.
+---
+ drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c | 67 +++++++++++++++++++
+ 1 file changed, 67 insertions(+)
+
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -8241,6 +8241,69 @@
+ 	return sysfs_emit(buf, "%u\n", val);
+ }
+ 
++/*
++ * Commit the connector and its CRTC unchanged, so that the ABM/CACP level just
++ * written to the connector state reaches the stream now. Without this the level
++ * only takes effect at the next commit that includes the connector, and
++ * compositors that leave the connector out of page flips (aquamarine 0.15 and
++ * later) apply it only at the next modeset.
++ */
++static int amdgpu_dm_commit_connector(struct drm_connector *connector)
++{
++	struct drm_device *dev = connector->dev;
++	struct drm_modeset_acquire_ctx ctx;
++	struct drm_atomic_commit *state;
++	struct drm_connector_state *conn_state;
++	struct drm_crtc_state *crtc_state;
++	int ret;
++
++	state = drm_atomic_commit_alloc(dev);
++	if (!state)
++		return -ENOMEM;
++
++	drm_modeset_acquire_init(&ctx, 0);
++	state->acquire_ctx = &ctx;
++
++retry:
++	conn_state = drm_atomic_get_connector_state(state, connector);
++	if (IS_ERR(conn_state)) {
++		ret = PTR_ERR(conn_state);
++		goto out;
++	}
++
++	/* Off: the next modeset picks the level up. */
++	if (!conn_state->crtc) {
++		ret = 0;
++		goto out;
++	}
++
++	crtc_state = drm_atomic_get_crtc_state(state, conn_state->crtc);
++	if (IS_ERR(crtc_state)) {
++		ret = PTR_ERR(crtc_state);
++		goto out;
++	}
++
++	if (!crtc_state->active) {
++		ret = 0;
++		goto out;
++	}
++
++	ret = drm_atomic_commit(state);
++
++out:
++	if (ret == -EDEADLK) {
++		drm_atomic_commit_clear(state);
++		drm_modeset_backoff(&ctx);
++		goto retry;
++	}
++
++	drm_atomic_commit_put(state);
++	drm_modeset_drop_locks(&ctx);
++	drm_modeset_acquire_fini(&ctx);
++
++	return ret;
++}
++
+ static ssize_t panel_power_savings_store(struct device *device,
+ 					 struct device_attribute *attr,
+ 					 const char *buf, size_t count)
+@@ -8269,6 +8332,10 @@
+ 	if (ret)
+ 		return ret;
+ 
++	ret = drm_to_adev(dev)->in_suspend ? 0 : amdgpu_dm_commit_connector(connector);
++	if (ret)
++		drm_dbg_kms(dev, "panel_power_savings: commit failed (%d), applied at the next modeset\n", ret);
++
+ 	drm_kms_helper_hotplug_event(dev);
+ 
+ 	return count;
+-- 
+2.51.0

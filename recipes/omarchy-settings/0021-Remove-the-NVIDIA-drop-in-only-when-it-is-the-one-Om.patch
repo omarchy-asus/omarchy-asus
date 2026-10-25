@@ -1,7 +1,7 @@
-From d289307cd5d35899ef3a96e4fd83c9bcaf6454bc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 04:53:47 -0400
-Subject: [PATCH 21/23] Remove the NVIDIA drop-in only when it is the one
+Subject: [PATCH 21/24] Remove the NVIDIA drop-in only when it is the one
  Omarchy wrote
 
 On a hybrid machine the migration deleted /etc/mkinitcpio.conf.d/nvidia.conf
@@ -70,6 +70,3 @@ index 4f35e41f..04fe3e83 100755
  # NVIDIA-only desktop: the early load is what gives it KMS at the LUKS prompt.
  write_pci_devices 0x10de:0x030000
  rm -f "$rebuild_marker"
--- 
-2.55.0
-

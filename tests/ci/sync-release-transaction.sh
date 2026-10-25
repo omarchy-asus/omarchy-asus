@@ -47,6 +47,8 @@ export OMARCHY_ASUS_WORKSPACE=$S/ws OMARCHY_ASUS_DATA=$S/data GNUPGHOME=$S/data/
     PII_DENYLIST=$S/denylist FAKE_REL=$S/release FAKE_LOG=$S/gh.log FAKE_CALLS=$S/calls \
     PATH=$S/bin:$PATH
 unset PII_SCAN SYNC_ADOPT_REMOTE PRUNE_GRACE_HOURS PUBLISH_LOCK_WAIT OMARCHY_ASUS_PUBLISH_LOCKED OMARCHY_ASUS_CHANNEL
+# Quattro is frozen (#309); this test runs the default (quattro) channel's code, so it overrides
+export OMARCHY_ASUS_ALLOW_QUATTRO=1
 # bin/sync-release talks to the live release (env.sh fixes GH_REPO/GH_TAG), so the fake gh
 # must win: a BASH_ENV that puts another dir first on PATH (a wrapper's gh shim) would hand
 # the uploads to the real gh. Drop it, and give any real gh that still runs no credentials.
@@ -264,7 +266,7 @@ cmp -s "$S/release-rc-x86_64/omarchy-asus.db" "$RR/omarchy-asus.db.tar.gz"; expe
 if [[ -f $S/release-rc-x86_64/foo-1-1-x86_64.pkg.tar.zst ]]; then r=0; else r=1; fi; expect "$r" 0 "the package is on the rc release"
 awk '$1 == "gh" && $2 == "release" && $4 != "rc-x86_64" {bad = 1} END {exit !bad}' "$S/gh.log"
 expect $? 1 "every gh release call names rc-x86_64"
-grep -q -- '--target next/omarchy-4.5' "$S/gh.log"; expect $? 0 "the rc release targets next/omarchy-4.5"
+grep -q -- '--target main' "$S/gh.log"; expect $? 0 "the rc release targets main, the RC trunk (#309)"
 if [[ $( (cd "$S/release" && sha256sum -- *) ) == "$rel_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the x86_64 release unchanged"
 if [[ $(cat "$S/data/release-db.sha256") == "$rec_before" ]]; then r=0; else r=1; fi; expect "$r" 0 "the x86_64 record unchanged"
 if [[ $(cat "$S/data/channel-rc/release-db.sha256" 2>/dev/null) == "$(sha256sum "$RR/omarchy-asus.db.tar.gz" | cut -d' ' -f1)" ]]; then r=0; else r=1; fi

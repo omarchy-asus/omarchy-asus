@@ -1,0 +1,42 @@
+# Started by 60-g16-winlockd.rules for each hidraw node of the ROG N-Key keyboard
+# (0b05:19b6); the instance for the node that carries report 0x5D owns the
+# io.github.omarchy_asus.WinLock1 bus name, the others exit at once.
+[Unit]
+Description=G16 Win-lock service (%I)
+BindsTo=dev-%i.device
+After=dev-%i.device dbus.socket
+Requires=dbus.socket
+
+[Service]
+ExecStart=/usr/lib/g16-winlockd %I
+Restart=on-failure
+RestartSec=2
+
+# Root only to open the root-owned 0600 node; no capabilities, no network,
+# a read-only filesystem, and hidraw as the only device.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=char-hidraw rw
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
