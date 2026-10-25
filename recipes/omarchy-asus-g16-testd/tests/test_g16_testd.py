@@ -621,6 +621,18 @@ class Session(unittest.TestCase):
         self.assertEqual(os.listdir(out), ["v.trace"])
         with self.assertRaises(m.Refused):
             d.trace_stop("w")
+        # the name is free again once collected, and not before
+        with self.assertRaises(m.Refused) as e:
+            d.trace_start("v", "timer/hrtimer_start")
+        self.assertIn("not collected yet", str(e.exception))
+        self.assertNotIn("v", d.rec["traces"])
+        self.assertEqual(os.listdir(out), ["v.trace"])
+        put(self.root, "fake-instance/trace", "<idle>-0 newer")
+        d.trace_start("w", "timer/hrtimer_start")
+        self.assertEqual(d.trace_stop("w"), {"trace": "w"})
+        self.assertEqual(d.handover.read().strip(), b"<idle>-0 newer")
+        d.handover.close()
+        d.handover = None
         # one nobody collected goes at the end of the session
         d.restore_runtime(idle=False)
         self.assertFalse(os.path.exists(out))
