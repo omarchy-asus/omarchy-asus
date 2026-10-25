@@ -56,6 +56,14 @@ printf 'ExecStart=/usr/bin/true\n' >"$SYS/etc/systemd/system/unrelated.service"
 printf '[Timer]\nOnCalendar=daily\n' >"$SYS/etc/systemd/system/old-build.timer"
 printf '[Timer]\nOnCalendar=weekly\nUnit=old-build.service\n' >"$SYS/etc/systemd/system/weekly-build.timer"
 printf '[Timer]\nOnCalendar=daily\n' >"$SYS/etc/systemd/system/unrelated.timer"
+# same name as a unit that calls the old path, but it starts another one
+mkdir -p "$SYS/etc/systemd/user" "$H/.config/systemd/user"
+printf 'ExecStart=%s/Work/repo/bin/build-pkg recipes/bar\n' "$H" >"$H/.config/systemd/user/user-build.service"
+printf '[Timer]\nOnCalendar=daily\nUnit=unrelated.service\n' >"$H/.config/systemd/user/user-build.timer"
+# a user timer naming a system unit: another manager, not counted
+printf '[Timer]\nOnCalendar=daily\nUnit=old-build.service\n' >"$H/.config/systemd/user/cross.timer"
+# a timer for every user, starting this user's unit
+printf '[Timer]\nOnCalendar=daily\nUnit=user-build.service\n' >"$SYS/etc/systemd/user/all-users.timer"
 printf '0 3 * * * %s/Work/repo/bin/build-pkg recipes/foo\n' "$H" >"$SYS/var/spool/cron/$U"
 printf 'OMARCHY_ASUS_CI_CCACHE=%s/ccache\nOMARCHY_ASUS_CI_DISTCC=%s/distcc\n' "$R" "$R" >"$R/actions-runner/.env"
 head -c 30000 /dev/zero >"$R/ccache/blob"
@@ -165,6 +173,10 @@ has '| /etc/systemd/system/weekly-build.timer | systemd timer |' "a timer with U
 has '| starts old-build.service |'
 hasnt 'unrelated.service'
 hasnt 'unrelated.timer'
+has '| ~/.config/systemd/user/user-build.service | systemd unit |' "a user unit"
+hasnt 'user-build.timer' "a same-name timer whose Unit= starts another unit"
+hasnt 'cross.timer' "a user timer naming a system unit"
+has '| /etc/systemd/user/all-users.timer | systemd timer |' "a timer for every user, starting a user's unit"
 hasre "^\\| /var/spool/cron/<a crontab> \\| sudoers/cron entry \\| $SZ \\|" "the crontab, sized"
 if ((EUID)); then has '| /etc/sudoers.d | sudoers/cron | needs root | not read |'; fi
 has '| devtools 1:1.5.3-1 | package | 462.79 KiB | required by: None; repo users besides the old path: bin/revdep-check |'
@@ -223,14 +235,22 @@ done
 echo "== 4. what cannot be read says so"
 if ((EUID)); then
     chmod 000 "$C/root/etc" "$C/root/var/lib/pacman"
+    # the logs behind an unsearchable data dir (the work-* rows say needs root there too)
+    mkdir -p "$S/lockeddata/logs"; : >"$S/lockeddata/logs/foo-20261001-120000.log"; chmod 000 "$S/lockeddata"
     mkdir -p "$S/locked/cc" "$SYS/etc/cron.d"; chmod 000 "$S/locked"
     printf 'secret\n' >"$SYS/etc/cron.d/private"; chmod 000 "$SYS/etc/cron.d/private"
     out=$(run CCACHE_HOST_DIR="$S/locked/cc" --offline --local 2>/dev/null)
+    has '| ~/.local/share/omarchy-asus/logs/<recipe>-<date>.log* | bin/build-pkg logs (2 files) |' "logs still listed beside the locked dirs"
+    out2=$out
+    out=$(run OMARCHY_ASUS_DATA="$S/lockeddata" --offline --local 2>/dev/null)
+    has '/lockeddata/logs/<recipe>-<date>.log* | bin/build-pkg logs | needs root | not read |' "logs behind an unsearchable data dir"
+    has '/lockeddata/work-*, verify-gnupg | bin/build-pkg scratch | needs root |' "scratch behind an unsearchable data dir"
+    out=$out2
     has '/root/etc/makepkg.conf.d | chroot makepkg config | needs root | not read |' "the chroot config behind an unreadable dir"
     has '/root/var/lib/pacman/local | chroot package db | needs root | not read |' "the chroot package db behind an unreadable dir"
     has '/locked/cc | release ccache | needs root |' "a path behind an unsearchable dir is not 'absent'"
     has '| /etc/cron.d | sudoers/cron | needs root | some files could not be read |' "an unreadable file in a readable dir"
-    chmod 755 "$C/root/etc" "$C/root/var/lib/pacman" "$S/locked"
+    chmod 755 "$C/root/etc" "$C/root/var/lib/pacman" "$S/locked" "$S/lockeddata"
 else
     echo "skip: running as root, everything is readable"
 fi

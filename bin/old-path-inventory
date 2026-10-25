@@ -253,7 +253,7 @@ host_section() {
         [[ -e $DATA/verify-gnupg ]] &&
             row "$(show "$DATA/verify-gnupg")" "bin/build-pkg recipe keyrings" "$(size "$DATA/verify-gnupg")" "bin/build-pkg's PGP source checks"
     fi
-    if [[ -e $LOG_DIR ]] && ! readable_dir "$LOG_DIR"; then
+    if hidden "$LOG_DIR" || { [[ -e $LOG_DIR ]] && ! readable_dir "$LOG_DIR"; }; then
         row "$(show "$LOG_DIR")/<recipe>-<date>.log*" "bin/build-pkg logs" "needs root" "not read"
     else
         local logs=()
@@ -296,15 +296,19 @@ host_section() {
 
     # units, timers, sudoers and cron entries that call the old path
     local pat='bin/build-pkg|build-pkg |bin/mkchroot|makechrootpkg|mkarchroot'
-    local where=() w hit hits st any=0 units=() u t
-    where=("$SYS/etc/systemd/system" "$SYS/etc/systemd/user")
-    for w in "${homes[@]}"; do where+=("$w/.config/systemd/user"); done
+    local where=() scopes=() w i hit hits st any=0 units=() u t target
+    # each dir with its manager: system, every user (etc/systemd/user), or one user's own
+    where=("$SYS/etc/systemd/system" "$SYS/etc/systemd/user") scopes=(system user:*)
+    for w in "${homes[@]}"; do where+=("$w/.config/systemd/user"); scopes+=("user:$w"); done
+    # same_manager <scope> <scope>: 0 when a timer in one can start a unit in the other
+    same_manager() { [[ $1 == "$2" || ($1 == user:\* && $2 == user:*) || ($2 == user:\* && $1 == user:*) ]]; }
     # greps <dir or file>: the files under it that call the old path; a row when some cannot be read
     greps() {
         st=0; hits=$(grep -rlE -- "$pat" "$1" 2>/dev/null | sort) || st=$?
         if ((st > 1)); then row "$(show "$1")" "$2" "needs root" "some files could not be read"; any=1; fi
     }
-    for w in "${where[@]}"; do
+    for i in "${!where[@]}"; do
+        w=${where[$i]}
         if hidden "$w"; then row "$(show "$w")" "systemd units" "needs root" "not read"; any=1; continue; fi
         [[ -d $w ]] || continue
         if ! readable_dir "$w"; then row "$(show "$w")" "systemd units" "needs root" "not read"; any=1; continue; fi
@@ -312,21 +316,27 @@ host_section() {
         while IFS= read -r hit; do
             [[ -n $hit ]] || continue
             row "$(show "$hit")" "systemd unit" "$(size "$hit")" "calls the old path"; any=1
-            units+=("${hit##*/}")
+            units+=("${scopes[$i]}|${hit##*/}")
         done <<<"$hits"
     done
-    # a timer names no command, only its unit: <name>.timer for <name>.service, or Unit=
-    for u in "${units[@]}"; do
-        [[ $u == *.service ]] || continue
-        for w in "${where[@]}"; do
+    # a timer names no command, only the unit it starts: its Unit=, else <name>.service; it
+    # starts a unit of its own manager only
+    if ((${#units[@]})); then
+        for i in "${!where[@]}"; do
+            w=${where[$i]}
             readable_dir "$w" || continue
-            while IFS= read -r t; do
-                [[ -n $t ]] || continue
-                row "$(show "$t")" "systemd timer" "$(size "$t")" "starts $u"; any=1
-            done < <({ [[ -f $w/${u%.service}.timer ]] && echo "$w/${u%.service}.timer"
-                grep -rlE --include='*.timer' -- "^[[:space:]]*Unit[[:space:]]*=[[:space:]]*${u//./\\.}[[:space:]]*$" "$w" 2>/dev/null; } | sort -u)
+            for t in "$w"/*.timer; do
+                [[ -f $t ]] || continue
+                target=$(sed -n 's/^[[:space:]]*Unit[[:space:]]*=[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$t" 2>/dev/null | tail -n1)
+                target=${target:-$(basename "$t" .timer).service}
+                for u in "${units[@]}"; do
+                    [[ ${u#*|} == "$target" ]] && same_manager "${scopes[$i]}" "${u%%|*}" || continue
+                    row "$(show "$t")" "systemd timer" "$(size "$t")" "starts $target"; any=1
+                    break
+                done
+            done
         done
-    done
+    fi
     for w in "$SYS/etc/sudoers" "$SYS/etc/sudoers.d" "$SYS/etc/cron.d" "$SYS/var/spool/cron"; do
         if hidden "$w"; then row "$(show "$w")" "sudoers/cron" "needs root" "not read"; any=1; continue; fi
         [[ -e $w ]] || continue
