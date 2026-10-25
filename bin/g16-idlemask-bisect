@@ -72,9 +72,12 @@ nvidia-smi, sensors, its config space or the nvidia_0 backlight.
 
 Root: one pkexec prompt at the start, through the desktop's polkit agent
 (G16_POLKIT_REASON=<wrapper> runs `<wrapper> run REASON -- pkexec ...` for a dialog
-with a reason; G16_ROOT=sudo is the other way). g16-testd (#277) can't remove PCI
-devices, freeze scopes or load these probes (its allowlist has the SD reader), so it
-isn't used. The run itself is a root transient unit (g16-idlemask-bisect-run), outside
+with a reason; G16_ROOT=sudo is the other way). g16-testd (#277, #284) isn't used:
+the run's root steps are taking a dozen PCI devices off the bus and back, unbinding
+the SMBus driver, reading amd_pmc's debugfs idlemask at 10 Hz and BTF fprobes with
+fetch arguments on the display code, none of which the helper does (each would be a
+broad root step on its allowlist). Its scope freezer alone would not save the prompt,
+and the run has to carry on as root when the terminal drops out. The run itself is a root transient unit (g16-idlemask-bisect-run), outside
 app.slice so the freezer never reaches it, and it carries on when the keyboard,
 touchpad, Wi-Fi and the terminal drop out; this command follows its log.
 
