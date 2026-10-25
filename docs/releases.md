@@ -117,9 +117,11 @@ container the PR check uses (#258). The first piece is `.github/workflows/releas
 and records, and **publishes nothing**. No signing key, secret or release upload is anywhere in
 it. The second is the signer on the build host, `bin/release-sign` (below), which checks a run's
 record with GitHub before it hands the packages to `bin/publish`. The daily rebase onto upstream
-runs it only for the recipes `build/release-path.conf` lists: so far `omarchy-asus-keyring` alone,
-on the rc channel. For every other recipe the chroot path (`bin/build-pkg`, then `bin/publish`)
-stays the live publisher (below, "Switching a recipe to the release path").
+runs it only for the recipes `build/release-path.conf` lists, on the rc channel: so far
+`asus-rog-nkey-winlock`, `nvidia-open-dkms`, `omarchy` and `omarchy-settings` (a cohort, listed
+together), `omarchy-asus-g16`, `omarchy-asus-g16-apply` and `omarchy-asus-keyring`. `hyprland` and
+`linux-omarchy` are not switched yet. For every other recipe the chroot path (`bin/build-pkg`,
+then `bin/publish`) stays the live publisher (below, "Switching a recipe to the release path").
 
 ```
 release workflow (GitHub)  ->  bin/release-sign (build host)  ->  bin/publish  ->  bin/sync-release
