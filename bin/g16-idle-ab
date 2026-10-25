@@ -13,6 +13,9 @@
 #   g16-idle-ab --no-dpms        CACP: the level write alone, no DPMS off/on (0810 kernels)
 #   g16-idle-ab --load light     under a light, repeatable load instead of idle (below);
 #                                phases 30 s measured after 10 s settling
+#   g16-idle-ab --only boost-off,epp-power,max-3500,max-3000,epp-dynamic,pmf-low-power --load light
+#                                the CPU boost / EPP / cap run for #328: 3 rounds of
+#                                30 s phases, about 30 minutes
 #   g16-idle-ab --unverified-msr allow wake-class and wlc-track (--only), which read the
 #                                workload-class MSR on every context switch (#10)
 #   g16-idle-ab --dry-run        change nothing, post nothing; short phases
@@ -78,6 +81,15 @@
 # share against the baseline-to-baseline noise; a watt saving that costs more than 10%
 # in p95 response is flagged.
 #
+# The CPU tweaks (#328: boost-off, epp-power, max-3500, max-3000, epp-dynamic,
+# pmf-low-power) are light-load tweaks: the idle mode leaves them out unless --only
+# names them; --load light runs them with the rest. Each changes every cpufreq
+# policy (a cap leaves a policy whose cpuinfo_max_freq is at or below it alone), and
+# power-profiles-daemon may write EPP or the profile back: the setting is read back
+# with every sample, logged in the report, and a phase in which it did not hold is
+# left out. epp-dynamic is skipped when energy_performance_available_preferences
+# doesn't list dynamic.
+#
 # Guards: it starts only on battery (Discharging) with the RTX runtime-suspended,
 # and stops (putting everything back) if the charger comes back or the RTX stays
 # awake. A phase in which the RTX woke is left out. It never reads the nvidia_0
@@ -133,14 +145,23 @@ TWEAKS=(
   "zen5c-all|10|ranking efficiency + wake_preferred all + wake_pack 1 together (patch 9900)"
   "wake-class|10|amd_hfi wake_preferred off -> class: reads the workload-class MSR on every switch, layout unverified (only with --unverified-msr)"
   "wlc-track|10|amd_hfi wlc_track 0 -> 1: the workload-class MSR read on every switch, layout unverified (only with --unverified-msr)"
+  "boost-off|328|CPU boost (cpufreq/boost) 1 -> 0 (light load)"
+  "epp-power|328|EPP balance_power -> power on every policy (light load)"
+  "max-3500|328|scaling_max_freq capped at 3.5 GHz on every policy above it (light load)"
+  "max-3000|328|scaling_max_freq capped at 3.0 GHz on every policy above it (light load)"
+  "epp-dynamic|328|EPP balance_power -> dynamic on every policy, when the kernel lists it (light load)"
+  "pmf-low-power|328|amd-pmf platform profile balanced -> low-power, asus-wmi left as it is (light load)"
 )
 # pb12: tweaks that switch the same setting, so can't be columns of one run
-PB12_CONFLICTS=("kbd-usb numlock" "usb-idle kbd-usb" "usb-idle bt-off" "usb-idle numlock" "cacp3 cacp4")
+PB12_CONFLICTS=("kbd-usb numlock" "usb-idle kbd-usb" "usb-idle bt-off" "usb-idle numlock" "cacp3 cacp4"
+                "epp-power epp-dynamic" "max-3500 max-3000")
 PB12_DEFAULT_OUT=" numlock usb-idle cacp4 hfi-eff hfi-inv wake-all wake-pack zen5c-all wake-class wlc-track "
 # The Zen 5c-first tweaks (#10): one at most in a pb12 run (they interact by design);
 # the MSR ones run only by name, with --unverified-msr.
 ZEN5C=" hfi-eff hfi-inv wake-all wake-pack zen5c-all wake-class wlc-track "
 MSR_TWEAKS=" wake-class wlc-track "
+# The CPU tweaks (#328): light-load tweaks, left out of an idle run unless --only names them
+LIGHT_TWEAKS=" boost-off epp-power max-3500 max-3000 epp-dynamic pmf-low-power "
 
 # Read by the root helper and the script alike (all world-readable): the USB4 /
 # Thunderbolt NHIs and routers awake with power/control on, as "path=on ...", never
@@ -161,6 +182,59 @@ panel_pps() { # sys
   local c
   for c in "$1"/class/drm/card*-eDP-*; do [[ -e $c/amdgpu/panel_power_savings ]] && { printf '%s\n' "$c/amdgpu/panel_power_savings"; return 0; }; done
   return 1
+}
+# The CPU tweaks (#328). cpu_hold: the files a tweak sets and the value each must
+# keep while it is on ("file=value" lines), read back with every sample; the root
+# helper writes the same lines. A frequency cap leaves a policy whose
+# cpuinfo_max_freq is at or below it alone.
+cpu_policies() { # sys
+  local p
+  for p in "$1"/devices/system/cpu/cpufreq/policy*; do [[ -d $p ]] && printf '%s\n' "$p"; done
+}
+pmf_profile() { # sys -> amd-pmf's platform-profile class file
+  local d n
+  for d in "$1"/class/platform-profile/platform-profile-*; do
+    n=''; read -r n 2>/dev/null <"$d/name"; [[ $n == amd-pmf && -e $d/profile ]] && { printf '%s\n' "$d/profile"; return 0; }
+  done
+  return 1
+}
+cpu_hold() { # sys tweak
+  local p m cap f
+  case $2 in
+    boost-off) [[ -e $1/devices/system/cpu/cpufreq/boost ]] && printf '%s=0\n' "$1/devices/system/cpu/cpufreq/boost" ;;
+    epp-power | epp-dynamic)
+      while read -r p; do [[ -e $p/energy_performance_preference ]] && printf '%s=%s\n' "$p/energy_performance_preference" "${2#epp-}"; done < <(cpu_policies "$1") ;;
+    max-3500 | max-3000)
+      cap=$((${2#max-} * 1000))
+      while read -r p; do
+        m=''; read -r m 2>/dev/null <"$p/cpuinfo_max_freq"
+        [[ $m =~ ^[0-9]+$ && -e $p/scaling_max_freq ]] && ((m > cap)) && printf '%s=%s\n' "$p/scaling_max_freq" "$cap"
+      done < <(cpu_policies "$1") ;;
+    pmf-low-power) f=$(pmf_profile "$1") && printf '%s=low-power\n' "$f" ;;
+  esac
+  return 0
+}
+# A CPU tweak that can't run here -> why (nothing when it can)
+cpu_skip() { # sys tweak
+  local p v
+  case $2 in
+    boost-off)
+      v=''; read -r v 2>/dev/null <"$1/devices/system/cpu/cpufreq/boost" || { echo "no cpufreq boost switch"; return; }
+      [[ $v == 1 ]] || echo "boost is $v, not 1" ;;
+    epp-power | epp-dynamic)
+      [[ -n $(cpu_hold "$1" "$2") ]] || { echo "no energy_performance_preference (amd-pstate not in active mode)"; return; }
+      [[ $2 == epp-dynamic ]] || return 0
+      while read -r p; do
+        v=''; read -r v 2>/dev/null <"$p/energy_performance_available_preferences"
+        [[ " $v " == *" dynamic "* ]] || { echo "energy_performance_available_preferences doesn't list dynamic ($v)"; return; }
+      done < <(cpu_policies "$1") ;;
+    max-3500 | max-3000) [[ -n $(cpu_hold "$1" "$2") ]] || echo "no policy's cpuinfo_max_freq is above ${2#max-} MHz" ;;
+    pmf-low-power)
+      p=$(pmf_profile "$1") || { echo "no amd-pmf platform profile"; return; }
+      v=''; read -r v 2>/dev/null <"${p%/profile}/choices"
+      [[ " $v " == *" low-power "* ]] || { echo "amd-pmf doesn't offer low-power ($v)"; return; }
+      v=''; read -r v 2>/dev/null <"$p"; [[ $v != low-power ]] || echo "amd-pmf is already low-power" ;;
+  esac
 }
 # IPI (csd) and hrtimer events in a trace file, by function: "trace RATE kind comm func"
 trace_count() { # seconds file
@@ -301,6 +375,21 @@ if [[ ${1:-} == --root-helper ]]; then
         ORIG[$t]="$d$v"; APPLIED[$t]=1 r=0
         for x in $kv; do wr "$d/${x%%=*}" "${x#*=}" || { r=1; break; }; done
         ((r == 0)) && echo "ok$(for x in $kv; do printf ' %s=%s' "${x%%=*}" "$(hfi_get "$d/${x%%=*}")"; done)" || echo "err write refused" ;;
+      boost-off | epp-power | epp-dynamic | max-3500 | max-3000 | pmf-low-power)
+        # One setting each: the other EPP value or cap must not be applied.
+        case $t in epp-*) f="epp-power epp-dynamic" ;; max-*) f="max-3500 max-3000" ;; *) f='' ;; esac
+        for v in $f; do [[ -n ${APPLIED[$v]:-} ]] && { echo "err $v is applied"; return; }; done
+        local p n=0
+        o=''
+        v=$(cpu_hold "$sys" "$t"); [[ -n $v ]] || { echo "err absent"; return; }
+        for p in $v; do o+="${p%=*}=$(rd "${p%=*}") "; done
+        # The policies' caps can follow boost: they go back after it.
+        if [[ $t == boost-off ]]; then
+          while read -r p; do [[ -e $p/scaling_max_freq ]] && o+="$p/scaling_max_freq=$(rd "$p/scaling_max_freq") "; done < <(cpu_policies "$sys")
+        fi
+        ORIG[$t]=$o; APPLIED[$t]=1
+        for p in $v; do wr "${p%=*}" "${p##*=}" || n=1; done
+        ((n == 0)) && echo "ok ${v##*=} on $(wc -l <<<"$v")" || echo "err write refused" ;;
       *) echo "err unknown tweak" ;;
     esac
   }
@@ -337,6 +426,8 @@ if [[ ${1:-} == --root-helper ]]; then
         # last set, first back: wake_pack, wake_preferred, then ranking
         read -r f p <<<"$o"; read -ra kv <<<"$p"
         for ((i = ${#kv[@]} - 1; i >= 0; i--)); do wr "$f/${kv[i]%%=*}" "${kv[i]#*=}" || rc=1; done ;;
+      boost-off | epp-power | epp-dynamic | max-3500 | max-3000 | pmf-low-power)
+        for p in $o; do wr "${p%=*}" "${p##*=}" || rc=1; done ;;
     esac
     ((rc == 0)) || { echo "err restore write refused"; return; }
     unset "APPLIED[$t]"
@@ -428,6 +519,12 @@ if [[ ${1:-} == --testd-helper ]]; then
       zen5c-all) echo hfi-ranking=efficiency hfi-wake-preferred=all hfi-wake-pack=1 ;;
       wake-class) echo hfi-wake-preferred=class ;;
       wlc-track) echo hfi-wlc-track=1 ;;
+      boost-off) echo cpu-boost=0 ;;
+      epp-power) echo cpu-epp=power ;;
+      epp-dynamic) echo cpu-epp=dynamic ;;
+      max-3500) echo cpu-max-freq=3500000 ;;
+      max-3000) echo cpu-max-freq=3000000 ;;
+      pmf-low-power) echo pmf-profile=low-power ;;
     esac
   }
   td() { # call... -> its last line (the error on a failure)
@@ -637,7 +734,7 @@ while (($#)); do
   case $1 in
     --dry-run) DRY=1 ;;
     --no-post) POST=0 ;;
-    --list) for t in "${TWEAKS[@]}"; do IFS='|' read -r n i d <<<"$t"; printf '%-10s #%-4s %s\n' "$n" "$i" "$d"; done; exit 0 ;;
+    --list) for t in "${TWEAKS[@]}"; do IFS='|' read -r n i d <<<"$t"; printf '%-13s #%-4s %s\n' "$n" "$i" "$d"; done; exit 0 ;;
     --only) ONLY=${2:-}; shift ;;
     --rounds) ROUNDS=${2:-}; shift ;;
     --design) DESIGN=${2:-}; shift ;;
@@ -684,6 +781,7 @@ if [[ -n $ONLY ]]; then
 else
   for t in "${TWEAKS[@]}"; do
     [[ $MSR_TWEAKS == *" ${t%%|*} "* ]] && continue
+    [[ $LIGHT_TWEAKS == *" ${t%%|*} "* && $LOAD != light ]] && continue
     [[ $DESIGN == pb12 && $PB12_DEFAULT_OUT == *" ${t%%|*} "* ]] && continue
     SEL+=("${t%%|*}")
   done
@@ -811,7 +909,7 @@ for b in "$SYS"/class/backlight/amdgpu_bl*; do [[ -r $b/actual_brightness ]] && 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/g16-idle-ab.XXXXXX")
 REPORT=${G16_AB_REPORT:-$HOME/omarchy-asus-g16-idle-ab-$STAMP.md}
 ROOT=${G16_ROOT:-auto} TESTD=${G16_TESTD:-g16-testd}
-WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together, USB4 runtime PM, OLED CACP, the Zen 5c-first scheduler knobs) for the G16 battery A/B (#$SUMMARY_ISSUE, #10); everything is put back when it ends"
+WHY="Change and restore small idle-power settings (NMI watchdog, NVMe APST, SD reader, keyboard autosuspend, Wi-Fi power save, Num Lock LED, Bluetooth, the keyboard and Bluetooth together, USB4 runtime PM, OLED CACP, the Zen 5c-first scheduler knobs, CPU boost, EPP, frequency cap, amd-pmf profile) for the G16 battery A/B (#$SUMMARY_ISSUE, #10, #328); everything is put back when it ends"
 if [[ $ROOT == auto ]]; then
   if "$TESTD" available >/dev/null 2>&1; then ROOT=testd; else ROOT=pkexec; fi
 fi
@@ -1044,7 +1142,7 @@ ask_root_lines() { # command -> lines until "end"
 # writes the samples and the counter differences as JSON.
 PHASES=()
 measure() { # name tweak round [design row signs]
-  local name=$1 tweak=$2 round=$3 design=${4:-} n out waited=0
+  local name=$1 tweak=$2 round=$3 design=${4:-} n out waited=0 hold='' x
   n=$(printf '%03d' "${#PHASES[@]}")
   out=$WORK/$n.json
   PHASES+=("$out")
@@ -1062,10 +1160,22 @@ measure() { # name tweak round [design row signs]
       sleep 5; waited=$((waited + 5))
     done
   fi
+  # The CPU tweaks' settings, read back with every sample (power-profiles-daemon
+  # may write them back): "file=value" lines.
+  if ((DRY == 0)); then
+    for x in ${tweak//,/ }; do [[ $LIGHT_TWEAKS == *" $x "* ]] && hold+=$(cpu_hold "$SYS" "$x")$'\n'; done
+  fi
   python3 -I - "$SYS" "$PROC" "${AMDGPU:-}" "$BAT" "${DGPU:-}" "${BACKLIGHT:-}" "$MEASURE" "$INTERVAL" "$name" "$tweak" "$round" "$design" \
-    "$LOAD" "$(printf '%s\n' "${KBD_LEDS[@]}")" "$WORK/cpus.json" >"$out" <<'PY'
+    "$LOAD" "$(printf '%s\n' "${KBD_LEDS[@]}")" "$WORK/cpus.json" "$hold" >"$out" <<'PY'
 import glob, json, os, struct, sys, time
-sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd, design, load, kbd, cpuf = sys.argv[1:16]
+sysfs, proc, amdgpu, bat, dgpu, bl, measure, interval, name, tweak, rnd, design, load, kbd, cpuf, hold = sys.argv[1:17]
+hold = [l.rsplit("=", 1) for l in hold.splitlines() if "=" in l]
+def short(f):
+    f = f[len(sysfs) + 1:] if f.startswith(sysfs + "/") else f
+    for a, b in (("devices/system/cpu/cpufreq/", ""), ("class/platform-profile/", ""),
+                 ("energy_performance_preference", "EPP"), ("scaling_max_freq", "max")):
+        f = f.replace(a, b)
+    return f
 measure, interval = int(measure), int(interval)
 kbd = [k for k in kbd.split("\n") if k]
 # Light load: each CPU's clock (APERF/MPERF over the last tick) at about 5 Hz.
@@ -1159,7 +1269,8 @@ while True:
     sock, gfx, core = metrics()
     st = devstate()
     samples.append({"t": t, "bat": w, "sock": sock, "gfx": gfx, "core": core, "status": rd(bat + "/status"),
-                    "bl": rd(bl + "/actual_brightness") if bl else None, "kbd": kbd_level()})
+                    "bl": rd(bl + "/actual_brightness") if bl else None, "kbd": kbd_level(),
+                    "readback": {short(f): rd(f) for f, _ in hold}, "want": {short(f): v for f, v in hold}})
     states.append(st)
     if t + interval > end:
         # under load the clocks cover the whole phase, and so does its burst window
@@ -1224,6 +1335,9 @@ ctx packages "omarchy $(pkgv omarchy), hyprland $(pkgv hyprland), nvidia-open-dk
 ctx "cmdline extras" "$(tr ' ' '\n' <"$PROC/cmdline" 2>/dev/null | grep -E '^(nmi_watchdog|rcu_nocbs|rcutree|workqueue|nvme_core|amdgpu|pcie_aspm|nohz)' | paste -sd' ' -)"
 pp=''; for d in "$SYS"/class/platform-profile/platform-profile-*; do [[ -d $d ]] || continue; pp+="$(cat "$d/name" 2>/dev/null)=$(cat "$d/profile" 2>/dev/null) "; done
 ctx "power profile" "$(powerprofilesctl get 2>/dev/null); platform ${pp% }; EPP $(cat "$SYS"/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)"
+bst=''; read -r bst 2>/dev/null <"$SYS/devices/system/cpu/cpufreq/boost"
+mx=$(for p in $(cpu_policies "$SYS"); do cat "$p/scaling_max_freq" 2>/dev/null; done | sort -un | awk '{printf "%s%.2f", (NR > 1 ? "/" : ""), $1 / 1e6}')
+ctx cpufreq "$(cat "$SYS"/devices/system/cpu/cpufreq/policy0/scaling_driver 2>/dev/null) boost ${bst:-?}, scaling_max_freq ${mx:-?} GHz"
 [[ -n $BACKLIGHT ]] && ctx brightness "$(( $(cat "$BACKLIGHT/actual_brightness") * 100 / $(cat "$BACKLIGHT/max_brightness" 2>/dev/null || echo 1) ))% (${BACKLIGHT##*/})"
 if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
   h=$(find "${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2-)
@@ -1296,6 +1410,8 @@ for t in "${SEL[@]}"; do
       if [[ -n $miss ]]; then SKIP+=("$t: no $miss under /sys/bus/platform/devices/AMDI0104:* (a kernel without the Zen 5c-first patch 9900)")
       elif [[ -n $HFI_NOTE ]]; then SKIP+=("$t: the Zen 5c-first knobs are not at their stock values ($HFI_NOTE)")
       else RUN+=("$t"); fi ;;
+    boost-off | epp-power | epp-dynamic | max-3500 | max-3000 | pmf-low-power)
+      r=$(cpu_skip "$SYS" "$t"); if [[ -n $r ]]; then SKIP+=("$t: $r"); else RUN+=("$t"); fi ;;
     *) RUN+=("$t") ;;
   esac
 done
@@ -1465,6 +1581,9 @@ def summarize(p):
     bls = {x.get("bl") for x in s}
     if len(bls) > 1: bad.append("brightness changed")
     if dry != "1" and any(x.get("kbd") not in (None, 0) for x in s): bad.append("keyboard LED on")
+    # A CPU setting that did not hold (power-profiles-daemon wrote it back): left out.
+    off = sorted({f"{k} {v}" for x in s for k, v in (x.get("readback") or {}).items() if v != x["want"][k]})
+    if off: bad.append("setting did not hold (" + ", ".join(off[:3]) + (", …" if len(off) > 3 else "") + ")")
     if p.get("load_stopped"): bad.append("light load stopped")
     stt = {}
     for z in p["states"]:
@@ -1636,6 +1755,15 @@ if light:
                  f"{p.get('bursts', 0)} | {f(p.get('burst5c'), 1)} | {trio(p.get('lat', []))} | {trio(p.get('comp', []))} | {f(p.get('p95'), 1)} | "
                  f"{f(p.get('ghz5'))} | {f(p.get('ghz5c'))} | {f(p.get('spike'), 1)} | {', '.join(p['bad'])} |")
     o.append("\n</details>\n")
+rb = []
+for i, p in enumerate(phases):
+    seen = {}
+    for x in p["samples"]:
+        for k, v in (x.get("readback") or {}).items(): seen.setdefault(k, []).append(v)
+    if seen:
+        rb.append(f"{i} {p['name']}: " + "; ".join(f"{k} " + "/".join(dict.fromkeys(v)) + f" ({sum(a == p['samples'][0]['want'][k] for a in v)}/{len(v)} held)"
+                                                  for k, v in sorted(seen.items())))
+if rb: o.append("<details><summary>CPU settings read back with every sample (a phase where one did not hold is left out)</summary>\n\n```\n" + "\n".join(rb) + "\n```\n</details>\n")
 applied = load(work + "/applied").strip()
 if applied: o.append("<details><summary>What each apply reported</summary>\n\n```\n" + "\n".join(sorted(set(applied.splitlines()))) + "\n```\n</details>\n")
 diag = load(work + "/diag").strip()
@@ -1644,22 +1772,29 @@ tr = load(work + "/trace").strip()
 if tr: o.append("<details><summary>20 s trace at the start: IPIs (who sends them, which function) and hrtimers, per second</summary>\n\n```\n" + tr.replace("trace ", "") + "\n```\n</details>\n")
 o.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
 print("\n".join(o))
-# Each tweak's own issue gets its row, the context and the method.
+# Each tweak's own issue gets its row, the context and the method; tweaks that
+# share an issue (#10's, #328's) share one post.
 hi = next((i for i, l in enumerate(o) if l.startswith("| tweak |")), None)
 head = o[hi:hi + 2] if hi is not None else []
 noisel = [l for l in o if l.startswith("| baseline noise")]
-ctxl = [l for l in load(work + "/context").splitlines() if l.split(":")[0] in ("- kernel", "- power profile", "- brightness", "- display", "- light load", "- core types")]
+ctxl = [l for l in load(work + "/context").splitlines() if l.split(":")[0] in ("- kernel", "- power profile", "- cpufreq", "- brightness", "- display", "- light load", "- core types")]
 basel = [l for l in o if l.startswith("Baseline") or l.startswith("SoC split") or l.startswith("\nFit: ")]
 meth = [l for l in o if l.startswith("- method:") or l.startswith("- verdict:") or l.startswith("- assumes") or l.startswith("- light load: started")]
-for t, (v, mean, se2) in verdicts.items():
-    row = [l for l in o if l.startswith(f"| {t} |")]
-    txt = [f"## A/B on the G16{' under a light load' if light else ''}: {t}\n", descs.get(t, ""), ""] + head + row + noisel + [""] + ctxl + meth + [""] + basel
-    txt.append(f"\nVerdict: **{v}** ({'?' if mean is None else f'{mean:+.2f}'} W, ±2 SE {'?' if se2 is None else f'{se2:.2f}'} W). "
-               f"The full report, with every phase, the device states and the interrupt rates, is on #{summary}.")
+by_issue = {}
+for t in verdicts: by_issue.setdefault(issues.get(t, "0"), []).append(t)
+for i, ts in by_issue.items():
+    rows_ = [l for t in ts for l in o if l.startswith(f"| {t} |")]
+    txt = [f"## A/B on the G16{' under a light load' if light else ''}: {', '.join(ts)}\n"]
+    txt += [(f"- {t}: " if len(ts) > 1 else "") + descs.get(t, "") for t in ts] + [""]
+    txt += head + rows_ + noisel + [""] + ctxl + meth + [""] + basel + [""]
+    for t in ts:
+        v, mean, se2 = verdicts[t]
+        txt.append(f"Verdict{' for ' + t if len(ts) > 1 else ''}: **{v}** ({'?' if mean is None else f'{mean:+.2f}'} W, ±2 SE {'?' if se2 is None else f'{se2:.2f}'} W).")
+    txt.append(f"\nThe full report, with every phase, the device states and the interrupt rates, is on #{summary}.")
     txt.append(f"\n<sub>bin/g16-idle-ab {rev}</sub>")
-    with open(f"{work}/post-{t}.md", "w") as fh: fh.write("\n".join(txt) + "\n")
+    with open(f"{work}/post-{i}.md", "w") as fh: fh.write("\n".join(txt) + "\n")
 with open(work + "/verdicts", "w") as fh:
-    for t, (v, mean, se2) in verdicts.items(): fh.write(f"{t}|{v}\n")
+    for i in by_issue: fh.write(f"{i}\n")
 PY
 [[ -s $WORK/report.md ]] || die "the report is empty"
 scrub "$WORK/report.md" "$REPORT"
@@ -1674,10 +1809,10 @@ if [[ -n $LOAD_STOPPED ]]; then
 fi
 if ((POST)) && [[ -z $BOOT ]]; then
   post "$SUMMARY_ISSUE" "$REPORT" "the whole report"
-  while IFS='|' read -r t _; do
-    i=${ISSUE_OF[$t]:-0}; ((i > 0)) && [[ -s $WORK/post-$t.md ]] || continue
-    scrub "$WORK/post-$t.md" "$WORK/post-$t.scrubbed.md"
-    post "$i" "$WORK/post-$t.scrubbed.md" "the $t result"
+  while read -r i; do
+    [[ $i =~ ^[0-9]+$ ]] && ((i > 0)) && [[ -s $WORK/post-$i.md ]] || continue
+    scrub "$WORK/post-$i.md" "$WORK/post-$i.scrubbed.md"
+    post "$i" "$WORK/post-$i.scrubbed.md" "the result"
   done <"$WORK/verdicts"
 fi
 exit 0

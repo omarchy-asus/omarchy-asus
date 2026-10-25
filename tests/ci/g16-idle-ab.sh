@@ -41,6 +41,12 @@
 #      report says so and nothing decodes; the decode takes VA-API frames only (with a
 #      real ffmpeg on an amdgpu node, a 4:4:4 clip is refused, not decoded on the CPU);
 #      a workload that stops in the last phase leaves that phase out and ends the run.
+#  16. the CPU tweaks (#328): listed, left out of idle runs unless --only names them,
+#      in the --load light default set; each applies on every policy it should (a cap
+#      at or above a policy's top leaves it alone) and goes back; epp-dynamic is
+#      skipped with a line when a policy doesn't list it; a setting that
+#      power-profiles-daemon writes back drops the phase; through g16-testd each is
+#      its knob; tweaks that share an issue share one post.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -115,6 +121,23 @@ build_fake() {
   ln -s "$S/bus/pci/drivers/thunderbolt" "$S/devices/pci0000:00/0000:00:08.3/0000:67:00.5/driver"
   mkdir -p "$S/class/drm/card1-eDP-1/amdgpu"
   echo 0 >"$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings"
+  # cpufreq (#328): amd-pstate-epp, boost on, EPP balance_power; two Zen 5 policies
+  # (5.09 GHz), a Zen 5c one (3.51 GHz) and one whose top is 3.5 GHz, which a 3.5 GHz
+  # cap must leave alone. asus-wmi quiet + amd-pmf balanced.
+  local c=$S/devices/system/cpu/cpufreq q m
+  mkdir -p "$c"; echo 1 >"$c/boost"
+  for q in 0:5090000 1:5090000 4:3510000 5:3500000; do
+    m=${q#*:}; mkdir -p "$c/policy${q%%:*}"
+    echo amd-pstate-epp >"$c/policy${q%%:*}/scaling_driver"
+    echo "$m" >"$c/policy${q%%:*}/cpuinfo_max_freq"; echo "$m" >"$c/policy${q%%:*}/scaling_max_freq"
+    echo balance_power >"$c/policy${q%%:*}/energy_performance_preference"
+    echo "default performance balance_performance balance_power power dynamic" >"$c/policy${q%%:*}/energy_performance_available_preferences"
+  done
+  mkdir -p "$S/class/platform-profile/platform-profile-0" "$S/class/platform-profile/platform-profile-1"
+  echo asus-wmi >"$S/class/platform-profile/platform-profile-0/name"; echo quiet >"$S/class/platform-profile/platform-profile-0/profile"
+  echo "quiet balanced performance" >"$S/class/platform-profile/platform-profile-0/choices"
+  echo amd-pmf >"$S/class/platform-profile/platform-profile-1/name"; echo balanced >"$S/class/platform-profile/platform-profile-1/profile"
+  echo "low-power balanced performance" >"$S/class/platform-profile/platform-profile-1/choices"
   echo 1 >"$P/sys/kernel/nmi_watchdog"
   echo "BOOT_IMAGE=/vmlinuz quiet" >"$P/cmdline"
   printf 'cpu  1 2 3 4\nintr 1000 0\nctxt 5000\n' >"$P/stat"
@@ -128,6 +151,14 @@ orig_state() {
     "$(cat "$S/class/rfkill/rfkill7/soft")" "$( [[ -e $ST/active/voxtype.service ]] && echo vox-on || echo vox-off)" \
     "$(cat "$S/bus/pci/devices/0000:67:00.5/power/control")" "$(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings")"
 }
+cpu_state() { # boost, then per policy max/EPP, then asus-wmi and amd-pmf
+  local c=$S/devices/system/cpu/cpufreq q
+  printf '%s ' "$(cat "$c/boost")"
+  for q in 0 1 4 5; do printf '%s/%s ' "$(cat "$c/policy$q/scaling_max_freq")" "$(cat "$c/policy$q/energy_performance_preference")"; done
+  printf '%s %s' "$(cat "$S/class/platform-profile/platform-profile-0/profile")" "$(cat "$S/class/platform-profile/platform-profile-1/profile")"
+}
+CPU_WANT="1 5090000/balance_power 5090000/balance_power 3510000/balance_power 3500000/balance_power quiet balanced"
+CPU=(boost-off epp-power max-3500 max-3000 epp-dynamic pmf-low-power)
 WANT="1 100 2000 100000 on auto on off 1 0 vox-on on 0 "
 ALL=(nmi nvme-apst sd-off kbd-usb wifi-ps numlock bt-off voxtype usb-idle usb4 cacp3 cacp4)
 PB_DEFAULT=(nmi nvme-apst sd-off kbd-usb wifi-ps bt-off voxtype usb4 cacp3)
@@ -249,7 +280,7 @@ want_posts=$(( 1 + $(for t in "${ALL[@]}"; do "$SCRIPT" --list | awk -v t="$t" '
 ((nposts == want_posts)) && ok "one post per tweak issue plus #198 ($nposts)" || bad "$nposts posts, want $want_posts"
 for f in "$ST"/posted-*; do
   [[ $f == */posted-198 ]] && continue
-  grep -q '^## A/B on the G16: ' "$f" && grep -q '^Verdict: ' "$f" && ok "${f##*/} has its row and verdict" || bad "${f##*/}: $(head -3 "$f")"
+  grep -q '^## A/B on the G16: ' "$f" && grep -qE '^Verdict( for [a-z0-9-]+)?: ' "$f" && ok "${f##*/} has its row and verdict" || bad "${f##*/}: $(head -3 "$f")"
 done
 
 # ---------------------------------------------------------- 3. the guards
@@ -645,7 +676,9 @@ for t in "${ZEN[@]}"; do
   grep -qE "^\| $t \| #10 \| 2/2 \|" "$T/home/report.md" && ok "$t measured in both rounds" || bad "$t row: $(grep "^| $t |" "$T/home/report.md")"
 done
 grep -q '^zen5c-all ok ranking=efficiency wake_preferred=all wake_pack=1' "$T/home/report.md" && ok "zen5c-all sets all three" || bad "zen5c-all apply: $(grep zen5c-all "$T/home/report.md")"
-grep -qE '^## A/B on the G16: (hfi-eff|hfi-inv|wake-all|wake-pack|zen5c-all)$' "$ST/posted-10" && ok "the Zen 5c tweaks' rows posted to #10" || bad "no post to #10"
+zl=$(grep '^## A/B on the G16: ' "$ST/posted-10" 2>/dev/null)
+nz=0; for t in "${ZEN[@]}"; do [[ $zl == *"$t"* ]] && grep -q "^| $t | #10 |" "$ST/posted-10" && nz=$((nz + 1)); done
+((nz == ${#ZEN[@]})) && [[ $(grep -c '^Verdict for ' "$ST/posted-10") == "${#ZEN[@]}" ]] && ok "the Zen 5c tweaks' rows posted to #10, one post" || bad "post to #10: $zl"
 # the root helper itself: one tweak per file, the MSR tweaks only when allowed, all back on EOF
 reset; hfi_fake
 reply=$(printf 'apply zen5c-all\napply wake-all\napply hfi-inv\napply wake-class\napply wlc-track\n' | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n +2)
@@ -825,5 +858,109 @@ else
 fi
 out=$(run --load light --design pb12 --dry-run "${FAST[@]}" 2>&1); rc=$?
 ((rc == 2)) && ok "--load light refuses --design pb12" || bad "light pb12: rc=$rc"
+
+# --------------------------------- 16. the CPU tweaks under light load (#328)
+reset
+out=$("$SCRIPT" --list)
+for t in "${CPU[@]}"; do grep -qE "^$t +#328 " <<<"$out" && ok "--list: $t with #328" || bad "--list $t: $(grep "^$t" <<<"$out")"; done
+# Idle mode leaves them out unless --only names them; --load light includes them.
+run --dry-run "${FAST[@]}" >/dev/null 2>&1
+grep -qE '^\| (boost-off|epp-power|max-3500|pmf-low-power) \|' "$T/home/report.md" && bad "idle run measured a CPU tweak" || ok "idle run: no CPU tweak by default"
+run --dry-run --only boost-off "${FAST[@]}" >/dev/null 2>&1
+grep -q '^| boost-off |' "$T/home/report.md" && ok "idle run: --only names a CPU tweak, it runs" || bad "idle --only boost-off: no row"
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+run_light --dry-run --load light --rounds 1 --measure 1 --settle 0 --interval 1 --seed 7 >/dev/null 2>&1
+miss=''; for t in "${CPU[@]}"; do grep -q "^| $t |" "$T/home/report.md" || miss+=" $t"; done
+[[ -z $miss ]] && ok "--load light: the CPU tweaks are in the default set" || bad "--load light default lacks:$miss"
+out=$(run --load heavy --dry-run 2>&1); rc=$?
+((rc == 2)) && ok "an unknown --load is refused" || bad "--load heavy: exit $rc"
+# The documented #328 command: 3 rounds of 30 s phases, about 30 minutes.
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+out=$(timeout 8 env HOME="$T/home" PATH="$B:$PATH" STUB="$ST" TMPDIR="$T/tmp" G16_ROOT=none G16_AB_SYS="$S" G16_AB_PROC="$P" G16_AB_ISSUE="$B/issue" \
+  G16_AB_REPORT="$T/home/report.md" "$SCRIPT" --only "$(IFS=,; echo "${CPU[*]}")" --load light --no-post 2>&1)
+grep -q '39 phases, about 28 minutes' <<<"$out" && ok "the #328 run: 39 phases of 10 + 30 s, about 30 minutes" || bad "#328 run length: $(grep phases <<<"$out")"
+sleep 1.5
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "the #328 run stopped early: CPU settings back" || bad "stopped early, left: $(cpu_state)"
+leftover && bad "the #328 run stopped early: a workload left running" || ok "the #328 run stopped early: every workload stopped"
+
+# Each tweak applies on every policy it should and goes back on EOF.
+reset
+c=$S/devices/system/cpu/cpufreq
+mid() { # tweak -> the CPU state while it is applied, and the reply
+  { printf 'apply %s\n' "$1"; sleep 0.5; cpu_state >"$T/mid"; } | "$SCRIPT" --root-helper "$S" "$P" 0 | tail -n1
+}
+r=$(mid boost-off)
+[[ $r == "ok 0 on 1" && $(cat "$T/mid") == "0 ${CPU_WANT#1 }" ]] && ok "boost-off: boost 0" || bad "boost-off: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "boost-off: back on EOF" || bad "boost-off left: $(cpu_state)"
+r=$(mid epp-power)
+[[ $r == "ok power on 4" && $(cat "$T/mid") == "1 5090000/power 5090000/power 3510000/power 3500000/power quiet balanced" ]] && ok "epp-power: power on every policy" || bad "epp-power: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "epp-power: back on EOF" || bad "epp-power left: $(cpu_state)"
+r=$(mid epp-dynamic)
+[[ $r == "ok dynamic on 4" && $(cat "$T/mid") == "1 5090000/dynamic 5090000/dynamic 3510000/dynamic 3500000/dynamic quiet balanced" ]] && ok "epp-dynamic: dynamic on every policy" || bad "epp-dynamic: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "epp-dynamic: back on EOF" || bad "epp-dynamic left: $(cpu_state)"
+r=$(mid max-3500)
+[[ $r == "ok 3500000 on 3" && $(cat "$T/mid") == "1 3500000/balance_power 3500000/balance_power 3500000/balance_power 3500000/balance_power quiet balanced" ]] &&
+  ok "max-3500: capped where cpuinfo_max_freq is above it" || bad "max-3500: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "max-3500: back on EOF" || bad "max-3500 left: $(cpu_state)"
+r=$(mid max-3000)
+[[ $r == "ok 3000000 on 4" && $(cat "$T/mid") == "1 3000000/balance_power 3000000/balance_power 3000000/balance_power 3000000/balance_power quiet balanced" ]] && ok "max-3000: capped on every policy" || bad "max-3000: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "max-3000: back on EOF" || bad "max-3000 left: $(cpu_state)"
+r=$(mid pmf-low-power)
+[[ $r == "ok low-power on 1" && $(cat "$T/mid") == "${CPU_WANT% balanced} low-power" ]] && ok "pmf-low-power: amd-pmf low-power, asus-wmi quiet" || bad "pmf-low-power: $r / $(cat "$T/mid")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "pmf-low-power: back on EOF" || bad "pmf-low-power left: $(cpu_state)"
+# boost off can lower the caps (the kernel's doing): they go back after boost.
+{ printf 'apply boost-off\n'; sleep 0.3; echo 4000000 >"$c/policy0/scaling_max_freq"; printf 'revert boost-off\n'; } | "$SCRIPT" --root-helper "$S" "$P" 0 >/dev/null
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "boost-off: the caps go back after boost" || bad "boost-off caps: $(cpu_state)"
+r=$(printf 'apply epp-power\napply epp-dynamic\napply max-3000\napply max-3500\n' | "$SCRIPT" --root-helper "$S" "$P" 0 | sed -n '3p;5p' | paste -sd'|')
+[[ $r == "err epp-power is applied|err max-3000 is applied" ]] && ok "one EPP value and one cap at a time" || bad "conflicts: $r"
+out=$(run --design pb12 --only epp-power,epp-dynamic --dry-run 2>&1); rc=$?
+((rc == 2)) && ok "pb12 refuses epp-power with epp-dynamic" || bad "pb12 epp conflict: exit $rc"
+
+# A real light run: every CPU tweak in both rounds, each setting held, all back.
+reset; light_fake; rm -rf "${T:?}/tmp"; mkdir -p "$T/tmp"
+out=$(run_light --only "$(IFS=,; echo "${CPU[*]}")" --load light "${LIGHT[@]}" 2>&1); rc=$?
+((rc == 0)) && ok "light run exits 0" || bad "light run exit $rc: $out"
+r=$T/home/report.md
+for t in "${CPU[@]}"; do
+  grep -qE "^\| $t \| #328 \| 2/2 \|" "$r" && ok "$t measured in both rounds" || bad "$t row: $(grep "^| $t |" "$r")"
+done
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "light run: every CPU setting back" || bad "light run left: $(cpu_state)"
+grep -q 'CPU settings read back with every sample' "$r" && grep -qE 'policy0/EPP power \([0-9]+/[0-9]+ held\)' "$r" && ok "the readback is logged" || bad "readback: $(grep -A4 'read back' "$r")"
+grep -q -- '- cpufreq: amd-pstate-epp boost 1, scaling_max_freq 3.50/3.51/5.09 GHz' "$r" && ok "context: driver, boost and caps" || bad "cpufreq line: $(grep cpufreq "$r")"
+[[ -e $ST/posted-328 ]] && grep -c '^Verdict for ' "$ST/posted-328" | grep -qx 6 && ok "one post to #328 with the six verdicts" || bad "#328 post: $(cat "$ST/posted-328" 2>/dev/null | head -5)"
+
+# The dynamic skip: a policy that doesn't list it.
+reset
+echo "default performance balance_performance balance_power power" >"$S/devices/system/cpu/cpufreq/policy4/energy_performance_available_preferences"
+out=$(run --only epp-dynamic,epp-power "${FAST[@]}" --no-post 2>&1)
+grep -q "skipped: epp-dynamic: energy_performance_available_preferences doesn't list dynamic" <<<"$out" && ok "epp-dynamic skipped with a line" || bad "dynamic skip: $out"
+grep -q 'dynamic' "$ST/log" "$S"/devices/system/cpu/cpufreq/policy*/energy_performance_preference && bad "dynamic was written" || ok "epp-dynamic skipped: EPP never dynamic"
+grep -qE '^\| epp-power \| #328 \| 2/2 \|' "$T/home/report.md" && ok "the other tweak still runs" || bad "epp-power after the skip: $(grep '^| epp-power' "$T/home/report.md")"
+
+# power-profiles-daemon writes EPP back mid-phase: the phase is left out.
+reset
+( e=$S/devices/system/cpu/cpufreq/policy0/energy_performance_preference
+  for _ in $(seq 1 6000); do [[ -e $ST/stop-ppd ]] && break; [[ $(cat "$e") == power ]] && echo balance_power >"$e"; sleep 0.01; done ) &
+ppd=$!
+# 2 s phases: three samples each, so the rewrite is seen whatever the timing.
+out=$(run --only epp-power,boost-off --rounds 2 --measure 2 --settle 0 --interval 1 --seed 7 --no-post 2>&1); rc=$?
+touch "$ST/stop-ppd"; wait "$ppd"
+r=$T/home/report.md
+((rc == 0)) && ok "PPD rewrite: the run finishes" || bad "PPD rewrite: exit $rc: $out"
+grep -qE '^\| epp-power \| #328 \| 0/2 \|' "$r" && ok "PPD rewrite: both epp-power phases left out" || bad "PPD rewrite row: $(grep '^| epp-power' "$r")"
+grep -qE '\| epp-power \|.*setting did not hold \(policy0/EPP balance_power' "$r" && ok "PPD rewrite: the phase says which setting slipped" || bad "PPD note: $(grep -E '^\| [0-9]+ \| [12] \| epp-power' "$r")"
+grep -qE '^\| boost-off \| #328 \| 2/2 \|' "$r" && ok "PPD rewrite: the other tweak is kept" || bad "boost-off: $(grep '^| boost-off' "$r")"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "PPD rewrite: everything back" || bad "PPD rewrite left: $(cpu_state)"
+
+# Through g16-testd: each CPU tweak is its knob.
+reset
+touch "$ST/td-open"
+run_td --only "$(IFS=,; echo "${CPU[*]}")" --rounds 1 --measure 1 --settle 0 --interval 1 --no-post >/dev/null 2>&1
+for k in "cpu-boost 0" "cpu-epp power" "cpu-epp dynamic" "cpu-max-freq 3500000" "cpu-max-freq 3000000" "pmf-profile low-power"; do
+  grep -q "^knob-set $k |" "$ST/td.log" && ok "testd: knob-set $k" || bad "testd: no knob-set $k"
+done
+nset=$(grep -c '^knob-set' "$ST/td.log") nres=$(grep -c '^knob-restore' "$ST/td.log")
+((nset == 6 && nres == 6)) && ok "testd: every CPU knob-set has its knob-restore" || bad "testd CPU: $nset sets, $nres restores"
+[[ $(cpu_state) == "$CPU_WANT" ]] && ok "testd: nothing changed behind g16-testd's back" || bad "testd changed: $(cpu_state)"
 
 ((fails == 0)) && echo "PASS" || { echo "$fails failed"; exit 1; }
