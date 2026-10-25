@@ -1,0 +1,227 @@
+#!/bin/bash
+# The build host's kernel lock (docs/kernel-runner.md, #258): the PR check's kernel job
+# (build-pr.yml, the omarchy-asus-kernel registration) and the release kernel job (release.yml,
+# the omarchy-asus-release registration) run under one runner account, and both take this lock
+# around their build, so two kernel builds never overlap.
+#
+# The lock file's path comes from the runner's environment, OMARCHY_ASUS_CI_LOCK (its .env;
+# both registrations name the same file). Next to it:
+#   <lock>.queue   a release takes it first and keeps it until it is done: while it is held,
+#                  a PR job never takes the lock (releases come first; PR checks absorb the
+#                  wait), and a second release waits behind the first
+#   <lock>.holder  who holds the lock: kind (pr|release), run_id, run_attempt, workflow, job,
+#                  container, pid (the process holding it), since. Left behind by a holder that
+#                  was killed; the lock itself (flock) is free then, and `holder` says so.
+#
+# A flock lives as long as the process holding its file descriptor, and a job's steps are
+# separate processes, so the lock is held by a small background process of this script that
+# outlives the step: it lets go when `release` asks, or when the job's Runner.Worker is gone
+# (a cancelled or killed job; the runner also ends a job's leftover processes). It keeps no
+# token: it starts with GH_TOKEN and GITHUB_TOKEN removed from its environment.
+#
+# A cancelled job must not leave its build container compiling while the lock looks free:
+#   - `release` force-removes this job's build container before letting go (the job's cleanup
+#     step normally has already);
+#   - `acquire` looks at the previous holder's record: if its container still exists (its job
+#     was killed before its cleanup ran), it waits for it to go, then removes it, before the
+#     new build starts.
+#
+# Usage (in a job on the build host's runner; state under $RUNNER_TEMP, or KERNEL_LOCK_STATE):
+#   ci/kernel-lock queue                      release jobs: take the release queue
+#   ci/kernel-lock acquire pr|release <container>
+#                                             wait for the lock and hold it; <container> is the
+#                                             name the job's docker run gives its build
+#   ci/kernel-lock release                    remove this job's container, then let go of both
+#   ci/kernel-lock holder                     print state=held|free and the holder record
+#   ci/kernel-lock preempt-target pr|release  the run ID to cancel for a job of that kind, or
+#                                             nothing: only a release preempts, and only a PR
+#                                             check's kernel job (never a release, never a PR)
+# Unset OMARCHY_ASUS_CI_LOCK: a PR job builds without the lock (one registration, nothing to
+# overlap with) and says so; a release job refuses.
+# Tests: KERNEL_LOCK_WATCH=<pid> stands in for the Runner.Worker; KERNEL_LOCK_POLL (seconds,
+# default 5, at most 10), KERNEL_LOCK_REPORT (default 60), KERNEL_LOCK_CONTAINER_WAIT (default 600).
+set -euo pipefail
+LOCK=${OMARCHY_ASUS_CI_LOCK:-}
+STATE=${KERNEL_LOCK_STATE:-${RUNNER_TEMP:-/tmp}/omarchy-asus-kernel-lock}
+POLL=${KERNEL_LOCK_POLL:-5} REPORT=${KERNEL_LOCK_REPORT:-60} CWAIT=${KERNEL_LOCK_CONTAINER_WAIT:-600}
+CONTAINER_RE='^omarchy-asus-kernel-[0-9]+-[0-9]+$'
+say() { echo "kernel lock: $*" >&2; }
+die() { echo "::error::kernel lock: $*" >&2; exit 1; }
+usage() { sed -n 's/^# \{0,1\}Usage[^:]*: /Usage: /p; /^#   ci\/kernel-lock /s/^# \{0,1\}//p' "$0" >&2; exit 2; }
+
+# field <file> <key>: a key=value line's value
+field() { [[ -f $1 ]] && sed -n "s/^$2=//p" "$1" | head -1 || true; }
+# lock_free <file>: nobody holds the flock on it (taken and given back at once)
+lock_free() { (exec 7>>"$1" && flock -n 7); }
+# worker: the pid whose end ends the hold, the job's Runner.Worker
+worker() {
+    if [[ -n ${KERNEL_LOCK_WATCH:-} ]]; then echo "$KERNEL_LOCK_WATCH"; return; fi
+    local pid=$$
+    while (( pid > 1 )); do
+        [[ $(cat "/proc/$pid/comm" 2>/dev/null) == Runner.Worker ]] && { echo "$pid"; return; }
+        pid=$(awk '{ print $4 }' "/proc/$pid/stat" 2>/dev/null) || break
+    done
+    die "no Runner.Worker above this step (KERNEL_LOCK_WATCH names one in tests)"
+}
+container_exists() { command -v docker >/dev/null && docker container inspect "$1" >/dev/null 2>&1; }
+
+# _hold queue|lock <kind> <container> <watch>: the background holder
+hold() {
+    local what=$1 kind=$2 container=$3 watch=$4 file=$LOCK
+    [[ $what == queue ]] && file=$LOCK.queue
+    exec 9>>"$file"
+    if [[ $what == queue ]]; then
+        until flock -n 9; do kill -0 "$watch" 2>/dev/null || exit 0; sleep "$POLL"; done
+    else
+        exec 8>>"$LOCK.queue"
+        while :; do
+            kill -0 "$watch" 2>/dev/null || exit 0
+            if flock -n 9; then
+                # a PR job gives the lock back while a release is queued
+                if [[ $kind == release ]] || flock -n 8; then
+                    [[ $kind == pr ]] && flock -u 8
+                    break
+                fi
+                flock -u 9
+            fi
+            sleep "$POLL"
+        done
+        exec 8>&-
+        [[ -f $LOCK.holder ]] && cp "$LOCK.holder" "$STATE/prev"
+        {
+            echo "kind=$kind"
+            echo "run_id=${GITHUB_RUN_ID:-}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT:-}"
+            echo "workflow=${GITHUB_WORKFLOW_REF:-}"
+            echo "job=${GITHUB_JOB:-}"
+            echo "container=$container"
+            echo "pid=$BASHPID"
+            echo "since=$(date -u +%FT%TZ)"
+        } >"$LOCK.holder.$BASHPID"
+        mv -f "$LOCK.holder.$BASHPID" "$LOCK.holder"
+    fi
+    echo "$BASHPID" >"$STATE/$what.ready"
+    while kill -0 "$watch" 2>/dev/null && [[ ! -e $STATE/$what.release ]]; do sleep "$POLL"; done
+    if [[ $what == lock && $(field "$LOCK.holder" pid) == "$BASHPID" ]]; then rm -f "$LOCK.holder"; fi
+    exit 0
+}
+
+# start queue|lock <kind> <container>: start the holder and wait until it holds
+start() {
+    local what=$1 kind=$2 container=$3 watch pid waited=0
+    watch=$(worker)
+    [[ -e $STATE/$what.pid ]] && kill -0 "$(cat "$STATE/$what.pid")" 2>/dev/null && die "this job already holds the $what"
+    rm -f "$STATE/$what.ready" "$STATE/$what.release"
+    env -u GH_TOKEN -u GITHUB_TOKEN KERNEL_LOCK_STATE="$STATE" "$0" _hold "$what" "$kind" "$container" "$watch" \
+        </dev/null >>"$STATE/$what.log" 2>&1 &
+    pid=$!
+    echo "$pid" >"$STATE/$what.pid"
+    until [[ -s $STATE/$what.ready ]]; do
+        kill -0 "$pid" 2>/dev/null || die "the $what holder exited before it held the $what ($(tail -3 "$STATE/$what.log" | tr '\n' ' '))"
+        if (( waited % REPORT == 0 )); then
+            if [[ $what == queue ]]; then say "waiting for the release queue (another release is building)"
+            else say "waiting for the lock: $(describe)"; fi
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+}
+
+# describe: one line on who holds the lock
+describe() {
+    if lock_free "$LOCK"; then echo "free"; return; fi
+    if [[ -f $LOCK.holder ]]; then
+        echo "held by $(field "$LOCK.holder" kind) run $(field "$LOCK.holder" run_id) ($(field "$LOCK.holder" job), container $(field "$LOCK.holder" container), since $(field "$LOCK.holder" since))"
+    else
+        echo "held (no record yet)"
+    fi
+}
+
+cmd=${1:-}; shift || true
+case $cmd in
+    _hold) hold "$@" ;;
+    queue)
+        [[ -n $LOCK ]] || die "OMARCHY_ASUS_CI_LOCK is not set in the runner's environment (docs/kernel-runner.md): a release kernel build needs the build host's lock"
+        mkdir -p "$STATE"
+        start queue release ""
+        say "release queue taken"
+        ;;
+    acquire)
+        kind=${1:-} container=${2:-}
+        [[ $kind == pr || $kind == release ]] || usage
+        [[ $container =~ $CONTAINER_RE ]] || die "container name '$container' is not omarchy-asus-kernel-<run>-<attempt>"
+        if [[ -z $LOCK ]]; then
+            [[ $kind == pr ]] || die "OMARCHY_ASUS_CI_LOCK is not set in the runner's environment (docs/kernel-runner.md): a release kernel build needs the build host's lock"
+            echo "::warning::kernel lock: OMARCHY_ASUS_CI_LOCK is not set: building without the build host's lock (docs/kernel-runner.md)"
+            exit 0
+        fi
+        mkdir -p "$STATE"
+        if [[ $kind == release && ! -s $STATE/queue.ready ]]; then die "a release takes the queue first (ci/kernel-lock queue)"; fi
+        echo "$container" >"$STATE/container"
+        rm -f "$STATE/prev"
+        start lock "$kind" "$container"
+        # the previous holder's build container, if its job ended before its cleanup did
+        prev=$(field "$STATE/prev" container)
+        if [[ $prev =~ $CONTAINER_RE && $prev != "$container" ]] && container_exists "$prev"; then
+            say "the previous holder's build container $prev is still there: waiting up to ${CWAIT}s for it to go"
+            waited=0
+            while container_exists "$prev" && (( waited < CWAIT )); do sleep 1; waited=$((waited + 1)); done
+            if container_exists "$prev"; then
+                say "removing $prev (its job is over: it no longer holds the lock)"
+                docker rm --force "$prev" >/dev/null
+            fi
+        fi
+        say "held by this job ($kind run ${GITHUB_RUN_ID:-?}, container $container)"
+        ;;
+    release)
+        [[ -n $LOCK && -d $STATE ]] || exit 0
+        c=$(cat "$STATE/container" 2>/dev/null || true)
+        if [[ $c =~ $CONTAINER_RE ]] && container_exists "$c"; then
+            say "removing this job's build container $c before letting go"
+            docker rm --force "$c" >/dev/null 2>&1 || true
+            container_exists "$c" && die "this job's build container $c is still there: keeping the lock"
+        fi
+        for what in lock queue; do
+            [[ -e $STATE/$what.pid ]] || continue
+            pid=$(cat "$STATE/$what.pid")
+            touch "$STATE/$what.release"
+            for _ in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+            kill "$pid" 2>/dev/null || true
+            rm -f "$STATE/$what.pid" "$STATE/$what.ready"
+            say "$what released"
+        done
+        ;;
+    holder)
+        [[ -n $LOCK ]] || { echo "state=unconfigured"; exit 0; }
+        if lock_free "$LOCK"; then
+            echo "state=free"
+            [[ -f $LOCK.holder ]] && sed 's/^/stale_/' "$LOCK.holder"
+        else
+            echo "state=held"
+            [[ -f $LOCK.holder ]] && cat "$LOCK.holder"
+        fi
+        exit 0
+        ;;
+    preempt-target)
+        kind=${1:-}
+        [[ $kind == pr || $kind == release ]] || usage
+        # a PR job never preempts anything
+        [[ $kind == release && -n $LOCK ]] || exit 0
+        # The holder writes its record just after it takes the lock: give a fresh holder a moment.
+        for _ in $(seq 1 30); do
+            lock_free "$LOCK" && exit 0
+            pid=$(field "$LOCK.holder" pid)
+            if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+                hk=$(field "$LOCK.holder" kind) run=$(field "$LOCK.holder" run_id)
+                # a release never preempts a release
+                [[ $hk == pr ]] || { say "held by a release (run $run): waiting, not preempting"; exit 0; }
+                [[ $run =~ ^[0-9]+$ ]] || die "the PR holder's record has no run ID"
+                say "held by a PR check's kernel job (run $run): preempting it"
+                echo "$run"
+                exit 0
+            fi
+            sleep 1
+        done
+        say "the lock is held but its holder record names no live process: waiting, not preempting"
+        ;;
+    *) usage ;;
+esac

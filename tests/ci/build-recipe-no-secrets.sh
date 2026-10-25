@@ -5,8 +5,11 @@
 # PR check, and release.yml, the release build): never
 # pull_request_target, no -e/--env/--privileged/docker socket/seccomp on the
 # `docker run ... ci/build-recipe` lines, checkout without persisted credentials, no
-# secrets.* reference, no token in the build steps' env, and ci/build-recipe itself
-# refusing to run with a token in its environment. Offline: plain grep/awk on the
+# secrets.* reference, no token in the build steps' env, nor in the steps that take the build
+# host's kernel lock (ci/kernel-lock starts the process that holds it through the build), and
+# ci/build-recipe itself refusing to run with a token in its environment. release.yml's kernel
+# job holds a token that can cancel and re-run (actions: write) for ci/kernel-preempt only;
+# tests/ci/release-workflow.sh checks it is in no other step. Offline: plain grep/awk on the
 # workflow, and ci/build-recipe on a recipe that does not exist (it stops at the
 # guard or at the PKGBUILD check, before ci/setup-arch touches anything).
 set -u
@@ -19,9 +22,9 @@ TOKENS=(GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOK
 unset_tokens=()
 for v in "${TOKENS[@]}"; do unset_tokens+=(-u "$v"); done
 
-# check_workflow <file> <docker runs/steps of ci/build-recipe>
+# check_workflow <file> <docker runs/steps of ci/build-recipe> <steps of ci/kernel-lock>
 check_workflow() {
-local WF=$W/.github/workflows/$1 want=$2 n=$1 runs checkouts nsteps nbad
+local WF=$W/.github/workflows/$1 want=$2 want_lock=$3 n=$1 runs checkouts nsteps nbad
 echo "== $n"
 
 # a. never pull_request_target (fork PRs would get secrets and a write token)
@@ -75,9 +78,22 @@ read -r nsteps nbad < <(awk '
     END { flush(); print n + 0, bad + 0 }' "$WF")
 expect "e: $want step(s) run ci/build-recipe" "$nsteps" "$want"
 expect "e: no GH_TOKEN/GITHUB_TOKEN/github.token in those steps" "$nbad" 0
+
+# g. the same for the steps that run ci/kernel-lock
+read -r nsteps nbad < <(awk '
+    function flush() {
+        if (blk ~ /ci\/kernel-lock/) { n++; if (blk ~ /GH_TOKEN|GITHUB_TOKEN|github\.token/) bad++ }
+        blk = ""
+    }
+    /^[[:space:]]*#/ { next }
+    /^      - / || /^[^ ]/ || /^  [^ ]/ { flush() }
+    { blk = blk "\n" $0 }
+    END { flush(); print n + 0, bad + 0 }' "$WF")
+expect "g: $want_lock step(s) run ci/kernel-lock" "$nsteps" "$want_lock"
+expect "g: no GH_TOKEN/GITHUB_TOKEN/github.token in those steps" "$nbad" 0
 }
-check_workflow build-pr.yml 2
-check_workflow release.yml 1
+check_workflow build-pr.yml 2 2
+check_workflow release.yml 2 3
 # A new workflow that runs ci/build-recipe has to be added above.
 expect "every workflow that runs ci/build-recipe is checked here" \
     "$(cd "$W/.github/workflows" && grep -l -E '^[^#]*ci/build-recipe' -- *.yml | tr '\n' ' ')" "build-pr.yml release.yml "

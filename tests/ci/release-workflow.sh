@@ -1,7 +1,8 @@
 #!/bin/bash
 # The release build (.github/workflows/release.yml) and its guards, offline:
 #   1. ci/release-plan, in a throwaway repo: main only, rc only (Quattro frozen, #309),
-#      no linux-omarchy, no held recipe, no unknown or missing recipe; the plan it prints
+#      linux-omarchy only with RELEASE_RUNNER naming the build host's release runner, no held
+#      recipe, no unknown or missing recipe; the plan it prints
 #   2. the workflow: dispatch only; the eligibility job (tests/ci/release-eligibility.sh has
 #      its decisions); every job after the plan skipped off main; the build
 #      step holds no token (tests/ci/build-recipe-no-secrets.sh has the rest); id-token and
@@ -12,6 +13,9 @@
 #      into the directory), several artifacts, and an empty download
 #   4. the attest job's own check, run from the workflow on the same layouts: one directory
 #      per artifact either way, and an empty download fails
+#   5. the kernel job: named as bin/release-sign looks for it, on the build host's release
+#      runner only, built as the PR check's kernel job builds it there, under the host's lock;
+#      the token that can cancel and re-run only in the ci/kernel-preempt steps
 # Usage: tests/ci/release-workflow.sh [keep]
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -35,11 +39,14 @@ for r in a b linux-omarchy nvidia-open-dkms held; do
 done
 printf '# why\nwaits for upstream fix\n' >"$R/recipes/held/HOLD"
 mkdir -p "$R/recipes/docs-only"
-plan() { "$R/ci/release-plan" "$@" 2>&1; }
+plan() { env -u RELEASE_RUNNER "$R/ci/release-plan" "$@" 2>&1; }
+RR='["omarchy-asus-release"]'
 
 out=$(plan refs/heads/main rc "b a recipes/a/"); rc=$?
 check "main, rc, two recipes: exit 0" test "$rc" = 0
 check "recipes sorted and de-duplicated" grep -qx 'recipes=\["a", "b"\]' <<<"$out"
+check "all: the same, with no kernel" grep -qx 'all=\["a", "b"\]' <<<"$out"
+check "kernel=false" grep -qx 'kernel=false' <<<"$out"
 check "channel=rc" grep -qx 'channel=rc' <<<"$out"
 check "nvidia=false" grep -qx 'nvidia=false' <<<"$out"
 check "nvidia-open-dkms: nvidia=true" grep -qx 'nvidia=true' <<<"$(plan refs/heads/main rc nvidia-open-dkms)"
@@ -56,8 +63,27 @@ check "quattro: says frozen (#309)" has "Quattro channel is frozen (#309)" "$out
 out=$(plan refs/heads/main stable a); rc=$?
 check "unknown channel: refused" test "$rc" = 1
 out=$(plan refs/heads/main rc "a linux-omarchy"); rc=$?
-check "kernel: refused, even next to another recipe" test "$rc" = 1
-check "kernel: says the build host's runner" has "linux-omarchy does not build here" "$out"
+check "kernel without RELEASE_RUNNER: refused, even next to another recipe" test "$rc" = 1
+check "kernel without RELEASE_RUNNER: says it never builds on a hosted runner" \
+    has "the repository variable RELEASE_RUNNER is not set" "$out"
+check "kernel without RELEASE_RUNNER: no plan printed" bash -c '! grep -q "^recipes=" <<<"$1"' _ "$out"
+out=$(RELEASE_RUNNER=$RR "$R/ci/release-plan" refs/heads/main rc "a linux-omarchy" 2>&1); rc=$?
+check "kernel with RELEASE_RUNNER: accepted" test "$rc" = 0
+check "kernel: in all" grep -qx 'all=\["a", "linux-omarchy"\]' <<<"$out"
+check "kernel: not in the hosted recipes" grep -qx 'recipes=\["a"\]' <<<"$out"
+check "kernel: kernel=true" grep -qx 'kernel=true' <<<"$out"
+check "kernel: its nvidia check runs (against its headers)" grep -qx 'nvidia=true' <<<"$out"
+check "kernel: nvidia-open-dkms itself not built" grep -qx 'nvidia_built=false' <<<"$out"
+out=$(RELEASE_RUNNER=$RR "$R/ci/release-plan" refs/heads/main rc linux-omarchy 2>&1); rc=$?
+check "kernel alone: accepted, no hosted recipe" bash -c '[[ $1 == 0 ]] && grep -qx "recipes=\[\]" <<<"$2"' _ "$rc" "$out"
+for bad in '["ubuntu-24.04"]' '["self-hosted"]' '"omarchy-asus-release"' '[]' 'nope'; do
+    out=$(RELEASE_RUNNER=$bad "$R/ci/release-plan" refs/heads/main rc linux-omarchy 2>&1); rc=$?
+    check "kernel with RELEASE_RUNNER=$bad: refused" test "$rc" = 1
+done
+check "a hosted RELEASE_RUNNER: says why" has "no GitHub-hosted label" \
+    "$(RELEASE_RUNNER='["ubuntu-24.04"]' "$R/ci/release-plan" refs/heads/main rc linux-omarchy 2>&1)"
+check "RELEASE_RUNNER is not needed without the kernel" \
+    grep -qx 'recipes=\["a"\]' <<<"$(plan refs/heads/main rc a)"
 out=$(plan refs/heads/main rc held); rc=$?
 check "held recipe: refused" test "$rc" = 1
 check "held recipe: gives the hold's reason" has "recipes/held is held: waits for upstream fix" "$out"
@@ -79,8 +105,8 @@ check "no default permissions" grep -qx 'permissions: {}' "$WF"
 # job name -> its block
 jobs=$(awk '/^jobs:/ { j = 1; next } j && /^  [a-z][a-z0-9_-]*:$/ { sub(/:$/, ""); sub(/^ +/, ""); print }' "$WF")
 job() { awk -v j="$1" '/^jobs:/ { in_jobs = 1; next } in_jobs && /^  [a-z][a-z0-9_-]*:$/ { cur = $1; sub(/:$/, "", cur) } in_jobs && cur == j' "$WF"; }
-check "jobs: plan build eligibility check nvidia-compat attest result" \
-    test "$(tr '\n' ' ' <<<"$jobs")" = "plan build eligibility check nvidia-compat attest result "
+check "jobs: plan build kernel eligibility check nvidia-compat attest result" \
+    test "$(tr '\n' ' ' <<<"$jobs")" = "plan build kernel eligibility check nvidia-compat attest result "
 for j in $jobs; do
     [[ $j == plan || $j == result ]] && continue
     check "$j: skipped off main (job-level if)" \
@@ -89,8 +115,18 @@ for j in $jobs; do
 done
 check "plan: ci/release-plan gets github.ref" \
     bash -c 'grep -q "REF: \${{ github.ref }}" <<<"$1" && grep -q "ci/release-plan \"\$REF\" \"\$CHANNEL\"" <<<"$1"' _ "$(job plan)"
-check "result: fails unless plan, eligibility, build, check and attest passed" \
-    grep -qF 'for r in "$PLAN" "$ELIGIBILITY" "$BUILD" "$CHECK" "$ATTEST"' <<<"$(job result)"
+check "result: fails unless plan, eligibility, check and attest passed" \
+    grep -qF 'for r in "$PLAN" "$ELIGIBILITY" "$CHECK" "$ATTEST"' <<<"$(job result)"
+check "result: and each build job passed when planned, was skipped when not" \
+    bash -c 'grep -qF "[[ \$BUILD == \"\$want_build\" ]]" <<<"$1" && grep -qF "[[ \$KERNEL == \"\$want_kernel\" ]]" <<<"$1"' _ "$(job result)"
+for j in check nvidia-compat attest; do
+    check "$j: waits for both build jobs, runs only when neither failed and the plan passed" \
+        bash -c 'grep -qF "needs: [plan, build, kernel]" <<<"$1" && grep -qF "needs.plan.result == '"'success'"'" <<<"$1" &&
+            grep -qF "(needs.build.result == '"'success'"' || needs.build.result == '"'skipped'"')" <<<"$1" &&
+            grep -qF "(needs.kernel.result == '"'success'"' || needs.kernel.result == '"'skipped'"')" <<<"$1"' _ "$(job "$j")"
+done
+check "eligibility and attest: every planned recipe, the kernel too" \
+    test "$(job eligibility | grep -c 'needs.plan.outputs.all')$(job attest | grep -c 'needs.plan.outputs.all')" = 11
 check "eligibility: runs ci/release-eligibility with the plan's recipes" \
     grep -qF '/repo/ci/release-eligibility --channel "$CHANNEL" "${recipes[@]}"' <<<"$(job eligibility)"
 check "eligibility: no token in the job" \
@@ -98,6 +134,8 @@ check "eligibility: no token in the job" \
 check "eligibility: its container gets no env, docker socket or privilege" \
     bash -c '! grep "docker run" <<<"$1" | grep -qE " -e |--env|--privileged|docker.sock"' _ "$(job eligibility)"
 check "build: runs on ubuntu-24.04" grep -q 'runs-on: ubuntu-24.04' <<<"$(job build)"
+check "build: the hosted recipes only, skipped when there are none" \
+    bash -c 'grep -qF "needs.plan.outputs.recipes != '"'[]'"'" <<<"$1" && grep -qF "fromJSON(needs.plan.outputs.recipes)" <<<"$1"' _ "$(job build)"
 check "build: no token in the job (no github.token, no actions: read)" \
     bash -c '! grep -qE "github\.token|GH_TOKEN|actions: read" <<<"$1"' _ "$(job build)"
 check "build: a release build (--release: the release chroot's packager)" \
@@ -261,6 +299,66 @@ check "attest, a package not in SHA256SUMS: fails" test "$rc" = 1
 reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; printf 'x' >>"$P/release-rc-a/a-1-101-any.pkg.tar.zst"; flat release-rc-a
 out=$(arun '["a"]'); rc=$?
 check "attest, one artifact changed after the manifest: fails" test "$rc" = 1
+
+echo "== 5. the kernel job"
+K=$(job kernel)
+# kstep <name>: one step of the kernel job; pstep: one of build-pr.yml's kernel job
+kstep() { awk -v n="- name: $1" 'index($0, n) && /^      - name: / { on = 1; print; next }
+    on && (/^      - / || /^  [^ ]/) { on = 0 } on { print }' <<<"$K"; }
+PK=$(awk '/^  kernel:/ { on = 1; next } /^  [^ ]/ { on = 0 } on' "$W/.github/workflows/build-pr.yml")
+pstep() { awk -v n="- name: $1" 'index($0, n) && /^      - name: / { on = 1; print; next }
+    on && (/^      - / || /^  [^ ]/) { on = 0 } on { print }' <<<"$PK"; }
+check "kernel: named build (linux-omarchy)" grep -qx '    name: build (linux-omarchy)' <<<"$K"
+check "kernel: bin/release-sign looks for build (<recipe>) of each artifact" grep -qF 'job_ok "build ($recipe)"' "$W/bin/release-sign"
+check "kernel: its artifact is release-<channel>-linux-omarchy" \
+    grep -qF 'name: release-${{ needs.plan.outputs.channel }}-linux-omarchy' <<<"$K"
+check "kernel: bin/release-sign takes that artifact name" \
+    bash -c '[[ release-rc-linux-omarchy =~ ^release-rc-([a-z0-9][a-z0-9@._+-]*)$ ]] && grep -qF "[[ \$name =~ ^release-\$channel-([a-z0-9][a-z0-9@._+-]*)\$ ]]" "$1"' _ "$W/bin/release-sign"
+check "kernel: uploads its packages and SHA256SUMS, as the other recipes" \
+    bash -c 'grep -qF "/out/SHA256SUMS" <<<"$1" && grep -qF "retention-days: 14" <<<"$1" && grep -qF "*-debug-*.pkg.tar.zst" <<<"$1"' _ "$K"
+check "kernel: only when planned" grep -qF "if: github.ref == 'refs/heads/main' && needs.plan.outputs.kernel == 'true'" <<<"$K"
+ro=$(grep -E '^    runs-on:' <<<"$K")
+check "kernel: runs on the runner RELEASE_RUNNER names" grep -qF 'fromJSON(vars.RELEASE_RUNNER' <<<"$ro"
+check "kernel: runs-on never names a hosted runner" bash -c '! grep -qE "ubuntu|windows|macos|github-hosted" <<<"$1"' _ "$ro"
+check "kernel: the plan gets RELEASE_RUNNER (and refuses the kernel without it)" \
+    grep -qF 'RELEASE_RUNNER: ${{ vars.RELEASE_RUNNER }}' <<<"$(job plan)"
+check "kernel: its first step refuses anything but the self-hosted runner" \
+    bash -c 'grep -m1 -A6 "^      - name:" <<<"$1" | grep -qF "[[ \$RUNNER_KIND == self-hosted ]] ||"' _ "$K"
+names=$(grep -E '^      - name: ' <<<"$K" | sed 's/^      - name: //')
+order() { local prev=0 i; for s in "$@"; do i=$(grep -nxF "$s" <<<"$names" | cut -d: -f1); [[ -n $i ]] && (( i > prev )) || return 1; prev=$i; done; }
+check "kernel: queue, preempt, lock, build, upload, cleanup, release the lock, re-run, in that order" \
+    order "Queue for the build host's kernel lock" "Preempt a PR check's kernel build" "Take the build host's kernel lock" \
+        "Build linux-omarchy" "Upload packages (unsigned) and SHA256SUMS" "Clean up the build tree" \
+        "Release the build host's kernel lock" "Re-run the preempted PR check"
+check "kernel: the last step is the re-run" test "$(tail -1 <<<"$names")" = "Re-run the preempted PR check"
+check "kernel: takes the lock as a release, naming its build container" \
+    bash -c 'grep -qF "ci/kernel-lock acquire release \"\$CONTAINER\"" <<<"$1" && grep -qF "CONTAINER: omarchy-asus-kernel-\${{ github.run_id }}-\${{ github.run_attempt }}" <<<"$1"' _ "$(kstep "Take the build host's kernel lock")"
+check "kernel: the lock is released pass or fail" grep -qF 'if: always()' <<<"$(kstep "Release the build host's kernel lock")"
+check "kernel: the re-run runs pass or fail, only after a cancel" \
+    grep -qF "if: always() && steps.preempt.outputs.cancelled != ''" <<<"$(kstep "Re-run the preempted PR check")"
+# the same build as the PR check's kernel job on the build host: the container's extra
+# arguments, the docker run (but --release) and the cleanup are line for line the same
+kb=$(kstep "Build linux-omarchy") pb=$(pstep "Build linux-omarchy")
+hostlines() { grep -E '^[[:space:]]*(host(\+)?=|docker run|"\$BUILDER_IMAGE"|echo "(distcc|ccache):)' | sed -e 's/^[[:space:]]*//' -e 's/ --release / /'; }
+check "kernel: the build host's container arguments are the PR check's" \
+    test "$(hostlines <<<"$kb")" = "$(hostlines <<<"$pb" | grep -v '^host=()$')"
+check "kernel: a release build (--release), on the channel" \
+    grep -qF '/repo/ci/build-recipe --channel "$CHANNEL" --release linux-omarchy' <<<"$kb"
+check "kernel: the build container's name is the PR check's pattern" \
+    test "$(grep -F 'CONTAINER:' <<<"$kb" | sed 's/^ *//')" = "$(grep -F 'CONTAINER:' <<<"$pb" | sed 's/^ *//')"
+cl() { grep -E 'docker (rm|run)|rmdir' | sed 's/^ *//'; }
+check "kernel: the cleanup is the PR check's" \
+    test "$(kstep 'Clean up the build tree' | cl)" = "$(pstep 'Clean up the build tree' | cl)"
+# the token
+check "actions: write only in the kernel job" \
+    test "$(for j in $jobs; do grep -q 'actions: write' <<<"$(job "$j")" && echo "$j"; done | tr '\n' ' ')" = "kernel "
+tok=$(awk '/^      - / { if (blk ~ /github\.token|GH_TOKEN/) print name; blk = ""; name = $0 } { blk = blk "\n" $0 }
+    END { if (blk ~ /github\.token|GH_TOKEN/) print name }' <<<"$K" | sed 's/^      - name: //')
+check "kernel: the token only in the preempt and re-run steps" \
+    test "$(tr '\n' '|' <<<"$tok")" = "Preempt a PR check's kernel build|Re-run the preempted PR check|"
+check "kernel: those steps run ci/kernel-preempt and nothing else of ours" \
+    bash -c 'p=$(grep -E "ci/|docker" <<<"$1$2" | sed "s/^ *//"); [[ $(grep -c "ci/kernel-preempt" <<<"$p") == 2 && $(grep -v -c "ci/kernel-preempt" <<<"$p") == 0 ]]' \
+    _ "$(kstep "Preempt a PR check's kernel build")" "$(kstep "Re-run the preempted PR check")"
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"

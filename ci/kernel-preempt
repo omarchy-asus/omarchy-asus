@@ -1,0 +1,65 @@
+#!/bin/bash
+# Preemption for the release kernel job (.github/workflows/release.yml, docs/kernel-runner.md):
+# a release that finds a PR check's kernel job holding the build host's kernel lock cancels that
+# PR run, waits for the lock, builds, and afterwards re-runs the PR run's failed and cancelled
+# jobs. PR checks absorb the wait, not releases. The decision is ci/kernel-lock preempt-target's
+# (only a release preempts, only a PR check's kernel job, never a release).
+#
+# These are the only steps of the job with a token that can cancel and re-run (GH_TOKEN,
+# actions: write); the lock, build and upload steps get none. The holder record is written by
+# the runner account, which also runs PR code, so it is not trusted on its own: a run is only
+# cancelled or re-run when GitHub says it is this repository's build-pr.yml.
+#
+# Usage: ci/kernel-preempt cancel        cancel the PR holder's run, if any; prints cancelled=<id>
+#                                        on stdout (a GITHUB_OUTPUT line), everything else on stderr
+#        ci/kernel-preempt rerun <id>    once that run has finished, re-run its failed and
+#                                        cancelled jobs, unless a newer build-pr.yml run on its
+#                                        branch has replaced it (re-running the old one would
+#                                        cancel the newer one: build-pr.yml cancels in progress)
+# Needs GH_TOKEN and GITHUB_REPOSITORY. KERNEL_PREEMPT_WAIT: how long rerun waits for the
+# cancelled run to finish (seconds, default 1800); KERNEL_PREEMPT_POLL (default 15).
+set -euo pipefail
+PR_WORKFLOW=.github/workflows/build-pr.yml
+WAIT=${KERNEL_PREEMPT_WAIT:-1800} POLL=${KERNEL_PREEMPT_POLL:-15}
+say() { echo "kernel preempt: $*" >&2; }
+R=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}
+
+# is_pr_run <id>: GitHub says the run is this repository's build-pr.yml
+is_pr_run() {
+    local path
+    path=$(gh api "repos/$R/actions/runs/$1" --jq .path 2>/dev/null) || return 1
+    [[ ${path%%@*} == "$PR_WORKFLOW" ]]
+}
+
+case ${1:-} in
+    cancel)
+        run=$("$(dirname "$0")/kernel-lock" preempt-target release)
+        [[ -n $run ]] || exit 0
+        if ! is_pr_run "$run"; then
+            echo "::warning::kernel preempt: the lock's holder record names run $run, which GitHub does not list as $R's build-pr.yml: not cancelling it" >&2
+            exit 0
+        fi
+        gh run cancel "$run" -R "$R" >&2 || { echo "::warning::kernel preempt: cancelling run $run failed: waiting for it instead" >&2; exit 0; }
+        echo "::notice::kernel preempt: cancelled the PR check's run $run; its failed and cancelled jobs re-run after this build" >&2
+        echo "cancelled=$run"
+        ;;
+    rerun)
+        run=${2:?usage: ci/kernel-preempt rerun <run id>}
+        [[ $run =~ ^[0-9]+$ ]] || { echo "::error::kernel preempt: '$run' is not a run ID"; exit 1; }
+        is_pr_run "$run" || { echo "::error::kernel preempt: run $run is not $R's build-pr.yml"; exit 1; }
+        waited=0
+        until [[ $(gh run view "$run" -R "$R" --json status --jq .status) == completed ]]; do
+            (( waited < WAIT )) || { echo "::error::kernel preempt: run $run has not finished after ${WAIT}s: re-run it by hand (gh run rerun $run --failed)"; exit 1; }
+            sleep "$POLL"; waited=$((waited + POLL))
+        done
+        branch=$(gh run view "$run" -R "$R" --json headBranch --jq .headBranch)
+        latest=$(gh run list -R "$R" -w build-pr.yml -b "$branch" -L 1 --json databaseId --jq '.[0].databaseId')
+        if [[ -n $latest && $latest != "$run" ]]; then
+            echo "::notice::kernel preempt: run $run on $branch was replaced by run $latest: not re-running it"
+            exit 0
+        fi
+        gh run rerun "$run" --failed -R "$R"
+        echo "::notice::kernel preempt: re-running run $run's failed and cancelled jobs"
+        ;;
+    *) sed -n 's/^# \{0,1\}Usage: /Usage: /p; /^#        ci\/kernel-preempt/s/^# \{0,7\}//p' "$0" >&2; exit 2 ;;
+esac

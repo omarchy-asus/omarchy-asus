@@ -1,9 +1,22 @@
-# The kernel job on the build host's runner (optional)
+# The kernel jobs on the build host's runner
 
 On a GitHub-hosted runner the `kernel` job of `.github/workflows/build-pr.yml`
 takes about 2.5 hours. It can run on a self-hosted runner on the build host
-instead, where distcc sends compiles to the helper (docs/distcc.md). Every
-other job stays on GitHub's runners.
+instead, where distcc sends compiles to the helper (docs/distcc.md). The
+kernel's release build (`.github/workflows/release.yml`, #258) runs there only.
+Every other job stays on GitHub's runners.
+
+One runner account on the build host, two registrations of it:
+
+| registration (label) | runs | chosen by the repository variable |
+|---|---|---|
+| `omarchy-asus-kernel` | the PR check's `kernel` job (build-pr.yml) | `KERNEL_RUNNER` (optional: unset, the PR check builds on `ubuntu-24.04`) |
+| `omarchy-asus-release` | the release build's `kernel` job (release.yml), dispatched on `main` | `RELEASE_RUNNER` (required: unset, the release refuses `linux-omarchy`; it never builds on a hosted runner) |
+
+Two registrations so a release never queues behind a PR check in GitHub's
+queue; one host lock (below) so their two kernel builds still never overlap.
+Both have the same isolation: the same account, its rootless docker, the same
+job-started hook, distcc key and compiler cache.
 
 It is off unless the repository variable `KERNEL_RUNNER` is set. With it set:
 
@@ -23,8 +36,76 @@ It is off unless the repository variable `KERNEL_RUNNER` is set. With it set:
 
 `tests/ci/kernel-runner.sh` checks all of this.
 
-If the runner is down, kernel jobs wait for it (up to a day). Unset the
-variable to send them back to GitHub's runners.
+If the runner is down, kernel jobs wait for it (up to a day). Unset
+`KERNEL_RUNNER` to send PR checks back to GitHub's runners; a kernel release
+waits for the build host, or is not dispatched.
+
+## The release kernel job
+
+`release.yml`'s `kernel` job is named `build (linux-omarchy)`, like the
+other recipes' build jobs, because that is the job `bin/release-sign` checks
+for the `release-<channel>-linux-omarchy` artifact. It builds exactly as the
+PR check's kernel job does on the build host (the same container,
+`ci/build-recipe --release`, the CPU weight, the run's container name, the
+distcc key dir and compiler cache from the runner's environment, the
+cleanup), then uploads the packages and their `SHA256SUMS` in the same layout
+as the other recipes. The run's attest, check and result jobs cover it, and
+`nvidia-compat` builds the NVIDIA module against the headers it just built.
+`tests/ci/release-workflow.sh` compares the two jobs line by line.
+
+## The host lock
+
+Both kernel jobs take one lock, `ci/kernel-lock`, around their build: a
+`flock` on the file `OMARCHY_ASUS_CI_LOCK` names in the runner's `.env` (the
+same file in both registrations' `.env`). Next to it:
+
+- `<lock>.holder` records who holds it: `kind` (`pr` or `release`), the run
+  ID and attempt, the workflow, the job, the build container's name, the
+  holding process and since when. `ci/kernel-lock holder` prints it, with
+  `state=held` or `state=free` (a record left by a killed holder shows as
+  `stale_...` on a free lock).
+- `<lock>.queue` is a release's place in line. A release takes it first and
+  keeps it until it is done: while it is held no PR job takes the lock, and a
+  second release waits behind the first.
+
+A job's steps are separate processes, so the lock is held by a small
+background process that `ci/kernel-lock` starts without the job's token. It
+lets go when the job's last steps ask (`ci/kernel-lock release`, after the
+cleanup), or when the job's `Runner.Worker` is gone (a cancelled or killed
+job). A lock never looks free while a build container still runs:
+`release` removes the job's own container first, and keeps the lock if it
+won't go; and a new holder that finds the previous holder's container still
+there (its job was killed before its cleanup ran) waits up to 10 minutes for
+it, then removes it, before it builds.
+
+With `OMARCHY_ASUS_CI_LOCK` unset a PR check builds without the lock (with
+one registration there is nothing to overlap with) and says so; a release
+refuses.
+
+## Preemption
+
+PR checks absorb the wait, not releases. The release kernel job:
+
+1. takes the release queue (`ci/kernel-lock queue`);
+2. if a PR check's kernel job holds the lock, cancels that PR run
+   (`ci/kernel-preempt cancel`). The holder record is written by the runner
+   account, which also runs branch code, so a run is only cancelled when
+   GitHub lists it as this repository's `build-pr.yml`;
+3. waits for the lock (the cancelled job's cleanup removes its container and
+   lets go), builds, uploads, cleans up and lets go;
+4. pass or fail, re-runs the cancelled run's failed and cancelled jobs
+   (`ci/kernel-preempt rerun`, `gh run rerun --failed`) once it has finished,
+   unless a newer `build-pr.yml` run on its branch has replaced it
+   (re-running the old one would cancel the newer one).
+
+A PR job never preempts anything: it waits for the lock, and gives way while a
+release is queued. A release never preempts a release; it waits its turn.
+
+Only steps 2 and 4 get the job's token in their environment, which can cancel
+and re-run runs (`actions: write`, no `contents: write`); the lock, build and
+upload steps get none, and the build container holds no credentials
+(`tests/ci/build-recipe-no-secrets.sh`, `tests/ci/release-workflow.sh`).
+`tests/ci/kernel-lock.sh` tests the lock and these decisions.
 
 ## Trust boundary
 
@@ -42,9 +123,10 @@ the distcc key at. What keeps the rest of the build host out of reach:
   are its subuid range. A privileged container from branch code gets no more
   than the runner account has. The system docker socket refuses it.
 - The runner's job-started hook, a root-owned copy of
-  `build/kernel-runner-job-started.sh` that no workflow can change, ends any job
-  that isn't build-pr.yml's `kernel` job on this repository, started by a
-  `pull_request` from one of its own branches or a `workflow_dispatch`. This
+  `build/kernel-runner-job-started.sh` that no workflow can change, run by
+  both registrations, ends any job that isn't build-pr.yml's `kernel` job on
+  this repository, started by a `pull_request` from one of its own branches or
+  a `workflow_dispatch`, or release.yml's `kernel` job dispatched on `main`. This
   is what keeps a fork's PR off the runner: its copy of the workflow decides
   `runs-on`, not ours. Failing the hook would not be enough (the runner still
   runs a step marked `if: always()`), so a refusal kills the job's
@@ -54,8 +136,17 @@ the distcc key at. What keeps the rest of the build host out of reach:
 - As a second layer, the repository asks for approval before running any
   outside contributor's workflow (Settings, Actions, "Require approval for all
   external contributors").
-- Its distcc key is its own (not the release builds' key), limited on the
-  helper the same way, so it can be revoked on its own.
+- Its distcc key is its own (not the chroot release builds' key), limited on
+  the helper the same way, so it can be revoked on its own.
+- The release registration runs main's code only, but under the same account
+  as PR jobs, at the same time while it waits for the lock. Its token can
+  cancel and re-run runs while its job lasts; a PR job's own steps run as the
+  same account and could read it. That is the trust level above (this
+  repository's own branches only), and the token can't push code, sign or
+  publish. The compiler cache and distcc key are shared the same way. The
+  packages it builds are not trusted for being on the build host:
+  `bin/release-sign` checks GitHub's record of the run before signing
+  (docs/releases.md).
 
 ## Setup
 
@@ -171,6 +262,13 @@ changes. After makepkg the log has this build's
 runner's subuids; to empty it, remove them from a container:
 `docker run --rm -v /var/lib/<runner>/ccache:/c <image> sh -c 'rm -rf /c/*'`.
 
+The host lock, in the runner's home, named in its `.env`:
+
+```bash
+runuser -u <runner> -- install -d -m 700 /var/lib/<runner>/lock
+echo "OMARCHY_ASUS_CI_LOCK=/var/lib/<runner>/lock/kernel.lock" >> /var/lib/<runner>/actions-runner/.env
+```
+
 Then turn it on:
 
 ```bash
@@ -182,3 +280,31 @@ The kernel job's log says `kernel runner: workflow_dispatch on ... accepted`,
 `distcc: ... mounted read-only`, `ccache: ... mounted` and
 `==> distcc: 1 helper(s), <n> slots on top of <m> here`, and after the build
 the ccache hit rate; the helper's `journalctl -t distccd` shows the compiles.
+
+### The release registration
+
+A second registration of the same account, in its own directory, with its own
+label and service. Its `.env` is the first one's (the same rootless docker,
+hook, distcc key dir, compiler cache and lock file):
+
+```bash
+runuser -u <runner> -- bash -c '
+    cd ~ && mkdir actions-runner-release && cd actions-runner-release &&
+    curl -fsSLo r.tgz https://github.com/actions/runner/releases/download/v<ver>/actions-runner-linux-x64-<ver>.tar.gz &&
+    echo "<sha256>  r.tgz" | sha256sum -c && tar xzf r.tgz && rm r.tgz'
+token=$(gh api -X POST repos/omarchy-asus/omarchy-asus/actions/runners/registration-token --jq .token)
+runuser -u <runner> -- /var/lib/<runner>/actions-runner-release/config.sh --unattended \
+    --url https://github.com/omarchy-asus/omarchy-asus --token "$token" \
+    --name <name>-release --labels omarchy-asus-release --no-default-labels --replace
+install -o <runner> -g <runner> -m 600 /var/lib/<runner>/actions-runner/.env /var/lib/<runner>/actions-runner-release/.env
+cd /var/lib/<runner>/actions-runner-release && ./svc.sh install <runner> && ./svc.sh start
+gh variable set RELEASE_RUNNER -R omarchy-asus/omarchy-asus --body '["omarchy-asus-release"]'
+```
+
+Keep the two `.env` files the same when one changes, and restart both
+services. Try it with a release dispatch (nothing publishes from the release
+workflow): `gh workflow run release.yml --ref main -f channel=rc -f recipes=linux-omarchy`.
+The kernel job's log says `kernel runner: workflow_dispatch on ... accepted`,
+`kernel lock: release queue taken`, `kernel lock: held by this job (release run ...)`,
+and, when a PR check's kernel build held the lock, `preempting it` and, after
+the build, `re-running run ...`.

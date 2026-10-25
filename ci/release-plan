@@ -3,14 +3,22 @@
 # Refuses (exit 1, one ::error:: line per reason):
 #   - a ref other than refs/heads/main: releases are built from main only
 #   - a channel other than rc: Quattro is frozen (#309) and builds no release here
-#   - no recipe, a name without a PKGBUILD, linux-omarchy (the kernel builds on the build
-#     host's runner, not here: #258), a held recipe (recipes/<r>/HOLD, its first line the
-#     reason: merged but never built or published until the hold is removed)
+#   - no recipe, a name without a PKGBUILD, a held recipe (recipes/<r>/HOLD, its first line
+#     the reason: merged but never built or published until the hold is removed)
+#   - linux-omarchy while RELEASE_RUNNER (the repository variable, in the environment) is not
+#     a JSON list of the build host's release runner labels: the kernel's release build runs
+#     on that runner only (docs/kernel-runner.md), never on a GitHub-hosted runner
 #   - recipes the release cohorts don't allow (bin/release-cohort check-recipes)
-# Usage: ci/release-plan <ref> <channel> "<recipe> <recipe>..."
+# Usage: RELEASE_RUNNER=<json> ci/release-plan <ref> <channel> "<recipe> <recipe>..."
 # Prints GITHUB_OUTPUT lines:
-#   recipes=<JSON list>   channel=rc   nvidia=true|false (nvidia-open-dkms builds: its
-#   reverse-dependency check, ci/nvidia-compat, runs on the result)
+#   all=<JSON list>       every recipe to build
+#   recipes=<JSON list>   those built on GitHub-hosted runners (all but linux-omarchy)
+#   kernel=true|false     linux-omarchy builds, on the build host's release runner
+#   channel=rc
+#   nvidia=true|false     nvidia-open-dkms or linux-omarchy builds: the reverse-dependency
+#                         check, ci/nvidia-compat, runs on the result (against this run's
+#                         linux-omarchy-headers when the kernel builds)
+#   nvidia_built=true|false  nvidia-open-dkms builds
 set -euo pipefail
 cd "$(dirname "$0")/.."
 KERNEL=linux-omarchy NVIDIA=nvidia-open-dkms
@@ -31,8 +39,6 @@ for n in $requested; do
     n=${n#recipes/}; n=${n%/}
     if [[ ! $n =~ ^[A-Za-z0-9][A-Za-z0-9@._+-]*$ || ! -f recipes/$n/PKGBUILD ]]; then
         err "no such recipe: $n"
-    elif [[ $n == "$KERNEL" ]]; then
-        err "$KERNEL does not build here: the kernel's release build runs on the build host's runner (#258)"
     elif [[ -f recipes/$n/HOLD ]]; then
         err "recipes/$n is held: $(grep -v -E '^[[:space:]]*(#|$)' "recipes/$n/HOLD" | head -1)"
     else
@@ -40,15 +46,36 @@ for n in $requested; do
     fi
 done
 ((${#names[@]} || fail)) || err "no recipe to build: give at least one recipe directory"
+for n in "${names[@]}"; do
+    [[ $n == "$KERNEL" ]] || continue
+    runner=${RELEASE_RUNNER:-}
+    if [[ -z $runner ]]; then
+        err "$KERNEL builds only on the build host's release runner, and the repository variable RELEASE_RUNNER is not set (docs/kernel-runner.md); it is never built on a GitHub-hosted runner for a release"
+    elif ! python3 -c '
+import json, sys
+v = json.loads(sys.argv[1])
+ok = isinstance(v, list) and v and all(isinstance(x, str) and x for x in v)
+hosted = ok and any(x.startswith(("ubuntu-", "windows-", "macos-")) or x == "self-hosted" for x in v)
+sys.exit(0 if ok and not hosted else 1)' "$runner" 2>/dev/null; then
+        err "RELEASE_RUNNER is '$runner': it must be a JSON list of the build host's release runner labels (e.g. [\"omarchy-asus-release\"]), no GitHub-hosted label and not plain self-hosted"
+    fi
+done
 
 bin/release-cohort --workspace "$PWD" check-recipes >&2 || err "the release cohorts' recipes disagree (bin/release-cohort check-recipes)"
 ((fail == 0)) || exit 1
 
 mapfile -t names < <(printf '%s\n' "${names[@]}" | sort -u)
-nvidia=false
-for n in "${names[@]}"; do [[ $n == "$NVIDIA" ]] && nvidia=true; done
-json=$(printf '%s\n' "${names[@]}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))')
-echo "==> release plan: channel=$channel recipes=$json" >&2
+nvidia=false nvidia_built=false kernel=false hosted=()
+for n in "${names[@]}"; do
+    [[ $n == "$NVIDIA" ]] && nvidia=true nvidia_built=true
+    if [[ $n == "$KERNEL" ]]; then kernel=true nvidia=true; else hosted+=("$n"); fi
+done
+tojson() { printf '%s\n' "$@" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))'; }
+all=$(tojson "${names[@]}") json=$(tojson "${hosted[@]}")
+echo "==> release plan: channel=$channel recipes=$all (kernel on the build host's runner: $kernel)" >&2
+echo "all=$all"
 echo "recipes=$json"
+echo "kernel=$kernel"
 echo "channel=$channel"
 echo "nvidia=$nvidia"
+echo "nvidia_built=$nvidia_built"

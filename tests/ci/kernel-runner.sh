@@ -71,8 +71,21 @@ expect "d: docker prune only in the hosted-only Free disk space step" \
     "$(grep -v -E '^[[:space:]]*#' "$WF" | grep -c 'docker [a-z]* *prune')$(step 'Free disk space' | grep -c 'docker [a-z]* *prune')" 11
 expect "d: cleanup removes only the job's build dir" \
     "$(grep -c 'docker run --rm -v "$DIR:/d" "$BUILDER_IMAGE" rm -rf /d/work /d/out' <<<"$clean")" 1
-expect "d: cleanup is the kernel job's last step" \
-    "$(awk '/^  kernel:/ { on = 1; next } /^  [^ ]/ { on = 0 } on && /^      - name: / { last = $0 } END { print last }' "$WF" | grep -c 'Clean up the build tree')" 1
+# the kernel job's step names, in order
+ksteps=$(awk '/^  kernel:/ { on = 1; next } /^  [^ ]/ { on = 0 } on && /^      - name: / { sub(/^      - name: /, ""); print }' "$WF")
+expect "d: the lock is released last, right after the cleanup (the container is gone first)" \
+    "$(tail -2 <<<"$ksteps" | tr '\n' '|')" "Clean up the build tree|Release the build host's kernel lock|"
+expect "d: the lock is taken right before the build" \
+    "$(grep -B1 -x 'Build linux-omarchy' <<<"$ksteps" | head -1)" "Take the build host's kernel lock"
+take=$(step "Take the build host's kernel lock")
+expect "d: on the build host's runner only, and only when it builds" \
+    "$(grep -c "if: steps.prev.outputs.run_id == '' && runner.environment == 'self-hosted'" <<<"$take")" 1
+expect "d: a PR job takes it as a PR (it never preempts), naming its build container" \
+    "$(grep -c 'ci/kernel-lock acquire pr "$CONTAINER"' <<<"$take")$(grep -c -F "$cname" <<<"$take")" 11
+expect "d: the release step runs pass or fail, on the build host's runner" \
+    "$(step "Release the build host's kernel lock" | grep -c "if: always() && runner.environment == 'self-hosted'")" 1
+expect "d: no step of build-pr.yml cancels or re-runs anything" \
+    "$(grep -v -E '^[[:space:]]*#' "$WF" | grep -c -E 'kernel-preempt|gh run (cancel|rerun)|actions: write')" 0
 
 # f. the runner's job-started hook (build/kernel-runner-job-started.sh)
 R=omarchy-asus/omarchy-asus WREF="omarchy-asus/omarchy-asus/.github/workflows/build-pr.yml@refs/pull/1/merge"
@@ -125,6 +138,17 @@ expect "f: pull_request_target: refused" "$(hook pull_request_target "$hev/own.j
 expect "f: push: refused" "$(hook push "$hev/own.json")" refused
 expect "f: another job: refused" "$(hook pull_request "$hev/own.json" GITHUB_JOB=build)" refused
 expect "f: another repository: refused" "$(hook workflow_dispatch /nonexistent GITHUB_REPOSITORY=someone/omarchy-asus)" refused
+RWREF="$R/.github/workflows/release.yml@refs/heads/main"
+expect "f: release.yml's kernel job, dispatched on main: accepted" \
+    "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$RWREF" GITHUB_REF=refs/heads/main)" accepted
+expect "f: release.yml from another branch: refused" \
+    "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$R/.github/workflows/release.yml@refs/heads/x" GITHUB_REF=refs/heads/x)" refused
+expect "f: release.yml's workflow file from main, run on another ref: refused" \
+    "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$RWREF" GITHUB_REF=refs/heads/x)" refused
+expect "f: release.yml on a pull_request: refused" \
+    "$(hook pull_request "$hev/own.json" GITHUB_WORKFLOW_REF="$RWREF" GITHUB_REF=refs/heads/main)" refused
+expect "f: release.yml's other jobs: refused" \
+    "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$RWREF" GITHUB_REF=refs/heads/main GITHUB_JOB=build)" refused
 expect "f: another workflow: refused" \
     "$(hook workflow_dispatch /nonexistent GITHUB_WORKFLOW_REF="$R/.github/workflows/lint.yml@refs/heads/main")" refused
 hook pull_request "$hev/fork.json" >/dev/null
