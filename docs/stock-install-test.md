@@ -156,9 +156,9 @@ File on [omarchy-asus/omarchy-asus](https://github.com/omarchy-asus/omarchy-asus
    Put the per-fix table under `## What happened`, the `g16-check` output under
    `## Evidence / How to test`, and `ours` (or the upstream issue number) under `## Upstream status`.
 
-3. Each **failure** gets its own issue with the `bug` label (plus the matching `delta:*` label:
-   `delta:kernel` for Win-lock, `delta:nvidia`, `delta:hyprland`, `delta:package` for the G16
-   packages), and a link back to the test-report issue. Reference the delta's existing issue
-   (`Refs #N`) when there is one.
+3. Each **failure** gets its own issue with the `bug` label only, and a link back to the
+   test-report issue. Name the fix that failed by its entry in
+   [docs/deltas.md](deltas.md) (e.g. `docs/deltas.md#kernel-0568-winlock`), which says what it
+   fixes and how to test it.
 
 `bin/issue` refuses text with personal information in it; fix the text, don't work around the scan.

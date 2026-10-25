@@ -2,7 +2,9 @@
 
 The issues on [omarchy-asus/omarchy-asus](https://github.com/omarchy-asus/omarchy-asus/issues)
 are the single tracker for all omarchy-asus work: kernel, nvidia, hyprland, the G16 packages,
-and fixes that only exist upstream. Every Claude/Codex session files here.
+and fixes that only exist upstream. Every Claude/Codex session files here. Issues are for work
+only: bugs, experiments being measured or tested, and tasks. A change we carry is recorded in
+[docs/deltas.md](docs/deltas.md), not in an issue (Carried changes, below).
 
 ## Rules
 
@@ -13,9 +15,10 @@ and fixes that only exist upstream. Every Claude/Codex session files here.
    the body), checks the labels exist, requires the body sections below, scans for personal
    information, and signs the issue with `--agent NAME` / `$AGENT_NAME`. Try `--dry-run` first.
 3. **Never file on upstream projects** (omacom/omarchy, basecamp, NVIDIA, hyprwm, Arch, kernel
-   mailing lists, ...). Draft the report here instead (`bin/issue template upstream-report`,
-   labels `delta:upstream-only` + `upstream:not-submitted`); a human decides. The helper refuses
-   any `--repo` other than this one.
+   mailing lists, ...). Draft the report here instead; a human decides. For a change we carry,
+   the draft goes in its docs/deltas.md entry, under "Upstream report draft". For anything else
+   (a bug we don't carry a fix for), it goes in the bug's issue. The helper refuses any `--repo`
+   other than this one.
 4. **No personal information** beyond what the author's own GitHub profile already makes
    public (their handle, name, or an email they show there; that isn't private, so it isn't a
    finding). Nothing else: no hostnames, local usernames, home paths, private emails,
@@ -74,6 +77,8 @@ On top of clud's caps, these hold across all stages:
   At the switch Quattro picks up the trunk (#309).
 - **Findings outside the task** (a flaky test, an unrelated bug) are filed with `bin/issue`,
   not fixed in passing.
+- **A carried change is recorded in the pull request that carries it**: its entry in
+  docs/deltas.md plus the recipe's `DELTA`/`NOTES.md` (Carried changes, below).
 - **Never** publish from a branch, publish a build made outside the chroot, or put
   personal information in anything pushed, posted or uploaded.
 
@@ -94,40 +99,54 @@ admin: once the required CI checks are green, the lander merges with `--admin`.
 - Pull requests from external contributors are reviewed by us, against these rules, and need
   the maintainer's approving review.
 
+## Carried changes
+
+[docs/deltas.md](docs/deltas.md) is the record of every change we carry: each patch or shipped
+change in every recipe, with its component, what it fixes, how to test it, its upstream state
+(open, merged-unreleased, not submitted, or ours-only, with merge commit IDs where known), when
+to drop it, and an upstream report draft where one exists. A carried change has no open issue.
+
+- **The pull request that adds a patch or shipped change** adds its docs/deltas.md entry and its
+  recipe's `DELTA`/`NOTES.md` in the same pull request. A GitHub pull request it carries goes in
+  the recipe's `UPSTREAM_PRS` too: that is what the daily `bin/check-upstream` watches.
+- **The pull request that drops a patch** moves its entry to the doc's "Dropped" section, with
+  the release that contains the fix (or why it went), and removes it from `DELTA`/`NOTES.md`.
+- **An upstream state that changes** (a PR opens, merges, is released) is updated in the entry,
+  with the date it was checked.
+- **An issue is filed only for work** on a carried change: a bug in it, a refresh to upstream's
+  newer version, a G16 test or measurement still to run. Its entry links the issue; the issue
+  closes when the work is done, not when the patch drops.
+
 ## Labels
 
 | label | meaning |
 |---|---|
-| `delta:kernel` / `delta:nvidia` / `delta:hyprland` | a change carried in linux-omarchy / nvidia-open-dkms / hyprland+hyprpm |
-| `delta:package` | a whole package shipped by omarchy-asus |
-| `delta:upstream-only` | not packaged here; tracked as an upstream PR/issue only |
-| `delta:candidate` | might be carried; not yet |
-| `experimental` | default-off, compile-tested only, or untested on hardware |
-| `upstream:open` / `upstream:merged-unreleased` / `upstream:not-submitted` | state of the upstream PR/issue |
 | `bug` | something broken in our packages or tooling |
+| `experimental` | an experiment being measured or tested; default-off, compile-tested only, or untested on hardware |
+| `delta:candidate` | a change we might carry; not yet (once carried, it gets a docs/deltas.md entry) |
+| `upstream:open` / `upstream:merged-unreleased` / `upstream:not-submitted` | on a work issue whose fix is upstream's, the state of the upstream PR/issue |
 
-Use one `delta:*` (or `bug`) plus one `upstream:*` where it applies.
+The other `delta:*` labels (`delta:kernel`, `delta:nvidia`, `delta:hyprland`, `delta:package`,
+`delta:upstream-only`) marked carried changes when each one had an issue. They are no longer
+used; the labels stay for the old issues.
 
 ## Body
 
-Markdown headings, all required (`bin/issue template delta|bug|upstream-report` prints one):
+Markdown headings, all required (`bin/issue template bug` prints them):
 
-- `## What happened` (bug) or `## What it fixes` (delta)
+- `## What happened` (a bug) or `## What it fixes` (an experiment or task)
 - `## Evidence / How to test`
 - `## Upstream status`: upstream PR/issue number and state, or why it isn't submitted.
-
-Title style for carried changes: `Delta: <component> <what> (<patch no.>)`, e.g.
-`Delta: hid-asus Win-lock pass-through (0568)`.
 
 ## References and closing
 
 - Refer to this repo's PRs and issues as `#N`, upstream ones as `owner/repo#N`
-  (e.g. `NVIDIA/open-gpu-kernel-modules#1299`), commits by short SHA.
+  (e.g. `NVIDIA/open-gpu-kernel-modules#1299`), commits by short SHA, and carried changes by
+  their docs/deltas.md anchor (e.g. `docs/deltas.md#kernel-0568-winlock`).
 - Put `Fixes #N` / `Refs #N` in PR descriptions so issues link and close.
-- Close an issue only when the fix is merged here or the delta is dropped; say which PR or
-  commit. When upstream merges but hasn't released, keep it open and move the label to
-  `upstream:merged-unreleased`; close once a release we build from contains it and the patch
-  is dropped from the recipe.
+- Close an issue when its work is done (the fix merged here, the experiment measured, the task
+  finished); say which PR or commit. Carrying a fix doesn't keep an issue open: its
+  docs/deltas.md entry tracks the upstream state until the patch drops.
 
 ## Without this checkout
 
@@ -138,7 +157,7 @@ by hand and scan your text for personal information yourself:
 R=omarchy-asus/omarchy-asus
 gh issue list -R $R --state all --search "winlock in:title,body" --json number,title,state,labels
 gh label list -R $R
-gh issue create -R $R --title "..." --label delta:kernel --label upstream:open --body-file body.md
+gh issue create -R $R --title "..." --label bug --body-file body.md
 gh issue comment N -R $R --body-file comment.md
 ```
 
