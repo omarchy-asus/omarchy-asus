@@ -46,6 +46,10 @@
 #   and the exit is 3; the release keeps serving the set it had. A previous release that
 #   exists but cannot be read refuses (exit 1). A sync that goes through removes
 #   release-withheld.
+# - Release train (#212): after a sync that went through, and after a withheld one,
+#   bin/release-train update rewrites the channel's open train issue on $GH_REPO (what the
+#   release serves, what waits, what was withheld); a failure there only warns.
+#   RELEASE_TRAIN=off skips it.
 # Release assets can't be symlinks, so the db/files links are uploaded as real
 # files under the names pacman requests.
 #
@@ -402,6 +406,15 @@ withheld=$CHANNEL_DATA/release-withheld crc=0
 complete() { OMARCHY_ASUS_WORKSPACE=$WORKSPACE "$(dirname "$0")/check-upstream" --complete "$up/$REPO_NAME.db" "$@" \
                  >"$up/.gaps" 2>"$up/.gaps.err"; }
 complete || crc=$?
+# --- the train's issue (#212): what the release serves, rewritten after each sync. A failure
+# here is a warning: the release itself is already settled (RELEASE_TRAIN=off skips it).
+train() {
+    [[ ${RELEASE_TRAIN:-on} == off ]] && { echo "release train issue not updated (RELEASE_TRAIN=off)"; return 0; }
+    local a=(--channel "$CHANNEL" update "$@")
+    ((dry)) && a+=(--dry-run)
+    "$(dirname "$0")/release-train" "${a[@]}" ||
+        echo "warning: the release train issue was not updated (bin/release-train); the sync stands" >&2
+}
 if ((crc == 10)); then
     # A package a recipe ships is not in the db (or a recipe is unreadable): a regression only
     # if the previous release served it. That is this release's db, and for RC also the Quattro
@@ -443,6 +456,8 @@ if ((crc == 10)); then
                 echo "warning: could not write $withheld" >&2
             fi
         fi
+        own=(); [[ -e $up/.previous-own.db ]] && own=(--db "$up/.previous-own.db")
+        train "${own[@]}" --withheld "$up/.gaps"
         exit 3
     elif ((crc == 0)); then
         echo "not in this db, and no regression (net new, or not served before; they go up once built):"
@@ -604,3 +619,4 @@ fi
 echo "sync: ${#upload_pkgs[@]} package file(s) and ${#upload_db[@]} db file(s) uploaded;" \
     "$deleted superseded asset(s) deleted, $waiting waiting out the ${grace_h}h grace period" \
     "($n_assets assets were in the release)"
+train --db "$up/$REPO_NAME.db"
