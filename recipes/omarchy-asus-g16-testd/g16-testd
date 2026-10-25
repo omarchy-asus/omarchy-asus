@@ -446,6 +446,25 @@ def _per_policy(name):
     return get, set_, save, load
 
 
+def _max_freq_set(h, v):
+    # only the policies whose own maximum is above the cap; the others are left alone
+    for p in _policies(h):
+        if int(rd(f"{p}/cpuinfo_max_freq") or 0) > int(v):
+            wr(f"{p}/scaling_max_freq", v)
+
+
+_BOOST = lambda h: _need(os.path.join(h.sys, "devices/system/cpu/cpufreq/boost"), "cpufreq boost")  # noqa: E731
+
+
+def _boost_load(h, orig):
+    # boost back first, then each policy's scaling_max_freq, which the kernel can lower
+    # while boost is off
+    wr(_BOOST(h), orig["value"])
+    for p, v in orig.get("policies", {}).items():
+        if os.path.exists(p) and v:
+            wr(f"{p}/scaling_max_freq", v)
+
+
 def _epp_choices(h):
     sets = [set(rd(f"{p}/energy_performance_available_preferences").split()) for p in _policies(h)]
     return set.intersection(*sets)
@@ -493,8 +512,8 @@ KNOBS = {
     "panel-power-savings": Knob("OLED CACP, amdgpu panel_power_savings (#172)", range(0, 5), *_file_knob(_panel)),
     "platform-profile": Knob("ACPI platform_profile (every handler)", _profile_choices, *_file_knob(_profile),
                              doc="from platform_profile_choices"),
-    "amd-pmf-profile": Knob("amd-pmf's own platform profile, /sys/class/platform-profile (#328)", _pmf_choices,
-                            *_file_knob(_pmf_profile), doc="from its choices"),
+    "pmf-profile": Knob("amd-pmf's own platform profile, /sys/class/platform-profile, not asus-wmi's (#328)", _pmf_choices,
+                        *_file_knob(_pmf_profile), doc="from its choices"),
     "hfi-ranking": Knob("amd_hfi ITMT ranking, Zen 5c-first patch 9900 (#10)", {"performance", "efficiency", "inverted"},
                         lambda h: _bracketed(rd(_hfi("ranking")(h))), lambda h, v: wr(_hfi("ranking")(h), v)),
     "hfi-wake-preferred": Knob("amd_hfi soft wakeup preference, patch 9900 (#10); class reads the workload-class MSR",
@@ -503,12 +522,14 @@ KNOBS = {
                           *_file_knob(_hfi("wake_pack"))),
     "hfi-wlc-track": Knob("amd_hfi workload-class tracking (an MSR read per switch), patch 9900 (#10)", {"0", "1"},
                           *_file_knob(_hfi("wlc_track"))),
-    "cpu-boost": Knob("cpufreq boost (#328)", {"0", "1"},
-                      *_file_knob(lambda h: _need(os.path.join(h.sys, "devices/system/cpu/cpufreq/boost"), "cpufreq boost"))),
+    "cpu-boost": Knob("cpufreq boost; restore also puts each policy's scaling_max_freq back (#328)", {"0", "1"},
+                      *_file_knob(_BOOST), save=lambda h: {"policies": {p: rd(f"{p}/scaling_max_freq") for p in _policies(h)}},
+                      load=_boost_load),
     "cpu-epp": Knob("energy_performance_preference, every policy (#328)", _epp_choices,
                     *_per_policy("energy_performance_preference"), doc="from energy_performance_available_preferences"),
-    "cpu-max-freq": Knob("scaling_max_freq in kHz, every policy (#328)", _max_freq_range,
-                         *_per_policy("scaling_max_freq"), doc="kHz, cpuinfo_min_freq..cpuinfo_max_freq"),
+    "cpu-max-freq": Knob("scaling_max_freq in kHz, on each policy whose cpuinfo_max_freq is above it (#328)", _max_freq_range,
+                         *_per_policy("scaling_max_freq")[:1], _max_freq_set, *_per_policy("scaling_max_freq")[2:],
+                         doc="kHz, cpuinfo_min_freq..cpuinfo_max_freq"),
 }
 
 

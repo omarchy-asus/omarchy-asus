@@ -473,6 +473,17 @@ class Session(unittest.TestCase):
         log = open(os.path.join(self.root, "daemon.log")).read()
         self.assertNotIn("restore:", log)
 
+    def test_boost_restore_puts_scaling_max_freq_back(self):
+        self.zen5c_and_cpufreq()
+        c = "sys/devices/system/cpu/cpufreq"
+        self.start()
+        self.assertEqual(self.g("call", "knob-set", "cpu-boost", "0")[0], 0)
+        # with boost off the kernel can lower a policy's scaling_max_freq
+        put(self.root, f"{c}/policy0/scaling_max_freq", "3506494")
+        rc, out = self.g("call", "knob-restore", "cpu-boost")
+        self.assertEqual((rc, out.strip()), (0, "1"))
+        self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["5090910", "3506494"])
+
     def test_zen5c_knobs_absent_without_patch_9900(self):
         self.start()
         rc, out = self.g("call", "knob-set", "hfi-ranking", "efficiency")
@@ -487,21 +498,26 @@ class Session(unittest.TestCase):
                           (("knob-set", "cpu-max-freq", "6000000"), "out of range 625000..5090910"),
                           (("knob-set", "cpu-max-freq", "500000"), "out of range"),
                           (("knob-set", "cpu-max-freq", "3.5GHz"), "out of range"),
-                          (("knob-set", "amd-pmf-profile", "quiet"), "not one of")]:
+                          (("knob-set", "pmf-profile", "quiet"), "not one of")]:
             rc, out = self.g("call", *args)
             self.assertEqual(rc, 1, args)
             self.assertIn(why, out, args)
         for k, v in [("cpu-boost", "0"), ("cpu-epp", "power"), ("cpu-max-freq", "3000000"),
-                     ("amd-pmf-profile", "low-power")]:
+                     ("pmf-profile", "low-power")]:
             rc, out = self.g("call", "knob-set", k, v)
             self.assertEqual(rc, 0, (k, out))
         c = "sys/devices/system/cpu/cpufreq"
         self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["3000000"] * 2)
+        # a cap above a policy's own maximum leaves that policy alone
+        self.assertEqual(self.g("call", "knob-set", "cpu-max-freq", "4000000")[0], 0)
+        self.assertEqual([get(self.root, f"{c}/policy{n}/scaling_max_freq") for n in (0, 1)], ["4000000", "3000000"])
+
         self.assertEqual([get(self.root, f"{c}/policy{n}/energy_performance_preference") for n in (0, 1)], ["power"] * 2)
         self.assertEqual(get(self.root, "sys/class/platform-profile/platform-profile-1/profile"), "low-power")
         self.assertEqual(get(self.root, "sys/class/platform-profile/platform-profile-0/profile"), "balanced")
         status = json.loads(self.g("session", "status")[1])["knobs"]
         self.assertEqual(status["cpu-max-freq"], "5090910,3506494")
+
         rc, out = self.stop()
         self.assertEqual(rc, 0, out)
         # each policy back to its own value
@@ -862,7 +878,7 @@ class Package(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("nmi-watchdog", p.stdout)
         for k in ("hfi-ranking", "hfi-wake-preferred", "hfi-wake-pack", "hfi-wlc-track", "cpu-boost", "cpu-epp",
-                  "cpu-max-freq", "amd-pmf-profile"):
+                  "cpu-max-freq", "pmf-profile"):
             self.assertIn(f"  {k} ", p.stdout)
         self.assertIn("irq_vectors/irq_work_entry", p.stdout)
         self.assertIn("dmub-cacp-set-level    dmub_cacp_set_level level=%si:u32", p.stdout)
