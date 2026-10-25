@@ -2,7 +2,8 @@
 # recipes/linux-omarchy/g16-test/dcn35-s0i2-ab, the patch 9901 A/B (#353), offline:
 #   1. --dry-run: simulated readings, no root; ABBA order, a PASS report with every phase
 #   2. the verdicts: a kernel-log error or a panel that stays off is FAIL, bit 5 never
-#      idle is NO EFFECT, a run without both arms is INCOMPLETE; the bit keys survive
+#      idle is NO EFFECT, a run without both arms or with the charger in is INCOMPLETE, a
+#      screen that stays off after the restore is FAIL; the bit keys survive
 #      the root stage's JSON
 #   3. bad usage exits 2
 set -u
@@ -39,9 +40,11 @@ for p in r["phases"]:
     p["idle"] = {5: 0.0, 20: 0.0}
 print("noeffect", v(r))
 r = copy.deepcopy(base); r["phases"] = [p for p in r["phases"] if p["param"] == 0]; print("onearm", v(r))
+r = copy.deepcopy(base); r["phases"][2]["status"] = ["Charging"]; print("charger", v(r))
+r = copy.deepcopy(base); r["panel_restore"] = False; r["problems"] = ["screen"]; print("restore", v(r))
 EOF
 )
-for want in "json PASS" "klog FAIL" "panel FAIL" "noeffect NO EFFECT" "onearm INCOMPLETE"; do
+for want in "json PASS" "klog FAIL" "panel FAIL" "noeffect NO EFFECT" "onearm INCOMPLETE" "charger INCOMPLETE" "restore FAIL"; do
     grep -qx "$want" <<<"$out" && ok "$want" || bad "want '$want': $out"
 done
 

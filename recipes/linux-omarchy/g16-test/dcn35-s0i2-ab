@@ -235,7 +235,7 @@ def run(hw, a, log):
             + ("" if on else " PANEL DID NOT READ BACK ON"))
         phases.append(p)
         if not a.dry_run and any(x != "Discharging" for x in s["status"]):
-            log("the charger came back: stopping")
+            log("the charger came back: stopping (the run counts as incomplete)")
             break
     return phases
 
@@ -286,6 +286,7 @@ def stage_root(a):
         if not hw.set_param(start_v):
             res["problems"].append(f"could not put {PARAM} back to {int(start_v)}")
         if not hw.screen(True):
+            res["panel_restore"] = False
             res["problems"].append("the screen did not read back on (hyprctl): press a key")
 
     def on_term(*_):
@@ -303,10 +304,16 @@ def stage_root(a):
         back()
     time.sleep(2)
     res["errors"] = journal_errors(t0 - 1)
-    path = os.path.join(out, "results.json")
-    with open(path, "w") as f:
-        json.dump(res, f, indent=1)
-    os.chown(path, uid, pw.pw_gid)
+    # Written as the user, never following a link: the directory is theirs.
+    os.setegid(pw.pw_gid)
+    os.seteuid(uid)
+    try:
+        fd = os.open(os.path.join(out, "results.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(res, f, indent=1)
+    finally:
+        os.seteuid(0)
+        os.setegid(0)
     return 0
 
 
@@ -320,11 +327,12 @@ def verdict(res):
         else mean([p["sock"] for p in on]) - mean([p["sock"] for p in off])
     d_bat = None if mean([p["bat"] for p in on]) is None or mean([p["bat"] for p in off]) is None \
         else mean([p["bat"] for p in on]) - mean([p["bat"] for p in off])
-    panel = all(p["panel_back"] for p in ph)
-    if not ph or res["problems"] or not on or not off:
-        v = "INCOMPLETE"
-    elif not panel or res["errors"]:
+    panel = all(p["panel_back"] for p in ph) and res.get("panel_restore", True)
+    charger = any(st != "Discharging" for p in ph for st in p["status"])
+    if not panel or res["errors"]:
         v = "FAIL"
+    elif not ph or res["problems"] or charger or not on or not off:
+        v = "INCOMPLETE"
     elif b5 is not None and b5 >= 0.8 and d_sock is not None and d_sock < 0:
         v = "PASS"
     else:
