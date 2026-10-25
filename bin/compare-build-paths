@@ -5,7 +5,8 @@
 # (the signed chroot builds). A recipe goes into build/release-path.conf only after this passes
 # for it (docs/releases.md "Switching a recipe to the release path").
 #
-#   the run      the repo's run of exactly the release workflow, dispatched on main, succeeded
+#   the run      the repo's run of exactly the release workflow, dispatched on main, succeeded;
+#                or, with --served, a same-version rebuild (below)
 #   new          its release-<channel>-<recipe> artifact, downloaded as a zip into a directory of
 #                its own (as bin/release-sign does): the zip's SHA-256 is the digest GitHub
 #                recorded, its entries are SHA256SUMS and exactly the packages it lists, each
@@ -26,6 +27,18 @@
 # listed) or it matches an --allow-content glob. A changed instruction or constant in compiled
 # code is a difference. A package only one side has is a difference.
 #
+# --served compares a rebuild of the version the channel already serves, the comparison the
+# switch needs. Such a run fails: its check job refuses file names the release already serves
+# (ci/release-check step 4; builds are not byte-reproducible). Under --served a failed run is
+# compared when it is still the repo's release workflow, dispatched on main at a commit on main,
+# and its latest attempt's jobs show nothing else failed: plan, eligibility, every build job
+# (built, or skipped as having nothing to build; the recipe's own built), attest and
+# nvidia-compat (or skipped) succeeded, and the check job's log has at least one error and
+# every error in it is "<package>: the <channel tag> release already serves a different file by
+# this name" (or the step's exit status). The full log is read, not the annotations, which
+# GitHub caps at 10 per step. Any other error, job or result refuses (exit 3); the report says
+# the run was a same-version rebuild. A run that succeeded is compared as without --served.
+#
 # Expected to differ, and not compared: builddate, packager and size in .PKGINFO, .BUILDINFO
 # and timestamps.
 #
@@ -44,6 +57,8 @@
 #                       may differ in content: for a difference already read and understood;
 #                       repeatable, and named in the pull request that switches the recipe
 #   --full              print every line of each difference (default: 100 per section)
+#   --served            accept a run that failed only because the release already serves
+#                       its file names (a same-version rebuild; above)
 # Exit: 0 only expected differences, 1 differences (printed), 2 usage, 3 could not compare.
 set -Eeuo pipefail
 usage() { sed -n 's/^# \{0,1\}Usage: /Usage: /p; /^#   --/s/^# \{0,1\}//p' "$0" >&2; exit 2; }
@@ -51,7 +66,7 @@ die() { echo "compare-build-paths: cannot compare: $*" >&2; exit 3; }
 # anything else that fails is a comparison that couldn't be made, never "differs"
 trap 'echo "compare-build-paths: cannot compare: unexpected failure at line $LINENO" >&2; exit 3' ERR
 
-channel='' recipe='' run_id='' size_bytes=64 size_pct=1 full=0 allow=()
+channel='' recipe='' run_id='' size_bytes=64 size_pct=1 full=0 served=0 allow=()
 while (($#)); do
     case $1 in
         --channel) (($# >= 2)) || usage; channel=$2; shift 2 ;;
@@ -59,6 +74,7 @@ while (($#)); do
         --size-percent) (($# >= 2)) || usage; size_pct=$2; shift 2 ;;
         --allow-content) (($# >= 2)) || usage; allow+=("$2"); shift 2 ;;
         --full) full=1; shift ;;
+        --served) served=1; shift ;;
         -h|--help) usage ;;
         -*) usage ;;
         *) if [[ -z $recipe ]]; then recipe=$1; elif [[ -z $run_id ]]; then run_id=$1; else usage; fi; shift ;;
@@ -95,7 +111,7 @@ api() {
 want() {   # want <json> <jq filter> <expected> <what>
     local got
     got=$(jq -er "$2 | strings" <<<"$1" 2>/dev/null) || die "the run's $4 is missing from GitHub's answer"
-    [[ $got == "$3" ]] || die "run $run_id's $4 is '$got', not '$3': only a release workflow run on main that succeeded is compared"
+    [[ $got == "$3" ]] || die "run $run_id's $4 is '$got', not '$3': only a release workflow run on main that succeeded is compared${5:-}"
 }
 
 # --- the run
@@ -106,8 +122,51 @@ want "$run" '.path' "$WORKFLOW" workflow
 want "$run" '.event' workflow_dispatch trigger
 want "$run" '.head_branch' main branch
 want "$run" '.status' completed status
-want "$run" '.conclusion' success conclusion
 head_sha=$(jq -er '.head_sha | strings' <<<"$run") || die "the run's commit is missing"
+rebuild=()
+if ((served)) && [[ $(jq -r '.conclusion' <<<"$run") == failure ]]; then
+    # a same-version rebuild: failed only because the release already serves its file names
+    [[ $head_sha =~ ^[0-9a-f]{40}$ ]] || die "the run's commit '$head_sha' is not a commit ID"
+    st=$(api "repos/$GH_REPO/compare/main...$head_sha" --jq '.status') || exit 3
+    [[ $st == identical || $st == behind ]] || die "run $run_id's commit ${head_sha:0:12} is not on main (it is $st)"
+    jobs=$(api "repos/$GH_REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100" --paginate) || exit 3
+    jobs=$(jq -sec 'if all(.[]; (.jobs | type) == "array") then [.[].jobs[]] else error("malformed") end' <<<"$jobs" 2>/dev/null) ||
+        die "run $run_id's jobs are missing from GitHub's answer"
+    check_id='' built=0
+    while IFS=$'\t' read -r jid jname jstatus jconc; do
+        [[ $jstatus == completed ]] || die "run $run_id's job '$jname' is $jstatus"
+        case $jname:$jconc in
+            plan:success | eligibility:success | attest:success | result:failure) ;;
+            'nvidia-open-dkms vs linux-omarchy-headers':success | 'nvidia-open-dkms vs linux-omarchy-headers':skipped) ;;
+            "build ($recipe):success") built=1 ;;
+            'build ('*'):success' | 'build ('*'):skipped') ;;
+            check:failure) [[ -z $check_id ]] || die "run $run_id has two check jobs"; check_id=$jid ;;
+            *) die "run $run_id's job '$jname' is $jconc: --served compares only a run whose check job alone failed, on already-served file names" ;;
+        esac
+    done < <(jq -r '.[] | [(.id | tostring), .name, .status, (.conclusion // "none")] | @tsv' <<<"$jobs")
+    ((built)) || die "run $run_id has no successful job 'build ($recipe)'"
+    for j in plan eligibility attest result; do
+        [[ $(jq --arg n "$j" '[.[] | select(.name == $n)] | length' <<<"$jobs") == 1 ]] || die "run $run_id has no single '$j' job"
+    done
+    [[ $check_id =~ ^[0-9]+$ ]] || die "run $run_id has no failed check job"
+    # every error in the check job's log: the release already serves the name, or the exit status
+    gh api --allow-escape-sequences "repos/$GH_REPO/actions/jobs/$check_id/logs" >"$T/list/check.log" 2>"$T/gh.err" ||
+        die "the check job's log: $(tr '\n' ' ' <"$T/gh.err") (logs expire: run the release workflow again)"
+    tags="$("$repo/ci/channel" --tag rc)|$("$repo/ci/channel" --tag quattro)"
+    tags=${tags//./\\.}
+    SERVED_RE="^([A-Za-z0-9@_+][A-Za-z0-9@._+-]*\\.pkg\\.tar\\.zst): the ($tags) release already serves a different file by this name: bump pkgrel\$"
+    while IFS= read -r e; do
+        if [[ $e =~ $SERVED_RE ]]; then rebuild+=("${BASH_REMATCH[1]} (${BASH_REMATCH[2]})")
+        elif [[ ! $e =~ ^Process\ completed\ with\ exit\ code\ [0-9]+\.$ ]]; then
+            die "run $run_id's check job failed on something else: $e"
+        fi
+    done < <(LC_ALL=C sed -E 's/\r$//; s/^[0-9TZ:.-]+ //' "$T/list/check.log" | LC_ALL=C sed -n 's/^##\[error\]//p')
+    ((${#rebuild[@]})) || die "run $run_id's check job failed, but not on file names the release already serves"
+else
+    hint=''
+    ((!served)) || hint=' (or, with --served, failed only on already-served file names)'
+    want "$run" '.conclusion' success conclusion "$hint"
+fi
 
 # --- new: the run's artifact for this recipe
 all=$(api "repos/$GH_REPO/actions/runs/$run_id/artifacts?per_page=100" --paginate) || exit 3
@@ -181,6 +240,10 @@ done
 
 # --- compare
 echo "Comparing $recipe on the $channel channel: release workflow run $run_id (main at ${head_sha:0:12}) against the release"
+if ((${#rebuild[@]})); then
+    echo "SAME-VERSION REBUILD: run $run_id failed only because the release already serves these file names (its check job):"
+    printf '  %s\n' "${rebuild[@]}"
+fi
 fail=0 out=$T/report
 : >"$out"
 note() { printf '%s\n' "$*" >>"$out"; }

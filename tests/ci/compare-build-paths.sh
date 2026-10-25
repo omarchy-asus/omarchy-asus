@@ -15,6 +15,10 @@
 #   4. cannot compare, exit 3: the quattro channel, a run off main, a failed run, no artifact
 #      for the recipe, an artifact whose digest doesn't match, a release package whose
 #      signature doesn't verify
+#   5. --served (a same-version rebuild): a run whose check job failed only on file names the
+#      release already serves is compared and said to be one; refused (exit 3) with any other
+#      check error, a failed build, attest or other job, a commit not on main, or a check log
+#      with no such error; without --served the same run is refused as before
 # Usage: [SHOW=1] tests/ci/compare-build-paths.sh [keep]
 #   SHOW=1 prints each report; keep leaves the temp dir for inspection
 set -u
@@ -39,8 +43,11 @@ R=omarchy-asus/omarchy-asus
 [[ $1 == api ]] || { echo "unexpected gh $*" >&2; exit 1; }
 case $2 in
     repos/$R/actions/runs/*/artifacts\?*) cat "$FX/artifacts.json" ;;
+    repos/$R/actions/runs/*/jobs\?*) cat "$FX/jobs.json" ;;
+    repos/$R/compare/main...*) cat "$FX/compare" ;;
     repos/$R/actions/runs/*) cat "$FX/run.json" ;;
     repos/$R/actions/artifacts/*/zip) cat "$FX/artifact.zip" ;;
+    --allow-escape-sequences) [[ $3 == repos/$R/actions/jobs/77/logs ]] && cat "$FX/check.log" ;;
     *) echo "unexpected gh api $2" >&2; exit 1 ;;
 esac
 STUB
@@ -255,6 +262,25 @@ check "a version mismatch" 1 "VERSIONS DIFFER" "foo: the release serves 1.0-1.10
 new 1.0-2.101; rm "$S/new/foo/usr/share/foo/data"; artifact
 check "a version mismatch still compares the files" 1 "VERSIONS DIFFER" "- ./usr/share/foo/data"
 
+# jobs <name:conclusion...>: the run's jobs (the check job is ID 77); check_log <error...>: its log
+jobs() {
+    local spec i=70 id
+    for spec in "$@"; do
+        if [[ ${spec%:*} == check ]]; then id=77; else id=$((i++)); fi
+        jq -n --arg n "${spec%:*}" --arg c "${spec##*:}" --argjson id "$id" \
+            '{id: $id, name: $n, status: "completed", conclusion: $c}'
+    done | jq -s '{total_count: length, jobs: .}' >"$FX/jobs.json"
+}
+check_log() {
+    { printf '\xef\xbb\xbf2026-10-25T06:54:51.0000000Z ##[group]Run ci/release-check --channel "$CHANNEL" pkgs\r\n'
+      printf '2026-10-25T06:55:00.9617794Z ==> 4. one file per name on every release\r\n'
+      local e; for e in "$@"; do printf '2026-10-25T06:55:02.5507796Z ##[error]%s\r\n' "$e"; done
+      printf '2026-10-25T06:55:02.5517098Z ##[error]Process completed with exit code 1.\r\n'; } >"$FX/check.log"
+}
+SERVED="the rc-x86_64 release already serves a different file by this name: bump pkgrel"
+GOOD_JOBS=(plan:success eligibility:success "build (foo):success" "build (linux-omarchy):skipped"
+    attest:success check:failure "nvidia-open-dkms vs linux-omarchy-headers:skipped" result:failure)
+
 # 4. cannot compare
 new 1.0-1.101; artifact
 CH=quattro check "the quattro channel" 3 "frozen"
@@ -265,5 +291,45 @@ ART=release-rc-other artifact; check "no artifact for the recipe" 3 "no single a
 artifact; echo junk >>"$FX/artifact.zip"; check "an artifact whose digest doesn't match" 3 "not the digest GitHub recorded"
 artifact; echo junk >>"$S/rel/foo-docs-1.0-1.101-x86_64.pkg.tar.zst"
 check "a release package whose signature doesn't verify" 3 "signature does not verify"
+
+# 5. --served: a same-version rebuild
+release foo:1.0-1.101 foo-docs:1.0-1.101
+new 1.0-1.101; artifact
+echo behind >"$FX/compare"
+jobs "${GOOD_JOBS[@]}"
+check_log "foo-1.0-1.101-x86_64.pkg.tar.zst: $SERVED" "foo-docs-1.0-1.101-x86_64.pkg.tar.zst: $SERVED"
+run_json main failure
+ARGS=--served check "--served: a run that failed only on already-served names" 0 "SAME-VERSION REBUILD" \
+    "foo-docs-1.0-1.101-x86_64.pkg.tar.zst (rc-x86_64)" "only expected differences"
+check "without --served the same run is refused" 3 "conclusion is 'failure'"
+ARGS=--served CH=quattro check "--served: still not the quattro channel" 3 "frozen"
+check_log "foo-1.0-1.101-x86_64.pkg.tar.zst: $SERVED" "foo-docs-1.0-1.101-x86_64.pkg.tar.zst: pkgrel 1.101 is out of the rc range"
+ARGS=--served check "--served: any other check error refuses" 3 "check job failed on something else: foo-docs"
+check_log
+ARGS=--served check "--served: a check that failed on no served name" 3 "not on file names the release already serves"
+check_log "foo-1.0-1.101-x86_64.pkg.tar.zst: $SERVED"
+jobs plan:success eligibility:success "build (foo):failure" attest:success check:failure result:failure
+ARGS=--served check "--served: a failed build job" 3 "job 'build (foo)' is failure"
+jobs plan:success eligibility:success "build (foo):success" "build (linux-omarchy):failure" attest:success check:failure result:failure
+ARGS=--served check "--served: another recipe's failed build job" 3 "job 'build (linux-omarchy)' is failure"
+jobs plan:success eligibility:success "build (foo):success" attest:failure check:failure result:failure
+ARGS=--served check "--served: a failed attest job" 3 "job 'attest' is failure"
+jobs plan:success eligibility:success "build (foo):success" check:failure result:failure
+ARGS=--served check "--served: no attest job" 3 "no single 'attest' job"
+jobs plan:success eligibility:failure "build (foo):success" attest:success check:failure result:failure
+ARGS=--served check "--served: a failed eligibility job" 3 "job 'eligibility' is failure"
+jobs plan:success eligibility:success "build (bar):success" attest:success check:failure result:failure
+ARGS=--served check "--served: the recipe wasn't built" 3 "no successful job 'build (foo)'"
+jobs "${GOOD_JOBS[@]}"
+echo diverged >"$FX/compare"
+ARGS=--served check "--served: a commit not on main" 3 "is not on main (it is diverged)"
+echo identical >"$FX/compare"
+run_json feature failure
+ARGS=--served check "--served: a run off main" 3 "branch is 'feature'"
+run_json main cancelled
+ARGS=--served check "--served: a cancelled run" 3 "conclusion is 'cancelled', not 'success'" "or, with --served"
+run_json
+ARGS=--served check "--served on a run that succeeded compares as before" 0 "only expected differences"
+grep -q 'SAME-VERSION' <<<"$out" && { echo "FAIL: a successful run was called a same-version rebuild"; fail=1; }
 
 exit $fail
