@@ -26,18 +26,26 @@ regression); and the recipe changes since the last cut.
   cut     close the train: tag the recipes commit its issue records as train/<tag>/NAME with
           the notes as the message, push the tag, then comment the notes and close the issue.
           The next update opens the next train. --dry-run prints the tag and the notes.
+          The cut first marks the issue (update then leaves it, and its notes, alone), so a cut
+          that stops half way (push, comment or close failed) resumes when rerun with the same
+          NAME; the tag is made once, the comment posted once.
+update and cut hold the publication lock ($DATA/publish.lock, shared with bin/publish,
+bin/unpublish and bin/sync-release, whose own lock covers its update): never two at once.
+Exit 75 when it stays busy for PUBLISH_LOCK_WAIT seconds.
 
 Recipes and git history come from $WORKSPACE (bin/env.sh): run it from a checkout of the
 channel's branch, as bin/sync-release is. A recipe's issue and pull request are read from the
 last commit that touched recipes/<dir>: its subject's last "(#N)" is the pull request, earlier
 ones and "Fixes/Closes/Refs #N" lines in the body are issues.
-Everything posted goes through bin/sync-release --pii-scan-text first; a hit posts nothing.
-Exit: 0 done, 1 failed (nothing posted after a failed scan), 2 usage.
+Everything posted is refused on control characters (other than newline and tab), then goes
+through bin/sync-release --pii-scan-text; a hit posts nothing.
+Exit: 0 done, 1 failed (nothing posted after a failed scan), 2 usage, 75 lock busy.
 """
 import argparse
 import datetime
 import importlib.machinery
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -48,6 +56,10 @@ import tempfile
 BIN = os.path.dirname(os.path.realpath(__file__))
 MARK = "<!-- release-train:{tag} -->"
 COMMIT_MARK = re.compile(r"^<!-- release-train-commit:([0-9a-f]{7,40}) -->$", re.M)
+CUTTING_MARK = re.compile(r"^<!-- release-train-cutting:(\S+) -->$", re.M)
+FOOTER = "Kept by bin/release-train"
+# C0 controls and DEL, except tab and newline (bin/issue refuses the same)
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 TITLE = "Release train: {tag} ({label})"
 LABELS = {"quattro": "Quattro channel", "rc": "RC channel"}
 MAX_CHANGES = 200      # keep the body well under GitHub's 65536 characters
@@ -64,8 +76,8 @@ def load_check_upstream():
 
 
 def channel_env():
-    """{CHANNEL, GH_REPO, GH_TAG, GH_BRANCH, CHANNEL_DATA, WORKSPACE} as bin/env.sh sets them."""
-    keys = ["CHANNEL", "GH_REPO", "GH_TAG", "GH_BRANCH", "CHANNEL_DATA", "WORKSPACE"]
+    """{CHANNEL, GH_REPO, GH_TAG, GH_BRANCH, DATA, CHANNEL_DATA, WORKSPACE} as bin/env.sh sets them."""
+    keys = ["CHANNEL", "GH_REPO", "GH_TAG", "GH_BRANCH", "DATA", "CHANNEL_DATA", "WORKSPACE"]
     script = 'source "$1" >/dev/null || exit 1; for k in ' + " ".join(keys) + '; do printf "%s\\n" "${!k}"; done'
     r = subprocess.run(["bash", "-c", script, "_", os.path.join(BIN, "env.sh")], capture_output=True, text=True)
     if r.returncode != 0:
@@ -233,6 +245,7 @@ def render(env, served, recipes, errors, hold, withheld, ws_info, now=None):
         if len(changes) > MAX_CHANGES:
             lines.append(f"- ... and more (`git log {cut}..{(head or 'HEAD')[:12]} -- recipes`)")
         lines.append("")
+    lines += ["---", FOOTER]
     return "\n".join(lines)
 
 
@@ -278,7 +291,12 @@ def gh(*args, check=True):
 
 
 def pii_ok(env, text):
-    """bin/sync-release --pii-scan-text on text (fails closed)."""
+    """No control characters, then bin/sync-release --pii-scan-text on text (fails closed)."""
+    bad = [n for n, l in enumerate(text.split("\n"), 1) if CONTROL_RE.search(l)]
+    if bad:
+        print(f"release-train: control characters on line(s) {', '.join(map(str, bad[:10]))} "
+              "(only newline and tab); nothing posted", file=sys.stderr)
+        return False
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
         f.write(text)
         path = f.name
@@ -293,13 +311,36 @@ def pii_ok(env, text):
     return r.returncode == 0
 
 
+def publish_lock(env):
+    """Take $DATA/publish.lock (bin/publish-lib.sh's pub_lock) unless a parent holds it, so an
+    update and a cut never interleave (and two updates never both open an issue). Exit 75
+    after PUBLISH_LOCK_WAIT seconds, as the other publishers do."""
+    import fcntl
+    import time
+    if os.environ.get("OMARCHY_ASUS_PUBLISH_LOCKED") == "1":
+        return None
+    os.makedirs(env["DATA"], exist_ok=True)
+    fd = os.open(os.path.join(env["DATA"], "publish.lock"), os.O_WRONLY | os.O_CREAT, 0o644)
+    deadline = time.monotonic() + float(os.environ.get("PUBLISH_LOCK_WAIT", "600"))
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.environ["OMARCHY_ASUS_PUBLISH_LOCKED"] = "1"   # our bin/sync-release scan runs under it
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                print(f"release-train: another publish/unpublish/sync-release/cut holds "
+                      f"{env['DATA']}/publish.lock", file=sys.stderr)
+                sys.exit(75)
+            time.sleep(0.5)
+
+
 def cache_path(env):
     return os.path.join(env["CHANNEL_DATA"], "release-train-issue")
 
 
 def find_issue(env):
     """(number, body) of the open train issue for this release, or (None, None)."""
-    import json
     mark = MARK.format(tag=env["GH_TAG"])
     try:
         with open(cache_path(env)) as f:
@@ -335,7 +376,13 @@ def remember(env, number):
 
 def update(env, db, withheld, dry):
     body = render(env, *gather(env, db, withheld))
-    number, _ = find_issue(env)
+    number, old = find_issue(env)
+    m = CUTTING_MARK.search(old or "")
+    if m:
+        # A cut that stopped half way: its notes are this body; don't change them under it.
+        print(f"release-train: #{number} is being cut as {m.group(1)}; finish that first "
+              f"(bin/release-train cut {m.group(1).rsplit('/', 1)[-1]}); not updated", file=sys.stderr)
+        return 1
     if dry:
         what = f"would update #{number}" if number else "would open a new train issue"
         print(f"release-train: {what} ({env['GH_TAG']}) with:\n{body}")
@@ -363,7 +410,6 @@ def update(env, db, withheld, dry):
 
 
 def notes(env, issue):
-    import json
     if issue:
         body = json.loads(gh("issue", "view", str(issue), "-R", env["GH_REPO"], "--json", "body").stdout)["body"]
     else:
@@ -388,34 +434,60 @@ def cut(env, name, dry):
         print(f"release-train: #{number} records no recipes commit; run a sync first", file=sys.stderr)
         return 1
     ws, commit, tag = env["WORKSPACE"], m.group(1), f"train/{env['GH_TAG']}/{name}"
+    cutting = CUTTING_MARK.search(body)
+    if cutting and cutting.group(1) != tag:
+        print(f"release-train: #{number} is being cut as {cutting.group(1)}; finish that cut first",
+              file=sys.stderr)
+        return 1
     if git(ws, "cat-file", "-e", f"{commit}^{{commit}}") is None:
         print(f"release-train: {commit} (from #{number}) is not in {ws}; fetch the channel's branch",
               file=sys.stderr)
         return 1
-    if git(ws, "rev-parse", "-q", "--verify", f"refs/tags/{tag}") is not None:
+    have = git(ws, "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}")
+    full = (git(ws, "rev-parse", f"{commit}^{{commit}}") or "").strip()
+    if have is not None and (not cutting or have.strip() != full):
+        # Ours to resume only when this issue says it is being cut as that tag, at that commit.
         print(f"release-train: tag {tag} exists already", file=sys.stderr)
         return 1
     text = f"{env['GH_TAG']} train {name}\n\n" + notes_from(body, env["GH_TAG"])
     if dry:
-        print(f"release-train: would tag {commit[:12]} as {tag}, push it, comment and close #{number}:\n{text}")
+        print(f"release-train: would {'resume the cut: ' if cutting else ''}tag {commit[:12]} as {tag}, "
+              f"push it, comment and close #{number}:\n{text}")
         return 0
     if not pii_ok(env, text):
         return 1
+    # Each step can be retried: the issue says the cut is under way (so update leaves it, and
+    # its notes, alone), the tag is made once, pushed (a no-op when origin has it), the comment
+    # posted once, then the issue closed.
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
-        f.write(text)
         path = f.name
     try:
-        r = subprocess.run(["git", "-C", ws, "tag", "-a", "-F", path, tag, commit], capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"release-train: git tag failed: {r.stderr.strip()}", file=sys.stderr)
-            return 1
+        if not cutting:
+            lines = body.split("\n")
+            at = next(i for i, l in enumerate(lines) if COMMIT_MARK.match(l)) + 1
+            with open(path, "w") as f:
+                f.write("\n".join(lines[:at] + [f"<!-- release-train-cutting:{tag} -->"] + lines[at:]))
+            gh("issue", "edit", str(number), "-R", env["GH_REPO"], "--body-file", path)
+        if have is None:
+            with open(path, "w") as f:
+                f.write(text)
+            r = subprocess.run(["git", "-C", ws, "tag", "-a", "-F", path, tag, commit],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"release-train: git tag failed: {r.stderr.strip()}", file=sys.stderr)
+                return 1
         r = subprocess.run(["git", "-C", ws, "push", "origin", f"refs/tags/{tag}"], capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"release-train: pushing {tag} failed (the local tag stays): {r.stderr.strip()}", file=sys.stderr)
+            print(f"release-train: pushing {tag} failed; rerun the same cut to resume: {r.stderr.strip()}",
+                  file=sys.stderr)
             return 1
-        with open(path, "w") as f:
-            f.write(f"Cut as `{tag}` ({commit[:12]}). The next sync opens the next train.\n\n" + text)
-        gh("issue", "comment", str(number), "-R", env["GH_REPO"], "--body-file", path)
+        head = f"Cut as `{tag}` ({commit[:12]})."
+        done = json.loads(gh("issue", "view", str(number), "-R", env["GH_REPO"], "--json", "comments").stdout
+                      or "{}").get("comments") or []
+        if not any((c.get("body") or "").startswith(head) for c in done):
+            with open(path, "w") as f:
+                f.write(f"{head} The next sync opens the next train.\n\n" + text)
+            gh("issue", "comment", str(number), "-R", env["GH_REPO"], "--body-file", path)
         gh("issue", "close", str(number), "-R", env["GH_REPO"])
     finally:
         os.unlink(path)
@@ -452,6 +524,8 @@ def main(argv):
         sys.stdout.write(render(env, *gather(env, args.db, args.withheld)) + "\n")
         return 0
     if args.cmd == "update":
+        if not args.dry_run:
+            publish_lock(env)
         return update(env, args.db, args.withheld, args.dry_run)
     if args.cmd == "find":
         n, _ = find_issue(env)
@@ -460,6 +534,8 @@ def main(argv):
         return 0 if n else 1
     if args.cmd == "notes":
         return notes(env, args.issue)
+    if not args.dry_run:
+        publish_lock(env)
     return cut(env, args.name, args.dry_run)
 
 

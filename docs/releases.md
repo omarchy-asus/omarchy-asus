@@ -96,7 +96,12 @@ carries, and the train's tag and release notes are cut from it, not from the db 
 - **Cutting a train:** `bin/release-train [--channel rc] cut NAME` (try `--dry-run` first), from
   a checkout of the channel's branch, tags the recorded commit `train/<release>/NAME` with the
   notes as its message, pushes the tag, comments the notes on the issue and closes it. The next
-  sync opens the next train, whose changes start at that tag.
+  sync opens the next train, whose changes start at that tag. The cut marks the issue first, so
+  a cut that stops half way (push, comment or close) is finished by rerunning it with the same
+  name, and syncs leave the issue alone until then.
+- `update` and `cut` hold the publication lock (`publish.lock`, shared with `bin/publish`,
+  `bin/unpublish` and `bin/sync-release`), so a sync never rewrites the issue during a cut.
+  Text with control characters (other than newline and tab) is refused before the scan.
 - `bin/release-train notes` prints the notes from the open issue (on the release and changes,
   without the waiting list); `find` prints its number; `render --db DB` prints a body offline.
 

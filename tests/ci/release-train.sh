@@ -12,7 +12,11 @@
 #   g. cut: --dry-run changes nothing; cut tags the recorded commit train/<tag>/NAME, pushes
 #      it, comments and closes the issue; the next update opens a new train whose Changes
 #      list the recipe commits since that tag; a second cut of the same name is refused
-#   h. bin/sync-release's failure to update the issue is a warning, not a failed sync (the
+#   g also stops a cut at the push, the comment and the close: the issue is marked, an update
+#      leaves it alone, another name is refused, and rerunning the cut finishes it (one comment)
+#   h. updates run one at a time under the publication lock (three at once open one issue; a
+#      held lock is exit 75 for update and cut); a control character in the body posts nothing
+#   i. bin/sync-release's failure to update the issue is a warning, not a failed sync (the
 #      sync-release transaction test runs with a gh that knows no issues)
 # No network, no real gh, no makepkg; workspace and data dir are temp dirs.
 # Usage: tests/ci/release-train.sh [keep]
@@ -39,12 +43,15 @@ cat >"$S/bin/makepkg" <<'STUB'
 [[ $* == --printsrcinfo && -f SRCINFO ]] || exit 1
 cat SRCINFO
 STUB
-# A fake gh: issue N is $FAKE_ISSUES/N.{title,body,state}; every call is logged.
+# A fake gh: issue N is $FAKE_ISSUES/N.{title,body,state,comments} (comments: one JSON string
+# per line); every call is logged; FAKE_FAIL=<subcommand> makes that issue subcommand fail.
 cat >"$S/bin/gh" <<'EOF'
 #!/usr/bin/env python3
 import json, os, sys
 d = os.environ["FAKE_ISSUES"]
 a = sys.argv[1:]
+if len(a) > 1 and a[1] == os.environ.get("FAKE_FAIL"):
+    sys.exit("fake gh: failing " + a[1])
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(" ".join(a[:3]) + "\n")
 def opt(name):
@@ -63,7 +70,9 @@ elif a[:2] == ["issue", "view"]:
     n = int(a[2])
     if n not in nums:
         sys.exit("no such issue")
-    print(json.dumps({"number": n, "state": read(n, "state"), "body": read(n, "body")}))
+    cs = read(n, "comments").splitlines() if os.path.exists(f"{d}/{n}.comments") else []
+    print(json.dumps({"number": n, "state": read(n, "state"), "body": read(n, "body"),
+                      "comments": [{"body": json.loads(c)} for c in cs]}))
 elif a[:2] == ["issue", "create"]:
     n = (nums[-1] if nums else 0) + 1
     write(n, "title", opt("--title")); write(n, "body", open(opt("--body-file")).read()); write(n, "state", "OPEN")
@@ -71,7 +80,8 @@ elif a[:2] == ["issue", "create"]:
 elif a[:2] == ["issue", "edit"]:
     write(int(a[2]), "body", open(opt("--body-file")).read())
 elif a[:2] == ["issue", "comment"]:
-    write(int(a[2]), "comment", open(opt("--body-file")).read())
+    with open(f"{d}/{a[2]}.comments", "a") as f:
+        f.write(json.dumps(open(opt("--body-file")).read()) + "\n")
 elif a[:2] == ["issue", "close"]:
     write(int(a[2]), "state", "CLOSED")
 else:
@@ -192,12 +202,31 @@ out=$(train cut 2026-10-25 --dry-run); rc=$?
 check "dry run: exit 0" [ $rc = 0 ]
 check "dry run: no tag" [ -z "$(git -C "$S/ws" tag)" ]
 check "dry run: issue open" has "$S/issues/1.state" OPEN
+# stop the cut at each step in turn, then resume it with the same name
+mv "$S/origin.git" "$S/origin.off"
+out=$(train cut 2026-10-25); rc=$?
+check "push fails: exit 1" [ $rc = 1 ]
+check "push fails: the issue says the cut is under way" has "$B" "<!-- release-train-cutting:train/x86_64/2026-10-25 -->"
+check "push fails: issue still open" has "$S/issues/1.state" OPEN
+cp "$B" "$S/before"
+out=$(train update --db "$S/db1"); rc=$?
+check "an update leaves a cut under way alone" [ $rc = 1 ]
+check "and the notes unchanged" cmp -s "$B" "$S/before"
+out=$(train cut other); rc=$?
+check "a cut under another name is refused" [ $rc = 1 ]
+mv "$S/origin.off" "$S/origin.git"
+out=$(FAKE_FAIL=comment train cut 2026-10-25); rc=$?
+check "comment fails: exit 1" [ $rc = 1 ]
+check "comment fails: tag pushed" [ -n "$(git -C "$S/origin.git" rev-parse -q --verify refs/tags/train/x86_64/2026-10-25)" ]
+out=$(FAKE_FAIL=close train cut 2026-10-25); rc=$?
+check "close fails: exit 1" [ $rc = 1 ]
+check "close fails: issue open" has "$S/issues/1.state" OPEN
 out=$(train cut 2026-10-25); rc=$?
 check "cut: exit 0" [ $rc = 0 ]
 check "tag at the recorded commit" [ "$(git -C "$S/ws" rev-parse 'train/x86_64/2026-10-25^{commit}')" = "$head" ]
 check "tag pushed" [ -n "$(git -C "$S/origin.git" rev-parse -q --verify refs/tags/train/x86_64/2026-10-25)" ]
 check "tag message is the notes" has <(git -C "$S/ws" tag -n99 train/x86_64/2026-10-25) "| foo | 1.0-1.1 | foo | ready |"
-check "issue commented" has "$S/issues/1.comment" 'Cut as `train/x86_64/2026-10-25`'
+check "issue commented once" [ "$(grep -c 'Cut as `train/x86_64/2026-10-25`' "$S/issues/1.comments")" = 1 ]
 check "issue closed" has "$S/issues/1.state" CLOSED
 recipe bar 2.0-1.3 bar; commit "bar 2.0-1.3: another fix (#12) (#13)"
 out=$(train update --db "$S/db2"); rc=$?
@@ -207,6 +236,29 @@ check "the new commit listed" has "$S/issues/2.body" "bar 2.0-1.3: another fix (
 check "an older commit not listed" hasnt "$S/issues/2.body" "foo 1.0-1.1: the fix"
 out=$(train cut 2026-10-25); rc=$?
 check "the same name again is refused" [ $rc = 1 ]
+
+
+echo "== h. one at a time, and no control characters"
+rm -f "$S/data/release-train-issue"
+mv "$S/issues" "$S/issues.g"; mkdir "$S/issues"
+for _ in 1 2 3; do train update --db "$S/db2" >/dev/null & done; wait
+check "three updates at once open one issue" [ "$(find "$S/issues" -name '*.state' | wc -l)" = 1 ]
+B=$S/issues/1.body; cp "$B" "$S/before"
+exec {lk}>"$S/data/publish.lock"; flock "$lk"
+out=$(PUBLISH_LOCK_WAIT=1 train update --db "$S/db1"); rc=$?
+check "update with the lock held elsewhere: exit 75" [ $rc = 75 ]
+check "issue unchanged" cmp -s "$B" "$S/before"
+out=$(PUBLISH_LOCK_WAIT=1 train cut x); rc=$?
+check "cut with the lock held elsewhere: exit 75" [ $rc = 75 ]
+out=$(OMARCHY_ASUS_PUBLISH_LOCKED=1 train update --db "$S/db1"); rc=$?
+check "under its parent's lock (bin/sync-release) it runs" [ $rc = 0 ]
+exec {lk}>&-
+cp "$B" "$S/before"
+printf 'waits \033[31m\n' >"$S/ws/recipes/baz/HOLD"
+out=$(train update --db "$S/db2"); rc=$?
+check "a control character: exit 1" [ $rc = 1 ]
+check "nothing posted" cmp -s "$B" "$S/before"
+check "says why" has <(echo "$out") "control characters"
 
 ((fail)) && { echo "FAILED"; exit 1; }
 echo "all passed"
