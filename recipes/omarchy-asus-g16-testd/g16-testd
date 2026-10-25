@@ -19,8 +19,10 @@
 #     trace-start NAME EVENTS [KPROBES] [BUFFER_KB]
 #                                         a private tracefs instance; EVENTS and KPROBES
 #                                         are comma lists from the allowlists ("-": none)
-#     trace-stop NAME                     stop it; the trace is handed to you, and the
-#                                         instance and its kprobes are removed
+#     trace-stop NAME                     stop it; the trace is handed to you (an open
+#                                         file: the helper keeps no copy), written to
+#                                         $XDG_RUNTIME_DIR/omarchy-asus-g16-testd/NAME.trace,
+#                                         and the instance and its kprobes are removed
 #     knob-set KNOB VALUE / knob-restore KNOB
 #     module-swap NAME PATH / module-restore NAME
 #     boot-dropin NAME on|off             prints the resulting kernel command lines
@@ -56,6 +58,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 UNIT = "omarchy-asus-g16-testd"
@@ -75,7 +78,7 @@ EVENTS = frozenset("""
 irq/irq_handler_entry irq/softirq_entry irq/tasklet_entry
 ipi/ipi_send_cpu ipi/ipi_send_cpumask
 irq_vectors/call_function_entry irq_vectors/call_function_single_entry
-irq_vectors/reschedule_entry irq_vectors/local_timer_entry
+irq_vectors/reschedule_entry irq_vectors/local_timer_entry irq_vectors/irq_work_entry
 csd/csd_queue_cpu
 sched/sched_waking sched/sched_switch sched/sched_wakeup
 timer/hrtimer_start timer/hrtimer_expire_entry timer/timer_start timer/timer_expire_entry
@@ -84,11 +87,14 @@ workqueue/workqueue_queue_work workqueue/workqueue_execute_start
 power/cpu_idle power/suspend_resume power/wakeup_source_activate
 rpm/rpm_suspend rpm/rpm_resume rpm/rpm_idle rpm/rpm_return_int
 """.split())
-# name -> the kernel symbol a kprobe goes on (named g16testd/<name> in tracefs)
+# name -> (the kernel symbol a kprobe goes on, its fixed fetch arguments); named
+# g16testd/<name> in tracefs. A caller can't add fetch arguments of its own.
 KPROBES = {
-    "asus-wmi-set-devstate": "asus_wmi_set_devstate",
-    "pci-set-power-state": "pci_set_power_state",
-    "pm-runtime-resume": "__pm_runtime_resume",
+    "asus-wmi-set-devstate": ("asus_wmi_set_devstate", ""),
+    "pci-set-power-state": ("pci_set_power_state", ""),
+    "pm-runtime-resume": ("__pm_runtime_resume", ""),
+    # bin/g16-cacp-check step 1 (#172): the CACP level sent to DMUB (kernel 0481)
+    "dmub-cacp-set-level": ("dmub_cacp_set_level", "level=%si:u32"),
 }
 # name -> what the drop-in appends to the default kernel command line
 DROPINS = {
@@ -425,6 +431,7 @@ class Daemon:
                     "ec_loaded": False, "traces": {}, "frozen": {}}
         self.records = os.path.join(h.state, "records.json")
         self.stopping = False
+        self.handover = None  # an open trace file for the caller, sent with the reply
 
     # -- records: written before every change, so a crash still knows what to put back
     def save(self):
@@ -472,6 +479,8 @@ class Daemon:
             self._try(errs, self.knob_restore, name)
         if self.rec["ec_loaded"]:
             self._try(errs, self.ec_unload)
+        # traces the watchdog stopped and nobody collected
+        shutil.rmtree(self.outdir(), ignore_errors=True)
         if idle:
             self._try(errs, self.idle_restore)
         return errs
@@ -628,7 +637,7 @@ class Daemon:
     def _kprobe_symbol(self, k):
         """KPROBES[k] if it names exactly one function in this kernel; the kernel
         refuses a name it has more than once."""
-        sym = KPROBES[k]
+        sym = KPROBES[k][0]
         try:
             with open(os.path.join(self.h.proc, "kallsyms")) as f:
                 hits = [ln.split() for ln in f if f" {sym}" in ln]
@@ -644,27 +653,43 @@ class Daemon:
 
     def _kprobe_add(self, base, k, sym):
         try:
-            tracefs_append(os.path.join(base, "kprobe_events"), f"p:g16testd/{_kp_event(k)} {sym}\n")
+            args = KPROBES[k][1]
+            tracefs_append(os.path.join(base, "kprobe_events"),
+                           f"p:g16testd/{_kp_event(k)} {sym}{' ' + args if args else ''}\n")
         except OSError as e:
             why = rd(os.path.join(base, "error_log")).splitlines()[-2:]
             fail(f"kprobe {k} ({sym}) refused: {e.strerror}" + (f" ({' / '.join(why)})" if why else ""))
 
+    def outdir(self):
+        return os.path.join(self.h.run_dir, "out")
+
     def trace_stop(self, name, keep=True):
-        t = self.rec["traces"].get(name) or fail(f"no trace {name} running")
+        """keep True: the trace goes to the caller as an open, unnamed file, so the helper
+        keeps no copy; "file": kept in the run dir until trace-stop NAME collects it (the
+        watchdog); False: discarded."""
+        if not NAME_RE.fullmatch(name):
+            fail("instance name: lowercase letters, digits and dashes, up to 32")
+        kept = os.path.join(self.outdir(), f"{name}.trace")
+        t = self.rec["traces"].get(name)
+        if t is None:
+            if keep is True and os.path.isfile(kept):  # stopped by the watchdog
+                with open(kept, "rb") as src:
+                    self._hand_over(src)
+                os.unlink(kept)
+                return {"trace": name}
+            fail(f"no trace {name} running")
         base = self.h.tracefs()
         inst = os.path.join(base, "instances", f"g16-testd-{name}")
-        out = None
         if os.path.isdir(inst):
             wr(f"{inst}/tracing_on", 0)
             if keep:
-                outdir = os.path.join(self.h.run_dir, "out")
-                os.makedirs(outdir, mode=0o755, exist_ok=True)
-                out = os.path.join(outdir, f"{name}.trace")
-                with open(f"{inst}/trace", "rb") as src, open(out, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                if not self.h.fake:
-                    os.chown(out, self.uid, -1)
-                os.chmod(out, 0o600)
+                os.makedirs(self.outdir(), mode=0o700, exist_ok=True)
+                with open(f"{inst}/trace", "rb") as src:
+                    if keep is True:
+                        self._hand_over(src)
+                    else:
+                        with open(os.open(kept, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as dst:
+                            shutil.copyfileobj(src, dst)
             self.h.rmdir(inst)
         in_use = {k for n, o in self.rec["traces"].items() if n != name for k in o["kprobes"]}
         for k in t["kprobes"]:
@@ -675,7 +700,18 @@ class Daemon:
                     log(f"kprobe {k} removal refused: {e.strerror}")
         del self.rec["traces"][name]
         self.save()
-        return out or "discarded"
+        return {"trace": name} if keep is True and self.handover else "discarded"
+
+    def _hand_over(self, src):
+        """src copied into an unnamed file under the run dir (root's), sent with the reply."""
+        os.makedirs(self.outdir(), mode=0o700, exist_ok=True)
+        f = tempfile.TemporaryFile(dir=self.outdir())
+        shutil.copyfileobj(src, f)
+        f.flush()
+        f.seek(0)
+        if self.handover:
+            self.handover.close()
+        self.handover = f
 
     # -- modules
     def module_swap(self, name, path):
@@ -828,7 +864,7 @@ class Daemon:
         for name, t in list(self.rec["traces"].items()):
             if now - t["started"] > TRACE_MAX_SECONDS:
                 log(f"watchdog: trace {name} ran {TRACE_MAX_SECONDS} s; stopping it, kept for trace-stop")
-                self._try([], self.trace_stop, name, True)
+                self._try([], self.trace_stop, name, "file")
 
     def status(self):
         return {"uid": self.uid, "expires": int(self.expires), "left_s": int(self.expires - time.time()),
@@ -915,6 +951,7 @@ class Daemon:
 
     def answer(self, conn):
         conn.settimeout(10)
+        self.handover = None
         pid, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
         try:
             if uid not in (self.uid, 0):
@@ -935,10 +972,17 @@ class Daemon:
         except Exception as e:  # one bad call never takes the session (and its restore) down
             log(f"error (uid {uid} pid {pid}): {type(e).__name__}: {e}")
             reply = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        data = (json.dumps(reply) + "\n").encode()
         try:
-            conn.sendall((json.dumps(reply) + "\n").encode())
+            if self.handover and reply["ok"]:
+                data = data[socket.send_fds(conn, [data], [self.handover.fileno()]):]
+            conn.sendall(data)
         except OSError:
             pass
+        finally:
+            if self.handover:
+                self.handover.close()
+                self.handover = None
 
 
 def _kp_event(k):
@@ -1114,19 +1158,49 @@ def call(method, args=(), reason=""):
         return None
     except PermissionError:
         return {"ok": False, "error": "the open session belongs to another user"}
+    fds = []
     with s:
         s.settimeout(300)
         s.sendall((json.dumps({"method": method, "args": list(args), "reason": reason}) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
+            chunk, got, _, _ = socket.recv_fds(s, 65536, 1)
+            fds += got
             if not chunk:
                 break
             buf += chunk
     try:
-        return json.loads(buf)
+        reply = json.loads(buf)
     except ValueError:
-        return {"ok": False, "error": "no answer from the daemon"}
+        reply = {"ok": False, "error": "no answer from the daemon"}
+    for fd in fds[1:]:
+        os.close(fd)
+    if fds:
+        reply["fd"] = fds[0]
+    return reply
+
+
+def take_trace(reply, name):
+    """trace-stop's answer: the open trace file the daemon handed over, written to a
+    file of yours; the reply's result becomes its path."""
+    if not reply or not reply.get("ok"):
+        return reply
+    fd = reply.pop("fd", None)
+    if fd is None:  # "discarded": the instance was already gone
+        return reply
+    if not NAME_RE.fullmatch(name):
+        os.close(fd)
+        return {"ok": False, "error": "bad trace name"}
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    d = os.path.join(rt if rt and os.path.isdir(rt) else os.path.expanduser("~/.cache"), UNIT)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    out = os.path.join(d, f"{name}.trace")
+    with os.fdopen(fd, "rb") as src, open(os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600),
+                                          "wb") as dst:
+        src.seek(0)
+        shutil.copyfileobj(src, dst)
+    reply["result"] = out
+    return reply
 
 
 def show(reply):
@@ -1207,7 +1281,7 @@ def cmd_list(_a):
               else v.pattern if isinstance(v, re.Pattern) else "|".join(sorted(v)))
         print(f"  {n:20} {vs:22} {k.what}")
     print("trace events (trace-start):\n  " + "\n  ".join(sorted(EVENTS)))
-    print("kprobes (trace-start):\n  " + "\n  ".join(f"{k:22} {s}" for k, s in KPROBES.items()))
+    print("kprobes (trace-start):\n  " + "\n  ".join(f"{k:22} {s} {a}".rstrip() for k, (s, a) in KPROBES.items()))
     print("boot drop-ins (boot-dropin NAME on|off):\n  " + "\n  ".join(f"{k:22}{s}" for k, s in DROPINS.items()))
     return 0
 
@@ -1257,7 +1331,12 @@ def main(argv=None):
     if a.cmd == "list":
         return cmd_list(a)
     if a.cmd == "call":
-        return show(call(a.method, a.args, a.reason))
+        r = call(a.method, a.args, a.reason)
+        if a.method == "trace-stop" and a.args:
+            r = take_trace(r, a.args[0])
+        elif r and "fd" in r:
+            os.close(r.pop("fd"))
+        return show(r)
     if a.cmd == "daemon":
         return cmd_daemon(a)
     if a.cmd == "cleanup":

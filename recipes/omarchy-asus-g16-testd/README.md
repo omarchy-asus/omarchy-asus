@@ -32,7 +32,7 @@ Nothing a caller sends is run as a command.
 | call | does | limits |
 |---|---|---|
 | `ec-read OFFSET LEN` | loads `ec_sys write_support=0` and reads EC RAM (FTBL, #185/#244) | 256 bytes; refuses when `ec_sys` is loaded with write support |
-| `trace-start NAME EVENTS [KPROBES] [BUFFER_KB]` / `trace-stop NAME` | a private tracefs instance `g16-testd-NAME` and named kprobes (#218, #239, #172) | events and kprobes from the allowlist; stopped after 30 min |
+| `trace-start NAME EVENTS [KPROBES] [BUFFER_KB]` / `trace-stop NAME` | a private tracefs instance `g16-testd-NAME` and named kprobes (#218, #239, #172); `trace-stop` hands the trace over as an open file and writes it to `$XDG_RUNTIME_DIR/omarchy-asus-g16-testd/NAME.trace`, yours to remove, so the helper keeps no copy (#284) | events and kprobes from the allowlist, each kprobe with its fixed fetch arguments (`dmub-cacp-set-level` records `level`); stopped after 30 min, then kept by the helper until `trace-stop NAME` collects it or the session ends |
 | `knob-set KNOB VALUE` / `knob-restore KNOB` | the A/B knobs: `nmi-watchdog`, `nvme-apst`, `sd-reader`, `sd-reader-pm`, `kbd-usb-pm`, `numlock-led`, `wifi-ps`, `bt-rfkill`, `panel-power-savings`, `platform-profile` | each knob's own values or range |
 | `module-swap NAME PATH` / `module-restore NAME` | swaps in a test build of a module (#226), then puts the stock one back | only builds whose sha256 was given at `session start --module NAME=SHA256`; the copy that is loaded is the one hashed |
 | `boot-dropin NAME on\|off` | a limine-entry-tool drop-in (`rcu-nocbs-all`, `nmi-watchdog-off`, #229), then `limine-update`; prints the resulting command lines to check before a reboot | named drop-ins only |

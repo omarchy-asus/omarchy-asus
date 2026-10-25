@@ -43,7 +43,9 @@ class Session(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="g16td")
         self.root = r = self.tmp.name
         self.sock = os.path.join(r, "s")
-        self.env = dict(os.environ, G16_TESTD_SOCKET=self.sock,
+        self.xdg = os.path.join(r, "xdg")
+        os.mkdir(self.xdg)
+        self.env = dict(os.environ, G16_TESTD_SOCKET=self.sock, XDG_RUNTIME_DIR=self.xdg,
                         G16_TESTD_STATE=os.path.join(r, "var/lib/omarchy-asus-g16-testd"))
         put(r, "proc/sys/kernel/random/boot_id", "boot-1")
         put(r, "proc/sys/kernel/nmi_watchdog", "1")
@@ -569,10 +571,59 @@ class Session(unittest.TestCase):
         self.assertEqual(get(inst, "events/g16testd/pci_set_power_state/enable"), "1")
         rc, out = self.g("call", "trace-stop", "x")
         self.assertEqual(rc, 0, out)
+        # handed over: the file is the caller's, and the helper's run dir keeps no copy
+        self.assertEqual(out.strip(), os.path.join(self.xdg, "omarchy-asus-g16-testd/x.trace"))
         self.assertEqual(open(out.strip()).read().strip(), "<idle>-0 hrtimer_start")
         self.assertEqual(oct(os.stat(out.strip()).st_mode & 0o777), "0o600")
+        self.assertEqual(os.listdir(os.path.join(self.root, "run/omarchy-asus-g16-testd/out")), [])
         self.assertFalse(os.path.exists(inst))
         self.assertTrue(get(self.root, "sys/kernel/tracing/kprobe_events").endswith("-:g16testd/pci_set_power_state"))
+
+    def test_trace_kprobe_fetch_args_and_irq_work(self):
+        # #284: irq_work idle exits for bin/g16-wakeups; the CACP level for bin/g16-cacp-check
+        tpl = os.path.join(self.root, "fake-instance")
+        put(tpl, "events/irq_vectors/irq_work_entry/enable", "0")
+        put(tpl, "events/g16testd/dmub_cacp_set_level/enable", "0")
+        put(self.root, "proc/kallsyms", "ffffffffc1000010 t dmub_cacp_set_level\t[amdgpu]")
+        self.start()
+        rc, out = self.g("call", "trace-start", "c", "irq_vectors/irq_work_entry", "dmub-cacp-set-level")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(get(self.root, "sys/kernel/tracing/kprobe_events"),
+                         "p:g16testd/dmub_cacp_set_level dmub_cacp_set_level level=%si:u32")
+        inst = os.path.join(self.root, "sys/kernel/tracing/instances/g16-testd-c")
+        self.assertEqual(get(inst, "events/g16testd/dmub_cacp_set_level/enable"), "1")
+        self.assertEqual(get(inst, "events/irq_vectors/irq_work_entry/enable"), "1")
+        self.stop()
+        self.assertTrue(get(self.root, "sys/kernel/tracing/kprobe_events").endswith("-:g16testd/dmub_cacp_set_level"))
+
+    def test_trace_watchdog_kept_then_collected(self):
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("g16testd", TOOL)
+        m = module_from_spec(spec_from_loader("g16testd", loader))
+        loader.exec_module(m)
+        put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
+        put(self.root, "fake-instance/trace", "<idle>-0 hrtimer_start")
+        h = m.Host(self.root)
+        d = m.Daemon(h, UID, time.time() + 600, {})
+        d.trace_start("w", "timer/hrtimer_start")
+        d.trace_start("v", "timer/hrtimer_start")
+        for t in d.rec["traces"].values():
+            t["started"] -= m.TRACE_MAX_SECONDS + 1
+        d.watchdogs()
+        out = os.path.join(self.root, "run/omarchy-asus-g16-testd/out")
+        self.assertEqual(sorted(os.listdir(out)), ["v.trace", "w.trace"])
+        self.assertEqual(oct(os.stat(os.path.join(out, "w.trace")).st_mode & 0o777), "0o600")
+        # the next trace-stop hands it over and removes the helper's copy
+        self.assertEqual(d.trace_stop("w"), {"trace": "w"})
+        self.assertEqual(d.handover.read().strip(), b"<idle>-0 hrtimer_start")
+        d.handover.close()
+        self.assertEqual(os.listdir(out), ["v.trace"])
+        with self.assertRaises(m.Refused):
+            d.trace_stop("w")
+        # one nobody collected goes at the end of the session
+        d.restore_runtime(idle=False)
+        self.assertFalse(os.path.exists(out))
 
     def test_trace_kprobe_symbol_must_be_unique(self):
         put(self.root, "fake-instance/events/timer/hrtimer_start/enable", "0")
@@ -709,6 +760,8 @@ class Package(unittest.TestCase):
         p = subprocess.run([sys.executable, "-I", TOOL, "list"], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("nmi-watchdog", p.stdout)
+        self.assertIn("irq_vectors/irq_work_entry", p.stdout)
+        self.assertIn("dmub-cacp-set-level    dmub_cacp_set_level level=%si:u32", p.stdout)
 
     def test_policy_points_at_the_installed_tool(self):
         pol = open(os.path.join(HERE, "..", "io.github.omarchy-asus.g16-testd.policy")).read()

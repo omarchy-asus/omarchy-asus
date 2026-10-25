@@ -369,8 +369,8 @@ print(" ".join(k for k in sys.argv[1:] if k in knobs))' "$@"
     echo "ok reverted"
   }
   TRN=''
-  # The helper's trace file is ours, in a directory of root's: empty it, so it holds
-  # no memory in /run, and remove it where we can.
+  # The helper's trace file is ours to remove. A helper before #284 left it in a
+  # directory of root's: empty it, so it holds no memory in /run, and remove it.
   drop() { : 2>/dev/null >"$1"; rm -f "$1" 2>/dev/null; }
   trace_cleanup() { [[ -n $TRN ]] && { f=$(td trace-stop "$TRN") && drop "$f"; }; TRN=''; }
   restore_all() { local t; for t in "${!APPLIED[@]}"; do revert "$t" >/dev/null; done; trace_cleanup; }
