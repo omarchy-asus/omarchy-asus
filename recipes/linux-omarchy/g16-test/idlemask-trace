@@ -167,16 +167,14 @@ def parse_devices(lines):
 
 
 def first_device(devices, bit):
-    """-> the first noirq row after which bit reads idle: (device, state), ("", stage) if it
-    was already idle at noirq-start, or None. Devices finish asynchronously, so a row's
-    mask can include a device that finished at about the same time."""
-    for i, (dev, st, m) in enumerate(devices):
+    """-> the first noirq row after which bit reads idle: (device, state), or ("", stage) when
+    that row is a stage line (noirq-start: idle before the phase; amdgpu-noirq or noirq: no
+    PCI row before it reads idle, so a non-PCI device or amdgpu's own noirq), or None.
+    Devices finish asynchronously, so a row's mask can include a device that finished at
+    about the same time."""
+    for dev, st, m in devices:
         if (m >> bit) & 1:
-            if dev is None and i == 0:
-                return "", st
-            if dev is None:
-                continue
-            return dev, st
+            return ("", st) if dev is None else (dev, st)
     return None
 
 
@@ -383,8 +381,11 @@ def noirq_section(res):
         f = first_device(devs, b)
         if f is None:
             o.append(f"- bit {b}: not idle by the end of the noirq phase")
-        elif not f[0]:
+        elif not f[0] and f[1] == NOIRQ_START:
             o.append(f"- bit {b}: already idle at {f[1]}")
+        elif not f[0]:
+            o.append(f"- bit {b}: first idle at the {f[1]} stage, with no PCI device row before it "
+                     "reading idle (a non-PCI device, or amdgpu's own noirq)")
         else:
             o.append(f"- bit {b}: {f[0]} ({f[1]})")
     o += ["", "Devices finish asynchronously: a row can include a device that finished at about "

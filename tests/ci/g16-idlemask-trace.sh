@@ -75,6 +75,11 @@ c = m.collect(dl)
 print("devs", ";".join(f"{d}={s}={x}" for d, s, x in c["devices"]))
 dv = m.devices_of(json.loads(json.dumps(c)))
 print("firstdev", m.first_device(dv, 16), m.first_device(dv, 17), m.first_device(dv, 18))
+late = {"devices": [[None, "noirq-start", "0x00000000"], ["0000:61:00.0", "D3hot", "0x00000000"],
+                    [None, "noirq", "0x00010000"]]}
+print("late", m.first_device(m.devices_of(late), 16))
+print("latetext", any(x.startswith("- bit 16: first idle at the noirq stage, with no PCI device row")
+                      for x in m.noirq_section(late)))
 r = copy.deepcopy(base); r["stages"] = []; text, vv = m.report(r, "k", False); print("empty", vv, "no `SMU idlemask" in text)
 EOF
 )
@@ -84,7 +89,7 @@ for want in "stages amdgpu-ip=0xfdc09add;noirq=0xfdc09add;dsm-screen-off-amd=Non
     "no9904 INCOMPLETE" "lacks True" "empty INCOMPLETE True" "no9905 INCOMPLETE" "lacks9905 True" \
     "onlystages INCOMPLETE" \
     "devs None=noirq-start=0x00010000;0000:61:00.0=D0=0x00010000;0000:67:00.0=D3cold=0x00030000;None=noirq=0x00030000" \
-    "firstdev ('', 'noirq-start') ('0000:67:00.0', 'D3cold') None"; do
+    "firstdev ('', 'noirq-start') ('0000:67:00.0', 'D3cold') None" "late ('', 'noirq')" "latetext True"; do
     grep -qxF "$want" <<<"$out" && ok "$want" || bad "want '$want': $out"
 done
 
