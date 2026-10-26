@@ -202,6 +202,33 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Notes:** #205's second failure (a DPIA link trained at RBR after a resume) has no root cause;
   `test --dock` records each link's settings. Details: NOTES.md, "0482".
 
+#### Upstream report draft
+
+amd-gfx mailing list, as a patch with 0482's commit message ("drm/amd/display: Replay DMUB HPDs
+skipped during suspend/resume"); the cover text below. Adapted from the draft on bug #205. Not
+sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
+
+> **Subject:** drm/amd/display: DPIA HPD dropped during resume, USB4 DP tunnels torn down
+>
+> On a Strix Point laptop (DCN 3.5, USB4 DPIA, software connection manager; an ASUS ROG Zephyrus
+> G16 GA605KM) with a USB4 dock and two DP monitors: suspend (s2idle), unplug the dock, plug it
+> back in while suspended, resume. amdgpu logs `Skip DMUB HPD IRQ callback in suspend/resume`
+> for each tunnel, 12 s later thunderbolt logs `(DP): not active, tearing down`, and the monitors
+> stay dark until the next suspend.
+>
+> `dmub_hpd_callback()` drops DMUB HPDs while `adev->in_suspend` is set and expects `dm_resume()`
+> to probe the connectors, but `dm_resume()` probes before thunderbolt has created the dock's DP
+> tunnels. Their HPDs arrive later in resume, while `in_suspend` is still set, and are lost.
+>
+> The patch keeps the skip, records the link of each skipped HPD, and replays it through
+> `handle_hpd_irq_helper()` from a new DM `.complete` callback, after `in_suspend` is cleared. A
+> link that didn't change finds the same sink and sends no hotplug event. Runtime PM resume
+> doesn't run `.complete` and is unchanged. Still present in mainline (v7.3-rc7) and
+> amd-staging-drm-next.
+>
+> Tested on the GA605KM: 40 of 40 docked s2idle cycles brought both monitors back. The
+> replug-while-suspended case still needs a re-run on the patched kernel.
+
 <a id="kernel-0773-gpio16-wake"></a>
 ### gpiolib-acpi ignores GPIO 16 wakeups on the GA605KM (0773)
 
@@ -236,6 +263,28 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Drop when:** an equivalent entry is merged upstream and reaches linux-omarchy.
 - **Notes:** formerly tracked in issue #151.
 
+#### Upstream report draft
+
+linux-gpio (gpiolib-acpi maintainers, Cc linux-acpi), as a patch with 0773's commit message
+("gpiolib: acpi: Add a quirk for ASUS ROG Zephyrus G16 GA605KM"); the cover text below. Not sent;
+a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
+
+> **Subject:** gpiolib: acpi: ignore GPIO 16 wakeups on the ASUS ROG Zephyrus G16 GA605KM
+>
+> With an HDMI monitor connected (the port is wired to the NVIDIA dGPU), the GA605KM (BIOS 307)
+> wakes about 95 ms after entering s2idle, on battery or AC. The wake is the `_AEI` pin GPIO 16
+> on `AMDI0030:00` (`ACPI: PM: Wakeup unrelated to ACPI SCI`, `GPIO 16 is active`), so lid-close
+> and idle suspend leave the machine awake with the screens off.
+>
+> Booting with `gpiolib_acpi.ignore_wake=AMDI0030:00@16` fixes it: `last_hw_sleep` goes from
+> 0.095 s to 10.5 s and 33 s with HDMI connected, and 44 s across a lid close. The lid (GPIO 0)
+> and the keyboard (GPIO 58) still wake it.
+>
+> The patch adds a DMI entry (`DMI_SYS_VENDOR` "ASUSTeK COMPUTER INC.", `DMI_BOARD_NAME`
+> "GA605KM") with `.ignore_wake = "AMDI0030:00@16"`, like the existing entries. Nothing else
+> matches it. I haven't decoded what GPIO 16's `_AEI` handler is for; an acpidump can follow if
+> that helps.
+
 <a id="kernel-0807-armoury-power-limits"></a>
 ### asus-armoury GA605KM power limits (0807)
 
@@ -255,6 +304,29 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Notes:** issue #34 closed when the per-charger limits moved to the omarchy-asus plugin; the
   patch is still carried.
 
+#### Upstream report draft
+
+platform-driver-x86 (asus-armoury maintainers), as a patch with 0807's commit message
+("platform/x86: asus-armoury: add power limits quirk for GA605KM"); the cover text below. Not
+sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
+
+> **Subject:** platform/x86: asus-armoury: add power limits for the ROG Zephyrus G16 GA605KM
+>
+> The GA605KM has no `power_limits` entry, so the kernel logs `No matching power limits found for
+> this system` and the ppt_*, nv_dynamic_boost and nv_temp_target attributes return `-ENODEV`.
+>
+> The entry gives the model's ranges from its ThrottleGear configuration: AC SPL 15-80 W, SPPT
+> and FPPT 35-80 W, Dynamic Boost 5-15 W, temp target 75-87 C; DC SPL 25-35 W, SPPT 31-44 W, FPPT
+> 45-65 W. They match GA605W apart from the Dynamic Boost maximum.
+>
+> It sets `requires_fan_curve = true`: on BIOS 307 the EC applies PPT only while the CPU custom
+> fan curve is on. Under a 16-thread load on AC, a 25 W SPL write was ignored in auto fan mode
+> (about 48 W package power); with the curve on, package power tracked 25 W, then 40 W.
+>
+> `nv_tgp` is left out: on this firmware 0x00120098 takes an offset above the 55 W base TGP,
+> while the other entries use absolute watts. I'd rather leave it out than ship a range that may
+> be wrong; happy to add it once you say which convention you want.
+
 <a id="kernel-0808-thermal-policy-restore"></a>
 ### asus-wmi restores the thermal policy after hibernation (0808)
 
@@ -270,6 +342,31 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Upstream: not submitted** (target platform-driver-x86). Not in mainline 7.3 (2026-10-22).
 - **Drop when:** upstream restores the policy after hibernation. Bug: #185.
 
+#### Upstream report draft
+
+platform-driver-x86 (asus-wmi maintainers), as a patch with 0808's commit message
+("platform/x86: asus-wmi: restore thermal policy and fan curves after hibernation"); the cover
+text below. Not sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI
+assistants ask for.
+
+> **Subject:** platform/x86: asus-wmi: restore the thermal policy and fan curves after hibernation
+>
+> After resume from hibernation the firmware has booted again, so the EC runs its default fan
+> table, but asus-wmi still reports the policy from before and never sends it again. Userspace
+> sees `quiet` already set and writes nothing. On an ASUS ROG Zephyrus G16 GA605KM the fans then
+> run the balanced table (about 2100/1800/3800 rpm on a cool idle) while every layer reports
+> quiet. The 0x00120075 method can't be read back (it always returns 0x00010003), so the only
+> fix is to send the policy again.
+>
+> The patch makes `asus_hotk_restore()` (the `.restore` callback, hibernation only) write
+> `throttle_thermal_policy_mode` back, then re-enable and re-send each custom fan curve that was
+> enabled (a policy write clears their enable flags). `.thaw` and `.resume` are unchanged.
+>
+> Tested on the GA605KM: the EC's fan-table byte stays on the silent table across three
+> hibernates in a row. The cost is one firmware `_QD4` call per hibernation resume, which wakes the
+> NVIDIA dGPU for about 20 s.
+> Mainline 7.3 has no such restore.
+
 <a id="kernel-0810-panel-power-savings"></a>
 ### panel_power_savings applies when written (0810)
 
@@ -282,6 +379,27 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
   1 (then 0 is written back).
 - **Upstream: not submitted.** Ours; mainline (7.4-rc1) has the same store function.
 - **Drop when:** upstream applies the level on write. Issue: #172.
+
+#### Upstream report draft
+
+amd-gfx, as a patch with 0810's commit message ("drm/amd/display: apply panel_power_savings when
+it is written"); the cover text below. Not sent; a human decides. Add the `Assisted-by:` tag the
+kernel's rules on AI assistants ask for.
+
+> **Subject:** drm/amd/display: apply panel_power_savings when it is written
+>
+> `panel_power_savings_store()` updates the connector state and sends a hotplug uevent; the level
+> reaches the stream only at the next commit that includes the connector. Compositors that leave
+> the connector out of page flips (aquamarine, so Hyprland) apply it only at the next modeset: a
+> DPMS cycle, a refresh-rate change or a resume. So a write by hand, or by power-profiles-daemon's
+> `amdgpu_panel_power` action, does nothing for a long time.
+>
+> The patch commits the connector and its CRTC unchanged right after the write (not while the
+> CRTC is off or during suspend). No modeset; DC gets the level as a fast stream update.
+>
+> Tested on an ASUS ROG Zephyrus G16 GA605KM (Radeon 860M, OLED eDP): a kprobe on
+> `dmub_cacp_set_level` fires within 3 s of the write. Mainline (7.4-rc1) has the same store
+> function.
 
 <a id="kernel-9900-zen5c-soft-park"></a>
 ### EXPERIMENTAL Zen 5c-first soft park (9900)
@@ -364,6 +482,28 @@ daily check reports their pull requests' state. When no patch is left, unpublish
   `suspended`. A real monitor still lights up.
 - **Upstream: not submitted.** Not in `UPSTREAM_PRS` until it has a pull request.
 - **Drop when:** NVIDIA fixes the stale connect state, or ships an equivalent check. Bug: #213.
+
+#### Upstream report draft
+
+NVIDIA/open-gpu-kernel-modules, a pull request with patch 0004 (NVIDIA asks for the CLA first,
+still unsigned, see [0001](#nvidia-0001-hibernate-power-off)). Not opened; a human decides.
+
+> **Title:** nvidia-drm: report an HDMI connector with no EDID as disconnected
+>
+> After resume from hibernation, on a hybrid laptop (ASUS ROG Zephyrus G16 GA605KM, RTX 5060
+> Laptop, 615.78.08), the RTX's HDMI port reads connected with nothing plugged in. The compositor
+> lights a phantom output, and the GPU stays awake.
+>
+> An HDMI sink always provides an EDID over DDC, so a connected HDMI connector with no EDID is a
+> stale connect state. This makes `nv_drm_connector_detect()` report it disconnected, as i915
+> does, and log `No EDID on connected HDMI connector`. A forced connector or an EDID override
+> still counts as connected.
+>
+> Test: hibernate and resume with nothing on HDMI; no output appears and the GPU returns to
+> runtime suspend, and a real HDMI monitor still lights up (fill in after the G16 run). The root
+> cause (why RM keeps the stale connect state across hibernation) isn't fixed here.
+>
+> This pull request was written with Claude Code.
 
 ## Hyprland: hyprland and hyprpm
 
@@ -1146,6 +1286,8 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
   not submitted; test cases: no scan on an unchanged app list, no scan on open with unchanged
   caches, a scan after one changes, single-pass indexing; on the G16: no `find` on repeated opens,
   a new app's icon on the next open, no rescan after saving a dotfile in the home directory.
+- **Upstream report:** no draft is kept. 0018's once-a-minute timer is the wrong shape (the plan
+  above); the change check from the plan gets a draft when it is written.
 - **Drop when:** Quattro moves to 4.5 (general-0004 then covers it), or an equivalent is released.
 - **Notes:** formerly tracked in issue #33.
 
@@ -1224,6 +1366,39 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
 - **Drop when:** the driver stops waking for device enumeration, or Omarchy ships an equivalent.
   Bug: #218.
 
+#### Upstream report draft
+
+omacom/omarchy, PR against `quattro` from patch 0026. Not opened; a human decides.
+
+> **Title:** Keep the NVIDIA GPU asleep while apps start on hybrids
+>
+> On a hybrid laptop whose iGPU drives the display, any app that lists Vulkan devices or opens
+> surfaceless or device EGL at startup (GTK, Chromium, Electron) wakes a runtime-suspended NVIDIA
+> GPU for about 20 s: nvidia-open resumes the GPU for any call into the driver. Screen lock and
+> unlock do too.
+>
+> **Change.** On those machines (Turing and newer), `nvidia.lua` sets
+> `VK_LOADER_DRIVERS_DISABLE=*nvidia*` and lists only Mesa's EGL vendor for the desktop session
+> (`OMARCHY_DESKTOP_GPU_PINS` names the two). Games get every GPU back however they start:
+>
+> - login autostart takes the pins out of the systemd user environment;
+> - an interactive bash drops them, so anything run from a terminal has both GPUs;
+> - the launcher starts game entries without them (Game category, `PrefersNonDefaultGPU`,
+>   `X-KDE-RunOnDiscreteGpu`, or a known game runner in `Exec`);
+> - the new `omarchy-launch-all-gpus` runs anything else with every GPU.
+>
+> A migration asks for a reboot when the session started without the pins. NVIDIA-only machines,
+> hybrids where NVIDIA drives the display, and pre-Turing GPUs get no change.
+>
+> **Evidence.** On an ASUS ROG Zephyrus G16 GA605KM, with the RTX suspended: GTK and Chromium apps
+> from the launcher, and a lock and unlock, leave it `suspended`; a game from Steam or the launcher
+> still runs on the RTX (fill in after the G16 run).
+>
+> **Tests.** New `launch-all-gpus-test.sh`; `hw-nvidia-test.sh`, `desktop-entry-launch-test.sh`
+> and `app-search-test.sh` are extended.
+>
+> This pull request was written with Claude Code.
+
 <a id="omarchy-general-0001-floating-redraw"></a>
 ### Floating mode waits for the app's redraw (general-0001)
 
@@ -1235,6 +1410,22 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
   full.
 - **Upstream: not submitted** (the same 1 ms timer is on upstream's `quattro`).
 - **Drop when:** an equivalent is released. Bug: #274.
+
+#### Upstream report draft
+
+omacom/omarchy, PR against `quattro` from patch general-0001. Not opened; a human decides.
+
+> **Title:** Float a moved window once its app has caught up with the move
+>
+> When a window moves onto a floating workspace on a monitor with a different scale, the
+> floating mode floats and sizes it 1 ms after the move, before the app has redrawn at the new
+> scale, so the window is drawn half. This waits 100 ms instead. Measured: 1 ms and 16 ms both
+> lose the size, 50 ms keeps it, so 100 ms leaves some margin.
+>
+> Test: move a window onto a floating workspace on a monitor of another scale; it is drawn in
+> full. `hyprland-floating-workspaces-test.sh` is updated for the new delay.
+>
+> This pull request was written with Claude Code.
 
 <a id="omarchy-general-0002-sleep-monitor"></a>
 ### The sleep lock's monitor survives suspends (general-0002)
@@ -1252,6 +1443,29 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
 - **Upstream: not submitted.** Related: omacom/omarchy#13782 (another contributor's open PR, which
   retries the rejected restart instead).
 - **Drop when:** an equivalent is released. Bug: #206.
+
+#### Upstream report draft
+
+omacom/omarchy, PR against `quattro` from patch general-0002, or a comment on
+omacom/omarchy#13782 offering it as an alternative. Not opened; a human decides.
+
+> **Title:** Keep the sleep monitor running across suspends
+>
+> `omarchy-sleep-lock.service` exits around every resume: logind rejects its new delay inhibitor
+> as "already running", the unit fails, and while it restarts a suspend can start unlocked.
+> #13782 retries the restart; this keeps the monitor alive for the whole session instead.
+>
+> `omarchy-system-sleep-monitor` holds a delay inhibitor between suspends. On
+> `PrepareForSleep(true)` it locks and releases it, and on `PrepareForSleep(false)` it takes a new
+> one. It takes the inhibitor only once dbus-monitor is subscribed, replaces a holder that dies at
+> once, and doesn't poll. An inhibitor logind rejects waits for the resume instead of failing the
+> unit, and a suspend while it holds none still gets the lock.
+>
+> Test: several suspend and resume cycles. `systemctl --user status omarchy-sleep-lock` shows no
+> exits or restarts, and the screen is locked on every resume. `sleep-monitor-test.sh` is
+> updated.
+>
+> This pull request was written with Claude Code.
 
 <a id="omarchy-general-0004-app-library"></a>
 ### The app library rescans only on real changes (general-0004)
@@ -1309,6 +1523,29 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
   not opened yet (a human decides; see [0002](#omarchy-0002-usbc-power)).
 - **Drop when:** 0002 drops, or an omarchy-settings release ships the unit.
 
+#### Upstream report draft
+
+omacom/omarchy-pkgs, PR from pkgs branch `omarchy-settings-source-monitor`, opened together with
+omacom/omarchy#15668 (it only matters once that merges). Not opened; a human decides.
+
+> **Title:** omarchy-settings: install omarchy-powerprofiles-source-monitor.service
+>
+> Companion to omacom/omarchy#15668, which adds the user unit
+> `omarchy-powerprofiles-source-monitor.service`. omarchy-settings installs user units from an
+> explicit list, so without this the unit lands only in `/usr/share/omarchy/default/systemd/user`,
+> where systemd doesn't look, and the first-run step and migration enable a unit that doesn't
+> exist.
+>
+> This installs it in `/usr/lib/systemd/user` when the source has it, so the package still builds
+> from a tree without #15668. Off ASUS ROG laptops the unit's `ConditionPathExists` keeps it
+> inert.
+>
+> Test: `pacman -Ql omarchy-settings` lists
+> `/usr/lib/systemd/user/omarchy-powerprofiles-source-monitor.service`, and Omarchy's
+> `config-test.sh` against this checkout no longer reports the unit as not shipped.
+>
+> This pull request was written with Claude Code.
+
 <a id="pkgbuild-pkgdesc-label"></a>
 ### The "(omarchy-asus build)" label
 
@@ -1350,6 +1587,26 @@ it is installed.
   ASUF1209 wakeups to clicks.
 - **Notes:** formerly tracked in issue #15.
 
+#### Upstream report draft
+
+omacom/omarchy, PR against `quattro` from fork branch `asus/touchpad-wake`. Not opened; a human
+decides.
+
+> **Title:** Stop the ASUS ROG Zephyrus G16 touchpad from waking the laptop
+>
+> The GA605KM's ASUF1209 I2C touchpad is armed as a wake source: a brush or click wakes it from
+> s2idle, and touches count as wakeup events while it is going down (129k in one boot), which can
+> abort a hibernate.
+>
+> This adds a udev rule that sets `power/wakeup` to `disabled` for `i2c-ASUF1209:*` only. The
+> keyboard, lid and power button still wake it.
+>
+> Test: `cat /sys/bus/i2c/devices/i2c-ASUF1209:*/power/wakeup` prints `disabled`; suspend and
+> click the touchpad, and it stays asleep; a key or the lid still wakes it; a hibernate with a
+> hand on the touchpad doesn't abort.
+>
+> This pull request was written with Claude Code.
+
 <a id="g16-hibernate-mode"></a>
 ### HibernateMode=shutdown
 
@@ -1371,6 +1628,24 @@ it is installed.
 - **Drop when:** Omarchy ships this for the GA605KM (or generic ROG), or the S4 rollback / NVIDIA
   restore bug is fixed in the kernel or driver.
 - **Notes:** formerly tracked in issue #16.
+
+#### Upstream report draft
+
+A comment on omacom/omarchy#8589 (the same setting for a G14 GA403UV), adding the GA605KM as a
+second model; a PR from fork branch `asus/hibernate-mode` once upstream says how to gate it. Not
+posted; a human decides.
+
+> Another ASUS model that needs `HibernateMode=shutdown`: the ROG Zephyrus G16 GA605KM (Radeon
+> 860M + RTX 5060 Laptop).
+>
+> In platform mode the kernel backs out of ACPI S4 when a wakeup event is pending. On the GA605KM
+> that rollback powers the RTX back up mid-transition, the NVIDIA driver fails to restore its
+> channels, and the laptop needs a hard reset. With a `sleep.conf.d` drop-in setting
+> `HibernateMode=shutdown`, the image is written and the machine powers off, with no rollback
+> path.
+>
+> That makes two ASUS hybrids that need it. Would gating it on ASUS ROG plus an NVIDIA GPU work
+> for you, or would you rather list models? I can open the PR either way.
 
 <a id="g16-nvidia-powerd-start-limit"></a>
 ### nvidia-powerd start limit
@@ -1396,6 +1671,25 @@ it is installed.
 - **Drop when:** asusctl stops restarting the unit per plug event, nvidia-utils relaxes the limit,
   or `omarchy-settings` ships the drop-in in a release.
 - **Notes:** formerly tracked in issue #17.
+
+#### Upstream report draft
+
+asusctl (asus-linux/asusctl on GitLab), an issue; the drafted asusctl patch can follow as a merge
+request once it is built and tested. Not filed; a human decides.
+
+> **Title:** asusd restarts nvidia-powerd on every charger plug, and it hits systemd's start limit
+>
+> asusd's `manage_nvidia_powerd` starts `nvidia-powerd.service` on every charger plug-in and stops
+> it on every unplug. nvidia-utils ships the unit with `StartLimitIntervalSec=infinity` and
+> `StartLimitBurst=5`, so from the sixth plug-in of a boot systemd refuses to start it
+> (`start-limit-hit`, "Start request repeated too quickly"), asusd ignores the failed start, and
+> Dynamic Boost stays off until reboot.
+>
+> Seen on an ASUS ROG Zephyrus G16 GA605KM. A drop-in with `StartLimitIntervalSec=60` works
+> around it: with it, `nvidia-powerd` is active after every plug-in.
+>
+> Could asusd leave the unit running across plug events (or start it once), and log when a start
+> fails?
 
 <a id="g16-rcu-nocbs"></a>
 ### rcu_nocbs=all
@@ -1429,6 +1723,30 @@ it is installed.
   NetworkManager treating a handshake timeout as a wrong key when no agent can answer); a human
   decides whether either is reported.
 - **Drop when:** either is fixed upstream. Bug: #196.
+
+#### Upstream report draft
+
+Two reports, sent separately or not at all; a human decides. Neither is filed.
+
+**mt76** (linux-wireless, Cc the mt76 maintainers), a report:
+
+> **Subject:** wifi: mt76: mt7925: first WPA handshake after resume times out
+>
+> On an ASUS ROG Zephyrus G16 GA605KM (MT7925, `mt7925e`), after most resumes from s2idle the
+> first WPA four-way handshake times out and the second attempt succeeds. The journal shows the
+> reauthentication right after resume. Happy to collect a trace with whatever debug options you
+> want.
+
+**NetworkManager** (gitlab.freedesktop.org NetworkManager), an issue:
+
+> **Title:** A handshake timeout is treated as a wrong password when no secret agent can answer
+>
+> When the four-way handshake times out (here an MT7925 after resume), NetworkManager reads it as
+> a possibly wrong key, asks for new secrets (`asking for new key`), and with no secret agent
+> running ends in `no-secrets` and blocks autoconnect, so Wi-Fi stays down until reconnected by
+> hand. A timeout isn't a rejected key. Could NetworkManager keep retrying with the stored
+> secrets when no agent is registered? For now `auth-retries=6` for `match-device=driver:mt7925e`
+> works around it.
 
 ## Our packages
 
@@ -1558,6 +1876,28 @@ it is installed.
 - **Drop when:** Valve's Proton Experimental ships the fix or reverts `a63f42b3` (then stock
   behaves the same). Until then the pin must follow each Proton Experimental update, or the fix
   is off (README.md, "Updating to a new Proton Experimental").
+
+#### Upstream report draft
+
+ValveSoftware/Proton, an issue (the fix is a one-file change Valve can take from the patch). Not
+filed; a human decides.
+
+> **Title:** Exclusive fullscreen on a secondary monitor maps the pointer wrong under Hyprland
+> (`_NET_WM_FULLSCREEN_MONITORS`)
+>
+> In Proton Experimental (11.0), a game in exclusive fullscreen on a monitor other than the
+> primary one gets clicks far from the pointer under Hyprland (about 80 px off on the HDMI
+> monitor of an ASUS ROG Zephyrus G16; the bottom edge is unreachable). winex11 sets
+> `_NET_WM_FULLSCREEN_MONITORS` and waits for a ConfigureNotify answering it. Hyprland doesn't
+> support the hint and never sends one, so the window's position stays wrong and pointer
+> coordinates map through the wrong monitor. The wait came with wine commit `a63f42b3`; upstream
+> wine doesn't wait there.
+>
+> Fix: expect the ConfigureNotify only when the window manager lists
+> `_NET_WM_FULLSCREEN_MONITORS` in `_NET_SUPPORTED`. A reproducer without a game: a test program
+> in a headless sway with two outputs laid out like the G16's. With the pointer at (400,400),
+> (1280,720) and (2000,1300) on the second output, stock logs clicks at 2559,320, 2559,640 and
+> 2559,1220, and with the fix at 400,400, 1280,720 and 2000,1300.
 
 ## Not carried
 
