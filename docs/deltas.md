@@ -49,6 +49,8 @@ An upstream state that changes is updated here, with the date it was checked.
 | [panel_power_savings applies when written](#kernel-0810-panel-power-savings) | linux-omarchy | 0810 | RC only | not submitted |
 | [EXPERIMENTAL Zen 5c-first soft park](#kernel-9900-zen5c-soft-park) | linux-omarchy | 9900 | both | ours-only |
 | [EXPERIMENTAL DCN 3.5 S0i2-ready display idle](#kernel-9901-dcn35-s0i2) | linux-omarchy | 9901 | RC only | not submitted |
+| [EXPERIMENTAL display idle with every CRTC off](#kernel-9902-dm-idle-all-off) | linux-omarchy | 9902 | RC only | not submitted |
+| [EXPERIMENTAL SMU idlemask trace through s2idle](#kernel-9903-idlemask-trace) | linux-omarchy | 9903 | RC only | ours-only |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -93,7 +95,7 @@ we no longer carry.
 
 ## Kernel: linux-omarchy
 
-RC 7.2.8-9.106 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
+RC 7.2.8-9.107 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
 why, the risks and the long test scripts are in `recipes/linux-omarchy/NOTES.md`. Our patches have
 no `.sig` (upstream's patch signatures use the Omarchy kernel maintainer's key); their checksums
 pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for each patch.
@@ -315,6 +317,36 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Upstream: not submitted.** Mainline master is unchanged (2026-10-25). An amd-gfx report will be
   drafted after the G16 numbers.
 - **Drop when:** the A/B shows no effect or a wake problem, or upstream sends the flags itself.
+
+<a id="kernel-9902-dm-idle-all-off"></a>
+### EXPERIMENTAL display idle with every CRTC off (9902)
+
+- **Component:** `linux-omarchy`,
+  `9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch`, after 9901. RC
+  only (since 9.107).
+- **What:** a new `amdgpu.dm_idle_all_off` parameter (bool, writable at runtime, default 0). When
+  it is 1, amdgpu's display manager treats "no stream in DC's state" as headless where that check
+  gates allowing idle optimizations (the end of a stream commit, the idle worker, periodic
+  detection). Stock only re-allows idle with no connector connected, and the internal panel always
+  is, so with the screen off (DPMS off) idle stays disallowed and IPS never runs (#249). The paths
+  that disallow idle are unchanged. With 0, the driver takes the stock path. Compile-tested only.
+- **Test:** `g16-test/dm-idle-all-off` (with 9901 and 9903); results go to experiment issue #353.
+- **Upstream: not submitted.** An amd-gfx report will be drafted after the G16 numbers.
+- **Drop when:** the A/B shows no effect, or upstream re-allows idle with every CRTC off.
+
+<a id="kernel-9903-idlemask-trace"></a>
+### EXPERIMENTAL SMU idlemask trace through s2idle (9903)
+
+- **Component:** `linux-omarchy`, `9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch`,
+  after 9902. RC only (since 9.107).
+- **What:** with `/sys/power/pm_debug_messages` at 1, each s2idle logs `amd_pmc: SMU idlemask
+  <stage>: 0x...` after amdgpu's display suspend (`amdgpu-display`), after its other IP suspend
+  (`amdgpu-ip`), at amd_pmc's prepare before and after the OS hint (`prepare`, `os-hint`), next to
+  the existing `s0i3` line. amd_pmc exports the helper and amdgpu finds it with `symbol_get()`.
+  With `pm_debug_messages` at 0 nothing is read or logged.
+- **Test:** phase (d) of `g16-test/dm-idle-all-off`: the first stage where bit 16 reads idle (#353).
+- **Upstream: ours-only.** A debug aid.
+- **Drop when:** with 9902, or once the stage that sets bit 16 is known.
 
 ## NVIDIA: nvidia-open-dkms
 

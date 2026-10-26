@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Sun, 25 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: drm/amd/display: allow idle optimizations with
+ every CRTC off (default off)
+
+EXPERIMENTAL, DEFAULT-OFF (local carry for ROG Zephyrus G16 GA605KM idle
+power testing; not submitted upstream).
+
+amdgpu_dm_commit_streams() re-allows idle optimizations after a commit
+only when no vblank interrupt is in use and amdgpu_dm_is_headless(), which
+is false while any connector is connected. On a laptop the internal panel
+stays connected when userspace turns it off (DPMS off: the CRTC goes
+inactive and its stream is removed), so idle is disallowed by the commit
+and never re-allowed: the ISM only re-allows on the vblank events of a
+live CRTC. DC then keeps the display out of IPS with every display off.
+
+Add amdgpu.dm_idle_all_off (bool, 0644, default 0) and
+amdgpu_dm_idle_headless(): true when amdgpu_dm_is_headless() is, or, with
+the parameter set, when the DC state has no stream. Use it where the
+headless check gates allowing idle: the end of amdgpu_dm_commit_streams(),
+the idle worker and the periodic detection helper. The paths that
+disallow idle are unchanged, so the next modeset (DPMS on) still exits
+idle first. The parameter is read on every check: write it, then turn the
+displays off again.
+
+With the parameter at 0 the driver takes the stock path.
+
+Tracked in omarchy-asus #353 (refs #249).
+---
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -11361,6 +11361,33 @@
+ 
+ }
+ 
++/*
++ * EXPERIMENTAL: with every CRTC off, allow idle optimizations as if headless,
++ * even while a connector (the internal panel) is still connected. Read on
++ * every check, so it can be changed at runtime. Default off.
++ */
++static bool dm_idle_all_off;
++module_param(dm_idle_all_off, bool, 0644);
++MODULE_PARM_DESC(dm_idle_all_off,
++	"EXPERIMENTAL: allow display idle optimizations with every CRTC off, even with a connected display (0 = off (default), 1 = on)");
++
++/**
++ * amdgpu_dm_idle_headless() - may idle optimizations be allowed as headless
++ * @adev: amdgpu device
++ *
++ * True when no connector is connected or, with dm_idle_all_off set, when the
++ * DC state has no stream. Called with dm.dc_lock held.
++ */
++bool amdgpu_dm_idle_headless(struct amdgpu_device *adev)
++{
++	if (amdgpu_dm_is_headless(adev))
++		return true;
++
++	return READ_ONCE(dm_idle_all_off) && adev->dm.dc &&
++	       adev->dm.dc->current_state &&
++	       adev->dm.dc->current_state->stream_count == 0;
++}
++
+ static void amdgpu_dm_commit_streams(struct drm_atomic_commit *state,
+ 					struct dc_state *dc_state)
+ {
+@@ -11541,7 +11568,7 @@
+ 			drm_dbg_kms(dev, "200ms frl status polling stops ...\n");
+ 	}
+ 	/* Allow idle optimization when vblank count is 0 for display off */
+-	if ((dm->active_vblank_irq_count == 0) && amdgpu_dm_is_headless(dm->adev))
++	if ((dm->active_vblank_irq_count == 0) && amdgpu_dm_idle_headless(dm->adev))
+ 		dc_allow_idle_optimizations(dm->dc, true);
+ 	mutex_unlock(&dm->dc_lock);
+ 
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+@@ -1196,6 +1196,7 @@
+ 						  void *addr);
+ 
+ bool amdgpu_dm_is_headless(struct amdgpu_device *adev);
++bool amdgpu_dm_idle_headless(struct amdgpu_device *adev);
+ 
+ void hdmi_cec_set_edid(struct amdgpu_dm_connector *aconnector);
+ void hdmi_cec_unset_edid(struct amdgpu_dm_connector *aconnector);
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
+@@ -182,7 +182,7 @@
+ 		fsleep(HPD_DETECTION_TIME_uS);
+ 		mutex_lock(&idle_work->dm->dc_lock);
+ 
+-		if (!amdgpu_dm_is_headless(idle_work->dm->adev) &&
++		if (!amdgpu_dm_idle_headless(idle_work->dm->adev) &&
+ 		    !amdgpu_dm_psr_is_active_allowed(idle_work->dm)) {
+ 			mutex_unlock(&idle_work->dm->dc_lock);
+ 			break;
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_helpers.c
+@@ -1565,7 +1565,7 @@
+ 
+ 	if (adev->dm.idle_workqueue) {
+ 		adev->dm.idle_workqueue->enable = enable;
+-		if (enable && !adev->dm.idle_workqueue->running && amdgpu_dm_is_headless(adev))
++		if (enable && !adev->dm.idle_workqueue->running && amdgpu_dm_idle_headless(adev))
+ 			schedule_work(&adev->dm.idle_workqueue->work);
+ 	}
+ }

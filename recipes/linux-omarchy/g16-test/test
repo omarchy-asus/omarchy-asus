@@ -26,6 +26,8 @@
 #   9900       Zen 5c soft park knobs all at their defaults (off)
 #   9901       amdgpu.dcn35_s0i2 exists and is off; nothing sets it (the A/B is
 #              g16-test/dcn35-s0i2-ab, #353)
+#   9902       amdgpu.dm_idle_all_off exists and is off; nothing sets it (the test is
+#              g16-test/dm-idle-all-off, with 9903's suspend idlemask trace, #353)
 #   nvidia     module, dkms, nvidia-smi, runtime PM back to suspended
 # --no-suspend skips the suspend cycle; --yes answers the yes/no prompts with yes
 # (the Fn+Super and touchpad steps still wait for you). --dock adds the 0482 dock
@@ -508,6 +510,19 @@ check_dcn35_s0i2() {
   result "$st" 9901 "amdgpu.dcn35_s0i2 reads $v (default N)" "${det[@]}"
 }
 
+check_dm_idle_all_off() {
+  local p=/sys/module/amdgpu/parameters/dm_idle_all_off v st=PASS det=() hits
+  grep -q 'dm_idle_all_off' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amdgpu.dm_idle_all_off"); }
+  hits=$(grep -rls 'dm_idle_all_off' /etc/modprobe.d /usr/lib/modprobe.d /etc/udev/rules.d /usr/lib/udev/rules.d /etc/tmpfiles.d /usr/lib/tmpfiles.d 2>/dev/null)
+  [[ -z $hits ]] || { st=FAIL; det+=("files that set it: $hits"); }
+  if ! v=$(cat "$p" 2>/dev/null); then
+    result FAIL 9902 "no $p: this kernel lacks patch 9902" "${det[@]}"
+    return
+  fi
+  [[ $v == N ]] || st=FAIL
+  result "$st" 9902 "amdgpu.dm_idle_all_off reads $v (default N)" "${det[@]}"
+}
+
 check_nvidia() {
   local d rs0 drv nv smi rs st=PASS det=()
   d=$(dgpu_dir) || { result FAIL nvidia "no NVIDIA GPU on the PCI bus"; return; }
@@ -621,6 +636,7 @@ run_checks() {
     check_dock
     check_hfi
     check_dcn35_s0i2
+    check_dm_idle_all_off
     check_nvidia
     check_suspend
     check_hibernate

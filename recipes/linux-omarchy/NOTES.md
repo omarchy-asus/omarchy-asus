@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.106**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.107**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,11 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.106` (kernel release string becomes `7.2.8-9.106-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.107` (kernel release string becomes `7.2.8-9.107-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack).
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -43,6 +43,8 @@ Compared with upstream, only:
    `0808-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
 10. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
 11. `9901-EXPERIMENTAL-...` after 9900 (see "EXPERIMENTAL: 9901" below).
+12. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
+    "EXPERIMENTAL: 9903" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -319,10 +321,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, last.
+   9900, then 9901, 9902 and 9903, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -403,6 +405,83 @@ and socket power drops; the panel comes back; the journal is clean.
 **Upstream.** Not submitted (target: amd-gfx), drafted after the G16 numbers.
 **Remove** if the A/B shows no effect or a wake problem, or once upstream sends
 the flags itself.
+
+## EXPERIMENTAL: 9902 display idle with every CRTC off (default off, #353)
+
+`9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch`
+(ours, compile-tested only, applied after 9901). It touches `amdgpu_dm.c`,
+`amdgpu_dm.h`, `amdgpu_dm_crtc.c` and `amdgpu_dm_helpers.c`.
+
+**What.** A new parameter `amdgpu.dm_idle_all_off` (bool, 0644, default 0) and
+a helper `amdgpu_dm_idle_headless()`: true when `amdgpu_dm_is_headless()` is,
+or, with the parameter at 1, when DC's current state has no stream. The three
+places where the headless check gates allowing idle use it: the end of
+`amdgpu_dm_commit_streams()`, the idle worker and
+`dm_helpers_enable_periodic_detection()`. The paths that disallow idle are
+unchanged, so a modeset (DPMS on) still leaves idle first.
+
+**Why.** With the screen off (DPMS off) the G16's `amdgpu_dm_ips_status` reads
+"Idle optimization: 0" and the IPS counters stop (#249, #353). The commit that
+turns the CRTC off disallows idle, and the only re-allow after a modeset needs
+`amdgpu_dm_is_headless()`, which is false while any connector is connected:
+the internal panel always is. The ISM only re-allows on the vblank events of a
+live CRTC.
+
+**Default behaviour.** None: with the parameter at 0 the helper returns what
+`amdgpu_dm_is_headless()` returns. The parameter is read on every check, so a
+write takes effect at the next commit: turn the screen on and off again after
+changing it. Nothing in this repo sets it.
+
+**Known limit.** DC lowers the clocks (and asks for periodic detection) before
+it swaps in the new state, so with the internal panel connected the periodic
+detection worker usually doesn't start. A display plugged into an AMD-driven
+port while every CRTC is off may then not be noticed until the screen comes
+back on. Only the A/B turns the parameter on.
+
+**Test.** `g16-test/dm-idle-all-off` (with 9901 and 9903; see below). Pass: with
+both parameters at 1 and the screen off, idlemask bits 5 and 20 read idle; if
+bit 16 does too and socket power drops, the screen-off blocker is found.
+
+**Upstream.** Not submitted; an amd-gfx report is drafted after the G16
+numbers. **Remove** if the A/B shows no effect, or once upstream re-allows
+idle with every CRTC off itself.
+
+## EXPERIMENTAL: 9903 SMU idlemask trace through s2idle (debug only, #353)
+
+`9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch` (ours,
+compile-tested only, after 9902). It touches `drivers/platform/x86/amd/pmc/pmc.c`,
+`drivers/gpu/drm/amd/amdgpu/amdgpu_device.c` and adds
+`include/linux/platform_data/x86/amd-pmc.h`.
+
+**What.** While `/sys/power/pm_debug_messages` is 1, each s2idle logs
+`amd_pmc: SMU idlemask <stage>: 0x...` at these stages, in order:
+`amdgpu-display` (after amdgpu's display IP suspend), `amdgpu-ip` (after the
+rest of amdgpu's IP suspend), `prepare` (amd_pmc's s2idle prepare, before the
+OS hint), `os-hint` (right after it) and the existing `s0i3` (amd_pmc's check).
+amd_pmc exports `amd_pmc_trace_idlemask()`; amdgpu finds it with
+`symbol_get()`, so it doesn't need amd_pmc loaded, and calls it only in s0ix.
+Cezanne is skipped (its read needs an SMU version check). `amd_pmc_remove()`
+clears `regbase` so a later trace can't read through a stale mapping.
+
+**Why.** The G16's idlemask reads 0xffff9efd at the s0i3 check (bits 5, 16 and
+20 idle), but with the screen off bit 16 never reads idle. The stages show
+which step of the suspend sequence sets it.
+
+**Default behaviour.** None: with `pm_debug_messages` at 0 nothing is read or
+logged.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9902, or once
+the first stage where bit 16 turns idle is known.
+
+**Test** (9902 and 9903 together, on the G16 booted on this kernel, on
+battery): `g16-test/dm-idle-all-off` needs one root prompt and takes about
+5 minutes, hands off. Phases: (a) a baseline with the screen on; (b) both
+`dcn35_s0i2` and `dm_idle_all_off` at 1 and the screen off for 30 s; (c) the
+screen back on, then both at 0 and the screen off for 30 s (the control);
+(d) `pm_debug_messages` at 1 and one 15 s s2idle, and the `SMU idlemask`
+stage lines. It samples the idlemask at 10 Hz, `amdgpu_dm_ips_status`, socket
+power and battery watts, restores everything on exit (Ctrl-C included), and a
+watchdog turns the screen back on and the parameters off if it dies.
 
 ## 0810: panel_power_savings applies when written (#172)
 
