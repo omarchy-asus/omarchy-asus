@@ -57,6 +57,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [EXPERIMENTAL SMU metrics table at runtime](#kernel-9907-smu-metrics-runtime) | linux-omarchy | 9907 | RC only | ours-only |
 | [EXPERIMENTAL display idle kept allowed with every CRTC off](#kernel-9908-dm-idle-kept) | linux-omarchy | 9908 | RC only | not submitted |
 | [EXPERIMENTAL the GA605KM keyboard declares only its Caps Lock LED](#kernel-9909-nkey-caps-led-only) | linux-omarchy | 9909 | RC only | not submitted |
+| [EXPERIMENTAL debugfs to send the SMU AllowZstates message](#kernel-9910-smu-allow-zstates) | linux-omarchy | 9910 | RC only | ours-only |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -455,6 +456,23 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
   key press, and 67:00.0 too with no Bluetooth device connected (#249).
 - **Upstream: not submitted.** A HID-tree candidate once the G16 test passes.
 - **Drop when:** upstream fixes it, or the G16 test shows no gain.
+
+<a id="kernel-9910-smu-allow-zstates"></a>
+### EXPERIMENTAL debugfs to send the SMU AllowZstates message (9910)
+
+- **Component:** `linux-omarchy`, `9910-EXPERIMENTAL-amd-pm-smu-allow-zstates-debugfs.patch`, after
+  9909. RC only (since 9.111).
+- **What:** maps swsmu's `SMU_MSG_AllowZstates` to `PPSMC_MSG_AllowZstates` (0x25) for SMU 14.0.x
+  and adds the debugfs file `amdgpu_smu_allow_zstates` (root, write-only) in amdgpu's DRM debugfs
+  directory. Writing 0 (disallow), 8 (Z8) or 9 (Z9 and Z8) sends it; other values are refused;
+  each write is logged. Linux never sends this message otherwise; a static read of the SMU
+  firmware suggests its runtime S0i2 gate needs the Z-state enable it feeds (#249). Nothing is
+  sent unless the file is written.
+- **Test:** on battery with the screen off and the PSP and keyboard xHCI suspended, write 9, then
+  read `timein_s0i2` (9907) and socket power (#249). The display's own AllowZstatesEntry is
+  logged by `echo 'file dcn35_smu.c +p' > /sys/kernel/debug/dynamic_debug/control`.
+- **Upstream: ours-only.** An experiment.
+- **Drop when:** the test is done.
 
 ## NVIDIA: nvidia-open-dkms
 

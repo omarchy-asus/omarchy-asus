@@ -18,7 +18,7 @@ Compared with upstream, only:
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -51,6 +51,7 @@ Compared with upstream, only:
 16. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
 17. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
 18. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
+19. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -327,10 +328,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908 and 9909, last.
+   9900, then 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909 and 9910, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -737,6 +738,42 @@ the keyboard's input; with Num Lock on and Caps Lock off,
 `cat /sys/bus/usb/devices/3-4/power/runtime_status` reads `suspended` a few seconds after the
 last key press, and 67:00.0 too when no Bluetooth device is connected. Before 9.111, a live
 try stands in for 9909 with `usbhid.ignoreled=1` for a 30 s window only (not packaged).
+
+## EXPERIMENTAL: 9910 debugfs to send the SMU AllowZstates message (nothing sent by default, #249)
+
+`9910-EXPERIMENTAL-amd-pm-smu-allow-zstates-debugfs.patch` (ours, compile-tested with W=1, after
+9909). It touches `pm/amdgpu_dpm.c`, `pm/swsmu/amdgpu_smu.c`, `pm/swsmu/inc/amdgpu_smu.h` and
+`pm/swsmu/smu14/smu_v14_0_0_ppt.{c,h}`.
+
+**Why.** On the G16 every idlemask bit reads idle at runtime with the screen off and the PSP and
+the keyboard xHCI suspended, but `timein_s0i2` stays 0. A static read of the SMU firmware's
+runtime deep-idle gate (#249) found it also needs a Z-state enable that only the driver-mailbox
+message AllowZstates (0x25) or the display's AllowZstatesEntry (display mailbox 0x15) appear to
+feed. Linux's display code sends 0x15; nothing in Linux sends 0x25 (swsmu has
+`SMU_MSG_AllowZstates`, but the 14.0.x message map has no entry for it).
+
+**What.** A `MSG_MAP(AllowZstates, PPSMC_MSG_AllowZstates)` entry for SMU 14.0.x, and a debugfs
+file `amdgpu_smu_allow_zstates` (0200, root only, write-only) in the amdgpu DRM debugfs
+directory, created on MP1 14.0.0, 14.0.1, 14.0.4 (the G16) and 14.0.5. Writing `0` (disallow),
+`8` (Z8) or `9` (Z9 and Z8; `ZStates_e` in `smu_v14_0_0_ppsmc.h`) sends the message with that
+argument; anything else is `-EINVAL`, and during reset or suspend `-EBUSY`. Each write logs
+`EXPERIMENTAL: SMU AllowZstates(N) sent: <ret>, arg register 0x...`.
+
+**Default behaviour.** None: the message is only sent on a write to the file.
+
+**What the display sends.** dcn35_smu.c already logs each AllowZstatesEntry through `smu_print()`
+(`DC_LOG_SMU`, a `pr_debug`); turn it on at runtime with
+`echo 'file dcn35_smu.c +p' > /sys/kernel/debug/dynamic_debug/control` and read
+`[SMU_MSG]:dcn35_smu_set_zstate_support: SMC_MSG_AllowZstatesEntry msg = ..., param = 0x...` in
+the journal (`-p` to turn it off).
+
+**Upstream.** Not submitted; an experiment. **Remove** when the test is done, or turn it into a
+proper send if AllowZstates turns out to be what gates runtime S0i2.
+
+**Test:** on battery, screen off, PSP and keyboard xHCI suspended:
+`echo 9 | sudo tee /sys/kernel/debug/dri/<amdgpu minor>/amdgpu_smu_allow_zstates`, then
+`timein_s0i2` from 9907's `smu_metrics_runtime` and socket power; `echo 0` afterwards. The
+SMU's state after a resume is not known: send again after each resume.
 
 ## 0810: panel_power_savings applies when written (#172)
 
