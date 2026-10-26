@@ -234,6 +234,9 @@ def stage_root(a):
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         res["problems"].append(str(e))
     finally:
+        # From here on nothing interrupts the restore or the results.
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
         if not (wr(PM_DEBUG, pm0) and rd(PM_DEBUG) == pm0):
             res["problems"].append(f"could not put {PM_DEBUG} back to {pm0}")
     time.sleep(3)
