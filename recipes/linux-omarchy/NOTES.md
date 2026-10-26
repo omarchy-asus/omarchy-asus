@@ -18,7 +18,7 @@ Compared with upstream, only:
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -46,6 +46,7 @@ Compared with upstream, only:
 12. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
     "EXPERIMENTAL: 9903" below).
 13. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
+14. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -322,10 +323,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902, 9903 and 9904, last.
+   9900, then 9901, 9902, 9903, 9904 and 9905, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -516,6 +517,38 @@ that idles bit 16 is known.
 one root prompt and takes about a minute. It sets `pm_debug_messages` to 1, suspends once
 for 15 s (`rtcwake -m freeze`), puts it back, and reports one row per stage, which `_DSM`
 calls ran, and the first stage where each of bits 5, 16, 17, 18, 19, 20 and 25 reads idle.
+
+## EXPERIMENTAL: 9905 idlemask trace after each PCI device's noirq suspend (debug only, #353)
+
+`9905-EXPERIMENTAL-idlemask-trace-after-each-pci-device-noirq-suspend.patch` (ours,
+compile-tested only, after 9904). It touches `drivers/base/power/main.c` only.
+
+**What.** In the noirq phase of an s2idle, 9903's trace once as the phase starts
+(`SMU idlemask noirq-start: 0x...`) and after each PCI device's noirq suspend, with the
+device and the power state the suspend left it in:
+`SMU idlemask noirq 0000:65:00.0 D3hot: 0x...` (`pci_power_name()`: D0, D3hot, D3cold, ...).
+The call is in `device_suspend_noirq()`, so an asynchronously suspended device logs from its
+async thread when it finishes, and the lines are in the order the devices finished. Devices
+skipped by direct_complete or syscore, and non-PCI devices, don't log. It goes through
+9904's `amd_pmc_trace_idlemask_stage()`, so the PM core does not depend on amd_pmc.
+
+**Why.** On 9.108 bit 16 (the runtime deep-idle blocker) and bits 17-19 turned idle between
+`s2idle-prepare` and `amdgpu-noirq`, and bits 5, 20 and 25 by `noirq`, while amdgpu's own
+noirq callback does nothing in s2idle on the G16. So it is another device's noirq suspend,
+where the PCI core puts it into D3. The candidates are the PCI devices that stay in D0 at
+runtime (the SMBus controller, the NVMe, the SD reader, the Wi-Fi, the GPU's audio and
+crypto functions, an unbound function, and the xHCI controller with the keyboard and
+Bluetooth). This names the device after whose D3 each bit reads idle.
+
+**Default behaviour.** None: with `pm_debug_messages` at 0 nothing is read or logged.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9903 and 9904, or once the
+device that holds bit 16 is known.
+
+**Test** (on the G16 booted on this kernel, any power): `g16-test/idlemask-trace` (the same
+one root prompt and 15 s suspend) also prints the per-device noirq rows in order and names
+the first device after whose noirq suspend each of bits 5, 16, 17, 18, 19, 20 and 25 reads
+idle.
 
 ## 0810: panel_power_savings applies when written (#172)
 

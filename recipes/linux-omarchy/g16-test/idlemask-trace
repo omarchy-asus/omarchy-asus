@@ -5,7 +5,10 @@ Patches 9903 and 9904 (EXPERIMENTAL, debug only) log "SMU idlemask <stage>: 0x..
 each stage of an s2idle while /sys/power/pm_debug_messages is 1. On 9.107 the display
 bits (5, 16, 17-19, 20, 25) turned idle between amdgpu's IP suspend and amd_pmc's
 prepare; 9904 adds the stages in between (suspend_late, the s2idle prepare, amdgpu's
-noirq, noirq, and each LPS0 _DSM call).
+noirq, noirq, and each LPS0 _DSM call). On 9.108 they turned idle in the noirq phase;
+9905 logs "SMU idlemask noirq <device> <power state>: 0x..." after each PCI device's
+noirq suspend (and "noirq-start" before the first), so the report also lists those rows
+in order and names the first device after whose noirq suspend each bit reads idle.
 
   idlemask-trace            run it: any power, one root prompt, about 1 minute
   idlemask-trace --post     and post the report to #353 (bin/issue)
@@ -14,7 +17,8 @@ noirq, noirq, and each LPS0 _DSM call).
 It sets pm_debug_messages to 1, suspends once for 15 s (rtcwake -m freeze), puts
 pm_debug_messages back, and reads the kernel log of that suspend: the stage lines, the
 LPS0 _DSM transitions, and amdgpu/DMUB errors. The report has one row per stage and the
-first stage where each of bits 5, 16, 17, 18, 19, 20 and 25 reads idle. It has no host
+first stage where each of bits 5, 16, 17, 18, 19, 20 and 25 reads idle, then (9905) the
+noirq phase device by device and the first device after which each of those bits reads idle. It has no host
 or user names and goes to ~/omarchy-asus-g16-idlemask-trace-<kernel>-<date>.md.
 
 Root: pkexec through the desktop's polkit agent (G16_POLKIT_REASON=<wrapper> runs
@@ -40,10 +44,13 @@ PM_DEBUG = "/sys/power/pm_debug_messages"
 BITS = (5, 16, 17, 18, 19, 20, 25)
 SLEEP_S = 15
 # The order an s2idle runs them (9903's and 9904's stages).
-STAGES = ("amdgpu-display", "amdgpu-ip", "suspend-late", "s2idle-prepare", "amdgpu-noirq", "noirq",
+STAGES = ("amdgpu-display", "amdgpu-ip", "suspend-late", "s2idle-prepare", "noirq-start", "amdgpu-noirq", "noirq",
           "dsm-screen-off-amd", "dsm-screen-off", "dsm-entry-amd", "dsm-ms-entry", "dsm-entry",
           "prepare", "os-hint", "s0i3")
 NEW = {"suspend-late", "s2idle-prepare", "amdgpu-noirq", "noirq"}   # 9904, not the _DSM ones
+NOIRQ_START = "noirq-start"                                          # 9905
+# 9905: "SMU idlemask noirq 0000:65:00.0 D3hot: 0x..." after each PCI device's noirq suspend.
+DEV_RE = re.compile(r"SMU idlemask noirq (\S+) (D[0-3]\w*|unknown|error): (0x[0-9a-fA-F]+)")
 STAGE_RE = re.compile(r"SMU idlemask ([a-z0-9-]+): (?:(0x[0-9a-fA-F]+)|not run \(func (\d+), mask (-?\d+)\))")
 DSM_RE = re.compile(r"(Successfully|Failed to) transitioned to state (.+?)\s*$")
 ERR_RE = re.compile(r"\*ERROR\*|dmub.*(timeout|timed out|error|fail)|REG_WAIT timeout|"
@@ -138,6 +145,41 @@ def parse_stages(lines):
     return out
 
 
+def parse_devices(lines):
+    """9905's noirq phase in log order: -> [(device, power state, mask)]; device None is a
+    stage line inside the phase (noirq-start, amdgpu-noirq, noirq) with the stage as state."""
+    out, inside = [], False
+    for ln in lines:
+        m = DEV_RE.search(ln)
+        if m:
+            out.append((m.group(1), m.group(2), int(m.group(3), 16)))
+            continue
+        m = STAGE_RE.search(ln)
+        if not m or not m.group(2):
+            continue
+        if m.group(1) == NOIRQ_START:
+            inside = True
+        if inside:
+            out.append((None, m.group(1), int(m.group(2), 16)))
+        if m.group(1) == "noirq":
+            inside = False
+    return out
+
+
+def first_device(devices, bit):
+    """-> the first noirq row after which bit reads idle: (device, state), ("", stage) if it
+    was already idle at noirq-start, or None. Devices finish asynchronously, so a row's
+    mask can include a device that finished at about the same time."""
+    for i, (dev, st, m) in enumerate(devices):
+        if (m >> bit) & 1:
+            if dev is None and i == 0:
+                return "", st
+            if dev is None:
+                continue
+            return dev, st
+    return None
+
+
 def parse_dsm(lines):
     """'Successfully transitioned to state screen off' -> [(state, ok)]."""
     out = []
@@ -165,6 +207,7 @@ def collect(text):
     if text is None:
         errs = ["(journalctl failed)"]
     return {"stages": [[st, None if m is None else f"0x{m:08x}", n] for st, m, n in parse_stages(lines)],
+            "devices": [[d, st, f"0x{m:08x}"] for d, st, m in parse_devices(lines)],
             "dsm": [[s, ok] for s, ok in parse_dsm(lines)], "errors": errs}
 
 
@@ -174,8 +217,19 @@ amd_pmc: SMU idlemask amdgpu-display: 0xfdc098dd
 amd_pmc: SMU idlemask amdgpu-ip: 0xfdc09add
 amd_pmc: SMU idlemask suspend-late: 0xfdc09add
 amd_pmc: SMU idlemask s2idle-prepare: 0xfdc09add
-amd_pmc: SMU idlemask amdgpu-noirq: 0xfdc09add
-amd_pmc: SMU idlemask noirq: 0xfdc09add
+amd_pmc: SMU idlemask noirq-start: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:66:00.0 D3hot: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:65:00.6 D3hot: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:63:00.0 D3hot: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:67:00.0 D3hot: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:65:00.2 D3hot: 0xfdcf9add
+amd_pmc: SMU idlemask amdgpu-noirq: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:65:00.0 D0: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:62:00.0 D3hot: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:61:00.0 D0: 0xfdcf9afd
+amd_pmc: SMU idlemask noirq 0000:00:14.0 D0: 0xfdcf9afd
+amd_pmc: SMU idlemask noirq 0000:00:08.1 D0: 0xffdf9afd
+amd_pmc: SMU idlemask noirq: 0xffdf9afd
 SMU idlemask dsm-screen-off-amd: not run (func 4, mask 0)
 ACPI: \\_SB_.PEP_: Successfully transitioned to state screen off
 amd_pmc: SMU idlemask dsm-screen-off: 0xffdf9afd
@@ -260,14 +314,23 @@ def stage_root(a):
 
 def verdict(res):
     """-> (verdict, stages). FAIL: kernel-log errors or the panel stayed off. INCOMPLETE: the
-    suspend failed or 9904's stages are missing. Otherwise TRACED."""
+    suspend failed, or 9904's stages or 9905's noirq rows are missing. Otherwise TRACED."""
     stages = [(st, None if m is None else int(m, 16), n) for st, m, n in res.get("stages", [])]
     seen = {st for st, _, _ in stages}
     if res.get("errors") or res.get("panel_back") is False:
         return "FAIL", stages
-    if not res.get("ok") or res.get("problems") or not NEW <= seen:
+    if not res.get("ok") or res.get("problems") or not NEW <= seen or not has_9905(res):
         return "INCOMPLETE", stages
     return "TRACED", stages
+
+
+def devices_of(res):
+    return [(d, st, int(m, 16)) for d, st, m in res.get("devices", [])]
+
+
+def has_9905(res):
+    devs = devices_of(res)
+    return any(d is None and st == NOIRQ_START for d, st, _ in devs) and any(d for d, _, _ in devs)
 
 
 def bits_list(xs):
@@ -299,6 +362,7 @@ def report(res, kernel, dry):
     if missing:
         o += ["", "Stages not logged: " + ", ".join(missing)
               + (" (this kernel lacks patch 9904)" if NEW <= set(missing) else "")]
+    o += noirq_section(res)
     if res.get("dsm"):
         o += ["", "LPS0 _DSM calls: " + "; ".join(f"{s} {'ok' if ok else 'FAILED'}" for s, ok in res["dsm"])]
     if res.get("errors"):
@@ -307,6 +371,37 @@ def report(res, kernel, dry):
         o += ["", "Problems: " + "; ".join(res["problems"])]
     o += ["", "<sub>recipes/linux-omarchy/g16-test/idlemask-trace</sub>"]
     return "\n".join(o) + "\n", v
+
+
+def noirq_section(res):
+    """9905's rows: the noirq phase device by device, and the first device per bit."""
+    devs = devices_of(res)
+    if not has_9905(res):
+        return ["", "No per-device noirq rows (this kernel lacks patch 9905)."]
+    o = ["", "Noirq phase, first PCI device after whose noirq suspend each bit reads idle:", ""]
+    for b in BITS:
+        f = first_device(devs, b)
+        if f is None:
+            o.append(f"- bit {b}: not idle by the end of the noirq phase")
+        elif not f[0]:
+            o.append(f"- bit {b}: already idle at {f[1]}")
+        else:
+            o.append(f"- bit {b}: {f[0]} ({f[1]})")
+    o += ["", "Devices finish asynchronously: a row can include a device that finished at about "
+          "the same time, so a bit is pinned to the named device or one just before it.", "",
+          "| # | device | state | idlemask | " + " | ".join(f"bit {b}" for b in BITS) + " | newly idle |",
+          "|---|---|---|---|" + "---|" * len(BITS) + "---|"]
+    prev, n = None, 0
+    for dev, st, m in devs:
+        new = [] if prev is None else [b for b in range(32) if (m >> b) & 1 and not (prev >> b) & 1]
+        prev = m
+        cells = " | ".join("idle" if (m >> b) & 1 else "-" for b in BITS)
+        if dev is None:
+            o.append(f"| | ({st}) | | 0x{m:08x} | {cells} | {bits_list(new)} |")
+        else:
+            n += 1
+            o.append(f"| {n} | {dev} | {st} | 0x{m:08x} | {cells} | {bits_list(new)} |")
+    return o
 
 
 def front(a):

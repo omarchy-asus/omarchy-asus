@@ -18,3 +18,4 @@ patch 9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch end -- 
 patch 9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch end -- EXPERIMENTAL, default-off amdgpu switch (display idle with every CRTC off) for GA605KM idle testing; see NOTES.md
 patch 9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch end -- EXPERIMENTAL, pm_debug_messages-only SMU idlemask trace through s2idle for GA605KM idle testing; see NOTES.md
 patch 9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch end -- EXPERIMENTAL, pm_debug_messages-only idlemask trace between amdgpu's suspend and amd_pmc's prepare (suspend_late, noirq, LPS0 _DSMs) for GA605KM idle testing; see NOTES.md
+patch 9905-EXPERIMENTAL-idlemask-trace-after-each-pci-device-noirq-suspend.patch end -- EXPERIMENTAL, pm_debug_messages-only idlemask trace after each PCI device's noirq suspend for GA605KM idle testing; see NOTES.md
