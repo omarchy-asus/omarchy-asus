@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.107**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.111**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,11 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.110` (kernel release string becomes `7.2.8-9.110-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.111` (kernel release string becomes `7.2.8-9.111-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -50,6 +50,7 @@ Compared with upstream, only:
 15. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
 16. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
 17. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
+18. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -326,10 +327,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902, 9903, 9904, 9905, 9906, 9907 and 9908, last.
+   9900, then 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908 and 9909, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -691,6 +692,51 @@ trace is one `READ_ONCE()`.
 
 **Test:** `g16-test/psp-rpm`, cells d and e (display idle re-allowed, the PSP runtime-suspended
 and in D0), with `dm_idle_trace` and `dm_idle_all_off_debug` on in the screen-off cells.
+
+## EXPERIMENTAL: 9909 the GA605KM keyboard declares only its Caps Lock LED (#249)
+
+`9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch` (ours, compile-tested
+with W=1, after 9908). It touches `drivers/hid/hid-asus.c` only.
+
+**Why.** On the G16, idlemask bit 16 (the runtime deep-idle blocker) read idle only with the PSP
+runtime-suspended *and* the keyboard/Bluetooth xHCI (67:00.0) runtime-suspended (#249). That
+xHCI stays awake because the built-in N-Key keyboard (USB 0b05:19b6) never autosuspends. Two
+things hold it: its `power/control` is `on` (the USB default; omarchy-asus-g16's udev rule sets
+`auto`), and usbhid's `hid_suspend()` refuses autosuspend while any declared LED is lit
+(`ledcount && !ignoreled`). The keyboard is tenkeyless with only a Caps Lock light, but its
+report descriptor declares Num Lock, Caps Lock, Scroll Lock, Compose and Kana, and Omarchy turns
+Num Lock on at login (`numlock_by_default = true` in its Hyprland input defaults), so
+`input::numlock` reads 1 and the count is never 0.
+
+**What.** A new quirk, `QUIRK_ROG_NKEY_CAPS_LED_ONLY`, on the 0b05:19b6 entry. In
+`asus_report_fixup()`, when the board is `GA605KM` (DMI board name), the descriptor is the
+745-byte one this keyboard reports and the 18 bytes at offset 167 are exactly its LED items, they
+are rewritten in place: bit 0 becomes padding, Caps Lock stays at bit 1, bits 2-4 join the three
+padding bits. The output report keeps its size and layout, so the Caps Lock report the keyboard
+gets is byte-identical. The kernel logs `Fixing up GA605KM keyboard LEDs: Caps Lock only` once
+per probe.
+
+**Effect.** `/sys/class/leds/input*::numlock` and `::scrolllock` (and compose/kana) are gone
+for this keyboard; `::capslock` stays and works. Num Lock is still a modifier in the input
+layer and the compositor. A lit Caps Lock still blocks autosuspend, by design (the light is
+real, and the state is rare and visible).
+
+**Default behaviour.** Unchanged on every other machine and keyboard: 0b05:19b6 is shared by many
+ROG laptops' N-Key keyboards (some with a number pad), hence the DMI and exact-bytes match.
+
+**Alternatives not taken.** `usbhid.ignoreled=1` is global: every USB HID keyboard would
+autosuspend with its LEDs lit. Turning Omarchy's `numlock_by_default` off is upstream's choice
+and would change number-pad keyboards.
+
+**Upstream.** Not submitted; a candidate for the HID tree once the G16 test passes. **Remove**
+when upstream fixes it, or if the G16 test shows no gain.
+
+**Test:** on the G16 with the udev rule in omarchy-asus-g16 (`power/control=auto`):
+`dmesg | grep 'Caps Lock only'`; `ls /sys/class/leds | grep -E 'num|scroll'` lists nothing for
+the keyboard's input; with Num Lock on and Caps Lock off,
+`cat /sys/bus/usb/devices/3-4/power/runtime_status` reads `suspended` a few seconds after the
+last key press, and 67:00.0 too when no Bluetooth device is connected. Before 9.111, a live
+try stands in for 9909 with `usbhid.ignoreled=1` for a 30 s window only (not packaged).
 
 ## 0810: panel_power_savings applies when written (#172)
 

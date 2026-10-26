@@ -56,6 +56,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [EXPERIMENTAL runtime PM for the PSP function](#kernel-9906-psp-rpm) | linux-omarchy | 9906 | RC only | not submitted |
 | [EXPERIMENTAL SMU metrics table at runtime](#kernel-9907-smu-metrics-runtime) | linux-omarchy | 9907 | RC only | ours-only |
 | [EXPERIMENTAL display idle kept allowed with every CRTC off](#kernel-9908-dm-idle-kept) | linux-omarchy | 9908 | RC only | not submitted |
+| [EXPERIMENTAL the GA605KM keyboard declares only its Caps Lock LED](#kernel-9909-nkey-caps-led-only) | linux-omarchy | 9909 | RC only | not submitted |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -89,6 +90,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [nvidia-powerd start limit](#g16-nvidia-powerd-start-limit) | omarchy-asus-g16 | unit drop-in | both | not submitted |
 | [rcu_nocbs=all](#g16-rcu-nocbs) | omarchy-asus-g16 | limine-entry-tool drop-in | RC only | ours-only |
 | [Wi-Fi back after a wake (mt7925)](#g16-mt7925-auth-retries) | omarchy-asus-g16 | NetworkManager drop-in | RC only | not submitted |
+| [EXPERIMENTAL built-in keyboard autosuspend](#g16-keyboard-autosuspend) | omarchy-asus-g16 | udev rule | RC only | ours-only |
 | [Win-lock helper](#pkg-asus-rog-nkey-winlock) | asus-rog-nkey-winlock | package | both | ours-only |
 | [keyring and setup script](#pkg-omarchy-asus-keyring) | omarchy-asus-keyring, `bin/omarchy-asus-setup` | package | both | ours-only |
 | [G16 fix applier](#pkg-omarchy-asus-g16-apply) | omarchy-asus-g16-apply | package | both | ours-only |
@@ -434,6 +436,25 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Test:** `g16-test/psp-rpm`, cells d and e (#249, #353).
 - **Upstream: not submitted.** With 9902.
 - **Drop when:** with 9902.
+
+<a id="kernel-9909-nkey-caps-led-only"></a>
+### EXPERIMENTAL the GA605KM keyboard declares only its Caps Lock LED (9909)
+
+- **Component:** `linux-omarchy`, `9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch`,
+  after 9908. RC only (since 9.111). Goes with
+  [the keyboard autosuspend rule](#g16-keyboard-autosuspend) in omarchy-asus-g16.
+- **What:** the G16's tenkeyless N-Key keyboard (USB 0b05:19b6) declares Num Lock, Caps Lock,
+  Scroll Lock, Compose and Kana LEDs but has only a Caps Lock light. usbhid refuses autosuspend
+  while a declared LED is lit, and Omarchy turns Num Lock on, so the keyboard and its xHCI
+  (67:00.0) never runtime-suspend, which holds idlemask bit 16 (#249). On a GA605KM (DMI board
+  name), with the exact 745-byte descriptor, hid-asus rewrites the 18 LED bytes in place so only
+  Caps Lock is declared, at the same bit; the report layout is unchanged. Caps Lock lit still
+  blocks autosuspend, by design. Other machines and keyboards: unchanged.
+- **Test:** on 9.111 with the udev rule, Num Lock on, Caps Lock off: `dmesg | grep 'Caps Lock
+  only'`; the keyboard's `power/runtime_status` reads `suspended` a few seconds after the last
+  key press, and 67:00.0 too with no Bluetooth device connected (#249).
+- **Upstream: not submitted.** A HID-tree candidate once the G16 test passes.
+- **Drop when:** upstream fixes it, or the G16 test shows no gain.
 
 ## NVIDIA: nvidia-open-dkms
 
@@ -1567,6 +1588,23 @@ it is installed.
   NetworkManager treating a handshake timeout as a wrong key when no agent can answer); a human
   decides whether either is reported.
 - **Drop when:** either is fixed upstream. Bug: #196.
+
+<a id="g16-keyboard-autosuspend"></a>
+### EXPERIMENTAL built-in keyboard autosuspend
+
+- **Component:** `omarchy-asus-g16`,
+  `/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules`. RC only (since
+  1.0.0-104). Goes with [9909](#kernel-9909-nkey-caps-led-only) in linux-omarchy.
+- **Fixes:** the built-in N-Key keyboard (USB 0b05:19b6) keeps `power/control` at the USB
+  default `on`, so it never runtime-suspends, and neither does the keyboard/Bluetooth xHCI
+  (67:00.0); idlemask bit 16 read idle only with that xHCI and the PSP both suspended (#249).
+  The rule sets `power/control=auto` and `autosuspend_delay_ms=2000`; a key press wakes it.
+  Without 9909 a lit Num Lock still keeps it awake (usbhid's LED check).
+- **Test:** `cat /sys/bus/usb/devices/3-4/power/control` prints `auto`; on 9.111 with Num Lock
+  on and Caps Lock off, its `power/runtime_status` reads `suspended` a few seconds after the last
+  key press (#249).
+- **Upstream: ours-only** (a power setting for one laptop's keyboard).
+- **Drop when:** the G16 test shows no gain, or the kernel autosuspends this keyboard by default.
 
 ## Our packages
 

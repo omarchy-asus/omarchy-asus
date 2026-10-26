@@ -1,0 +1,6 @@
+# ASUS ROG Zephyrus G16 GA605KM: let the built-in N-Key keyboard (USB 0b05:19b6) runtime-suspend
+# 2 s after the last key press, so the xHCI it sits on can suspend too (#249, EXPERIMENTAL). The
+# USB core leaves power/control at "on"; the keyboard supports remote wakeup, so a key press
+# wakes it. usbhid still keeps it awake while a declared LED is lit: with linux-omarchy 9909 only
+# Caps Lock is declared, so Num Lock on no longer counts.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0b05", ATTR{idProduct}=="19b6", ATTR{power/autosuspend_delay_ms}="2000", ATTR{power/control}="auto"
