@@ -14,11 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.108` (kernel release string becomes `7.2.8-9.108-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.110` (kernel release string becomes `7.2.8-9.110-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -47,6 +47,7 @@ Compared with upstream, only:
     "EXPERIMENTAL: 9903" below).
 13. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
 14. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
+15. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -323,10 +324,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902, 9903, 9904 and 9905, last.
+   9900, then 9901, 9902, 9903, 9904, 9905 and 9906, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -549,6 +550,72 @@ device that holds bit 16 is known.
 one root prompt and 15 s suspend) also prints the per-device noirq rows in order and names
 the first device after whose noirq suspend each of bits 5, 16, 17, 18, 19, 20 and 25 reads
 idle.
+
+## EXPERIMENTAL: 9906 runtime PM for the PSP function (default off, #249)
+
+`9906-EXPERIMENTAL-ccp-psp-runtime-pm-default-off.patch` (ours, compile-tested only, after
+9905). It touches `drivers/crypto/ccp/` only: `sp-pci.c`, `psp-dev.c`/`.h`, `tee-dev.c`,
+`platform-access.c` and `dbc.c`.
+
+**What.** ccp has no runtime PM: it never gives back the reference the PCI core takes in
+`local_pci_probe()`, so the PSP function (1022:17E0, 65:00.2 on the G16) stays in D0 even
+with `power/control` at `auto` (so an earlier `control=auto` A/B on a stock kernel never put
+it in D3). Two module parameters:
+
+- `ccp.psp_rpm_delay_ms` (int, 0644, default 0 = off). When it is > 0, for a PSP-only PCI
+  function without SEV (no CCP engines, no SEV vdata: pspv5 parts like the G16's), the
+  driver gives up the probe reference and uses autosuspend with that delay
+  (`pm_runtime_set_autosuspend_delay`, `pm_runtime_use_autosuspend`,
+  `pm_runtime_put_autosuspend`). With `power/control=auto` as well, the function goes to
+  D3hot once no command has touched its registers for that long. A write applies at once
+  to the bound function (no reprobe): > 0 drops the reference or changes the delay, 0 takes
+  it back and resumes the function.
+- `ccp.psp_rpm_debug` (bool, 0644, default off) logs `psp rpm: runtime suspend #N` and
+  `psp rpm: runtime resume #N for <caller> (<task>)` (or `not for a ccp command`, for
+  `power/control`, system sleep and the PCI core), to see who wakes it.
+
+Every path that touches the function's registers holds a runtime PM reference
+(`psp_pm_get()`/`psp_pm_put()`): `psp_mailbox_command()` (TEE ring init/destroy, SFS, the
+extended commands), `psp_tee_process_cmd()` (every amdtee and amd-pmf call, held until the
+reply is copied), `psp_send_platform_access_msg()` and `psp_ring_platform_doorbell()`
+(I2C arbitration, HSTI), the dbc ioctl, and the `bootloader_version`/`tee_version` sysfs
+attributes and their `is_visible()`. The reference is taken on these devices whether or
+not runtime PM is on, so switching never unbalances a command in flight; on every other
+ccp/PSP device the helpers do nothing. The PSP interrupt handler is not wrapped: a function
+in D3hot can't raise MSI-X, and the handler only serves SEV.
+
+The runtime_suspend callback sends the PSP nothing (it has no such command). The PCI core
+then saves config space and sets D3hot (`pci_pm_runtime_suspend()` ->
+`pci_finish_runtime_suspend()`; the G16's PSP node has no `_PS3`/`_PR3`, so it is the
+PMCSR write that s2idle's noirq phase does too, after which the TEE ring works without a
+re-init). runtime_resume has nothing to restore. The system-sleep callbacks are unchanged:
+without `DPM_FLAG_SMART_SUSPEND` the PCI core resumes a runtime-suspended function before
+its suspend callback, and the noirq D3hot follows as before.
+
+Not through this function: the fTPM (`tpm_crb`, CRB registers at 0xFED40000) and amdgpu's
+PSP block (MP0 C2PMSG registers through amdgpu's own MMIO BAR) never resume it. Whether the
+PSP firmware serves them while its function is in D3hot is checked on the G16 (Windows
+idles this function in S0 with both in use).
+
+**Why.** SMU idlemask bit 16, the runtime deep-idle blocker, turns idle in s2idle's noirq
+phase, where the PCI core moves this function to D3hot (9905, #353). This tries that at
+runtime.
+
+**Default behaviour.** None: with `psp_rpm_delay_ms` at 0 the probe reference is kept, so
+the function never runtime-suspends whatever `power/control` says; with `power/control` at
+`on` (the PCI core's default) a delay alone changes nothing either.
+
+**Upstream.** Not submitted: an experiment. If D3hot releases bit 16 and the TEE, TPM and
+display keep working, the shape for upstream is a ccp runtime-PM patch for PSP-only parts.
+**Remove** if the G16 shows no effect.
+
+**Test** (on the G16 booted on this kernel, on battery): `g16-test/psp-rpm` (one root
+prompt, about 3 minutes): a 15 s baseline, then `psp_rpm_delay_ms=2000` and
+`power/control=auto`, a check that the function reaches `runtime_status=suspended`, 60 s
+screen on and 30 s with the screen off (DPMS; idlemask bit 10 must read 1) reading the
+idlemask (bit 16), socket power, battery watts and the PSP's suspend/resume counts and
+wakers; then, still suspended, one fTPM PCR read and one firmware-version read (which
+resumes it), and everything goes back.
 
 ## 0810: panel_power_savings applies when written (#172)
 

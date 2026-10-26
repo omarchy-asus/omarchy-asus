@@ -53,6 +53,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [EXPERIMENTAL SMU idlemask trace through s2idle](#kernel-9903-idlemask-trace) | linux-omarchy | 9903 | RC only | ours-only |
 | [EXPERIMENTAL idlemask trace between amdgpu's suspend and the LPS0 calls](#kernel-9904-idlemask-window) | linux-omarchy | 9904 | RC only | ours-only |
 | [EXPERIMENTAL idlemask trace after each PCI device's noirq suspend](#kernel-9905-idlemask-noirq-devices) | linux-omarchy | 9905 | RC only | ours-only |
+| [EXPERIMENTAL runtime PM for the PSP function](#kernel-9906-psp-rpm) | linux-omarchy | 9906 | RC only | not submitted |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -380,6 +381,27 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
   device after which each bit reads idle (#353).
 - **Upstream: ours-only.** A debug aid.
 - **Drop when:** with 9903 and 9904, or once the device that holds bit 16 is known.
+
+<a id="kernel-9906-psp-rpm"></a>
+### EXPERIMENTAL runtime PM for the PSP function (9906)
+
+- **Component:** `linux-omarchy`, `9906-EXPERIMENTAL-ccp-psp-runtime-pm-default-off.patch`, after
+  9905. RC only (since 9.110).
+- **What:** ccp runtime PM for a PSP-only PCI function without SEV (the G16's 1022:17E0,
+  65:00.2). `ccp.psp_rpm_delay_ms` (default 0 = off) > 0 gives up the PCI core's probe
+  reference and uses autosuspend with that delay, so with `power/control=auto` the function
+  sits in D3hot between commands; every register user (mailbox, TEE ring, platform access,
+  dbc, the version attributes) holds a runtime PM reference. A write applies at once.
+  `ccp.psp_rpm_debug` logs each runtime suspend and resume with the caller that woke it. With
+  the delay at 0, or `power/control` at `on`, nothing changes. Idlemask bit 16 (the runtime
+  deep-idle blocker) turns idle where s2idle's noirq phase puts this function in D3hot (#353);
+  this tries that at runtime.
+- **Test:** `g16-test/psp-rpm` (on battery, about 3 minutes): bit 16, socket power and the
+  PSP's suspend/resume counts with it runtime-suspended, screen on and off; an fTPM read and a
+  version read with it suspended (#249).
+- **Upstream: not submitted.** An experiment; a ccp runtime-PM patch for PSP-only parts if it
+  works and the TEE, TPM and display keep working.
+- **Drop when:** the G16 shows no effect on bit 16 or socket power.
 
 ## NVIDIA: nvidia-open-dkms
 
