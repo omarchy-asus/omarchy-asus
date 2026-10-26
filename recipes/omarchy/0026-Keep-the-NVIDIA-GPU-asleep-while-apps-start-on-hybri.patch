@@ -17,8 +17,12 @@ vendor for its devices whatever their order.
 
 Hyprland now sets VK_LOADER_DRIVERS_DISABLE=*nvidia* and lists only
 Mesa's EGL vendor there, on Turing and newer, for the desktop: the
-shell, the launcher, key bindings and the apps they start. Games get
-both back however they start:
+shell, the launcher, key bindings and the apps they start. Hyprland
+itself keeps every vendor, since aquamarine opens EGL on the dGPU for a
+monitor on its ports (HDMI on the G16): autostart.lua sets the pins at
+hyprland.start, which fires on the first frame, after the renderer has
+loaded the EGL vendors (GLVND reads the list once per process) and
+before Hyprland starts anything. Games get both back however they start:
 
 - autostart.lua takes the pins back out of the systemd user environment
   after exporting the rest, so what systemd starts, a game launcher at
@@ -35,10 +39,12 @@ both back however they start:
 
 OMARCHY_DESKTOP_GPU_PINS names the pins for bash, so a value of the
 user's own is left alone. A migration asks for a reboot while the
-session predates the pins.
+session predates the pins, and another while Hyprland itself still
+carries them (1.107 to 1.112 set them for Hyprland too, so an HDMI
+monitor plugged in after login never appeared).
 
-Fork commits c02f91e3, 8769c24c, 02c9d61f and 6ef8e273 on asus/v4-5-0-rc1,
-squashed.
+Fork commits c02f91e3, 8769c24c, 02c9d61f, 6ef8e273 and e71057d9 on
+asus/v4-5-0-rc1, squashed.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -46,18 +52,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  bin/omarchy-launch-all-gpus               |  20 ++++
  bin/omarchy-launch-desktop-entry          |  77 +++++++++++++++
  default/bash/envs                         |   8 ++
- default/hypr/autostart.lua                |   8 +-
- default/hypr/nvidia.lua                   |  22 ++++-
+ default/hypr/autostart.lua                |  19 +++-
+ default/hypr/nvidia.lua                   |  26 +++++-
  migrations/1792823623.sh                  |  11 +++
+ migrations/1793053364.sh                  |  10 ++
  shell/services/AppLibrary.qml             |   4 +-
  test/shell.d/app-search-test.sh           |   4 +-
  test/shell.d/desktop-entry-launch-test.sh |  10 +-
- test/shell.d/hw-nvidia-test.sh            |  80 +++++++++++++---
+ test/shell.d/hw-nvidia-test.sh            | 107 +++++++++++++++++----
  test/shell.d/launch-all-gpus-test.sh      | 108 ++++++++++++++++++++++
- 12 files changed, 329 insertions(+), 25 deletions(-)
+ 13 files changed, 380 insertions(+), 26 deletions(-)
  create mode 100755 bin/omarchy-launch-all-gpus
  create mode 100755 bin/omarchy-launch-desktop-entry
  create mode 100644 migrations/1792823623.sh
+ create mode 100644 migrations/1793053364.sh
  create mode 100755 test/shell.d/launch-all-gpus-test.sh
 
 diff --git a/bin/omarchy-install-gaming-steam b/bin/omarchy-install-gaming-steam
@@ -199,26 +207,39 @@ index ac608cb70..8cf2e4660 100644
    *":$HOME/.local/bin:"*) ;;
    *) export PATH="$PATH:$HOME/.local/bin" ;;
 diff --git a/default/hypr/autostart.lua b/default/hypr/autostart.lua
-index cb49fc11e..336c0212b 100644
+index cb49fc11e..361aa1823 100644
 --- a/default/hypr/autostart.lua
 +++ b/default/hypr/autostart.lua
-@@ -9,7 +9,13 @@ hl.on("hyprland.start", function()
+@@ -7,9 +7,26 @@ hl.on("hyprland.start", function()
+     hl.env("XCURSOR_THEME", omarchy_startup_cursor.xcursor)
+   end
  
++  -- The desktop's GPU pins (nvidia.lua) reach what Hyprland starts from now
++  -- on, never Hyprland's own renderer: it has already loaded its EGL vendors.
++  local pin_names = {}
++  for _, pin in ipairs(o.desktop_gpu_pins or {}) do
++    hl.env(pin[1], pin[2])
++    table.insert(pin_names, pin[1])
++  end
++  if #pin_names > 0 then
++    hl.env("OMARCHY_DESKTOP_GPU_PINS", table.concat(pin_names, " "))
++  end
++
    -- Slow app launch fix -- set systemd and D-Bus activation vars before
    -- starting session services.
 -  hl.exec_cmd("dbus-update-activation-environment --systemd --all")
-+  -- The desktop's GPU pins (nvidia.lua) stay out of it, so what systemd
-+  -- starts, a game launcher at login included, has every GPU.
++  -- The desktop's GPU pins stay out of it, so what systemd starts, a game
++  -- launcher at login included, has every GPU.
 +  local activation = "dbus-update-activation-environment --systemd --all"
-+  if o.desktop_gpu_pins then
-+    activation = activation .. " && systemctl --user unset-environment " .. table.concat(o.desktop_gpu_pins, " ")
++  if #pin_names > 0 then
++    activation = activation .. " && systemctl --user unset-environment " .. table.concat(pin_names, " ")
 +  end
 +  hl.exec_cmd(activation)
  
    hl.exec_cmd("omarchy-launch-shell")
    hl.exec_cmd("omarchy-provision-first-run")
 diff --git a/default/hypr/nvidia.lua b/default/hypr/nvidia.lua
-index 2349195f0..80220c3b0 100644
+index 2349195f0..6c2d462a1 100644
 --- a/default/hypr/nvidia.lua
 +++ b/default/hypr/nvidia.lua
 @@ -58,6 +58,7 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
@@ -229,7 +250,7 @@ index 2349195f0..80220c3b0 100644
    if o.shell_succeeds(o.shell_quote(nvidia_gsp)) then
      hl.env("NVD_BACKEND", "direct")
      -- An iGPU that is a non-VGA display controller (AMD Krackan) has no
-@@ -66,10 +67,29 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
+@@ -66,10 +67,33 @@ if o.shell_succeeds(o.shell_quote(nvidia)) then
      -- wakes the dGPU for every video and keeps it awake for any GLX app (the
      -- Steam client). Games ask for the dGPU themselves: DXVK picks it, and
      -- native OpenGL games run with PRIME render offload (prime-run).
@@ -251,11 +272,15 @@ index 2349195f0..80220c3b0 100644
 +    -- drops them (default/bash/envs); the app launcher starts game entries
 +    -- without them (omarchy-launch-desktop-entry); and anything else can run
 +    -- through omarchy-launch-all-gpus. OMARCHY_DESKTOP_GPU_PINS names them.
++    -- Hyprland itself keeps NVIDIA's EGL vendor: a monitor on the dGPU's ports
++    -- (HDMI) needs it, plugged in at login or later. So autostart.lua sets the
++    -- pins once Hyprland has started, after its renderer has loaded the EGL
++    -- vendors (GLVND reads the list once per process).
 +    if igpu_drives_display then
-+      hl.env("VK_LOADER_DRIVERS_DISABLE", "*nvidia*")
-+      hl.env("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/50_mesa.json")
-+      hl.env("OMARCHY_DESKTOP_GPU_PINS", "VK_LOADER_DRIVERS_DISABLE __EGL_VENDOR_LIBRARY_FILENAMES")
-+      o.desktop_gpu_pins = { "VK_LOADER_DRIVERS_DISABLE", "__EGL_VENDOR_LIBRARY_FILENAMES" }
++      o.desktop_gpu_pins = {
++        { "VK_LOADER_DRIVERS_DISABLE", "*nvidia*" },
++        { "__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/50_mesa.json" },
++      }
 +    end
    elseif o.shell_succeeds(o.shell_quote(nvidia_without_gsp)) then
      hl.env("NVD_BACKEND", "egl")
@@ -277,8 +302,24 @@ index 000000000..69e1e0d99
 +  omarchy-state set reboot-required
 +  echo "Reboot to keep the NVIDIA GPU asleep while apps start; games still use it."
 +fi
+diff --git a/migrations/1793053364.sh b/migrations/1793053364.sh
+new file mode 100644
+index 000000000..264695cf9
+--- /dev/null
++++ b/migrations/1793053364.sh
+@@ -0,0 +1,10 @@
++echo "Let an HDMI monitor on the NVIDIA GPU of a hybrid appear when plugged in"
++
++# The desktop's GPU pins used to be set for Hyprland itself, so it could not
++# open EGL on the NVIDIA GPU and a monitor on its ports never appeared. Hyprland
++# now sets them only for what it starts. A session started with the old pins
++# keeps them until Hyprland restarts.
++if [[ -n ${OMARCHY_DESKTOP_GPU_PINS:-} ]]; then
++  omarchy-state set reboot-required
++  echo "Reboot so a monitor plugged into the NVIDIA GPU's ports appears."
++fi
 diff --git a/shell/services/AppLibrary.qml b/shell/services/AppLibrary.qml
-index f73a205ec..a1692d9f3 100644
+index 66f399f52..061fc269c 100644
 --- a/shell/services/AppLibrary.qml
 +++ b/shell/services/AppLibrary.qml
 @@ -89,8 +89,10 @@ Item {
@@ -294,7 +335,7 @@ index f73a205ec..a1692d9f3 100644
  
    // The command a terminal entry runs, without the field codes it leaves for a
 diff --git a/test/shell.d/app-search-test.sh b/test/shell.d/app-search-test.sh
-index fed8c20e5..f5f6e9cd4 100644
+index 5ebd1cfe3..2cadd6a6a 100644
 --- a/test/shell.d/app-search-test.sh
 +++ b/test/shell.d/app-search-test.sh
 @@ -108,8 +108,8 @@ assert(
@@ -341,7 +382,7 @@ index 16fe5a055..b58c0a5c0 100644
  bash "$ROOT/bin/omarchy-install-and-launch" "Example App" "alpha beta" "Disk Usage"
  presentation_command=$(<"$OMARCHY_TEST_PRESENTATION")
 diff --git a/test/shell.d/hw-nvidia-test.sh b/test/shell.d/hw-nvidia-test.sh
-index 37426149f..69f9f1259 100755
+index 37426149f..0deb384d0 100755
 --- a/test/shell.d/hw-nvidia-test.sh
 +++ b/test/shell.d/hw-nvidia-test.sh
 @@ -12,7 +12,8 @@ export OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" OMARCHY_DRM_PATH="$tmp_dir/dr
@@ -354,11 +395,23 @@ index 37426149f..69f9f1259 100755
  while IFS='|' read -r description nvidia gsp without_gsp display expected_env devices; do
    rm -rf "$tmp_dir/devices" "$tmp_dir/by-path"
    mkdir -p "$tmp_dir/devices" "$tmp_dir/by-path"
-@@ -44,25 +45,32 @@ require("default.hypr.helpers")
+@@ -42,27 +43,43 @@ while IFS='|' read -r description nvidia gsp without_gsp display expected_env de
+ package.path = os.getenv("ROOT") .. "/?.lua;" .. package.path
+ require("default.hypr.helpers")
  local env = {}
- hl = { env = function(key, value) env[key] = value end }
+-hl = { env = function(key, value) env[key] = value end }
++local handlers = {}
++hl = { env = function(key, value) env[key] = value end, on = function(event, fn) handlers[event] = fn end,
++  exec_cmd = function() end }
  require("default.hypr.nvidia")
 -print(table.concat({ env.NVD_BACKEND or "-", env.LIBVA_DRIVER_NAME or "-", env.__GLX_VENDOR_LIBRARY_NAME or "-" }, " "))
++-- Hyprland's own environment (its renderer loads the EGL vendors from it) never
++-- carries the pins; what it starts does, once it has started.
++if env.VK_LOADER_DRIVERS_DISABLE or env.__EGL_VENDOR_LIBRARY_FILENAMES or env.OMARCHY_DESKTOP_GPU_PINS then
++  print("pins set for Hyprland itself")
++end
++require("default.hypr.autostart")
++handlers["hyprland.start"]()
 +local egl = env.__EGL_VENDOR_LIBRARY_FILENAMES
 +egl = egl and egl:gsub("/usr/share/glvnd/egl_vendor.d/", "")
 +print(table.concat({ env.NVD_BACKEND or "-", env.LIBVA_DRIVER_NAME or "-", env.__GLX_VENDOR_LIBRARY_NAME or "-",
@@ -401,7 +454,7 @@ index 37426149f..69f9f1259 100755
  CASES
  
  # A session started before this change still carries LIBVA_DRIVER_NAME=nvidia
-@@ -107,3 +115,45 @@ for glx in nvidia ""; do
+@@ -107,3 +124,61 @@ for glx in nvidia ""; do
    fi
  done
  pass "the migration asks for a reboot only while the old NVIDIA GLX override is live"
@@ -427,6 +480,22 @@ index 37426149f..69f9f1259 100755
 +  fi
 +done
 +pass "the GPU pin migration asks for a reboot only while the session lacks the pins"
++
++# A session started with the pins set for Hyprland itself needs a reboot before
++# a monitor on the NVIDIA GPU's ports can appear.
++migration=$(grep -l 'Let an HDMI monitor on the NVIDIA GPU of a hybrid appear' "$ROOT"/migrations/*.sh)
++for pinned in "" "VK_LOADER_DRIVERS_DISABLE __EGL_VENDOR_LIBRARY_FILENAMES"; do
++  : >"$tmp_dir/state.log"
++  PATH="$tmp_dir/state-bin:$PATH" OMARCHY_TEST_STATE_LOG="$tmp_dir/state.log" OMARCHY_DESKTOP_GPU_PINS=$pinned \
++    bash -euo pipefail "$migration" >/dev/null
++  if [[ -n $pinned ]]; then
++    grep -Fxq "set reboot-required" "$tmp_dir/state.log" ||
++      fail "the HDMI migration asks for a reboot while Hyprland carries the old pins"
++  elif [[ -s $tmp_dir/state.log ]]; then
++    fail "the HDMI migration leaves a session without the pins alone"
++  fi
++done
++pass "the HDMI migration asks for a reboot only while Hyprland carries the old pins"
 +
 +# What systemd starts (a game launcher at login) gets every GPU: autostart
 +# takes the desktop's pins back out of the activation environment.
