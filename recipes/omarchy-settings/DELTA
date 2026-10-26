@@ -10,7 +10,7 @@ upstream omarchy-pkgs pkgbuilds/omarchy-settings
 mode overlay
 keep NOTES.md
 # Ship the fork's charger-swap monitor user unit (0002) in /usr/lib/systemd/user; omarchy-settings
-# installs user units from an explicit list. Fork pkgs branch omarchy-settings-source-monitor.
+# installs user units from an explicit list. Upstream: omacom/omarchy-pkgs#1629 (open).
 pkgbuild-patch pkgbuild-source-monitor-unit.diff
 pkgbuild-patch pkgbuild-pkgdesc-label.diff
 patch 0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch prepare omarchy

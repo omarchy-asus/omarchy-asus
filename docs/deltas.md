@@ -74,7 +74,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [the sleep lock's monitor survives suspends](#omarchy-general-0002-sleep-monitor) | omarchy | general-0002 | RC only | not submitted |
 | [app library rescans only on real changes](#omarchy-general-0004-app-library) | omarchy | general-0004 | RC only | open |
 | [omarchy pins omarchy-settings to its release](#omarchy-pkgbuild-pin-settings) | omarchy | `pkgbuild-pin-settings-release.diff` | both | ours-only |
-| [omarchy-settings ships the charger-swap monitor unit](#omarchy-pkgbuild-source-monitor-unit) | omarchy-settings | `pkgbuild-source-monitor-unit.diff` | both | not submitted |
+| [omarchy-settings ships the charger-swap monitor unit](#omarchy-pkgbuild-source-monitor-unit) | omarchy-settings | `pkgbuild-source-monitor-unit.diff` | both | open |
 | [the "(omarchy-asus build)" label](#pkgbuild-pkgdesc-label) | omarchy, omarchy-settings, hyprland, hyprpm | `pkgbuild-pkgdesc-label.diff` | both | ours-only |
 | [touchpad wake (ASUF1209)](#g16-touchpad-wake) | omarchy-asus-g16 | udev rule | both | not submitted |
 | [HibernateMode=shutdown](#g16-hibernate-mode) | omarchy-asus-g16 | sleep.conf.d drop-in | both | not submitted |
@@ -113,7 +113,10 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
   forever. Raw check: read the keyboard's hidraw node and look for `5d bf 01 xx` on each press.
 - **Upstream: open.** Submitted to linux-input on 2026-09-10, patchwork **14804337**, no replies.
   Checked 2026-10-25: not upstream; `hid-asus.c` in v7.2.8 (what we build), v7.3 and mainline
-  master after the 7.4 HID merge (`5ac62bdef71a`) still drops report 0x5d whole.
+  master after the 7.4 HID merge (`5ac62bdef71a`) still drops report 0x5d whole. Checked
+  2026-10-26: v1 now fails checkpatch, because mainline removed the `Assisted-by` trailer from
+  the kernel docs (`1e035297ffda`) and v1 carries one. A v2 without it is prepared; it goes to
+  linux-input after v7.4-rc1.
 - **Drop when:** mainline or the HID tree carries an equivalent quirk **and** a stock
   `linux-omarchy` release contains it. If nothing else is left in the kernel recipe then,
   `bin/unpublish linux-omarchy linux-omarchy-headers` and delete the recipe.
@@ -689,20 +692,22 @@ are numbered `0001...`; fixes to Omarchy's own software that don't help the hard
   `7a7c9c84`; latest summary 5/5. The omacom/omarchy-pkgs companion (ship
   `omarchy-powerprofiles-source-monitor.service` as a user unit; without it the unit lands only in
   `/usr/share/omarchy/default/systemd/user`, where systemd doesn't find it, and `config-test.sh`
-  reports it as not shipped) is not opened. #15668 and #15669 conflict in
+  reports it as not shipped) is open as
+  [omacom/omarchy-pkgs#1629](https://github.com/omacom/omarchy-pkgs/pull/1629), opened
+  2026-10-26 (see [its entry](#omarchy-pkgbuild-source-monitor-unit)). #15668 and #15669 conflict in
   `bin/omarchy-powerprofiles-set` and `test/shell.d/powerprofiles-set-test.sh`; whichever merges
   second needs a rebase (the fork's `quattro` merge has the resolution).
 - **Fork vs upstream:** `pr/usbc-power` is `7a7c9c84`; `asus/usbc-power` (`3ce14809` plus five
   fixups) is identical on all eleven PR files. Fork `quattro` differs only where it also carries
   #15669.
 - **Next:** test a live barrel-to-USB-C swap and back on the G16 without going through battery
-  (each source has been checked on its own, a swap has not). Open the pkgs companion with or after
-  #15668; a human decides. A flaky assertion in the fork's
+  (each source has been checked on its own, a swap has not). A flaky assertion in the fork's
   `test/shell.d/asus-rog-usbc-power-test.sh` ("battery is answered without waiting", `(( SECONDS -
   start < 1 ))`, fails a few percent of runs at a second boundary) should time with
   `EPOCHREALTIME` against about 200 ms, on `asus/usbc-power` and the backport branches, the next
   time the patch is regenerated; it affects only the fork's tests, not the package.
-- **Drop when:** #15668 (and its pkgs companion) are in an Omarchy release we build from.
+- **Drop when:** #15668 (and its pkgs companion, omacom/omarchy-pkgs#1629) are in an Omarchy
+  release we build from.
 - **Notes:** formerly tracked in issue #22.
 
 <a id="omarchy-0003-external-owner"></a>
@@ -1180,7 +1185,8 @@ bullets.)
     full fetch on open) was merged another way, in omacom/omarchy#7623 (`c872d57cf`, on `quattro`
     2026-10-22). v4.5.0-rc1, which RC builds from, doesn't have it (checked 2026-10-25). Our
     [omacom/omarchy#15671](https://github.com/omacom/omarchy/pull/15671) "Poll only Tailscale
-    status while its panel is closed" (head `c5e37d6d`, Greptile 5/5) is still open.
+    status while its panel is closed" was closed on 2026-10-26 in favour of #7623 (`c872d57cf`),
+    which makes it redundant and conflicts with it.
   - **open:** the IPN-bus watcher is omacom/omarchy#9894 (open, "Fix Tailscale login and reconnect
     getting stuck after key expiry"; not ours), which adds an always-on watcher
     (`watch-ipn-bus?mask=18`, refresh on State, Prefs and LoginFinished, 150 ms debounce, 2 to 60
@@ -1361,8 +1367,9 @@ omacom/omarchy#6505. Not opened; a human decides.
   monitor plugged in: the failsafe clears without a TTY. For 0027, with a second Hyprland running
   a Quickshell (another login on a TTY), the check from this session no longer reports it.
 - **Upstream: open.** [omacom/omarchy#15912](https://github.com/omacom/omarchy/pull/15912), which
-  replaced our omacom/omarchy#15890 (from fork branch `pr/lock-stranded-voxtype`). 0027 is open
-  too: proposed for #15912 in its thread, not yet on the pull request (checked 2026-10-26).
+  replaced our omacom/omarchy#15890 (from fork branch `pr/lock-stranded-voxtype`). Its head is
+  `ab447851e`, which 0024 matches. 0027 is open too: proposed for #15912 in its thread, not yet
+  on the pull request (checked 2026-10-26). It is endorsed there to go into #15912 as is.
 - **Drop when:** a release we build from contains #15912, and 0027 when that release has the
   other-Hyprland check too (or #15912 lands without it and upstream rejects it).
 - **Notes:** formerly tracked in issue #102 (and #130 for the refresh).
@@ -1543,8 +1550,10 @@ omacom/omarchy#13782 offering it as an alternative. Not opened; a human decides.
 ### omarchy-settings ships the charger-swap monitor unit
 
 - **Component:** `recipes/omarchy-settings`, `pkgbuild-source-monitor-unit.diff` (a
-  `pkgbuild-patch` line in `DELTA`). Both channels. Same change as pkgs branch
-  [`omarchy-settings-source-monitor`](https://github.com/omarchy-asus/omarchy-pkgs/tree/omarchy-settings-source-monitor).
+  `pkgbuild-patch` line in `DELTA`). Both channels. Same change as omacom/omarchy-pkgs#1629
+  (pkgs branch
+  [`omarchy-settings-usbc-power-unit`](https://github.com/omarchy-asus/omarchy-pkgs/tree/omarchy-settings-usbc-power-unit);
+  the PR also covers `omarchy-settings-dev`, and only its code comment differs from our diff).
 - **Fixes:** omarchy-settings installs user units from an explicit list, so the charger-swap
   monitor that [0002](#omarchy-0002-usbc-power) adds would land only in
   `/usr/share/omarchy/default/systemd/user`, where systemd doesn't find it, and first-run and
@@ -1556,32 +1565,11 @@ omacom/omarchy#13782 offering it as an alternative. Not opened; a human decides.
   `systemctl --user cat omarchy-powerprofiles-source-monitor.service` finds it; Omarchy's
   `config-test.sh`, run with the patched PKGBUILDs as the omarchy-pkgs checkout, no longer
   reports it as not shipped.
-- **Upstream: not submitted.** It is the omacom/omarchy-pkgs companion of omacom/omarchy#15668,
-  not opened yet (a human decides; see [0002](#omarchy-0002-usbc-power)).
+- **Upstream: open.** [omacom/omarchy-pkgs#1629](https://github.com/omacom/omarchy-pkgs/pull/1629)
+  "omarchy-settings: ship the ASUS charger-swap monitor as a user unit", opened 2026-10-26, the
+  companion of omacom/omarchy#15668 (see [0002](#omarchy-0002-usbc-power)). It only matters once
+  #15668 merges.
 - **Drop when:** 0002 drops, or an omarchy-settings release ships the unit.
-
-#### Upstream report draft
-
-omacom/omarchy-pkgs, PR from pkgs branch `omarchy-settings-source-monitor`, opened together with
-omacom/omarchy#15668 (it only matters once that merges). Not opened; a human decides.
-
-> **Title:** omarchy-settings: install omarchy-powerprofiles-source-monitor.service
->
-> Companion to omacom/omarchy#15668, which adds the user unit
-> `omarchy-powerprofiles-source-monitor.service`. omarchy-settings installs user units from an
-> explicit list, so without this the unit lands only in `/usr/share/omarchy/default/systemd/user`,
-> where systemd doesn't look, and the first-run step and migration enable a unit that doesn't
-> exist.
->
-> This installs it in `/usr/lib/systemd/user` when the source has it, so the package still builds
-> from a tree without #15668. Off ASUS ROG laptops the unit's `ConditionPathExists` keeps it
-> inert.
->
-> Test: `pacman -Ql omarchy-settings` lists
-> `/usr/lib/systemd/user/omarchy-powerprofiles-source-monitor.service`, and Omarchy's
-> `config-test.sh` against this checkout no longer reports the unit as not shipped.
->
-> This pull request was written with Claude Code.
 
 <a id="pkgbuild-pkgdesc-label"></a>
 ### The "(omarchy-asus build)" label

@@ -56,7 +56,7 @@ SHAs are the commits of omacom/omarchy#12428, reachable there.
 | 0010-0011, 0022 | rtkit on x86_64; restart the portal, then PipeWire (0022: only for a session that started without rtkit) | #28 | omacom/omarchy#12428 (another contributor's PR, taken as is; 0022 is ours, not on that PR) |
 | 0012-0013, 0021 | no NVIDIA early load in the initramfs on hybrid machines (0021: only an unedited drop-in is removed) | #29 | omacom/omarchy#8263 (another contributor's PR; 0021 is ours, not on that PR) |
 | 0014-0015 | webcam menu guard answered from udev, only from a real camera's capture record (one with a parent device, so not a v4l2loopback node, whose role follows its producer) that this user can open; anything else is asked live. 0015 is fork commits 1c396770 + 5ba289be + ccd0f93d, squashed (the last two are #15910's fixes, taken as is) | #30 | omacom/omarchy#15910 (replaces #15670) |
-| 0016 | Tailscale bar follows tailscaled's IPN bus (one `tailscale debug watch-ipn` per panel) and runs no client while the panel is closed; the open panel refreshes everything on its interval. Fork commits cf5cf22a + 2a1d84b0 + d3e137d8 on asus/v4-5-0-rc1, squashed | #31 | omacom/omarchy#15671 (has only the first half, the closed-panel status-only poll) |
+| 0016 | Tailscale bar follows tailscaled's IPN bus (one `tailscale debug watch-ipn` per panel) and runs no client while the panel is closed; the open panel refreshes everything on its interval. Fork commits cf5cf22a + 2a1d84b0 + d3e137d8 on asus/v4-5-0-rc1, squashed | #31 | first half (the closed-panel status-only poll) merged another way in omacom/omarchy#7623 (`c872d57cf`; our omacom/omarchy#15671 closed for it); the IPN-bus watcher is omacom/omarchy#9894, open |
 | 0017 | clamshell state from logind events instead of a 2 s poll | #32 | not submitted |
 | 0024 | a crashed shell retakes its stranded lock while voxtype's dictation OSD runs (stock Omarchy bug); the OSD is told apart by its `-p` argument in `/proc/<pid>/cmdline` (fork commits f87801d1 + d528fca1, squashed; test paths under `/data`) | #102, #130 | omacom/omarchy#15912 (replaces #15890) |
 | 0027 | the stranded-lock check counts only lockers under this Hyprland: a Quickshell or hyprlock whose `HYPRLAND_INSTANCE_SIGNATURE` names another instance (a second login, a nested or sandboxed desktop) can't hold this lock; one with no signature, or an unreadable environment, still counts. Diogo Chaves's commit ddfdcf77, taken as is: fork commit 23846af8 | | proposed for omacom/omarchy#15912 in its thread (diogochaves/omarchy branch `lock-stranded-scope`) |
@@ -117,7 +117,7 @@ ways above. Native OpenGL games still need PRIME render offload as above.
 **PKGBUILD change (omarchy-settings only):** `pkgbuild-source-monitor-unit.diff` installs the
 charger-swap monitor user unit (from 0002) in `/usr/lib/systemd/user`. omarchy-settings installs
 user units from an explicit list, so without it first-run and migration `1792174852` would
-enable a unit systemd can't find. Same change as fork pkgs branch `omarchy-settings-source-monitor`.
+enable a unit systemd can't find. Same change as omacom/omarchy-pkgs#1629 (open).
 
 **Left out on purpose:** the GA605KM touchpad wake, `HibernateMode=shutdown` and the
 nvidia-powerd start limit (shipped by `omarchy-asus-g16` under `/usr/lib`, no `/etc`
