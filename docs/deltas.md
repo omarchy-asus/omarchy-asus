@@ -54,6 +54,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [EXPERIMENTAL idlemask trace between amdgpu's suspend and the LPS0 calls](#kernel-9904-idlemask-window) | linux-omarchy | 9904 | RC only | ours-only |
 | [EXPERIMENTAL idlemask trace after each PCI device's noirq suspend](#kernel-9905-idlemask-noirq-devices) | linux-omarchy | 9905 | RC only | ours-only |
 | [EXPERIMENTAL runtime PM for the PSP function](#kernel-9906-psp-rpm) | linux-omarchy | 9906 | RC only | not submitted |
+| [EXPERIMENTAL SMU metrics table at runtime](#kernel-9907-smu-metrics-runtime) | linux-omarchy | 9907 | RC only | ours-only |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -402,6 +403,19 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Upstream: not submitted.** An experiment; a ccp runtime-PM patch for PSP-only parts if it
   works and the TEE, TPM and display keep working.
 - **Drop when:** the G16 shows no effect on bit 16 or socket power.
+
+<a id="kernel-9907-smu-metrics-runtime"></a>
+### EXPERIMENTAL SMU metrics table at runtime (9907)
+
+- **Component:** `linux-omarchy`, `9907-EXPERIMENTAL-amd-pmc-smu-metrics-at-runtime.patch`, after
+  9906. RC only (since 9.110).
+- **What:** `/sys/kernel/debug/amd_pmc/smu_metrics_runtime`: a read sends the SMU the metrics dump
+  message that amd_pmc otherwise sends only on s2idle resume, and prints every field of the table
+  (`timein_s0i2` and both per-IP counter arrays included); a rejection is reported, never retried.
+  Writing `start` resets and starts the SMU's logging. Nothing is sent unless the file is used.
+- **Test:** `g16-test/psp-rpm` reads it at the end of each phase (#249).
+- **Upstream: ours-only.** A debug aid.
+- **Drop when:** with 9903.
 
 ## NVIDIA: nvidia-open-dkms
 

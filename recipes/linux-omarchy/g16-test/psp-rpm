@@ -24,7 +24,8 @@ Phases:
 Each measured phase reads amd_pmc's idlemask at 10 Hz, gpu_metrics' average_socket_power
 (v3.0, offset 112) every 0.5 s, battery watts and the PSP's runtime_status every second,
 and its runtime suspended/active time; the suspend and resume counts and the wakers come
-from 9906's psp_rpm_debug lines. power/control, both parameters and the screen go back to
+from 9906's psp_rpm_debug lines. With patch 9907, each phase also restarts the SMU's logging
+and reads amd_pmc's smu_metrics_runtime at its end (timein_s0i2, or the SMU's refusal). power/control, both parameters and the screen go back to
 their values at the start on exit, Ctrl-C included; a watchdog in its own session does it
 if the kit dies or runs past its deadline.
 
@@ -58,6 +59,7 @@ KIT = os.path.dirname(SELF)
 P_DELAY = "/sys/module/ccp/parameters/psp_rpm_delay_ms"
 P_DEBUG = "/sys/module/ccp/parameters/psp_rpm_debug"
 IDLEMASK = "/sys/kernel/debug/amd_pmc/amd_pmc_idlemask"
+SMU_METRICS = "/sys/kernel/debug/amd_pmc/smu_metrics_runtime"   # 9907
 PSP_ID = ("0x1022", "0x17e0")
 DELAY_MS = 2000
 BITS = (10, 16)          # screen off (display activity ended), the runtime deep-idle blocker
@@ -137,6 +139,22 @@ def socket_w(dev):
 def parse_mask(t):
     m = re.search(r"0x[0-9a-fA-F]+", t or "")
     return int(m.group(0), 16) if m else None
+
+
+def parse_metrics(text):
+    """9907's smu_metrics_runtime -> {"dump": "ok 0" | "rejected ...", "timein_s0i2": n, ...}, or None."""
+    if not text:
+        return None
+    out = {}
+    for ln in text.splitlines():
+        m = re.match(r"Dump data \(0x[0-9a-f]+\): (.*)$", ln)
+        if m:
+            out["dump"] = m.group(1).strip()
+            continue
+        m = re.match(r"([a-z0-9_]+): (\d+|0x[0-9a-f]+)$", ln)
+        if m:
+            out[m.group(1)] = int(m.group(2), 0)
+    return out or None
 
 
 def hypr_instance():
@@ -277,6 +295,12 @@ class SimHw:
                          "psp rpm: runtime suspend #2"]
         return "00.2d.00.6a", 0.012
 
+    def metrics_start(self):
+        return True
+
+    def metrics_read(self):
+        return {"dump": "ok 0", "timein_s0i2": 0 if self.on else 1200000, "hint_count": 0}
+
     def tpm_read(self):
         return {"ok": True, "secs": 0.031, "status_after": "suspended" if self.suspended() else "active"}
 
@@ -345,6 +369,13 @@ class Hw:
         v = rd(f"{self.psp}/{attr}", "")
         return v, time.monotonic() - t0
 
+    def metrics_start(self):
+        """9907: reset and start the SMU's logging, so the phase's read covers the phase."""
+        return os.path.exists(SMU_METRICS) and wr(SMU_METRICS, "start")
+
+    def metrics_read(self):
+        return parse_metrics(rd(SMU_METRICS, "")) if os.path.exists(SMU_METRICS) else None
+
     def tpm_read(self):
         """One TPM2_PCR_Read through the kernel (sysfs PCR 0), with a timeout."""
         p = "/sys/class/tpm/tpm0/pcr-sha256/0"
@@ -389,16 +420,18 @@ def measure(hw, name, label, screen_on, secs, log, dry):
     off = True if screen_on else hw.screen(False)
     if not dry:
         time.sleep(3)
+    started = hw.metrics_start()
     t0, tm0 = time.time(), hw.times()
     s = hw.sample(secs if not dry else 3)
     t1, tm1 = time.time(), hw.times()
+    met = hw.metrics_read() if started else None
     back = True if screen_on else hw.screen(True)
     if not dry and not screen_on:
         time.sleep(3)
     ev = rpm_events(hw.lines_between(t0, t1))
     d = {k: (None if tm0[k] is None or tm1[k] is None else tm1[k] - tm0[k]) for k in tm0}
     p = {"phase": name, "label": label, "screen_on": screen_on, "screen_off_ok": off, "panel_back": back,
-         "status": s["status"], "secs": secs, "rpm_ms": d, **ev, **summarize(s)}
+         "status": s["status"], "secs": secs, "rpm_ms": d, "smu": met, **ev, **summarize(s)}
     log(f"phase {name} ({label}): bit16 idle {fmt_share(p['idle'][16])} bit10 {fmt_share(p['idle'][10])} "
         f"suspended {fmt_share(p['suspended_share'])} suspends {ev['suspends']} resumes {ev['resumes']} "
         f"socket {fmt_w(p['sock'])} battery {fmt_w(p['bat'])}" + ("" if back else " PANEL DID NOT READ BACK ON"))
@@ -639,6 +672,15 @@ def where16(f):
     return "in neither"
 
 
+def smu_cell(met):
+    """9907's timein_s0i2 for a phase (the SMU's logging restarted at the phase start)."""
+    if not met:
+        return "-"
+    if not str(met.get("dump", "")).startswith("ok"):
+        return f"dump {met.get('dump', '?')}"
+    return str(met.get("timein_s0i2", "-"))
+
+
 def bits_list(xs):
     return ", ".join(str(x) for x in xs) if xs else "none"
 
@@ -677,8 +719,8 @@ def report(res, kernel, dry):
     o += [f"- panel back every time: {'yes' if f['panel'] else 'NO'}",
           f"- ccp / TEE / TPM / amdgpu errors in the kernel log: {len(res.get('errors') or []) or 'none'}", "",
           "| phase | what | PSP suspended | suspends | resumes | runtime suspended ms | bit 16 | bit 10 "
-          "| never idle | socket W | battery W | idlemask (most read) |",
-          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+          "| never idle | socket W | battery W | SMU timein_s0i2 | idlemask (most read) |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for p in res.get("phases", []):
         masks = ", ".join(f"{m} x{n}" for m, n in p["masks"][:2])
         sms = p["rpm_ms"].get("suspended_ms")
@@ -686,7 +728,7 @@ def report(res, kernel, dry):
                  f"{p['resumes']} | {'-' if sms is None else sms} of {p['secs'] * 1000} | {fmt_share(p['idle'][16])} | "
                  f"{fmt_share(p['idle'][10])} | {bits_list(p['never_idle'])} | "
                  f"{'-' if p['sock'] is None else '%.2f' % p['sock']} | {'-' if p['bat'] is None else '%.2f' % p['bat']} | "
-                 f"{masks} |")
+                 f"{smu_cell(p.get('smu'))} | {masks} |")
     wakers = {}
     for p in res.get("phases", []) + ([ck["events"]] if ck.get("events") else []):
         for w, n in p.get("wakers", {}).items():

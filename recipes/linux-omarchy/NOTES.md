@@ -18,7 +18,7 @@ Compared with upstream, only:
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906 and 9907.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -48,6 +48,7 @@ Compared with upstream, only:
 13. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
 14. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
 15. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
+16. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -324,10 +325,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902, 9903, 9904, 9905 and 9906, last.
+   9900, then 9901, 9902, 9903, 9904, 9905, 9906 and 9907, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -616,6 +617,37 @@ screen on and 30 s with the screen off (DPMS; idlemask bit 10 must read 1) readi
 idlemask (bit 16), socket power, battery watts and the PSP's suspend/resume counts and
 wakers; then, still suspended, one fTPM PCR read and one firmware-version read (which
 resumes it), and everything goes back.
+
+## EXPERIMENTAL: 9907 the SMU metrics table at runtime (debug only, #249)
+
+`9907-EXPERIMENTAL-amd-pmc-smu-metrics-at-runtime.patch` (ours, compile-tested only, after
+9906, on top of 9903's `pmc.c`). It touches `drivers/platform/x86/amd/pmc/pmc.c` only.
+
+**What.** `/sys/kernel/debug/amd_pmc/smu_metrics_runtime` (0600). A read sends
+`SMU_MSG_LOG_DUMP_DATA` (0x08) now and prints every field of the SMU metrics table:
+`table_version`, `hint_count`, `s0i3_last_entry_status`, `timein_s0i2`, the S0i3, resume and
+SW DRIPS times, `active_ips`, and both per-IP arrays (`timecondition_notmet_lastcapture` and
+`_totaltime`, all 32 entries, named where the CPU's IP list names them). If the SMU rejects
+the message, the first line says `rejected, table not refreshed: <error>` and the table is
+printed as it was; it never retries. Writing `start` resets and starts the SMU's logging
+(`SMU_MSG_LOG_RESET` and `SMU_MSG_LOG_START`, what s2idle's prepare does), so the next read
+covers the time since. Without an s2idle since boot, the table is mapped from the SMU's DRAM
+address queries only, with no logging reset.
+
+**Why.** `smu_fw_info` shows only what the SMU last wrote, and the SMU writes the table when
+amd_pmc sends the dump message on s2idle resume, so at runtime it is stale and
+`timein_s0i2` is never printed.
+
+**Safety.** The message is the one `amd_pmc_s2idle_restore()` sends from a running system,
+over the same mailbox under amd_pmc's lock; nothing else uses that port. Whether the SMU
+accepts it outside a suspend is what the first read on the G16 shows.
+
+**Default behaviour.** None: nothing is sent unless the file is read or written.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9903.
+
+**Test:** `g16-test/psp-rpm` restarts the logging at each phase and reads the file at its
+end (the report's `SMU timein_s0i2` column, or the SMU's refusal).
 
 ## 0810: panel_power_savings applies when written (#172)
 

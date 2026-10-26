@@ -7,6 +7,7 @@
 #      left off, a wrong version read or a failed TPM read are FAIL; a problem, the charger
 #      or a screen that did not really go off (bit 10) is INCOMPLETE; a PSP that never
 #      suspended is NOT SUSPENDED; bit 16 busy throughout is NO EFFECT
+#      9907's smu_metrics_runtime: the dump status and timein_s0i2, a refused dump
 #   3. bad usage exits 2
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
@@ -63,12 +64,18 @@ text, _ = m.report(r, "k", False); print("nosustext", "**not reached**" in text)
 r = copy.deepcopy(base); r["phases"][2]["idle"][16] = 0.2; print("noeffect", v(r))
 r = copy.deepcopy(base); r["phases"][1]["idle"][16] = 0.9; f = m.verdict(r)[1]; print("both", m.where16(f))
 r = copy.deepcopy(base); r["phases"] = []; print("empty", v(r))
+met = m.parse_metrics("Dump data (0x8): ok 0\ntable_version: 3\ntimein_s0i2: 4500\nactive_ips: 0x1ff\n"
+                     "idx name active timecondition_notmet_lastcapture timecondition_notmet_totaltime\n 0 DISPLAY  1 5 9\n")
+print("metrics", met["dump"], met["timein_s0i2"], met["active_ips"], m.smu_cell(met))
+print("rejected", m.smu_cell(m.parse_metrics("Dump data (0x8): rejected, table not refreshed: -5\ntimein_s0i2: 0\n")))
+print("nometrics", m.parse_metrics(""), m.smu_cell(None))
 EOF
 )
 for want in 'events 1 4 {"handle_invoke_cmd (pmf)": 2, "not a ccp command (kworker/3:1)": 1, "tee_version_show (cat)": 1}' \
     "base BIT 16 IDLE" "klog FAIL" "panel FAIL" "version FAIL" "tpm FAIL" "notpm BIT 16 IDLE" \
     "problem INCOMPLETE" "charger INCOMPLETE" "screen INCOMPLETE" "nosus NOT SUSPENDED" "nosustext True" \
-    "noeffect NO EFFECT" "both with the screen on and off" "empty INCOMPLETE"; do
+    "noeffect NO EFFECT" "both with the screen on and off" "empty INCOMPLETE" \
+    "metrics ok 0 4500 511 4500" "rejected dump rejected, table not refreshed: -5" "nometrics None -"; do
     grep -qxF "$want" <<<"$out" && ok "$want" || bad "want '$want': $out"
 done
 
