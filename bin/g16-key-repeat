@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""g16-key-repeat: why a key keeps repeating on the G16 when a monitor or the charger is
+unplugged while typing (#350). EXPERIMENTAL.
+
+  g16-key-repeat capture [--minutes N] [--ime on|off] [--libinput] [--out DIR]
+      opens one foot window ("g16-key-repeat") with WAYLAND_DEBUG on and records, until
+      the window is closed or N minutes pass (default 10, at most 60): that window's
+      keyboard traffic, Hyprland's monitor and reload events (socket2), the input, drm
+      and power_supply uevents, and the keyboards Hyprland lists before and after.
+      --ime off stops Omarchy's fcitx5 for the run and starts it again at the end (the
+      A/B: with fcitx5 on, every key goes through its keyboard grab and comes back
+      through its virtual keyboard). --libinput adds `sudo libinput debug-events`
+      (one sudo prompt, key names hidden) to see when the hardware release came.
+      Then it writes the report (analyze).
+  g16-key-repeat analyze DIR [--json]
+      the report for a capture: each key hold whose release came late or never, and the
+      repeats fcitx5 made, with the monitor, reload and uevents around each.
+
+What the report tells apart (Hyprland 0.56.2, Omarchy's foot + fcitx5):
+  late release   the release reached the window more than 150 ms after its hardware
+                 time said it happened, while the window's own repeat was running: the
+                 compositor (or fcitx5) stalled, e.g. in a blocking modeset. A burst of
+                 extra characters that stops by itself.
+  ime repeat     fcitx5 repeats a key itself while its grab is active (release + press
+                 pairs on the wire carrying the original press's time) and stops only
+                 when the release of that key comes back through its grab. A run whose
+                 key is never released (to the end of the capture, with no leave) is a
+                 release that never reached fcitx5: the runaway "until another key is
+                 pressed" (the other key stops the repeat, not the lost release).
+  stuck          a repeating key still down when the capture ends, over 2 s after its
+                 press, with other keys typed since (and no keyboard leave, which ends
+                 a hold normally): the release was lost on the way to the window.
+  long hold      a repeating key held over 2 s while others were typed, then released:
+                 listed for a look, not a verdict (the wire can't tell it from a real
+                 hold; libinput's key count near it can).
+  A capture with no keyboard focus or no key presses (foot failed, nothing typed)
+  exits 1 instead of reporting "nothing seen".
+  The capture types nothing and changes nothing but fcitx5 with --ime off. Type plain
+  letters in the window, never a password: the raw logs hold the key codes (they stay
+  in DIR); the report numbers the keys instead (k1, k2, ...).
+
+Files: DIR (default ~/.local/state/omarchy-asus/key-repeat/<time>): wire.log, side.log,
+devices-before.json, devices-after.json, versions.txt, report.md.
+Exit status: 0 done, 1 a problem (foot failed, or no keyboard traffic), 2 bad usage.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+TITLE = "g16-key-repeat"
+LATE_MS = 150        # a release this much later than its hardware time says is late
+STUCK_S = 2.0        # a hold this long with other keys typed meanwhile is stuck
+NEAR_S = 3.0         # side events this close to an anomaly are listed with it
+DEFAULT_RATE, DEFAULT_DELAY = 40, 250   # Omarchy's input.lua
+# The wire lines kept from foot's WAYLAND_DEBUG (the rest is frame traffic).
+KEEP = re.compile(r"\b(wl_keyboard|wl_seat|wl_output|zwp_text_input_v3)[@#]\d+\.|wl_registry[@#]\d+\.global_remove")
+WIRE = re.compile(r"^\[\s*[\d:.]+\]\s+(?:\{[^}]*\}\s+)?(->\s+)?(\w+)[@#](\d+)\.(\w+)\((.*)\)\s*$")
+# evdev codes of Ctrl, Shift, Alt, Super (left and right) and Caps Lock: they don't repeat
+MODIFIERS = {29, 42, 54, 56, 58, 97, 100, 125, 126}
+NO_CAPTURE = "no capture: the window got no keyboard focus or no key presses"
+SOCKET2_KEEP = ("monitoradded", "monitoraddedv2", "monitorremoved", "monitorremovedv2",
+                "configreloaded", "focusedmon", "focusedmonv2")
+
+
+def log(msg):
+    print(f"g16-key-repeat: {msg}", file=sys.stderr, flush=True)
+
+
+def default_out():
+    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(state, "omarchy-asus", "key-repeat", time.strftime("%Y%m%d-%H%M%S"))
+
+
+def scrub(text):
+    home = os.path.expanduser("~")
+    text = text.replace(home, "~")
+    for name in {socket.gethostname(), os.environ.get("USER", "")}:
+        if len(name) > 2:
+            text = re.sub(r"\b%s\b" % re.escape(name), "<host>" if name == socket.gethostname() else "<user>", text)
+    return text
+
+
+# ------------------------------------------------------------------ capture
+class Recorder:
+    """Lines from several sources into files, each stamped with this process's clock."""
+
+    def __init__(self, out):
+        self.lock = threading.Lock()
+        self.files = {n: open(os.path.join(out, n), "a", encoding="utf-8") for n in ("wire.log", "side.log")}
+
+    def write(self, name, line):
+        with self.lock:
+            f = self.files[name]
+            if f.closed:
+                return   # a follower still draining after the capture ended
+            f.write(f"{time.time():.6f} {line.rstrip()}\n")
+            f.flush()
+
+    def follow(self, name, stream, tag="", keep=None):
+        def run():
+            for raw in stream:
+                line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+                if keep is None or keep(line):
+                    self.write(name, tag + line)
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return t
+
+    def close(self):
+        with self.lock:
+            for f in self.files.values():
+                f.close()
+
+
+def socket2_path():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    run = os.environ.get("XDG_RUNTIME_DIR")
+    return os.path.join(run, "hypr", sig, ".socket2.sock") if sig and run else None
+
+
+def follow_socket2(rec):
+    path = socket2_path()
+    if not path:
+        log("no Hyprland instance: monitor and reload events not recorded")
+        return
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+    except OSError as e:
+        log(f"socket2: {e}")
+        return
+    rec.follow("side.log", s.makefile("rb"), "hyprland ", lambda ln: ln.split(">>", 1)[0] in SOCKET2_KEEP)
+
+
+def run_text(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def keyboards(out, name):
+    text = run_text(["hyprctl", "devices", "-j"])
+    try:
+        names = sorted(k.get("name", "") for k in json.loads(text).get("keyboards", []))
+    except (ValueError, AttributeError):
+        names = []
+    with open(os.path.join(out, name), "w", encoding="utf-8") as f:
+        json.dump(names, f, indent=1)
+    return names
+
+
+def versions(out):
+    pk = run_text(["pacman", "-Q", "hyprland", "aquamarine", "libinput", "fcitx5", "foot", "linux-omarchy"])
+    hv = run_text(["hyprctl", "version", "-j"])
+    try:
+        hv = json.loads(hv).get("tag", "") + " " + json.loads(hv).get("commit", "")[:8]
+    except ValueError:
+        hv = ""
+    fc = "running" if run_text(["pgrep", "-x", "fcitx5"]).strip() else "not running"
+    with open(os.path.join(out, "versions.txt"), "w", encoding="utf-8") as f:
+        f.write(scrub(pk) + f"hyprctl version: {hv}\nfcitx5: {fc}\n")
+
+
+def fcitx(action):
+    subprocess.run(["systemctl", "--user", action, "omarchy-fcitx5.service"], capture_output=True)
+    if action == "stop":
+        subprocess.run(["pkill", "-u", str(os.getuid()), "-x", "fcitx5"], capture_output=True)
+
+
+def capture(a):
+    if not shutil.which("foot"):
+        log("foot not found")
+        return 1
+    out = os.path.expanduser(a.out or default_out())
+    os.makedirs(out, exist_ok=True)
+    versions(out)
+    before = keyboards(out, "devices-before.json")
+    rec = Recorder(out)
+    rec.write("side.log", f"capture start ime={a.ime} keyboards={len(before)}")
+    procs = []
+    if a.libinput:
+        if subprocess.run(["sudo", "-v"]).returncode != 0:
+            log("sudo refused: running without libinput")
+        else:
+            # root's process can't be signalled from here: it is bounded by timeout and
+            # ends on its next line once this script has gone (a broken pipe)
+            li = subprocess.Popen(["sudo", "-n", "timeout", str(a.minutes * 60 + 30), "libinput", "debug-events"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            procs.append(li)
+            rec.follow("side.log", li.stdout, "libinput ",
+                       lambda ln: "KEYBOARD_KEY" in ln or "DEVICE_ADDED" in ln or "DEVICE_REMOVED" in ln)
+    if shutil.which("udevadm"):
+        ud = subprocess.Popen(["udevadm", "monitor", "--udev", "-s", "input", "-s", "drm", "-s", "power_supply"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        procs.append(ud)
+        rec.follow("side.log", ud.stdout, "udev ", lambda ln: ln.startswith("UDEV"))
+    follow_socket2(rec)
+    if a.ime == "off":
+        fcitx("stop")
+        rec.write("side.log", "fcitx5 stopped for the run")
+    env = dict(os.environ, WAYLAND_DEBUG="1")
+    term = subprocess.Popen(["foot", "--title", TITLE, "--app-id", TITLE, "--", "sh", "-c",
+                             "echo 'Type plain letters here (no passwords). Close this window to stop.'; cat >/dev/null"],
+                            env=env, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    reader = rec.follow("wire.log", term.stderr, "", lambda ln: KEEP.search(ln) is not None)
+    log(f"recording to {scrub(out)}: type in the window, unplug and replug, then close it")
+    try:
+        term.wait(timeout=a.minutes * 60)
+    except subprocess.TimeoutExpired:
+        term.terminate()
+    except KeyboardInterrupt:
+        term.terminate()
+    finally:
+        reader.join(timeout=2)
+        if a.ime == "off":
+            fcitx("start")
+            rec.write("side.log", "fcitx5 started again")
+        for p in procs:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+        after = keyboards(out, "devices-after.json")
+        rec.write("side.log", f"capture end keyboards={len(after)}")
+        rec.close()
+    rc = term.wait()
+    report = analyze_dir(out)
+    with open(os.path.join(out, "report.md"), "w", encoding="utf-8") as f:
+        f.write(render(report))
+    print(render(report))
+    # foot's status is its shell's (closing the window hangs the shell up), so only a
+    # foot that never reached the compositor is a failed start
+    if rc not in (0, -signal.SIGTERM) and not read_lines(os.path.join(out, "wire.log")):
+        log(f"foot exited with status {rc} before reaching the compositor: the capture is not usable")
+        return 1
+    if report["verdict"] == NO_CAPTURE:
+        log("no keyboard traffic was recorded: type in the g16-key-repeat window")
+        return 1
+    return 0
+
+
+# ------------------------------------------------------------------ analyze
+def parse_wire(lines):
+    """(stamp, iface, id, event, args) for each event (requests dropped)."""
+    out = []
+    for line in lines:
+        stamp, _, rest = line.partition(" ")
+        m = WIRE.match(rest.strip())
+        if not m or m.group(1):
+            continue
+        try:
+            t = float(stamp)
+        except ValueError:
+            continue
+        args = [x.strip() for x in m.group(5).split(",")] if m.group(5) else []
+        out.append((t, m.group(2), int(m.group(3)), m.group(4), args))
+    return out
+
+
+def parse_side(lines):
+    out = []
+    for line in lines:
+        stamp, _, rest = line.partition(" ")
+        try:
+            out.append((float(stamp), rest.strip()))
+        except ValueError:
+            continue
+    return out
+
+
+def analyze(wire, side):
+    """Walk each wl_keyboard's events and return the report as a dict."""
+    names = {}
+
+    def kname(code):
+        return names.setdefault(code, f"k{len(names) + 1}")
+
+    rate, delay = DEFAULT_RATE, DEFAULT_DELAY
+    held = {}            # (kbd, key) -> {t, wt, others, reps: [fcitx5 repeat stamps], rel: pending release}
+    anomalies = []
+    stats = {"presses": 0, "releases": 0, "leaves": 0, "enters": 0, "ime_repeats": 0, "keymaps": 0,
+             "globals_removed": 0, "capabilities": []}
+    t0 = wire[0][0] if wire else (side[0][0] if side else 0.0)
+
+    def add(kind, t, **kw):
+        anomalies.append(dict(kind=kind, at=round(t - t0, 3), **kw))
+
+    def unreleased(code, h, t):
+        # A key whose release never reached the window by the end of the capture: fcitx5
+        # kept repeating it, or the window's own repeat ran while other keys were typed.
+        # Modifiers don't repeat, and a key held at a leave ends there normally.
+        if h["reps"]:
+            add("ime repeat", h["t"], key=kname(code), repeats=len(h["reps"]), seconds=round(t - h["t"], 3),
+                ended="never released", others_typed=h["others"])
+        elif t - h["t"] > STUCK_S and h["others"] and code not in MODIFIERS:
+            add("stuck", h["t"], key=kname(code), seconds=round(t - h["t"], 3), others_typed=h["others"],
+                ended="never released")
+
+    def released(k, h, t, wt):
+        held.pop(k)
+        code = k[1]
+        hold_s = t - h["t"]
+        hw_s = (wt - h["wt"]) / 1000.0
+        late_ms = (hold_s - hw_s) * 1000.0
+        # repeats fcitx5 sent after the hardware said the key was up
+        past = sum(1 for r in h["reps"] if r > h["t"] + hw_s + LATE_MS / 1000.0)
+        if past:
+            add("ime repeat past release", h["t"], key=kname(code), repeats_after_release=past,
+                late_ms=round(late_ms), hardware_hold_ms=round(hw_s * 1000.0))
+        elif late_ms > LATE_MS and hold_s * 1000.0 > delay and (wt or h["wt"]):   # time 0: no clock
+            def reps(ms):   # how many repeats the window makes in a hold of ms
+                return int(max(0, round(ms) - delay) * rate / 1000.0 + 1e-6)
+            extra = reps(hold_s * 1000.0) - reps(hw_s * 1000.0)
+            add("late release", h["t"], key=kname(code), late_ms=round(late_ms),
+                hardware_hold_ms=round(hw_s * 1000.0), extra_repeats=max(extra, 0))
+        if hold_s > STUCK_S and h["others"] and code not in MODIFIERS:
+            # A long hold of a repeating key while others were typed: a real hold, or a
+            # release lost until the key was pressed again. The wire can't tell, so it is
+            # listed for a look (with libinput's keys near it) and leaves the verdict alone.
+            add("long hold", h["t"], key=kname(code), seconds=round(hold_s, 3), others_typed=h["others"],
+                fcitx5_repeats=len(h["reps"]))
+
+    def settle(oid, but=None):
+        # A release carrying its press's time is half of an fcitx5 repeat pair only if the
+        # same press follows; anything else on this keyboard makes it the real release
+        # (virtual keyboards such as wtype send time 0 for everything).
+        for k, h in list(held.items()):
+            if k[0] == oid and k[1] != but and h["rel"]:
+                released(k, h, h["rel"], h["wt"])
+
+    for t, iface, oid, ev, args in wire:
+        if iface == "wl_keyboard":
+            if ev == "repeat_info" and len(args) == 2:
+                rate, delay = int(args[0]), int(args[1])
+            elif ev == "keymap":
+                stats["keymaps"] += 1
+            elif ev == "enter":
+                stats["enters"] += 1
+            elif ev == "leave":
+                stats["leaves"] += 1
+                settle(oid)
+                for k in [k for k in held if k[0] == oid]:
+                    held.pop(k)   # the release goes to the next focus: a normal end
+            elif ev == "key" and len(args) == 4:
+                wt, code, state = int(args[1]), int(args[2]), int(args[3])
+                k = (oid, code)
+                settle(oid, but=code)
+                h = held.get(k)
+                if state == 1:
+                    stats["presses"] += 1
+                    if h and h["rel"] and h["wt"] == wt:
+                        # fcitx5's own repeat: release + press again, with the original press's time
+                        stats["ime_repeats"] += 1
+                        h["reps"].append(t)
+                        h["rel"] = None
+                        continue
+                    if h and h["rel"]:
+                        released(k, h, h["rel"], h["wt"])
+                    for (o, c), other in held.items():
+                        if o == oid and c != code:
+                            other["others"] += 1
+                    held[k] = {"t": t, "wt": wt, "others": 0, "reps": [], "rel": None}
+                    kname(code)
+                elif state == 0:
+                    stats["releases"] += 1
+                    if not h:
+                        continue
+                    if wt == h["wt"]:
+                        h["rel"] = t
+                    else:
+                        released(k, h, t, wt)
+        elif iface == "wl_seat" and ev == "capabilities" and args:
+            stats["capabilities"].append([round(t - t0, 3), int(args[0])])
+        elif iface == "wl_registry" and ev == "global_remove":
+            stats["globals_removed"] += 1
+    end = wire[-1][0] if wire else t0
+    for oid in {k[0] for k in held}:
+        settle(oid)
+    for (oid, code), h in list(held.items()):
+        unreleased(code, h, end)
+    anomalies.sort(key=lambda x: x["at"])
+    for an in anomalies:
+        at, span = an["at"] + t0, an.get("seconds", 0)
+        an["near"] = [f"{s - t0:+.3f}s {text}" for s, text in side
+                      if at - NEAR_S <= s <= at + span + NEAR_S and not text.startswith("libinput")]
+        hw = sum(1 for s, text in side if text.startswith("libinput") and "KEYBOARD_KEY" in text
+                 and at - 0.05 <= s <= at + span + NEAR_S)
+        if hw:
+            an["libinput_keys_near"] = hw
+    events = [f"{s - t0:+.3f}s {text}" for s, text in side
+              if not text.startswith("libinput") and not text.startswith("udev")]
+    udev = sum(1 for _, text in side if text.startswith("udev"))
+    return dict(verdict=verdict_of(anomalies, stats), repeat_rate=rate, repeat_delay=delay, stats=stats,
+                anomalies=anomalies, events=events, uevents=udev, keys=len(names))
+
+
+def verdict_of(anomalies, stats):
+    if not stats["enters"] or not stats["presses"]:
+        return NO_CAPTURE
+    kinds = {a["kind"] for a in anomalies}
+    if "ime repeat" in kinds:
+        a = next(a for a in anomalies if a["kind"] == "ime repeat")
+        return f"lost release at fcitx5: it kept repeating a key whose release never came back ({a['ended']})"
+    if "stuck" in kinds:
+        return "lost release on the way to the window: a key stayed down while others were typed"
+    if kinds & {"late release", "ime repeat past release"}:
+        return "late release: a stall delayed the release while the key was repeating, then it stopped"
+    return "nothing seen: no late, lost or runaway repeat in this capture"
+
+
+def read_lines(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def analyze_dir(d):
+    r = analyze(parse_wire(read_lines(os.path.join(d, "wire.log"))), parse_side(read_lines(os.path.join(d, "side.log"))))
+    for name in ("devices-before.json", "devices-after.json"):
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                r[name.split(".")[0].replace("-", "_")] = json.load(f)
+        except (OSError, ValueError):
+            pass
+    r["versions"] = "\n".join(read_lines(os.path.join(d, "versions.txt")))
+    return r
+
+
+def render(r):
+    s = r["stats"]
+    out = ["## g16-key-repeat capture", "", f"**Verdict:** {r['verdict']}", "",
+           f"Keys: {r['keys']} distinct, {s['presses']} presses, {s['releases']} releases; "
+           f"fcitx5 repeats on the wire: {s['ime_repeats']}; keyboard enter/leave: {s['enters']}/{s['leaves']}; "
+           f"keymaps: {s['keymaps']}; repeat {r['repeat_rate']}/s after {r['repeat_delay']} ms; "
+           f"uevents: {r['uevents']}; seat capability changes: {s['capabilities'] or 'none'}.", ""]
+    b, a = r.get("devices_before"), r.get("devices_after")
+    if b is not None and a is not None:
+        gone, new = sorted(set(b) - set(a)), sorted(set(a) - set(b))
+        out.append(f"Keyboards: {len(b)} before, {len(a)} after"
+                   + (f"; gone: {', '.join(gone)}" if gone else "") + (f"; new: {', '.join(new)}" if new else ""))
+        out.append("")
+    if r["anomalies"]:
+        out.append("| at | what | details | near it |")
+        out.append("|---|---|---|---|")
+        for an in r["anomalies"]:
+            det = ", ".join(f"{k}={v}" for k, v in an.items() if k not in ("at", "kind", "near"))
+            out.append(f"| {an['at']:+.3f}s | {an['kind']} | {det} | {'<br>'.join(an['near'][:8]) or '-'} |")
+        out.append("")
+    if r["events"]:
+        out.append("<details><summary>Monitor, reload and fcitx5 events</summary>\n")
+        out.append("```")
+        out.extend(r["events"][:200])
+        out.append("```\n</details>\n")
+    if r.get("versions"):
+        out.append("<details><summary>Versions</summary>\n\n```\n" + r["versions"] + "\n```\n</details>")
+    return scrub("\n".join(out)) + "\n"
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="g16-key-repeat", description=__doc__.split("\n\n")[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("capture")
+    c.add_argument("--minutes", type=int, default=10)
+    c.add_argument("--ime", choices=("on", "off"), default="on")
+    c.add_argument("--libinput", action="store_true")
+    c.add_argument("--out")
+    an = sub.add_parser("analyze")
+    an.add_argument("dir")
+    an.add_argument("--json", action="store_true")
+    try:
+        a = p.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    if a.cmd == "capture":
+        if not 1 <= a.minutes <= 60:
+            log("--minutes is 1 to 60")
+            return 2
+        return capture(a)
+    if not os.path.isfile(os.path.join(a.dir, "wire.log")):
+        log(f"no wire.log in {a.dir}")
+        return 1
+    r = analyze_dir(a.dir)
+    print(json.dumps(r, indent=1) if a.json else render(r), end="")
+    return 1 if r["verdict"] == NO_CAPTURE else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

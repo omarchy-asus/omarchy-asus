@@ -75,6 +75,11 @@ state under its temp dir stays private (600). Next to it:
 - `<lock>.queue` is a release's place in line. A release takes it first and
   keeps it until it is done: while it is held no PR job takes the lock, and a
   second release waits behind the first.
+- `<lock>.wait` keeps PR jobs out while a release waits for the queue. Every
+  release holds it (a shared flock) from the moment it asks for the queue
+  until it is done, and a PR job takes the lock only when it can take this one
+  exclusively. So when one release hands the queue to the next, there is no
+  moment a waiting PR job could take the lock in between.
 
 A job's steps are separate processes, so the lock is held by a small
 background process that `ci/kernel-lock` starts without the job's token (and

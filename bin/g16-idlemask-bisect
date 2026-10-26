@@ -19,9 +19,11 @@ question for AMD (drm/amd#5863).
            --skip a,b --only a,b --no-screen --no-follow --out DIR --sim MODEL.json (dry run)
 
 Groups (found at run time by driver, class and vendor; the BDFs are the G16's):
-  rtx        the RTX's root port (00:03.1) and everything behind it; skipped while
-             anything holds the RTX's DRM node or /dev/nvidia* (Hyprland does on the
-             G16: removing it there would take the compositor down)
+  rtx        the RTX's root port (00:03.1) and everything behind it, taken off once a
+             run, at the end (below); skipped while anything holds the RTX's DRM node
+             or /dev/nvidia* (Hyprland does on the G16: removing it there would take
+             the compositor down) or the RTX isn't runtime-suspended, checked again
+             right before the removal
   wifi       mt7925e (63:00.0)            sd        GL9767 SD reader (62:00.0)
   usb4       the USB4 NHI (67:00.5)       xhci-kbd  the xHCI with the keyboard (USB
   xhci-cam   the xHCI with the camera               0b05:19b6) and Bluetooth (67:00.0)
@@ -44,19 +46,22 @@ Pass 1, the bits (short phases: 3 s settle, 5 s after a rescan, then 3 s of read
   when they free different bits). A bit that goes idle with the whole set off but with
   neither half alone needs devices from both: it is bisected in B with A off and in A
   with B off, and reported as "needs X + Y together". Then the screen off (DPMS, through
-  hyprctl) with everything on, and with everything off.
-  The quiet phase, held 60 s: every removable device off, the screen off and the app
-  scopes frozen (cgroup freezer, app.slice scopes only: never services, the compositor,
-  the shell, audio or polkit) all at once, with the wakeups/s (/proc/interrupts), the
+  hyprctl) with everything on. Pass 1 leaves the RTX's port on throughout.
+Pass 2, the watts (10 s settle + 30 s measured): baseline, everything off but the RTX's
+  port, each device or device set pass 1 tied to a bit (its idlemask confirms pass 1),
+  and the baseline again; each against the mean of the two baselines. Battery watts are
+  BAT current_now x voltage_now every second; socket power is gpu_metrics' average_socket_power
+  (struct gpu_metrics_v3_0, natural alignment: offset 112) every 0.5 s.
+Then everything off together, the RTX's port too: its one removal of the run. A second
+  removal, after the rescan had nvidia re-probe the RTX, hung the G16 (#352), so the
+  port stays off from here to the restore: a long phase (its bits and watts), the screen
+  off (DPMS, through hyprctl), and the quiet phase, held 60 s: the screen off and the app
+  scopes frozen as well (cgroup freezer, app.slice scopes only: never services, the
+  compositor, the shell, audio or polkit), with the wakeups/s (/proc/interrupts), the
   deepest cpuidle state's residency, gpu_metrics and the display -> SMU probes (the
   DCN's SMU messages, Z-state decisions, idle-optimization allows and DML
   StutterPeriod). A bit that goes idle only here wants a quieter machine; one still
   stuck is firmware. The report says which.
-Pass 2, the watts (10 s settle + 30 s measured): baseline, everything off, each device
-  or device set pass 1 tied to a bit (its idlemask confirms pass 1), and the baseline
-  again; each against the mean of the two baselines. Battery watts are BAT current_now x
-  voltage_now every second; socket power is gpu_metrics' average_socket_power (struct
-  gpu_metrics_v3_0, natural alignment: offset 112) every 0.5 s.
 
 Preflight (it refuses and changes nothing if any holds): on AC or not discharging;
 the GPU MUX not in hybrid mode (asus-armoury gpu_mux_mode must be 1: the internal
@@ -67,9 +72,12 @@ nvidia-smi, sensors, its config space or the nvidia_0 backlight.
 
 Root: one pkexec prompt at the start, through the desktop's polkit agent
 (G16_POLKIT_REASON=<wrapper> runs `<wrapper> run REASON -- pkexec ...` for a dialog
-with a reason; G16_ROOT=sudo is the other way). g16-testd (#277) can't remove PCI
-devices, freeze scopes or load these probes (its allowlist has the SD reader), so it
-isn't used. The run itself is a root transient unit (g16-idlemask-bisect-run), outside
+with a reason; G16_ROOT=sudo is the other way). g16-testd (#277, #284) isn't used:
+the run's root steps are taking a dozen PCI devices off the bus and back, unbinding
+the SMBus driver, reading amd_pmc's debugfs idlemask at 10 Hz and BTF fprobes with
+fetch arguments on the display code, none of which the helper does (each would be a
+broad root step on its allowlist). Its scope freezer alone would not save the prompt,
+and the run has to carry on as root when the terminal drops out. The run itself is a root transient unit (g16-idlemask-bisect-run), outside
 app.slice so the freezer never reaches it, and it carries on when the keyboard,
 touchpad, Wi-Fi and the terminal drop out; this command follows its log.
 
@@ -79,7 +87,10 @@ come back and puts the keyboard light back. A watchdog unit
 (g16-idlemask-bisect-watchdog-*) does the same if the run dies, or stops it after 25
 minutes. If anything is still missing afterwards, a reboot brings every device back:
 nothing here persists across a reboot. After the psp group, amd-pmf's policy session
-may stay stale until the next boot.
+may stay stale until the next boot. Every write has a timeout (30 s); a PCI write that
+doesn't return stops the run, and nothing more is written to the PCI bus, by the run or
+the watchdog: any later remove or rescan, the root bus's too, would hang behind it. The
+report says what stays off until the reboot.
 
 Output: ~/omarchy-asus-249-bisect/ (report.md, bisect.json with every phase's reads,
 run.log). The report is written to be posted on #249 as it is; --post does that
@@ -100,7 +111,6 @@ import statistics
 import struct
 import subprocess
 import sys
-import threading
 import time
 
 SYS = os.environ.get("G16_BISECT_SYS", "/sys")  # overrides for the offline tests only
@@ -788,6 +798,23 @@ def thaw_from_file(state):
 
 
 # ------------------------------------------------------------------- hardware
+class Skip(Exception):
+    """The RTX's port can't come off now (why): the run carries on without the rtx group."""
+
+
+class Stuck(RuntimeError):
+    """A PCI write that didn't return: the kernel holds its rescan/remove lock, so every later
+    remove or rescan would hang behind it. Nothing more is written to the PCI bus."""
+
+
+PCI_PATHS = ("/bus/pci/", "/class/pci_bus/")
+
+
+def rtx_again(reprobed):
+    return ("its port came off once already this run" + (", and nvidia re-probed it when it came back" if reprobed else "")
+            + ": a second removal can hang the G16 (#352)")
+
+
 class Hw:
     """The G16: groups off and on the bus, the screen, and the readings. All writes go
     through _write, so the offline tests can stand in for the kernel."""
@@ -802,20 +829,65 @@ class Hw:
         self.amdgpu = next((os.path.realpath(c + "/device") for c in sorted(glob.glob(SYS + "/class/drm/card*"))
                             if re.search(r"card\d+$", c) and card_driver(os.path.basename(c)) == "amdgpu"), None)
         self.rtx = find_rtx(pci_devices())
+        self.rtx_removals, self.rtx_reprobed, self.stuck = 0, False, None
         self.leds = sorted(glob.glob(SYS + "/class/leds/*kbd_backlight*/brightness"))
         for f in self.leds:
             self.state["leds"][os.path.basename(os.path.dirname(f))] = rd(f)
 
-    # primitives (the tests override these)
     def _write(self, path, value, timeout=30):
-        """A sysfs write in a thread: a remove that hangs in the kernel can't hang the run."""
-        res = []
-        t = threading.Thread(target=lambda: res.append(wr(path, value)), daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            raise RuntimeError(f"the write to {path} did not return in {timeout} s (a reboot brings the device back)")
-        return bool(res and res[0])
+        """A sysfs write with a timeout. Once a PCI write is stuck, no other PCI write is tried:
+        it would only queue behind the stuck one (#352)."""
+        pci = any(x in path for x in PCI_PATHS)
+        if pci and self.stuck:
+            raise Stuck(f"not writing {path}: the write to {self.stuck} is still stuck in the kernel")
+        if pci:  # saved before the write, cleared once it returned: a signal or the run dying
+            self.state["stuck"] = path  # mid-write leaves it set, for restore() and the watchdog
+            self.save()
+        done = False
+        try:
+            ok = self._timed_write(path, value, timeout)
+            done = ok is not None
+        except BaseException as e:
+            done = getattr(e, "write_done", False)
+            raise
+        finally:
+            if pci and done:
+                self.state.pop("stuck", None)
+                self.save()
+            elif pci:
+                self.stuck = path
+        if ok is not None:
+            return ok
+        if pci:
+            raise Stuck(f"the write to {path} did not return in {timeout} s")
+        raise RuntimeError(f"the write to {path} did not return in {timeout} s")
+
+    # primitives (the tests override these)
+    def _timed_write(self, path, value, timeout):
+        """-> the write's result, or None when it didn't return in time. The write is a child
+        process's: one stuck in the kernel keeps only the child, so the run can still finish,
+        write its report and exit."""
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os._exit(0 if wr(path, value) else 1)
+            except BaseException:
+                os._exit(1)
+        end = time.monotonic() + timeout
+        try:
+            while True:
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    return os.waitstatus_to_exitcode(status) == 0
+                if time.monotonic() >= end:
+                    return None
+                time.sleep(0.01)
+        except BaseException as e:  # a signal mid-wait: did the write finish anyway?
+            try:
+                e.write_done = os.waitpid(pid, os.WNOHANG)[0] != 0
+            except (OSError, AttributeError):
+                pass
+            raise
 
     def _exists(self, bdf):
         return os.path.exists(f"{SYS}/bus/pci/devices/{bdf}")
@@ -835,6 +907,19 @@ class Hw:
         os.replace(tmp, self.state_path)
 
     # changes
+    def rtx_refusal(self):
+        """Why the RTX's port can't come off now, or None. It comes off at most once a run, and
+        only while the RTX is runtime-suspended with nothing holding its DRM node or
+        /dev/nvidia*: a removal of an awake RTX that nvidia has just re-probed hangs (#352)."""
+        if self.rtx_removals:
+            return rtx_again(self.rtx_reprobed)
+        if self.stuck:
+            return f"the write to {self.stuck} is stuck"
+        rs = rd(f"{SYS}/bus/pci/devices/{self.rtx}/power/runtime_status", "gone") if self.rtx else "gone"
+        if rs != "suspended":
+            return f"the RTX is {rs}, not runtime-suspended"
+        return busy_groups([self.groups["rtx"]], pci_devices()).get("rtx")
+
     def is_on(self, g):
         """On the bus (and, for an unbind group, bound to its driver)."""
         if not self._exists(g["top"]):
@@ -844,6 +929,12 @@ class Hw:
     def remove(self, g):
         if not self.is_on(g):
             return
+        if g["name"] == "rtx":
+            why = self.rtx_refusal()
+            if why:
+                raise Skip(why)
+            self.rtx_removals += 1
+            self.state["rtx_removals"] = self.rtx_removals
         self.state["touched"][g["name"]] = {k: g[k] for k in ("top", "members", "drivers", "method", "bus", "port")}
         self.save()
         if g["method"] == "unbind":
@@ -879,6 +970,8 @@ class Hw:
             if not (os.path.exists(f) and self._write(f, 1)):
                 self._write(SYS + "/bus/pci/rescan", 1)
         missing = self.wait_back(gs)
+        if self.rtx and "rtx" in names and self._driver(self.rtx):
+            self.rtx_reprobed = True
         for p in ports:
             if p in self.state["ports"]:
                 self._write(f"{SYS}/bus/pci/devices/{p}/power/control", self.state["ports"].pop(p))
@@ -906,6 +999,10 @@ class Hw:
         """Go to exactly these groups removed, this screen state and the apps frozen or not. -> what it did."""
         removed = frozenset(removed)
         info = {"rescanned": [], "removed": [], "missing": [], "screen": None, "frozen": None}
+        if "rtx" in removed - self.removed and "rtx" in self.groups:
+            why = self.rtx_refusal()
+            if why:  # before anything changes
+                raise Skip(why)
         if self.frozen and not frozen:
             info["frozen"] = f"thawed {self.freezer.revert()}"
             self.frozen = False
@@ -914,13 +1011,17 @@ class Hw:
             info["missing"] = self.rescan(sorted(add))
             info["rescanned"] = sorted(add)
             self.removed = self.removed - add
-        for n in sorted(removed - self.removed, key=list(self.groups).index):
-            self.remove(self.groups[n])
-            info["removed"].append(n)
-        # A rescan of a shared bus brings back siblings that are to stay removed.
-        for n in sorted(removed):
-            if self.is_on(self.groups[n]):
+        try:
+            for n in sorted(removed - self.removed, key=list(self.groups).index):
                 self.remove(self.groups[n])
+                info["removed"].append(n)
+            # A rescan of a shared bus brings back siblings that are to stay removed.
+            for n in sorted(removed):
+                if self.is_on(self.groups[n]):
+                    self.remove(self.groups[n])
+        except Skip:  # the RTX came back (a global rescan): what is off now is what is off
+            self.removed = frozenset(n for n in self.removed | removed if not self.is_on(self.groups[n]))
+            raise
         self.removed = removed
         if screen_off != self.screen_off and self.display:
             ok = self.display.set(not screen_off)
@@ -951,7 +1052,11 @@ class Hw:
             errs.append("the screen did not come back on (hyprctl): press a key")
         self.screen_off = False
         gs = [n for n in self.state["touched"] if n in self.groups]
-        if gs:
+        if self.stuck:
+            # No rescan, not even of the root bus: it would hang behind the stuck write.
+            errs.append(f"the write to {self.stuck} did not return (it may be stuck in the kernel), so nothing more was written to the PCI "
+                        f"bus: {', '.join(gs)} may still be off, and the stuck write holds the bus until a reboot")
+        elif gs:
             missing = self.rescan(gs)
             if missing:
                 self._write(SYS + "/bus/pci/rescan", 1)
@@ -1060,11 +1165,20 @@ class SimHw:
         self.groups = {g["name"]: g for g in groups}
         self.model, self.rng = model, random.Random(seed)
         self.removed, self.screen_off, self.t, self.display, self.frozen = frozenset(), False, 0.0, True, False
+        self.rtx_removals = 0
+
+    def rtx_refusal(self):
+        return rtx_again(True) if self.rtx_removals else None
 
     def set_state(self, removed, screen_off, frozen=False):
         removed = frozenset(removed)
-        self.frozen = frozen
         add, rem = self.removed - removed, removed - self.removed
+        if "rtx" in rem:
+            why = self.rtx_refusal()
+            if why:
+                raise Skip(why)
+            self.rtx_removals += 1
+        self.frozen = frozen
         # siblings of a rescanned bus come back and go again
         buses = {self.groups[n]["bus"] for n in add}
         again = {n for n in removed & self.removed if self.groups[n]["bus"] in buses}
@@ -1148,6 +1262,7 @@ class Runner:
         self.names = [g["name"] for g in groups]
         self.phases, self.cache = [], {}
         self.target = set(base_bits or ())
+        self.rtx_skipped = None
         self.t0 = hw.clock()
 
     def measure(self, removed, screen_off=False, why="", secs=None, fresh=False, settle=None, frozen=False, probes=False):
@@ -1156,7 +1271,15 @@ class Runner:
             return self.cache[key]
         if len(self.phases) >= self.args.max_phases:
             raise Budget()
-        info = self.hw.set_state(removed, screen_off, frozen)
+        try:
+            info = self.hw.set_state(removed, screen_off, frozen)
+        except Skip as e:  # the RTX's port stays on: the phase runs without it
+            self.rtx_skipped = str(e)
+            log(f"rtx: not removed: {e}")
+            key = (key[0] - {"rtx"}, screen_off, frozen)
+            if key in self.cache and not fresh:
+                return self.cache[key]
+            info = self.hw.set_state(key[0], screen_off, frozen)
         if settle is None:
             settle = self.args.settle_rescan if info["rescanned"] else self.args.settle
         self.hw.sleep(settle)
@@ -1197,22 +1320,26 @@ class Runner:
         return set(self.measure(removed, why="bisect")["released"])
 
     def run(self):
-        """Pass 1, the bits (short phases), then pass 2, the watts (long phases)."""
+        """Pass 1, the bits (short phases), then pass 2, the watts (long phases), both with the
+        RTX's port on; then everything off at once, the RTX's port too (its one removal)."""
         res = {"holders": {}, "display": [], "internal": [], "unresolved": [], "with_screen": [],
-               "verified": {}, "notes": [], "watts": [], "pass1": "run", "quiet_only": []}
+               "verified": {}, "notes": [], "watts": [], "pass1": "run", "quiet_only": [], "rtx": {}}
         base = self.measure((), why="baseline")
         self.target = set(base["not_idle"])
         base["released"] = []
         res["target"] = sorted(self.target)
         if not self.target:
             res["notes"].append("no bit was not idle at the baseline: nothing to map")
+        # The RTX's port is never in the bisect or pass 2: it comes off once, at the end.
+        others = [n for n in self.names if n != "rtx"]
         s_all = set()
         try:
+            screen = bool(self.args.screen and self.hw.display)
             if self.target:
                 # the first split: everything off
-                s_all = set(self.measure(self.names, why="all-off")["released"])
+                s_all = set(self.measure(others, why="all-off")["released"])
                 if s_all:
-                    bis = Bisect(self.names, self.released, budget=10 ** 6)
+                    bis = Bisect(others, self.released, budget=10 ** 6)
                     try:
                         res["holders"] = {str(b): h for b, h in sorted(bis.run(s_all).items())}
                     except Budget:
@@ -1220,34 +1347,58 @@ class Runner:
                         raise
                 else:
                     res["pass1"] = "skipped: no bit went idle with every removable device off"
-                screen = bool(self.args.screen and self.hw.display)
                 if screen:
                     res["display"] = self.measure((), True, why="screen-off")["released"]
-                    res["with_screen"] = sorted(set(self.measure(self.names, True, why="all+screen")["released"])
-                                                - s_all - set(res["display"]))
-                # Everything quiet at once, held: every removable device off, the screen off, the
-                # app scopes frozen. A bit that goes idle only here wants a quieter machine.
-                q = self.measure(self.names, screen, why="quiet", frozen=True, probes=True,
-                                 settle=self.args.settle_rescan, secs=self.args.quiet)
-                res["quiet_phase"] = q["n"]
-                res["quiet_only"] = sorted(set(q["released"]) - s_all - set(res["display"]) - set(res["with_screen"]))
-            self.pass2(res)
+            self.pass2(res, others)
+            if self.target:
+                self.together(res, s_all, screen)
         except Budget:
             res["notes"].append(f"stopped at {self.args.max_phases} phases: the map is incomplete")
         res["unresolved"] = sorted(s_all - {int(b) for b in res["holders"]})
         res["internal"] = sorted(self.target - s_all - set(res["display"]) - set(res["with_screen"])
-                                 - set(res.get("quiet_only", [])))
+                                 - set(res.get("quiet_only", [])) - set(res["rtx"].get("bits", [])))
         return res
 
-    def pass2(self, res):
-        """Watts: baseline, everything off, each holder set from pass 1, the baseline again;
-        long phases, and each holder set's idlemask confirms pass 1."""
+    def together(self, res, s_all, screen):
+        """Everything off at once: the RTX's port comes off here, once a run (a second removal,
+        after nvidia re-probed it on the rescan, hangs the G16: #352), and stays off through the
+        screen-off and quiet phases until the restore. A long phase first, for its watts."""
+        every = list(self.names)
+        if "rtx" in every:
+            why = self.hw.rtx_refusal()
+            p = None
+            if not why:
+                p = self.measure(every, why="rtx", fresh=True, settle=self.args.watts_settle, secs=self.args.watts_measure)
+                why = None if "rtx" in p["removed"] else self.rtx_skipped
+            if why:
+                res["rtx"] = {"skipped": why}
+                every.remove("rtx")
+                log(f"rtx: not removed: {why}")
+            else:
+                b_bat, b_sock = res.get("base_w", (None, None))
+                res["rtx"] = {"phase": p["n"], "bits": sorted(set(p["released"]) - s_all)}
+                res["watts"].append({"label": "rtx", "removed": p["removed"], "bits": res["rtx"]["bits"],
+                                     "bat_w": p["bat_w"], "socket_w": p["socket_w"], "phase": p["n"],
+                                     "d_bat": none_sub(p["bat_w"], b_bat), "d_sock": none_sub(p["socket_w"], b_sock)})
+        known = s_all | set(res["display"]) | set(res["rtx"].get("bits", []))
+        if screen:
+            res["with_screen"] = sorted(set(self.measure(every, True, why="all+screen")["released"]) - known)
+        # Everything quiet at once, held: every removable device off, the screen off, the
+        # app scopes frozen. A bit that goes idle only here wants a quieter machine.
+        q = self.measure(every, screen, why="quiet", frozen=True, probes=True,
+                         settle=self.args.settle_rescan, secs=self.args.quiet)
+        res["quiet_phase"] = q["n"]
+        res["quiet_only"] = sorted(set(q["released"]) - known - set(res["with_screen"]))
+
+    def pass2(self, res, others):
+        """Watts: baseline, everything off (but the RTX's port), each holder set from pass 1, the
+        baseline again; long phases, and each holder set's idlemask confirms pass 1."""
         sets = []
         for b, h in res["holders"].items():
             if tuple(h) not in [x for x, _ in sets]:
                 sets.append((tuple(h), []))
             dict(sets)[tuple(h)].append(int(b))
-        plan = [("baseline", ()), ("all-off", tuple(self.names))] + [("+".join(h), h) for h, _ in sets] + [("baseline", ())]
+        plan = [("baseline", ()), ("all-off", tuple(others))] + [("+".join(h), h) for h, _ in sets] + [("baseline", ())]
         got = []
         for i, (label, rem) in enumerate(plan):
             p = self.measure(rem, why="watts", fresh=True, settle=self.args.watts_settle, secs=self.args.watts_measure,
@@ -1259,6 +1410,7 @@ class Runner:
                 res["verified"][str(b)] = b in p["released"]
         bases = [p for label, p in got if label == "baseline"]
         b_bat, b_sock = mean([p["bat_w"] for p in bases]), mean([p["socket_w"] for p in bases])
+        res["base_w"] = (b_bat, b_sock)
         bits_of = {"+".join(h): bits for h, bits in sets}
         for label, p in got:
             res["watts"].append({"label": label, "removed": p["removed"], "bits": sorted(bits_of.get(label, [])),
@@ -1283,8 +1435,8 @@ def report(res, phases, groups, left, skipped, facts, args, sim=False, minutes=N
     if sim:
         o += ["**DRY RUN: simulated devices and bits, not a measurement.**", ""]
     m0 = next(iter(base[0]["masks"])) if base and base[0]["masks"] else "?"
-    p1 = [p for p in phases if p["why"] != "watts"]
-    p2 = [p for p in phases if p["why"] == "watts"]
+    p1 = [p for p in phases if p["why"] not in ("watts", "rtx")]
+    p2 = [p for p in phases if p["why"] in ("watts", "rtx")]
     o.append(f"We took the G16's removable PCI devices off the bus in halves (sysfs `remove`, then `rescan`) and read "
              f"amd_pmc's idlemask at 10 Hz after each change: on battery, the RTX runtime-suspended, hands off. "
              f"Kernel {facts.get('kernel', '?')}; {fmt(minutes, '.1f')} min in all. Pass 1 (the bits): {len(p1)} phases, "
@@ -1295,6 +1447,7 @@ def report(res, phases, groups, left, skipped, facts, args, sim=False, minutes=N
     o.append(f"Baseline idlemask {m0}: not idle {bits_txt(res.get('target', []))}.")
     o.append("")
     o += ["| bit | held by | confirmed |", "|---|---|---|"]
+    rtx = res.get("rtx") or {}
     for b in res.get("target", []):
         h = res["holders"].get(str(b))
         if h:
@@ -1303,6 +1456,10 @@ def report(res, phases, groups, left, skipped, facts, args, sim=False, minutes=N
             conf = {True: "yes", False: "**no** (did not go idle in pass 2 with only these removed)"}.get(res["verified"].get(str(b)), "-")
         elif b in res["display"]:
             who, conf = "the display: idle with the screen off (DPMS)", "-"
+        elif b in rtx.get("bits", []):
+            who, conf = (f"the RTX's port ({lab.get('rtx', 'rtx')}): idle only once it came off too, with every other "
+                         "removable device off (it comes off once a run, so whether it needs the others isn't "
+                         "bisected)"), "-"
         elif b in res.get("quiet_only", []):
             who, conf = ("idle **only in the quiet phase** (every removable device off, the screen off, the apps "
                          "frozen, held): the machine is otherwise never quiet long enough"), "-"
@@ -1351,6 +1508,8 @@ def report(res, phases, groups, left, skipped, facts, args, sim=False, minutes=N
         if qr.get("top_irq"):
             o.append("Top IRQs/s in the quiet phase: " + "; ".join(f"{k} {v}" for v, k in qr["top_irq"]) + ".")
             o.append("")
+    if rtx.get("skipped"):
+        skipped = dict(skipped, rtx=rtx["skipped"])
     if skipped:
         o.append("Not removed: " + "; ".join(f"{n} ({why})" for n, why in skipped.items()) + ".")
         o.append("")
@@ -1359,12 +1518,21 @@ def report(res, phases, groups, left, skipped, facts, args, sim=False, minutes=N
     if res.get("watts"):
         o += ["Each against the mean of the two baselines.", "",
               "| removed | for bits | battery W | Δ battery W | socket W | Δ socket W |", "|---|---|---|---|---|---|"]
+        has_rtx = any(g["name"] == "rtx" for g in groups)
         for w in res["watts"]:
-            what = {"baseline": "nothing (baseline)", "all-off": "every removable device"}.get(
-                w["label"], " + ".join(w["removed"]))
+            what = {"baseline": "nothing (baseline)",
+                    "all-off": "every removable device" + (" but the RTX's port" if has_rtx else ""),
+                    "rtx": "every removable device and the RTX's port"}.get(w["label"], " + ".join(w["removed"]))
             o.append(f"| {what} | {bits_txt(w['bits']) if w['bits'] else '-'} | {fmt(w['bat_w'])} | "
                      f"{fmt(w['d_bat'], '+.2f')} | {fmt(w['socket_w'])} | {fmt(w['d_sock'], '+.2f')} |")
         o.append("")
+        off = {w["label"]: w for w in res["watts"]}
+        if "rtx" in off and "all-off" in off:
+            o.append(f"The RTX's port on its own (the last two rows apart): battery "
+                     f"{fmt(none_sub(off['rtx']['d_bat'], off['all-off']['d_bat']), '+.2f')} W, socket "
+                     f"{fmt(none_sub(off['rtx']['d_sock'], off['all-off']['d_sock']), '+.2f')} W. It comes off once, "
+                     "at the end of the run, and stays off until the restore.")
+            o.append("")
     else:
         o += ["Pass 2 did not run.", ""]
     both = next((p for p in phases if p["why"] == "all+screen"), None)
@@ -1705,6 +1873,8 @@ def restore_from_state(st, out):
         d = st["display"]
         Display(d["user"], d["uid"], d["sig"]).set(True)
     touched = list(st.get("touched", {}).values())
+    if st.get("stuck"):  # a PCI write in flight or stuck: every other would hang behind it; a reboot brings them back
+        touched, st["ports"] = [], {}
     for g in touched:
         top, drv = g.get("top", ""), g.get("drivers", {}).get(g.get("top", ""), "")
         if g.get("method") == "unbind" and drv and not os.path.lexists(f"{SYS}/bus/pci/devices/{top}/driver"):

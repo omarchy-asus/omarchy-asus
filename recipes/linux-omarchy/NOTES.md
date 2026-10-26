@@ -62,7 +62,9 @@ Everything else (config, other patches, keys) is byte-identical to upstream.
 Not in mainline (`torvalds/linux` master) or the HID tree (`hid.git` for-next)
 as of 2026-10-17: neither contains `QUIRK_HID_WIN_LOCK` or the 0xbf handling.
 It was submitted to linux-input on 2026-09-10 (patchwork 14804337) and has had
-no replies yet.
+no replies yet. Since mainline dropped the `Assisted-by` trailer from the kernel
+docs (`1e035297ffda`), v1 fails checkpatch; a v2 without it goes to linux-input
+after v7.4-rc1 (checked 2026-10-26).
 
 ## 0569: i2c-designware RX FIFO threshold (backport from linux-next)
 

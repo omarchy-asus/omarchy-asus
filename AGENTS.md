@@ -99,6 +99,28 @@ admin: once the required CI checks are green, the lander merges with `--admin`.
 - Pull requests from external contributors are reviewed by us, against these rules, and need
   the maintainer's approving review.
 
+## G16 hardware tests
+
+The maintainer's hands-on time is the scarce part: a test session offers about 15 minutes of
+it. Anything that has to run on the G16 is queued with `steward test add --device G16`, never
+asked for in an issue comment or a separate ask. The steward skill has the flags; every card:
+
+- **answers one question**, with the result that settles it (`--question`, `--pass`);
+- **is as short as possible**: the fewest phases, rounds and reboots that answer it. Power A/Bs
+  use 30 s phases and one change each; a further round only when the first is ambiguous, and
+  stop early once the answer is clear (`bin/g16-idle-ab` does); never padded;
+- **runs unattended** by default: root steps go through an open g16-testd session (`--helper`),
+  pkexec only as the fallback. It needs the maintainer (`--with-you` / `--hands N`) only for
+  physical actions (cables, the charger, the lid, looking at the screen, judging sound or
+  light) or a decision; `--actions` names the physical steps, so a session does each once;
+- **says whether it needs the G16 alone** (`--exclusive`: power and timing measurements) or can
+  share it with other idle work (`--shared`: most functional checks);
+- **says what it unblocks** (`--value blocks|fix|explore`): a kernel PR waiting on its G16 test
+  comes before an exploratory power tweak;
+- **isn't queued** when earlier results on the issue already answer its question;
+- **arrives ready to run**: built, staged, one deploy and one test command. An intermittent fault
+  gets a passive logger left running for a day or two, not repetitions in a sitting.
+
 ## Carried changes
 
 [docs/deltas.md](docs/deltas.md) is the record of every change we carry: each patch or shipped

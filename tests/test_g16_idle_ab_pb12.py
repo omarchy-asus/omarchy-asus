@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline tests for g16-idle-ab --design pb12 (#276): the Plackett-Burman matrix,
-the run order, and the least-squares fit of the main effects on synthetic data.
+the run order, and the least-squares fit of the main effects on synthetic data; and the
+early stop (the A/B, pb12 and --load light): it fires on settled data and not on
+ambiguous data.
 
   python3 -I tests/test_g16_idle_ab_pb12.py
 """
@@ -161,6 +163,95 @@ class Fit(unittest.TestCase):
         d["keys"] = ["bat", "sock"]
         r = fit(d)
         self.assertAlmostEqual(r["sock"]["effects"]["nmi"][0], -0.25, places=6)
+
+
+def phase(name, tweak, rnd, bat, design=""):
+    return {"name": name, "tweak": tweak, "round": rnd, "design": design, "dt": 1.0,
+            "samples": [{"bat": bat, "status": "Discharging"}], "states": [], "irq": {}}
+
+
+def ab_phases(deltas, rounds, noise=(), base=9.0):
+    """B T1 B T2 ... B a round; tweak t reads deltas[t] + noise[round - 1] above the baseline."""
+    out = []
+    for r in range(1, rounds + 1):
+        out.append(phase("baseline", "-", r, base))
+        for t, d in deltas.items():
+            out += [phase(t, t, r, base + d + (noise[r - 1] if noise else 0.0)), phase("baseline", "-", r, base)]
+    return out
+
+
+def pb12_phases(data):
+    signs = lambda r: "".join("+" if v > 0 else "-" for v in r)  # noqa: E731
+    return [phase(f"row {n}", ",".join(p["on"]) or "-", p["round"], p["bat"], signs(p["design"]))
+            for n, p in enumerate(data["phases"])]
+
+
+def settled(phases, design="ab", load="idle", run=None):
+    """g16-idle-ab --settled on these phases -> its answer ("settled", or "open" and the tweaks)."""
+    with tempfile.TemporaryDirectory() as work:
+        paths = []
+        for i, p in enumerate(phases):
+            paths.append(os.path.join(work, f"phase-{i}.json"))
+            with open(paths[-1], "w") as f:
+                json.dump(p, f)
+        with open(os.path.join(work, "phases"), "w") as f:
+            f.write("\n".join(paths) + "\n")
+        if run is None:  # the tweaks the phases measured
+            run = list(dict.fromkeys(p["tweak"] for p in phases if p["tweak"] != "-"))
+        with open(os.path.join(work, "run"), "w") as f:
+            f.write("\n".join(run) + "\n")
+        rnd = str(max(p["round"] for p in phases))
+        return subprocess.run([SCRIPT, "--settled", work, design, load, rnd], check=True, capture_output=True, text=True).stdout.strip()
+
+
+class EarlyStop(unittest.TestCase):
+    def test_ab_settled(self):
+        # nmi saves well beyond noise; wifi-ps and voxtype clearly don't (the whole
+        # interval above -0.10 W, a cost included): nothing a third round could change.
+        d = {"nmi": -0.50, "wifi-ps": 0.0, "voxtype": 0.30}
+        self.assertEqual(settled(ab_phases(d, 2, noise=(0.01, -0.01))), "settled")
+
+    def test_ab_ambiguous(self):
+        # wifi-ps reads -0.08 W, but its ±2 SE (0.20 W) reaches past -0.10 W both ways.
+        d = {"nmi": -0.50, "wifi-ps": -0.08}
+        self.assertEqual(settled(ab_phases(d, 2, noise=(0.10, -0.10))), "open wifi-ps")
+
+    def test_ab_saving_near_the_line(self):
+        # -0.12 W with ±2 SE 0.04: it saves (below -0.10 W and below -2 SE), settled.
+        self.assertEqual(settled(ab_phases({"nmi": -0.12}, 2, noise=(0.02, -0.02))), "settled")
+
+    def test_ab_one_round_has_no_noise_estimate(self):
+        self.assertEqual(settled(ab_phases({"nmi": -0.50}, 1)), "open nmi")
+
+    def test_ab_left_out_phase(self):
+        # A round left out (the RTX woke) leaves one valid delta: no SE, so not settled.
+        p = ab_phases({"nmi": -0.50}, 2, noise=(0.01, -0.01))
+        p[4]["samples"][0]["status"] = "Charging"
+        self.assertEqual(settled(p), "open nmi")
+
+    def test_ab_a_tweak_not_applied_yet(self):
+        # voxtype failed to apply in rounds 1 and 2: no phase, no verdict. nmi is
+        # settled, but round 3 may still measure voxtype, so the run goes on.
+        p = ab_phases({"nmi": -0.50}, 2, noise=(0.01, -0.01))
+        self.assertEqual(settled(p, run=["nmi", "voxtype"]), "open voxtype")
+        self.assertEqual(settled(p, run=["nmi"]), "settled")
+
+    def test_light_load(self):
+        d = {"boost-off": -0.40, "epp-power": 0.05}
+        self.assertEqual(settled(ab_phases(d, 2, noise=(0.02, -0.02)), load="light"), "settled")
+        self.assertEqual(settled(ab_phases({"boost-off": -0.10}, 2, noise=(0.15, -0.15)), load="light"), "open boost-off")
+
+    def test_pb12_settled(self):
+        eff = dict(zip(TWEAKS, [-0.50, 0.0, -0.30, 0.20, 0.0, -0.25, 0.80, 0.0, -0.05]))
+        d = synthetic(eff, rounds=2, noise=0.005, seed=2)
+        self.assertEqual(settled(pb12_phases(d), design="pb12", run=TWEAKS), "settled")
+
+    def test_pb12_ambiguous(self):
+        eff = dict(zip(TWEAKS, [-0.50, 0.0, -0.30, 0.20, 0.0, -0.12, 0.80, 0.0, -0.05]))
+        d = synthetic(eff, rounds=2, noise=0.15, seed=2)
+        out = settled(pb12_phases(d), design="pb12", run=TWEAKS)
+        self.assertTrue(out.startswith("open "), out)
+        self.assertIn("bt-off", out.split())
 
 
 if __name__ == "__main__":

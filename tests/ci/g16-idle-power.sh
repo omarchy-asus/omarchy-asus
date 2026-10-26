@@ -11,6 +11,12 @@
 #   4. posting goes through bin/issue: a denylist hit, or no denylist, posts nothing;
 #   7. the RTX's nvidia_0 backlight, its device runtime-suspended, is never read
 #      (reading actual_brightness resumes the RTX, #216); awake, it is.
+#   8. inside an open g16-testd session (stand-in) the RAPL reads are its rapl-read and
+#      the CACP levels its knob-set panel-power-savings, the exit its knob-restore,
+#      powertop is left out with a line in the report, and nothing asks for root; a
+#      session that already changed panel-power-savings stops a run that would write
+#      it before anything changes (--no-cacp and --dry-run still run, leaving it
+#      alone), and G16_ROOT=testd with no session refuses.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 T=$(mktemp -d)
@@ -247,5 +253,67 @@ echo suspended >"$S/devices/pci-dgpu/power/runtime_status"
 reply=$(printf 'cacp 9\nfoo\nrapl\n' | "$W/bin/g16-idle-power" --root-helper "$S" 1)
 [[ $reply == $'ready '"$(id -u)"$' 2\nerr bad level\nerr unknown\nrapl 1000000 65532610987 1000000 65532610987' ]] &&
   ok "root helper refuses bad levels and unknown commands" || bad "root helper replies: $reply"
+
+# ------------------------------------------- 8. through a g16-testd session
+cat >"$B/g16-testd" <<'STUB'
+#!/bin/bash
+P=$G16_IDLE_SYS/class/drm/card1-eDP-1/amdgpu/panel_power_savings
+case $1 in
+  available) [[ -e $STUB/td-open ]] ;;
+  session) [[ -e $STUB/td-pre ]] && echo '{"knobs": {"panel-power-savings": "1"}}' || echo '{"knobs": {}}' ;;
+  call)
+    shift; m=$1 r=''; shift; a=()
+    while (($#)); do if [[ $1 == --reason ]]; then r=$2; shift 2; else a+=("$1"); shift; fi; done
+    [[ -n $r && -e $STUB/td-open ]] || exit 3
+    echo "$m ${a[*]} | $r" >>"$STUB/td.log"
+    case $m in
+      rapl-read) echo "3000000 65532610987 2000000 65532610987" ;;
+      knob-set) [[ -e $STUB/td-orig ]] || cp "$P" "$STUB/td-orig"; echo "${a[1]}" >"$P"; cat "$P" ;;
+      knob-restore) [[ -e $STUB/td-orig ]] && cat "$STUB/td-orig" >"$P"; rm -f "$STUB/td-orig"; cat "$P" ;;
+      *) echo "g16-testd: unknown method"; exit 1 ;;
+    esac ;;
+esac
+STUB
+for c in pkexec sudo systemd-run powertop; do printf '#!/bin/bash\necho "%s $*" >>"$STUB/root.log"; exit 1\n' "$c" >"$B/$c"; done
+chmod +x "$B"/*
+tdrun() { # args...
+  env -u OMARCHY_PATH HOME="$T/home" PATH="$B:$PATH" STUB="$ST" G16_ROOT="${TD_ROOT:-auto}" G16_IDLE_SYS="$S" G16_TESTD="$B/g16-testd" \
+    G16_IDLE_REPORT="$T/home/report.md" "$W/bin/g16-idle-power" "$@"
+}
+reset
+touch "$ST/td-open"
+out=$(tdrun "${FAST[@]}" --no-post 2>&1); rc=$?
+L=$ST/td.log
+((rc == 0)) && ok "testd: run exits 0" || bad "testd: exit $rc: $out"
+grep -q 'through the open g16-testd session' <<<"$out" && ok "testd: says it uses the session" || bad "testd: $out"
+[[ ! -e $ST/root.log ]] && ok "testd: nothing asks for root, no powertop" || bad "testd: asked for root: $(cat "$ST/root.log")"
+grep -q '^rapl-read  | g16-idle-power: ' "$L" && ok "testd: RAPL through rapl-read" || bad "testd: no rapl-read: $(cat "$L" 2>/dev/null)"
+for v in 0 1 2 3 4; do grep -q "^knob-set panel-power-savings $v | g16-idle-power: " "$L" && ok "testd: level $v through knob-set" || bad "testd: no level $v"; done
+[[ $(tail -n1 "$L") == "knob-restore panel-power-savings | g16-idle-power: "* ]] && ok "testd: knob-restore at the exit" || bad "testd: last call $(tail -n1 "$L")"
+[[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 2 ]] && ok "testd: panel_power_savings back to 2" || bad "testd: panel_power_savings not restored"
+grep -q '^| cacp-4 |' "$T/home/report.md" && ok "testd: CACP levels measured" || bad "testd: no cacp-4 row"
+grep -q '^- sensors: .*RAPL package+core' "$T/home/report.md" && ok "testd: context has RAPL" || bad "testd: context: $(grep '^- sensors' "$T/home/report.md")"
+grep -q '^powertop: not run: it needs root' "$T/home/report.md" && ok "testd: report says powertop was left out" || bad "testd: powertop line: $(grep powertop "$T/home/report.md")"
+
+reset
+touch "$ST/td-open" "$ST/td-pre"
+out=$(tdrun "${FAST[@]}" --no-post 2>&1); rc=$?
+((rc == 1)) && grep -q 'g16-testd helper did not start (panel-power-savings is already changed in this g16-testd session)' <<<"$out" &&
+  [[ ! -e $ST/td.log && ! -s $ST/log ]] &&
+  ok "testd: panel-power-savings already changed in the session: stops first" || bad "testd pre-set: rc=$rc $out $(cat "$ST/log")"
+for opt in --no-cacp --dry-run; do
+  reset
+  touch "$ST/td-open" "$ST/td-pre"
+  out=$(tdrun "${FAST[@]}" --no-post "$opt" 2>&1); rc=$?
+  ((rc == 0)) && ! grep -q '^knob-' "$ST/td.log" && [[ $(cat "$S/class/drm/card1-eDP-1/amdgpu/panel_power_savings") == 2 ]] &&
+    ok "testd: knob already changed in the session, $opt: runs and leaves the knob alone" || bad "testd pre-set $opt: rc=$rc $out $(cat "$ST/td.log" 2>/dev/null)"
+done
+reset
+out=$(TD_ROOT=testd tdrun "${FAST[@]}" --no-post 2>&1); rc=$?
+((rc == 1)) && grep -q 'no g16-testd session is open' <<<"$out" && ok "G16_ROOT=testd with no session refuses" || bad "G16_ROOT=testd: rc=$rc $out"
+reset
+out=$(tdrun "${FAST[@]}" --no-post 2>&1); rc=$?
+grep -q '^pkexec\|^systemd-run' "$ST/root.log" 2>/dev/null && ok "no session: falls back to pkexec" || bad "no session: $(cat "$ST/root.log" 2>/dev/null) $out"
+rm -f "$B/g16-testd" "$B/pkexec" "$B/sudo" "$B/systemd-run" "$B/powertop"
 
 ((fails == 0)) && echo "PASS" || { echo "$fails failed"; exit 1; }

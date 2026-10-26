@@ -16,6 +16,8 @@
 #   g16-testd call METHOD ARG... --reason TEXT
 #                                  one root step; METHOD is one of
 #     ec-read OFFSET LEN                  EC RAM bytes through ec_sys, read-only
+#     rapl-read                           the RAPL package and core energy counters,
+#                                         read-only: "PKG_UJ PKG_MAX CORE_UJ CORE_MAX"
 #     trace-start NAME EVENTS [KPROBES] [BUFFER_KB]
 #                                         a private tracefs instance; EVENTS and KPROBES
 #                                         are comma lists from the allowlists ("-": none)
@@ -684,6 +686,26 @@ class Daemon:
             fail(f"cannot read {io}: {e.strerror}")
         return data.hex()
 
+    # -- RAPL energy counters, read-only
+    def rapl_read(self):
+        """The package-0 zone and its core subzone, "PKG_UJ PKG_MAX CORE_UJ CORE_MAX"
+        ("- -" for one that is absent). energy_uj is root-only (the counters are a power
+        side channel): only these two zones and these two files are read."""
+        pc = os.path.join(self.h.sys, "class/powercap")
+        names = os.listdir(pc) if os.path.isdir(pc) else []
+        rapl = sorted(n for n in names if re.fullmatch(r"intel-rapl:\d+(:\d+)?", n))
+
+        def zone(want, parent="intel-rapl"):  # a subzone's parent is its name less ":N"
+            return next((n for n in rapl if n.rsplit(":", 1)[0] == parent
+                         and rd(os.path.join(pc, n, "name")) == want), None)
+
+        def read(n):
+            v = [rd(os.path.join(pc, n, f)) for f in ("energy_uj", "max_energy_range_uj")] if n else []
+            return " ".join(v) if len(v) == 2 and all(x.isdigit() for x in v) else "- -"
+
+        pkg = zone("package-0")
+        return f"{read(pkg)} {read(zone('core', pkg) if pkg else None)}"
+
     def ec_unload(self):
         self.h.run(["modprobe", "-r", "ec_sys"])
         self.rec["ec_loaded"] = False
@@ -999,7 +1021,7 @@ class Daemon:
         "ec-read": "ec_read", "trace-start": "trace_start", "trace-stop": "trace_stop",
         "knob-set": "knob_set", "knob-restore": "knob_restore", "module-swap": "module_swap",
         "module-restore": "module_restore", "boot-dropin": "boot_dropin", "freeze": "freeze",
-        "thaw": "thaw", "status": "status",
+        "thaw": "thaw", "rapl-read": "rapl_read", "status": "status",
     }
 
     def handle(self, req, peer):

@@ -14,9 +14,10 @@
 #                                 each change (60), between samples (5)
 #
 # Run it as your normal user in the desktop session, with the charger plugged in
-# or not: it asks for root once (one polkit dialog), then waits for the charger to
-# be unplugged. Leave the laptop alone until it says it's done; it keeps the
-# screen on (Omarchy's stay-awake) and the brightness where it is.
+# or not: it asks for root once (one polkit dialog; none inside a g16-testd
+# session), then waits for the charger to be unplugged. Leave the laptop alone
+# until it says it's done; it keeps the screen on (Omarchy's stay-awake) and the
+# brightness where it is.
 #
 # Phases, each settled and then measured on battery:
 #   baseline, then each of these stopped in turn and started again: omarchy-fcitx5,
@@ -35,9 +36,12 @@
 # ~/omarchy-asus-g16-idle-power-<date>.md, and is posted through bin/issue next to this
 # script (its denylist scan refuses a hit; without bin/issue nothing is posted).
 #
-# Root: G16_ROOT=pkexec (default: pkexec through the desktop's polkit agent, via
-# systemd-run --user), sudo, or none (tests only). G16_POLKIT_REASON=<wrapper>
-# runs `<wrapper> run REASON -- pkexec ...` so the dialog says why.
+# Root: inside an open g16-testd session (omarchy-asus-g16-testd, #277) the RAPL
+# reads and the CACP levels go through that helper, with no dialog, and powertop is
+# left out (it runs as root). Otherwise pkexec through the desktop's polkit agent,
+# via systemd-run --user. G16_ROOT=testd or pkexec forces one, sudo is the other,
+# none is for tests only. G16_POLKIT_REASON=<wrapper> runs
+# `<wrapper> run REASON -- pkexec ...` so the dialog says why.
 #
 # Exit status: 0 when the run finished, 1 on a problem, 2 on bad usage.
 set -uo pipefail
@@ -99,6 +103,51 @@ if [[ ${1:-} == --root-helper ]]; then
   exit 0
 fi
 
+# --------------------------------------------------------- g16-testd helper
+# The same protocol, run as you inside an open g16-testd session (#277, #284): rapl
+# is the helper's rapl-read, a CACP level its knob-set panel-power-savings, and EOF
+# its knob-restore. powertop runs as root, which the helper doesn't do, so it is
+# not asked for here (G16_ROOT=pkexec runs it).
+if [[ ${1:-} == --testd-helper ]]; then
+  sys=${2:?} dry=${3:-0} why=${4:-} cacp=${5:-1}
+  TD=${G16_TESTD:-g16-testd} SET=0
+  td() { local out rc; out=$("$TD" call "$@" --reason "$why" 2>&1); rc=$?; printf '%s' "${out##*$'\n'}"; return $rc; }
+  cacp_orig=-
+  for c in "$sys"/class/drm/card*-eDP-*; do
+    s=''; read -r s 2>/dev/null <"$c/status"
+    [[ $s == connected && -f $c/amdgpu/panel_power_savings ]] && { read -r cacp_orig 2>/dev/null <"$c/amdgpu/panel_power_savings" || cacp_orig=-; break; }
+  done
+  # Another test's setting in this session would be undone by the knob-restore; a
+  # run that won't write the knob (--no-cacp, --dry-run) leaves it alone.
+  if ((cacp && !dry)) && "$TD" session status 2>/dev/null | grep -q '"panel-power-savings"'; then
+    echo "panel-power-savings is already changed in this g16-testd session"; exit 1
+  fi
+  # shellcheck disable=SC2329 # the EXIT trap calls it
+  bye() { ((SET)) && td knob-restore panel-power-savings >/dev/null; }
+  trap bye EXIT
+  trap 'exit 0' HUP INT TERM PIPE
+  printf 'ready testd %s\n' "${cacp_orig:--}"
+  while read -r cmd arg; do
+    case $cmd in
+      rapl)
+        if r=$(td rapl-read) && [[ $r =~ ^[0-9-]+\ [0-9-]+\ [0-9-]+\ [0-9-]+$ ]]; then echo "rapl $r"; else echo 'rapl - - - -'; fi ;;
+      cacp)
+        if [[ ! $arg =~ ^[0-4]$ ]]; then echo "err bad level"
+        elif ((!cacp)); then echo "err --no-cacp"
+        elif [[ $cacp_orig == - ]]; then echo "err absent"
+        elif ((dry)); then echo "ok dry"
+        elif SET=1 && r=$(td knob-set panel-power-savings "$arg"); then echo "ok $r"
+        else echo "err g16-testd: $r"
+        fi
+        ;;
+      powertop) echo "end" ;;
+      quit) exit 0 ;;
+      *) echo "err unknown" ;;
+    esac
+  done
+  exit 0
+fi
+
 # ------------------------------------------------------------------ options
 DRY=0 POST=1 CACP=1 MEASURE='' SETTLE='' INTERVAL=5 ALSO=()
 while (($#)); do
@@ -110,7 +159,7 @@ while (($#)); do
     --measure) MEASURE=${2:-}; shift ;;
     --settle) SETTLE=${2:-}; shift ;;
     --interval) INTERVAL=${2:-}; shift ;;
-    -h | --help) sed -n '2,42s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,46s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -182,9 +231,15 @@ bat_uw() { # battery draw in microwatts, or empty
 }
 
 # ------------------------------------------------------------- root helper
-ROOT=${G16_ROOT:-pkexec}
+ROOT=${G16_ROOT:-auto} TESTD=${G16_TESTD:-g16-testd}
 WHY="Read the CPU's RAPL energy counters and set the OLED panel's power saving level for the G16 idle power measurement (#$ISSUE); everything is put back when it ends"
+if [[ $ROOT == auto ]]; then
+  if "$TESTD" available >/dev/null 2>&1; then ROOT=testd; else ROOT=pkexec; fi
+fi
 case $ROOT in
+  testd)
+    "$TESTD" available >/dev/null 2>&1 || die "G16_ROOT=testd, but no g16-testd session is open for you (g16-testd session start)"
+    HELPER_CMD=(env G16_TESTD="$TESTD" "$SELF" --testd-helper "$SYS" "$DRY" "g16-idle-power: $WHY" "$CACP") ;;
   pkexec)
     if [[ -n ${G16_POLKIT_REASON:-} ]]; then
       HELPER_CMD=(systemd-run --user --wait -q -P "$G16_POLKIT_REASON" run "$WHY" -- pkexec "$SELF" --root-helper "$SYS" "$DRY")
@@ -194,7 +249,7 @@ case $ROOT in
     ;;
   sudo) HELPER_CMD=(sudo ${SUDO_ASKPASS:+-A} "$SELF" --root-helper "$SYS" "$DRY") ;;
   none) HELPER_CMD=("$SELF" --root-helper "$SYS" "$DRY") ;;
-  *) die "G16_ROOT must be pkexec, sudo or none" ;;
+  *) die "G16_ROOT must be testd, pkexec, sudo or none" ;;
 esac
 
 # ------------------------------------------------------------- restore state
@@ -249,6 +304,7 @@ restore() {
   fi
   if [[ -n ${HELPER_PID:-} ]]; then
     local fd=${HELPER[1]:-}
+    trap '' PIPE  # a helper that already exited must not end the restore
     if [[ -n $fd ]]; then printf 'quit\n' 1>&"$fd" 2>/dev/null; exec {fd}>&-; fi
     wait "$HELPER_PID" 2>/dev/null
   fi
@@ -381,13 +437,17 @@ wait_battery() {
 
 # ------------------------------------------------------------------- start
 say "G16 idle power measurement (#$ISSUE)$( ((DRY)) && echo ', dry run')"
-note "asking for root once (RAPL counters, panel power saving)"
+if [[ $ROOT == testd ]]; then note "root steps through the open g16-testd session (RAPL counters, panel power saving; no powertop)"
+else note "asking for root once (RAPL counters, panel power saving)"; fi
 coproc HELPER { "${HELPER_CMD[@]}" 2>/dev/null; }
 HELPER_PID=$HELPER_PID
 IFS= read -r -t 180 HELLO <&"${HELPER[0]}" || HELLO=''
-[[ $HELLO == ready\ * ]] || die "the root helper did not start (polkit dialog dismissed, or no agent); nothing was changed"
+if [[ $HELLO != ready\ * ]]; then
+  [[ $ROOT == testd ]] && die "the g16-testd helper did not start (${HELLO:-no answer}); nothing was changed"
+  die "the root helper did not start (polkit dialog dismissed, or no agent); nothing was changed"
+fi
 read -r _ HELPER_UID CACP_ORIG <<<"$HELLO"
-[[ $ROOT == none || $HELPER_UID == 0 ]] || die "the root helper is not root"
+[[ $ROOT == none || $HELPER_UID == 0 || ($ROOT == testd && $HELPER_UID == testd) ]] || die "the root helper is not root"
 
 # Units to take out in turn: the ones that run all the time and came with (or
 # changed in) Omarchy 4.5, plus voxtype (#171) and --also.
@@ -453,14 +513,19 @@ if ((${#UNITS[@]} > 1)); then
 fi
 measure baseline-again
 
-say "powertop, 60 s"
-# Many lines come back, so not through ask_root.
 : >"$WORK/powertop.csv"
-printf 'powertop 60\n' 1>&"${HELPER[1]}" 2>/dev/null
-while IFS= read -r -t 90 line <&"${HELPER[0]}"; do
-  [[ $line == end ]] && break
-  printf '%s\n' "${line#| }" >>"$WORK/powertop.csv"
-done
+if [[ $ROOT == testd ]]; then
+  note "powertop not run: it needs root, which a g16-testd session doesn't give it (G16_ROOT=pkexec runs it)"
+  printf 'not run: it needs root, and this run went through a g16-testd session (G16_ROOT=pkexec runs it).\n' >"$WORK/powertop.note"
+else
+  say "powertop, 60 s"
+  # Many lines come back, so not through ask_root.
+  printf 'powertop 60\n' 1>&"${HELPER[1]}" 2>/dev/null
+  while IFS= read -r -t 90 line <&"${HELPER[0]}"; do
+    [[ $line == end ]] && break
+    printf '%s\n' "${line#| }" >>"$WORK/powertop.csv"
+  done
+fi
 
 CACP_RAN=0
 if ((CACP)) && [[ $CACP_ORIG != - ]]; then
@@ -590,6 +655,8 @@ if pt.strip():
     if keep:
         o.append("<details><summary>powertop, 60 s after the last baseline: top wake-up sources</summary>\n")
         o.append("```\n" + "\n".join(keep[:16]) + "\n```\n</details>\n")
+elif load(work + "/powertop.note").strip():
+    o.append("powertop: " + load(work + "/powertop.note").strip() + "\n")
 else:
     o.append("powertop: not installed or no output.\n")
 if cacp_ran == "1":

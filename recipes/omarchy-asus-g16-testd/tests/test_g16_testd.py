@@ -892,6 +892,25 @@ class Session(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("write_support on", out)
 
+    def test_rapl_read_package_and_core_only(self):
+        pc = "sys/class/powercap"
+        for z, name, e in (("intel-rapl:0", "package-0", "123456"), ("intel-rapl:0:0", "core", "7890"),
+                           ("intel-rapl:0:1", "uncore", "55"), ("intel-rapl-mmio:0", "package-0", "99")):
+            put(self.root, f"{pc}/{z}/name", name)
+            put(self.root, f"{pc}/{z}/energy_uj", e)
+            put(self.root, f"{pc}/{z}/max_energy_range_uj", "65532610987")
+        self.start()
+        rc, out = self.g("call", "rapl-read")
+        self.assertEqual((rc, out.strip()), (0, "123456 65532610987 7890 65532610987"))
+        self.assertEqual(self.g("call", "rapl-read", "intel-rapl:0:1")[0], 1)  # no arguments taken
+        put(self.root, f"{pc}/intel-rapl:0:0/name", "dram")
+        self.assertEqual(self.g("call", "rapl-read")[1].strip(), "123456 65532610987 - -")
+        self.stop()
+
+    def test_rapl_read_absent(self):
+        self.start()
+        self.assertEqual(self.g("call", "rapl-read"), (0, "- - - -\n"))
+
     def test_wrong_arg_count(self):
         self.start()
         rc, out = self.g("call", "knob-set", "nmi-watchdog")

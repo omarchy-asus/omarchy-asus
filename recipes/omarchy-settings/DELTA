@@ -10,7 +10,7 @@ upstream omarchy-pkgs pkgbuilds/omarchy-settings
 mode overlay
 keep NOTES.md
 # Ship the fork's charger-swap monitor user unit (0002) in /usr/lib/systemd/user; omarchy-settings
-# installs user units from an explicit list. Fork pkgs branch omarchy-settings-source-monitor.
+# installs user units from an explicit list. Upstream: omacom/omarchy-pkgs#1629 (open).
 pkgbuild-patch pkgbuild-source-monitor-unit.diff
 pkgbuild-patch pkgbuild-pkgdesc-label.diff
 patch 0001-Stop-asusd-from-switching-the-power-profile-and-EPP-.patch prepare omarchy
@@ -38,6 +38,7 @@ patch 0023-Leave-mpv-alone-when-the-user-sets-hwdec-or-vaapi-de.patch prepare om
 patch 0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch prepare omarchy
 patch 0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch prepare omarchy
 patch 0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch prepare omarchy
+patch 0027-Count-only-lockers-under-this-Hyprland-as-holding-it.patch prepare omarchy
 # General fixes: Omarchy software fixes that don't help the hardware, carried with the
 # maintainer's approval and kept apart from the ASUS patches above (NOTES.md).
 patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy

@@ -310,15 +310,15 @@ class Passes(unittest.TestCase):
         res, phases = self.run_sim({b: ["soc"] for b in (1, 5, 8, 10, 13, 14, 16, 20, 21)})
         self.assertTrue(res["pass1"].startswith("skipped"))
         self.assertEqual([p["why"] for p in phases],
-                         ["baseline", "all-off", "screen-off", "all+screen", "quiet", "watts", "watts", "watts"])
-        self.assertEqual([w["label"] for w in res["watts"]], ["baseline", "all-off", "baseline"])
+                         ["baseline", "all-off", "screen-off", "watts", "watts", "watts", "rtx", "all+screen", "quiet"])
+        self.assertEqual([w["label"] for w in res["watts"]], ["baseline", "all-off", "baseline", "rtx"])
         self.assertEqual(res["internal"], [1, 5, 8, 10, 13, 14, 16, 20, 21])
 
     def test_pass_2_is_long_phases_for_each_holder_set(self):
         res, phases = self.run_sim({1: ["wifi"], 5: ["xhci-kbd", "usb4"], 13: ["soc"]},
                                    {"base": 7.0, "socket": 4.4, "wifi": 0.2, "xhci-kbd": 0.1, "usb4": 0.3})
         p2 = [p for p in phases if p["why"] == "watts"]
-        self.assertEqual([p["removed"] for p in p2], [[], GROUPS, ["wifi"], ["xhci-kbd", "usb4"], []])
+        self.assertEqual([p["removed"] for p in p2], [[], GROUPS[1:], ["wifi"], ["xhci-kbd", "usb4"], []])
         self.assertTrue(all(p["settle"] == 10 and p["reads"] == 300 for p in p2))
         w = {x["label"]: x for x in res["watts"]}
         self.assertAlmostEqual(w["wifi"]["d_bat"], -0.2, delta=0.05)
@@ -341,6 +341,37 @@ class Passes(unittest.TestCase):
         self.assertIn("**Quiet:** bits 14 go idle only when everything is quiet", md)
         self.assertIn("**Firmware:** bits 5, 8, 10, 13, 20, 21 stay not idle", md)
         self.assertIn("| wakeups/s | 150 | 850 |", md)
+
+    def test_the_rtx_comes_off_once_at_the_end_and_stays_off(self):
+        # 3 is the RTX's alone, 4 needs the RTX and the Wi-Fi: neither goes idle with the RTX on
+        res, phases = self.run_sim({1: ["wifi"], 3: ["rtx"], 4: ["rtx", "wifi"], 13: ["soc"]},
+                                   {"base": 7.0, "socket": 4.4, "rtx": 0.5})
+        off = [i for i, p in enumerate(phases) if "rtx" in p["removed"]]
+        self.assertEqual([phases[i]["why"] for i in off], ["rtx", "all+screen", "quiet"])
+        self.assertEqual(off, list(range(len(phases) - 3, len(phases))))  # one stretch, the last, no rescan in it
+        self.assertEqual(res["rtx"], {"phase": phases[off[0]]["n"], "bits": [3, 4]})
+        self.assertEqual(res["holders"], {"1": ["wifi"]})
+        self.assertNotIn(3, res["internal"])
+        self.assertEqual(res["quiet_only"], [])
+        w = {x["label"]: x for x in res["watts"]}
+        self.assertAlmostEqual(w["rtx"]["d_bat"] - w["all-off"]["d_bat"], -0.5, delta=0.05)
+        md = B.report(res, phases, sim_groups(), {}, {}, {}, B.parse([]))
+        self.assertIn("| 3 | the RTX's port (rtx, 60:00.0): idle only once it came off too", md)
+        self.assertIn("The RTX's port on its own (the last two rows apart): battery -0.", md)
+
+    def test_a_second_rtx_removal_is_refused(self):
+        groups = sim_groups()
+        hw = B.SimHw(groups, {"holders": {}})
+        hw.set_state({"rtx"}, False)
+        hw.set_state(set(), False)
+        with self.assertRaises(B.Skip):
+            hw.set_state({"rtx", "wifi"}, False)
+        self.assertEqual(hw.removed, frozenset())
+        # the runner carries on without it
+        r = B.Runner(hw, groups, B.parse([]))
+        p = r.measure({"rtx", "wifi"}, why="bisect")
+        self.assertEqual(p["removed"], ["wifi"])
+        self.assertIn("#352", r.rtx_skipped)
 
     def test_no_screen_still_runs_a_quiet_phase(self):
         res, phases = self.run_sim({1: ["wifi"]}, None, "--no-screen")
@@ -488,9 +519,9 @@ class Kernel(B.Hw):
     brings back what's missing on that bus (only with its port awake), drivers bind
     unless told not to."""
 
-    def __init__(self, groups, state, devs, no_bind=()):
+    def __init__(self, groups, state, devs, no_bind=(), block=()):
         self.present = set(devs)
-        self.devs, self.no_bind, self.writes, self.bound = devs, set(no_bind), [], {}
+        self.devs, self.no_bind, self.writes, self.bound, self.block = devs, set(no_bind), [], {}, set(block)
         super().__init__(groups, state)
 
     def _exists(self, bdf):
@@ -504,9 +535,11 @@ class Kernel(B.Hw):
     def sleep(self, s):
         pass
 
-    def _write(self, path, value, timeout=30):
+    def _timed_write(self, path, value, timeout):
         rel = path[len(B.SYS) + 1:]
         self.writes.append((rel, str(value)))
+        if rel in self.block:
+            return None
         parts = rel.split("/")
         if rel.endswith("/remove"):
             top = parts[-2]
@@ -570,6 +603,43 @@ class Bus(Fake):
         hw.set_state(set(), False)
         self.assertTrue({"0000:00:03.1", "0000:64:00.0", "0000:64:00.1"} <= hw.present)
 
+    def test_the_rtx_port_comes_off_at_most_once(self):
+        hw, _ = self.hw()
+        hw.set_state({"rtx"}, False)
+        hw.set_state(set(), False)
+        self.assertTrue(hw.rtx_reprobed)  # nvidia bound again after the rescan
+        hw.writes.clear()
+        with self.assertRaises(B.Skip) as e:
+            hw.set_state({"rtx", "wifi"}, False)
+        self.assertIn("nvidia re-probed it", str(e.exception))
+        self.assertEqual(hw.writes, [])  # refused before anything changed
+        self.assertIn("0000:00:03.1", hw.present)
+
+    def test_the_rtx_stays_on_unless_suspended_and_unheld(self):
+        hw, _ = self.hw()
+        put(os.path.join(self.paths["0000:64:00.0"], "power", "runtime_status"), "active")
+        with self.assertRaises(B.Skip) as e:
+            hw.set_state({"rtx"}, False)
+        self.assertIn("the RTX is active, not runtime-suspended", str(e.exception))
+        put(os.path.join(self.paths["0000:64:00.0"], "power", "runtime_status"), "suspended")
+        # something opened /dev/nvidia0 since the run started
+        fd = os.path.join(self.proc, "4243", "fd")
+        os.makedirs(fd)
+        put(os.path.join(self.proc, "4243", "comm"), "steam")
+        nv = os.path.join(self.tmp, "dev", "nvidia0")
+        os.makedirs(os.path.dirname(nv))
+        os.symlink("/dev/null", nv)
+        os.symlink("/dev/null", os.path.join(fd, "3"))
+        B.os.readlink, real = (lambda f, _r=os.readlink: "/dev/nvidia0" if f.endswith("4243/fd/3") else _r(f)), os.readlink
+        try:
+            with self.assertRaises(B.Skip) as e:
+                hw.set_state({"rtx"}, False)
+        finally:
+            B.os.readlink = real
+        self.assertIn("steam /dev/nvidia0 open", str(e.exception))
+        self.assertEqual(hw.writes, [])
+        self.assertEqual(hw.rtx_removals, 0)
+
     def test_a_driver_that_does_not_come_back_is_bound(self):
         hw, _ = self.hw(no_bind={"0000:62:00.0"})
         hw.set_state({"sd"}, False)
@@ -622,9 +692,126 @@ class Bus(Fake):
         self.assertEqual(res["holders"], {"1": ["wifi"], "5": ["xhci-kbd"], "21": ["xhci-67:00.3", "usb4"]})
         self.assertEqual(res["internal"], [8, 10, 13, 14, 16, 20])
         self.assertEqual([w["label"] for w in res["watts"]], ["baseline", "all-off", "wifi", "xhci-kbd", "xhci-67:00.3+usb4",
-                                                              "baseline"])
+                                                              "baseline", "rtx"])
         self.assertTrue(all(res["verified"].values()))
+        self.assertEqual(hw.removed, frozenset(GROUPS))  # everything off together at the end, until the restore
+        self.assertEqual(sum(1 for w, _ in hw.writes if w == "bus/pci/devices/0000:00:03.1/remove"), 1)
+        self.assertEqual(sum(1 for w, _ in hw.writes if w == "class/pci_bus/0000:00/rescan"), 0)  # not until the restore
+        self.assertEqual(hw.restore(), [])
         self.assertEqual(hw.removed, frozenset())
+        self.assertEqual(sum(1 for w, _ in hw.writes if w == "class/pci_bus/0000:00/rescan"), 1)
+
+    def runner(self, hw):
+        hw.sample = lambda secs, probes=False: {"masks": [0xffce9add] * 10, "gm": [], "bat": [7.0],
+                                                "status": ["Discharging"], "rtx": ["suspended"]}
+        hw.clock = lambda: 0.0
+        return B.Runner(hw, list(hw.groups.values()), B.parse(["--no-screen"]))
+
+    def test_an_awake_rtx_at_the_end_is_skipped_and_said(self):
+        hw, _ = self.hw()
+        r = self.runner(hw)
+        real = hw.set_state
+
+        def set_state(removed, screen_off, frozen=False):  # the RTX wakes during pass 2
+            if any(p["why"] == "watts" for p in r.phases):
+                put(os.path.join(self.paths["0000:64:00.0"], "power", "runtime_status"), "active")
+            return real(removed, screen_off, frozen)
+        hw.set_state = set_state
+        res = r.run()
+        self.assertEqual(res["rtx"], {"skipped": "the RTX is active, not runtime-suspended"})
+        q = next(p for p in r.phases if p["why"] == "quiet")
+        self.assertEqual(q["removed"], [g for g in GROUPS if g != "rtx"])
+        self.assertNotIn("bus/pci/devices/0000:00:03.1/remove", [w for w, _ in hw.writes])
+        md = B.report(res, r.phases, list(hw.groups.values()), {}, {}, {}, B.parse([]))
+        self.assertIn("Not removed: rtx (the RTX is active, not runtime-suspended).", md)
+
+    def test_a_stuck_remove_stops_the_run_without_a_rescan(self):
+        hw, _ = self.hw(block={"bus/pci/devices/0000:00:03.1/remove"})
+        r = self.runner(hw)
+        with self.assertRaises(B.Stuck):
+            r.run()
+        n = len(hw.writes)
+        errs = hw.restore()
+        self.assertEqual(len(errs), 1)
+        self.assertIn("the write to", errs[0])
+        self.assertIn("did not return", errs[0])
+        after = [w for w, _ in hw.writes[n:]]
+        self.assertFalse([w for w in after if "pci" in w], after)  # no rescan, not of the root bus, not global
+        self.assertIn("class/leds/asus::kbd_backlight/brightness", after)
+        with open(os.path.join(self.tmp, "state.json")) as f:
+            st = json.load(f)
+        self.assertTrue(st["stuck"].endswith("bus/pci/devices/0000:00:03.1/remove"))
+        self.assertFalse(st["done"])
+        with self.assertRaises(B.Stuck):  # and nothing else gets written to the bus
+            hw._write(f"{B.SYS}/class/pci_bus/0000:63/rescan", 1)
+
+    def test_a_signal_during_a_blocked_write_keeps_the_guard(self):
+        hw, _ = self.hw()
+        real = hw._timed_write
+
+        def interrupted(path, value, timeout):
+            if path.endswith("0000:00:03.1/remove"):
+                raise B.Abort("stopped by signal 15")  # SIGTERM while the child is blocked
+            return real(path, value, timeout)
+        hw._timed_write = interrupted
+        with self.assertRaises(B.Abort):
+            hw.set_state({"rtx"}, False)
+        self.assertTrue(hw.stuck.endswith("0000:00:03.1/remove"))
+        n = len(hw.writes)
+        hw.restore()
+        self.assertFalse([w for w, _ in hw.writes[n:] if "pci" in w])
+
+    def test_the_run_dying_mid_write_leaves_the_marker_for_the_watchdog(self):
+        hw, _ = self.hw()
+        seen, real = {}, hw._timed_write
+
+        def dies(path, value, timeout):  # what the watchdog finds if the run dies right here
+            with open(os.path.join(self.tmp, "state.json")) as f:
+                seen.setdefault(path, json.load(f).get("stuck"))
+            return real(path, value, timeout)
+        hw._timed_write = dies
+        hw.set_state({"wifi"}, False)
+        p = f"{B.SYS}/bus/pci/devices/0000:63:00.0/remove"
+        self.assertEqual(seen[p], p)
+        with open(os.path.join(self.tmp, "state.json")) as f:
+            self.assertNotIn("stuck", json.load(f))  # cleared once the write returned
+        self.assertIsNone(hw.stuck)
+
+    def test_a_real_write_interrupted_by_a_signal(self):
+        import signal
+        hw, _ = self.hw()
+        hw._timed_write = lambda p, v, t: B.Hw._timed_write(hw, p, v, t)
+        d = os.path.join(self.tmp, "pcidev", "bus", "pci", "devices", "x")
+        os.makedirs(d)
+        fifo = os.path.join(d, "remove")
+        os.mkfifo(fifo)  # blocks like a stuck remove
+
+        def stop(*_):
+            raise B.Abort("stopped by signal 14")
+        old = signal.signal(signal.SIGALRM, stop)
+        signal.setitimer(signal.ITIMER_REAL, 0.2)
+        try:
+            with self.assertRaises(B.Abort):
+                hw._write(fifo, 1, timeout=5)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old)
+            os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+        self.assertEqual(hw.stuck, fifo)
+        with open(os.path.join(self.tmp, "state.json")) as f:
+            self.assertEqual(json.load(f)["stuck"], fifo)
+
+    def test_a_write_that_blocks_times_out(self):
+        hw, _ = self.hw()
+        fifo = os.path.join(self.tmp, "fifo")
+        os.mkfifo(fifo)  # opening it to write blocks until a reader comes: a stand-in for a stuck write
+        self.assertIsNone(B.Hw._timed_write(hw, fifo, 1, 0.3))
+        r = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)  # let the child go
+        os.close(r)
+        f = os.path.join(self.tmp, "plain")
+        self.assertTrue(B.Hw._timed_write(hw, f, 1, 5))
+        self.assertEqual(B.rd(f), "1")
+        self.assertFalse(B.Hw._timed_write(hw, os.path.join(self.tmp, "no", "such"), 1, 5))
 
 
 # ------------------------------------------------------------------ the command
@@ -718,6 +905,23 @@ class Command(Fake):
         self.assertIsNone(B.rd(os.path.join(self.sys, "class/pci_bus/0000:00/rescan")) or None)
         self.assertEqual(B.rd(os.path.join(self.sys, "bus/pci/devices/0000:00:02.3/power/control")), "auto")
         self.assertEqual(B.rd(os.path.join(self.sys, "class/leds/asus::kbd_backlight/brightness")), "2")
+
+    def test_the_watchdog_writes_nothing_to_the_bus_after_a_stuck_write(self):
+        out = os.path.join(self.tmp, "out")
+        os.makedirs(out)
+        st = {"done": False, "screen_off": False, "stuck": f"{self.sys}/bus/pci/devices/0000:00:03.1/remove",
+              "ports": {"0000:00:03.1": "auto"}, "leds": {"asus::kbd_backlight": "2"},
+              "touched": {"rtx": {"top": "0000:00:03.1", "members": ["0000:00:03.1"], "method": "remove",
+                                  "bus": "0000:00", "drivers": {}}}}
+        put(os.path.join(self.sys, "class/leds/asus::kbd_backlight/brightness"), "0")
+        B.time.sleep, real = (lambda s: None), B.time.sleep
+        written = []
+        B.wr, real_wr = (lambda p, v: written.append(p[len(self.sys) + 1:]) or real_wr(p, v)), B.wr
+        try:
+            B.restore_from_state(st, out)
+        finally:
+            B.time.sleep, B.wr = real, real_wr
+        self.assertEqual(written, ["class/leds/asus::kbd_backlight/brightness"])
 
     def test_the_root_stage_refuses_without_root(self):
         if os.geteuid() == 0:
