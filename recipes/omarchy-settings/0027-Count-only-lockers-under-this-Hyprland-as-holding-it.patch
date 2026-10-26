@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Diogo Chaves
+Date: Mon, 19 Oct 2026 19:39:14 -0300
+Subject: [PATCH 27/27] Count only lockers under this Hyprland as holding its
+ lock
+
+A Quickshell or hyprlock started under another Hyprland (a second login, a
+nested or sandboxed desktop) can't hold this compositor's lock, yet it made
+every stranded-lock check undetermined, so a crashed shell never retook its
+lock while one ran. Skip a locker whose HYPRLAND_INSTANCE_SIGNATURE names
+another instance; one with no signature, or an unreadable environment, still
+counts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bin/omarchy-hyprland-session-lock-stranded    | 27 ++++++++++++++--
+ .../hyprland-session-lock-stranded-test.sh    | 32 ++++++++++++++++++-
+ 2 files changed, 55 insertions(+), 4 deletions(-)
+
+diff --git a/bin/omarchy-hyprland-session-lock-stranded b/bin/omarchy-hyprland-session-lock-stranded
+index 24ab5b80..3421ce7a 100755
+--- a/bin/omarchy-hyprland-session-lock-stranded
++++ b/bin/omarchy-hyprland-session-lock-stranded
+@@ -7,8 +7,9 @@
+ # Hyprland lets any client take over a held lock (misc:allow_session_lock_restore),
+ # so a shell that recovers a lock it merely sees can take the live lock screen of
+ # another shell, and strand it when it exits. A lock is stranded only while no
+-# other Quickshell or hyprlock is running; until then the answer is undetermined,
+-# so the caller keeps asking until that locker exits or it gives up.
++# other Quickshell or hyprlock is running under this Hyprland; until then the
++# answer is undetermined, so the caller keeps asking until that locker exits or
++# it gives up.
+ #
+ # Exits 0 stranded, 1 unlocked, 2 undetermined. The caller passes its own pid,
+ # as a crash re-execs the shell in place.
+@@ -35,6 +36,26 @@ is_voxtype_osd() {
+   return 1
+ }
+ 
++# A Quickshell or hyprlock under another Hyprland (a second login, a nested or
++# sandboxed desktop) can't hold this compositor's lock. hyprctl, which read the
++# lock above, picks its compositor by HYPRLAND_INSTANCE_SIGNATURE, and a process
++# started under a Hyprland inherits its signature. A locker with no signature,
++# or whose environment can't be read, still counts.
++in_other_hyprland() {
++  local var
++
++  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE-} ]] || return 1
++
++  while IFS= read -r -d '' var; do
++    if [[ $var == HYPRLAND_INSTANCE_SIGNATURE=?* ]]; then
++      [[ ${var#*=} != "$HYPRLAND_INSTANCE_SIGNATURE" ]]
++      return
++    fi
++  done 2>/dev/null <"$proc_root/$1/environ"
++
++  return 1
++}
++
+ while read -r pid; do
+-  [[ $pid == "$1" ]] || is_voxtype_osd "$pid" || exit 2
++  [[ $pid == "$1" ]] || in_other_hyprland "$pid" || is_voxtype_osd "$pid" || exit 2
+ done < <(pgrep -u "$UID" -x 'quickshell|qs|hyprlock')
+diff --git a/test/shell.d/hyprland-session-lock-stranded-test.sh b/test/shell.d/hyprland-session-lock-stranded-test.sh
+index 6a1a8756..55f668d6 100755
+--- a/test/shell.d/hyprland-session-lock-stranded-test.sh
++++ b/test/shell.d/hyprland-session-lock-stranded-test.sh
+@@ -32,6 +32,13 @@ locker() {
+   printf '%s\0' "$@" >"$proc/$pid/cmdline"
+ }
+ 
++# The Hyprland a locker was started under, as its environment names it.
++under() {
++  local pid="$1" signature="$2"
++
++  printf '%s\0' "PATH=/usr/bin" "HYPRLAND_INSTANCE_SIGNATURE=$signature" "WAYLAND_DISPLAY=wayland-1" >"$proc/$pid/environ"
++}
++
+ locker 100 quickshell -n -p /usr/share/omarchy/shell
+ locker 200 quickshell -n -p /tmp/tmp.abc/omarchy/shell
+ locker 201 quickshell -n -p "/data/voxtype/quickshell backup/omarchy/shell"
+@@ -41,11 +48,25 @@ locker 301 qs -d -p /data/.local/share/voxtype/quickshell
+ locker 302 /usr/bin/qs -p "/data/User Data/voxtype/quickshell/"
+ locker 400 hyprlock
+ locker 401 hyprlock -c /usr/share/voxtype/quickshell/lock.conf
++locker 600 quickshell -n -p /usr/share/omarchy/shell
++locker 601 quickshell -n -p /usr/share/omarchy/shell
++locker 602 hyprlock
++locker 603 quickshell -n -p /usr/share/omarchy/shell
++locker 604 quickshell -n -p /usr/share/omarchy/shell
++
++under 600 other-hyprland
++under 601 this-hyprland
++under 602 other-hyprland
++printf '%s\0' "PATH=/usr/bin" "HYPRLAND_INSTANCE_SIGNATURE=" >"$proc/603/environ"
++printf '%s\0' "PATH=/usr/bin" >"$proc/604/environ"
++
++# The Hyprland the asking shell runs under.
++signature=this-hyprland
+ 
+ assert_status() {
+   local expected="$1" locked="$2" lockers="$3" description="$4" actual=0
+ 
+-  PATH="$fake_bin:$PATH" OMARCHY_PROC_ROOT="$proc" OMARCHY_TEST_LOCKED="$locked" OMARCHY_TEST_LOCKERS="$lockers" \
++  PATH="$fake_bin:$PATH" HYPRLAND_INSTANCE_SIGNATURE="$signature" OMARCHY_PROC_ROOT="$proc" OMARCHY_TEST_LOCKED="$locked" OMARCHY_TEST_LOCKERS="$lockers" \
+     "$ROOT/bin/omarchy-hyprland-session-lock-stranded" 100 || actual=$?
+ 
+   (( actual == expected )) || fail "$description" "expected exit $expected, got $actual"
+@@ -66,3 +87,12 @@ assert_status 2 0 "100 202" "a shell beside voxtype's config is still a locker"
+ assert_status 2 0 "100 201" "a shell whose path only contains voxtype's config, after a space, is still a locker"
+ assert_status 2 0 "100 401" "hyprlock is a locker whatever its arguments name"
+ assert_status 2 0 "100 500" "a locker gone before its arguments are read is still counted"
++assert_status 0 0 "100 600" "a shell under another Hyprland cannot hold this one's lock"
++assert_status 2 0 "100 601" "a shell under this Hyprland is still a locker"
++assert_status 0 0 "100 602" "nor can hyprlock under another Hyprland"
++assert_status 2 0 "100 603" "a shell with an empty signature is still a locker"
++assert_status 2 0 "100 604" "a shell with no signature is still a locker"
++assert_status 2 0 "600 601" "a shell under another Hyprland does not hide one under this"
++signature=
++assert_status 2 0 "100 600" "with no signature of its own, the asking shell counts every locker"
++signature=this-hyprland

@@ -67,7 +67,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [Tailscale panel](#omarchy-0016-tailscale) | omarchy | 0016 | both | open / merged-unreleased |
 | [clamshell state from logind events](#omarchy-0017-monitor-watch-logind) | omarchy | 0017 | both | not submitted |
 | [launcher icon index throttle](#omarchy-0018-launcher-icon-index) | omarchy | 0018 | Quattro only | not submitted |
-| [stranded lock recovered while voxtype runs](#omarchy-0024-stranded-lock) | omarchy | 0024 | both | open |
+| [stranded lock recovered while voxtype runs](#omarchy-0024-stranded-lock) | omarchy | 0024, 0027 | both (0027 RC only) | open |
 | [G16 Control widget's dead link swapped for the plugin](#omarchy-0025-widget-link) | omarchy | 0025 | RC only | ours-only |
 | [the RTX stays asleep while apps start](#omarchy-0026-rtx-asleep-at-app-start) | omarchy | 0026 | RC only | not submitted |
 | [floating mode waits for the app's redraw](#omarchy-general-0001-floating-redraw) | omarchy | general-0001 | RC only | not submitted |
@@ -629,7 +629,7 @@ For a human to post as a hyprwm/Hyprland Discussion.
 
 ## Omarchy: omarchy and omarchy-settings
 
-RC 4.5.0rc1-1.111 (`main`, from fork branch `asus/v4-5-0-rc1`), Quattro 4.0.6-1.3 (from
+RC 4.5.0rc1-1.112 (`main`, from fork branch `asus/v4-5-0-rc1`), Quattro 4.0.6-1.3 (from
 `asus/v4-0-5`). Both packages build from the same source tree and carry the **same** patch list
 (their `DELTA` files stay in lockstep, and they publish as one cohort). Their migrations apply the
 fixes that live in user config or `/etc` on `omarchy update`, and leave fixes made by hand alone.
@@ -1318,12 +1318,15 @@ omacom/omarchy#6505. Not opened; a human decides.
 > This pull request was written with Claude Code.
 
 <a id="omarchy-0024-stranded-lock"></a>
-### Stranded lock recovered while voxtype's OSD runs (0024)
+### Stranded lock recovered while voxtype's OSD runs (0024, 0027)
 
-- **Component:** `omarchy`/`omarchy-settings`, patch 0024
-  (`omarchy-hyprland-session-lock-stranded`). Both channels; refreshed to omacom/omarchy#15912 in
-  #191 and #192 (#130). The OSD is told apart by its `-p` argument in `/proc/<pid>/cmdline` (fork
-  commits `f87801d1` + `d528fca1`, squashed).
+- **Component:** `omarchy`/`omarchy-settings`, patches 0024 and 0027
+  (`omarchy-hyprland-session-lock-stranded`). 0024 on both channels; refreshed to
+  omacom/omarchy#15912 in #191 and #192 (#130). The OSD is told apart by its `-p` argument in
+  `/proc/<pid>/cmdline` (fork commits `f87801d1` + `d528fca1`, squashed). 0027, RC only (since
+  1.112), is Diogo Chaves's follow-up `ddfdcf77` "Count only lockers under this Hyprland as
+  holding its lock" (branch `lock-stranded-scope` of diogochaves/omarchy), taken as is with its
+  author and message: fork commit `23846af8` on `asus/v4-5-0-rc1`.
 - **Fixes:** after a resume from suspend-then-hibernate while locked, the Omarchy shell died
   creating its lock surface (omacom/omarchy#11084), and the relaunched shell never took the orphaned
   lock back: both screens stayed on Hyprland's "lockscreen app died" failsafe until someone ran
@@ -1332,7 +1335,11 @@ omacom/omarchy#6505. Not opened; a human decides.
   other `quickshell`/`qs`/`hyprlock` runs, and voxtype's dictation OSD always runs as `qs -p
   /usr/share/voxtype/quickshell`, so recovery never happens with dictation installed. Hybrid NVIDIA
   laptops with an external monitor hit the crash more often. The fix skips voxtype's Quickshell in
-  that check; any other Quickshell and hyprlock still block recovery.
+  that check; any other Quickshell and hyprlock still block recovery. 0027 also skips a
+  Quickshell or hyprlock started under another Hyprland (a second login, a nested or sandboxed
+  desktop): its `HYPRLAND_INSTANCE_SIGNATURE` in `/proc/<pid>/environ` names another instance, so
+  it can't hold this compositor's lock. A locker with no signature, or an environment that can't
+  be read, still counts, and so does every locker when the asking shell has no signature.
 - **Evidence (GA605KM, omarchy 4.0.5-1.1; the script and `shell/plugins/lock/Service.qml` were
   byte-identical to stock 4.0.5-1):**
 
@@ -1347,13 +1354,17 @@ omacom/omarchy#6505. Not opened; a human decides.
   2438 qs -p /usr/share/voxtype/quickshell
   63973 quickshell -n -p /usr/share/omarchy/shell
   ```
-- **Test:** `test/shell.d/hyprland-session-lock-stranded-test.sh` (fails on the old script). On
+- **Test:** `test/shell.d/hyprland-session-lock-stranded-test.sh` (fails on the old script; 0027's
+  cases fail on 0024 alone: "a shell under another Hyprland cannot hold this one's lock"). On
   hardware with dictation installed, run the old and new checks against the live process list: the
   old one reports another locker, the new one doesn't. Then a locked hibernate with an HDMI
-  monitor plugged in: the failsafe clears without a TTY.
+  monitor plugged in: the failsafe clears without a TTY. For 0027, with a second Hyprland running
+  a Quickshell (another login on a TTY), the check from this session no longer reports it.
 - **Upstream: open.** [omacom/omarchy#15912](https://github.com/omacom/omarchy/pull/15912), which
-  replaced our omacom/omarchy#15890 (from fork branch `pr/lock-stranded-voxtype`).
-- **Drop when:** a release we build from contains #15912.
+  replaced our omacom/omarchy#15890 (from fork branch `pr/lock-stranded-voxtype`). 0027 is open
+  too: proposed for #15912 in its thread, not yet on the pull request (checked 2026-10-26).
+- **Drop when:** a release we build from contains #15912, and 0027 when that release has the
+  other-Hyprland check too (or #15912 lands without it and upstream rejects it).
 - **Notes:** formerly tracked in issue #102 (and #130 for the refresh).
 
 <a id="omarchy-0025-widget-link"></a>
