@@ -1286,10 +1286,36 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
   not submitted; test cases: no scan on an unchanged app list, no scan on open with unchanged
   caches, a scan after one changes, single-pass indexing; on the G16: no `find` on repeated opens,
   a new app's icon on the next open, no rescan after saving a dotfile in the home directory.
-- **Upstream report:** no draft is kept. 0018's once-a-minute timer is the wrong shape (the plan
-  above); the change check from the plan gets a draft when it is written.
 - **Drop when:** Quattro moves to 4.5 (general-0004 then covers it), or an equivalent is released.
 - **Notes:** formerly tracked in issue #33.
+
+#### Upstream report draft
+
+omacom/omarchy, PR against `quattro`, for the plan's steps 2 and 3 rather than 0018's timer (not
+written yet; the text below describes it). Open it after omacom/omarchy#14992 and reference
+omacom/omarchy#6505. Not opened; a human decides.
+
+> **Title:** Rescan launcher icons on open only when the icon caches changed
+>
+> Opening the launcher rescans every icon theme (about 9,000 paths) and indexes each path in its
+> own JS callback on the GUI thread while the menu animates in. #15167 made the scan one `find`
+> per icon tree, and #14992 stops the rescans on unrelated home-directory changes, but the rescan
+> on open still runs every time, as a guard against the shell starting before packages have
+> placed their icons.
+>
+> This keeps that guard with a cheap change check: on open, compare the modification times of the
+> `icon-theme.cache` files (rewritten by the pacman hook) and the user icon directories against
+> the last scan's, a few `stat` calls, and rescan only when one changed. The index is built in a
+> single pass instead of one callback per path. Desktop-entry changes still rescan at once.
+>
+> Measured: the icon walk is about 9,000 paths and 75 ms of `find` per open. (Fill in this
+> change's results after a G16 run: no `find` on repeated opens, a new app's icon on the next
+> open.)
+>
+> **Tests.** No scan on an unchanged app list, no scan on open with unchanged caches, a scan
+> after one changes, and the single-pass index.
+>
+> This pull request was written with Claude Code.
 
 <a id="omarchy-0024-stranded-lock"></a>
 ### Stranded lock recovered while voxtype's OSD runs (0024)
@@ -1594,9 +1620,9 @@ decides.
 
 > **Title:** Stop the ASUS ROG Zephyrus G16 touchpad from waking the laptop
 >
-> The GA605KM's ASUF1209 I2C touchpad is armed as a wake source: a brush or click wakes it from
-> s2idle, and touches count as wakeup events while it is going down (129k in one boot), which can
-> abort a hibernate.
+> The GA605KM's ASUF1209 I2C touchpad is armed as a wake source: a click wakes it from s2idle,
+> and touches count as wakeup events while it is going down (129k in one boot), which can abort a
+> hibernate.
 >
 > This adds a udev rule that sets `power/wakeup` to `disabled` for `i2c-ASUF1209:*` only. The
 > keyboard, lid and power button still wake it.
