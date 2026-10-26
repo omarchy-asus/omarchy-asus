@@ -1,39 +1,55 @@
 #!/usr/bin/env python3
-"""psp-rpm: the PSP function in runtime D3hot and SMU idlemask bit 16 on the G16 (#249).
+"""psp-rpm: the PSP function in runtime D3hot, display idle, and idlemask bit 16 on the G16 (#249).
 
 Patch 9906 (EXPERIMENTAL, default off) gives ccp runtime PM for a PSP-only function (the
 G16's 1022:17E0, 65:00.2): ccp.psp_rpm_delay_ms > 0 plus power/control=auto lets it sit in
 D3hot between commands, and ccp.psp_rpm_debug logs each runtime suspend and resume with
-the caller that woke it. In s2idle, bit 16 (the runtime deep-idle blocker) turns idle in
-the noirq phase, where the PCI core puts this function into D3hot. Does it at runtime?
+the caller that woke it. 9908 keeps display idle optimizations allowed while every CRTC is
+off (with 9902's amdgpu.dm_idle_all_off) and traces every change of them
+(amdgpu.dm_idle_trace). In s2idle, bit 16 (the runtime deep-idle blocker) turns idle in the
+noirq phase, where the PCI core puts the PSP function into D3hot. Does it at runtime, and
+does it need display idle too?
 
-  psp-rpm             run it: on battery, one root prompt, about 3 minutes
+  psp-rpm             run it: on battery, one root prompt, about 4 minutes, hands off
   psp-rpm --post      and post the report to #249 (bin/issue)
   psp-rpm --dry-run   simulated readings, no root, nothing changed
 
-Phases:
+Phases (one change each):
   a  baseline: the PSP in D0 as now, screen on (15 s)
   -  psp_rpm_debug=1, psp_rpm_delay_ms=2000, power/control=auto; wait (up to 15 s) for
      runtime_status=suspended
   b  the PSP runtime-suspended, screen on (60 s)
-  c  the same with the screen off (DPMS, Hyprland; 30 s); idlemask bit 10 must read 1
-     (the screen really is off)
-  -  while it is still suspended: read the PSP's firmware version from sysfs (that resumes
-     it, through 9906's reference) and compare it with the D0 value, and one fTPM PCR read
-     (CRB, not this function's BAR: it should not wake it)
-Each measured phase reads amd_pmc's idlemask at 10 Hz, gpu_metrics' average_socket_power
-(v3.0, offset 112) every 0.5 s, battery watts and the PSP's runtime_status every second,
-and its runtime suspended/active time; the suspend and resume counts and the wakers come
-from 9906's psp_rpm_debug lines. With patch 9907, each phase also restarts the SMU's logging
-and reads amd_pmc's smu_metrics_runtime at its end (timein_s0i2, or the SMU's refusal). power/control, both parameters and the screen go back to
-their values at the start on exit, Ctrl-C included; a watchdog in its own session does it
-if the kit dies or runs past its deadline.
+  c  the same with the screen off (DPMS), display idle parameters 0 (30 s)
+  d  screen on, amdgpu.dcn35_s0i2=1 and amdgpu.dm_idle_all_off=1, screen off again (they
+     act on the DPMS-off commit): display idle
+     re-allowed (9901, 9902, 9908) and the PSP runtime-suspended (30 s)
+  e  as d with the PSP back in D0 (power/control=on): display idle alone (30 s)
+  -  screen on (verified); then, with the PSP runtime-suspended again: one fTPM PCR read
+     (CRB, not this function's BAR: it should not wake it) and one firmware-version read
+     (it resumes it, through 9906's reference), compared with the D0 value
+The screen goes off with Hyprland's Lua dispatch hl.dsp.dpms({ action = "disable" }) (the old
+`dpms off` only if that is refused) and counts as off only when every enabled monitor reads
+dpmsStatus false AND the eDP connector's kernel DPMS state reads Off: the kernel state with
+every read, Hyprland's every 5 s. A screen-off phase that fails either is INVALID.
+Each measured phase reads amd_pmc's idlemask at 10 Hz (bits 5, 10, 16, 20), gpu_metrics'
+average_socket_power (v3.0, offset 112) every 0.5 s, battery watts, the PSP's
+runtime_status and amdgpu_dm_ips_status's "Idle optimization" every second (and before and
+after), and the PSP's runtime suspended time; the suspend and resume counts and the wakers
+come from 9906's psp_rpm_debug lines. With 9907 each phase restarts the SMU's logging and
+reads smu_metrics_runtime at its end (timein_s0i2). In c, d and e, amdgpu.dm_idle_trace=1 and
+amdgpu.dm_idle_all_off_debug=1 (9908) log every idle allow/disallow with its caller, and the
+report has them. power/control, every parameter and the screen go back to their values at
+the start on exit, Ctrl-C included; a watchdog in its own session does it if the kit dies or
+runs past its deadline.
 
-Verdicts: BIT 16 IDLE (in most reads of b or c, with the PSP suspended), NO EFFECT (the PSP
-suspended, bit 16 still busy), NOT SUSPENDED, INCOMPLETE (no 9906, the charger, the screen
-not really off, a problem), FAIL (ccp/TEE/TPM/amdgpu errors in the kernel log, a wrong
-version read, a failed TPM read, the panel not back). The report (no host or user names)
-goes to ~/omarchy-asus-g16-psp-rpm-<kernel>-<date>.md.
+Verdicts: BIT 16 IDLE (in most reads of a cell with the PSP suspended in most reads; the
+report says which cells, and whether e (PSP in D0) had it too), NO EFFECT (display idle held
+in d, the PSP suspended, bit 16 still busy), NO DISPLAY IDLE (d never kept "Idle
+optimization" at 1: the trace says why), PSP KEPT AWAKE (suspended in under 80% of the
+reads), NOT SUSPENDED, INCOMPLETE (no 9906, the charger, a screen-off phase not verified, a
+problem), FAIL (ccp/TEE/TPM/amdgpu errors in the kernel log, a wrong version read, a failed
+TPM read, the panel not back). The report (no host or user names) goes to
+~/omarchy-asus-g16-psp-rpm-<kernel>-<date>.md.
 
 Root: pkexec through the desktop's polkit agent (G16_POLKIT_REASON=<wrapper> runs
 `<wrapper> run REASON -- pkexec ...`; G16_ROOT=sudo uses sudo).
@@ -58,17 +74,27 @@ SELF = os.path.realpath(__file__)
 KIT = os.path.dirname(SELF)
 P_DELAY = "/sys/module/ccp/parameters/psp_rpm_delay_ms"
 P_DEBUG = "/sys/module/ccp/parameters/psp_rpm_debug"
+P_S0I2 = "/sys/module/amdgpu/parameters/dcn35_s0i2"            # 9901
+P_IDLE = "/sys/module/amdgpu/parameters/dm_idle_all_off"       # 9902
+P_TRACE = "/sys/module/amdgpu/parameters/dm_idle_trace"        # 9908
+P_REDBG = "/sys/module/amdgpu/parameters/dm_idle_all_off_debug"  # 9908
+DISPLAY_PARAMS = (P_S0I2, P_IDLE)
+TRACE_PARAMS = (P_TRACE, P_REDBG)
+BOOL_PARAMS = DISPLAY_PARAMS + TRACE_PARAMS
 IDLEMASK = "/sys/kernel/debug/amd_pmc/amd_pmc_idlemask"
 SMU_METRICS = "/sys/kernel/debug/amd_pmc/smu_metrics_runtime"   # 9907
 PSP_ID = ("0x1022", "0x17e0")
 DELAY_MS = 2000
-BITS = (10, 16)          # screen off (display activity ended), the runtime deep-idle blocker
+BITS = (5, 10, 16, 20)   # display idle, screen off, the runtime deep-idle blocker, IPS2
 SOCKET_OFF = 112         # gpu_metrics_v3_0.average_socket_power (u32, mW)
 BASELINE_S, ON_S, OFF_S, SUSPEND_WAIT_S = 15, 60, 30, 15
 IDLE_SHARE = 0.8
+TRACE_KEEP = 40          # trace lines kept per phase in the report
 SUS_RE = re.compile(r"psp rpm: runtime suspend #(\d+)")
 RES_RE = re.compile(r"psp rpm: runtime resume #(\d+)(?: for (\S+)(?: \[[^\]]+\])? \(([^)]*)\)|"
                     r", not for a ccp command \(([^)]*)\))")
+TRACE_RE = re.compile(r"dm_idle_trace: (allow|disallow) by (\S+) -> allowed=(\d)")
+REALLOW_RE = re.compile(r"dm_idle_all_off: idle re-allowed #(\d+)")
 ERR_RE = re.compile(r"\*ERROR\*|dmub.*(timeout|timed out|error|fail)|REG_WAIT timeout|"
                     r"amdgpu.*(timeout|timed out|failed|hang|reset|error)|"
                     r"\btee: .*(timed out|failed|disabling)|psp: runtime resume .* failed|"
@@ -108,11 +134,33 @@ def bat_w(bat):
 
 
 def amdgpu_dev():
-    for c in sorted(glob.glob("/sys/class/drm/card*")):
+    for c in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
         d = os.path.realpath(c + "/device")
         if os.path.basename(os.path.realpath(d + "/driver")) == "amdgpu" and os.path.exists(d + "/gpu_metrics"):
             return d
     return None
+
+
+def ips_status_path(dev):
+    """amdgpu_dm_ips_status of the amdgpu (iGPU) DRM device in debugfs."""
+    pci = os.path.basename(dev) if dev else ""
+    found = sorted(glob.glob("/sys/kernel/debug/dri/*/amdgpu_dm_ips_status"))
+    for p in found:
+        if pci and pci in (rd(os.path.dirname(p) + "/name", "") or ""):
+            return p
+    return found[0] if found else None
+
+
+def edp_connectors(dev):
+    """The connected eDP connectors of the amdgpu card (sysfs dirs)."""
+    out = []
+    for c in sorted(glob.glob("/sys/class/drm/card*-eDP-*")):
+        card = os.path.basename(c).split("-")[0]
+        if dev and os.path.realpath(f"/sys/class/drm/{card}/device") != dev:
+            continue
+        if rd(c + "/status") == "connected":
+            out.append(c)
+    return out
 
 
 def psp_dev():
@@ -141,6 +189,12 @@ def parse_mask(t):
     return int(m.group(0), 16) if m else None
 
 
+def idle_opt(ips):
+    """'Idle optimization: N' from amdgpu_dm_ips_status, or None."""
+    m = re.search(r"Idle optimization:\s*(\d+)", ips or "")
+    return int(m.group(1)) if m else None
+
+
 def parse_metrics(text):
     """9907's smu_metrics_runtime -> {"dump": "ok 0" | "rejected ...", "timein_s0i2": n, ...}, or None."""
     if not text:
@@ -158,21 +212,28 @@ def parse_metrics(text):
 
 
 def hypr_instance():
-    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
-    if re.match(r"^[A-Za-z0-9_]+$", sig):
-        return sig
+    """The running Hyprland's signature: $HYPRLAND_INSTANCE_SIGNATURE if its socket exists,
+    else the newest socket."""
     run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if re.match(r"^[A-Za-z0-9_]+$", sig) and os.path.exists(f"{run}/hypr/{sig}/.socket.sock"):
+        return sig
     socks = [x for x in glob.glob(run + "/hypr/*/.socket.sock")
              if re.match(r"^[A-Za-z0-9_]+$", os.path.basename(os.path.dirname(x)))]
     return os.path.basename(os.path.dirname(max(socks, key=os.path.getmtime))) if socks else ""
 
 
 class Display:
-    """DPMS of every output through the user's Hyprland (Lua dispatch first, then the old one)."""
+    """DPMS through the user's Hyprland, verified by Hyprland and by the kernel.
 
-    def __init__(self, user, uid, sig):
-        self.base = ["runuser", "-u", user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
-                     f"HYPRLAND_INSTANCE_SIGNATURE={sig}", "hyprctl"]
+    Hyprland 0.56 runs a Lua config, so the Lua dispatch is sent; the old `dpms on|off` only
+    if that is refused. The screen counts as off only when every enabled monitor reads
+    dpmsStatus false AND every connected eDP connector's kernel DPMS state reads Off."""
+
+    def __init__(self, user, uid, sig, connectors):
+        self.base = ["runuser", "-u", user, "--", "/usr/bin/env", "-i", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                     f"HYPRLAND_INSTANCE_SIGNATURE={sig}", "PATH=/usr/bin:/bin", "hyprctl"]
+        self.connectors = connectors
 
     def _ctl(self, *a):
         try:
@@ -180,29 +241,40 @@ class Display:
         except (OSError, subprocess.SubprocessError):
             return ""
 
-    def reads(self, on):
+    def hypr(self):
+        """True all enabled monitors lit, False all off, None unknown or mixed."""
         try:
-            mons = json.loads(self._ctl("monitors", "-j") or "x")
+            mons = [m for m in json.loads(self._ctl("-j", "monitors") or "x") if not m.get("disabled")]
         except ValueError:
             return None
-        return all(bool(m.get("dpmsStatus")) == on for m in mons if not m.get("disabled"))
+        states = {bool(m.get("dpmsStatus")) for m in mons}
+        return states.pop() if len(states) == 1 else None
 
-    def set(self, on):
-        said = self._ctl("dispatch", 'hl.dsp.dpms({ action = "%s" })' % ("enable" if on else "disable")) == "ok"
-        time.sleep(1)
-        got = self.reads(on)
-        if got is False or (got is None and not said):
-            said = self._ctl("dispatch", "dpms", "on" if on else "off") == "ok"
-            time.sleep(1)
-            got = self.reads(on)
-        return said if got is None else got
+    def kernel_off(self):
+        """True every connected eDP connector reads Off, False any reads On, None unknown."""
+        vals = [rd(c + "/dpms") for c in self.connectors]
+        if not vals or any(v not in ("On", "Off") for v in vals):
+            return None
+        return all(v == "Off" for v in vals)
 
-    def back_on(self, tries=5):
-        for _ in range(tries):
-            if self.set(True):
-                return True
-            time.sleep(2)
+    def _dispatch(self, on):
+        r = self._ctl("dispatch", 'hl.dsp.dpms({ action = "%s" })' % ("enable" if on else "disable"))
+        if r != "ok":
+            self._ctl("dispatch", "dpms", "on" if on else "off")
+
+    def set(self, on, attempts=3, wait=4.0):
+        """True once Hyprland and the kernel both read the screen on (off)."""
+        for _ in range(attempts):
+            self._dispatch(on)
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < wait:
+                time.sleep(0.25)
+                if self.kernel_off() is (not on) and self.hypr() is on:
+                    return True
         return False
+
+    def back_on(self):
+        return self.set(True, attempts=5)
 
 
 def journal(since):
@@ -241,21 +313,54 @@ def rpm_events(lines):
     return ev
 
 
+def trace_summary(lines):
+    """9908's dm_idle_trace and dm_idle_all_off_debug lines -> counts by direction and caller,
+    the re-allows, and the first TRACE_KEEP trace lines (from the 'dm_idle_trace:' on)."""
+    out = {"allow": 0, "disallow": 0, "by": {}, "reallows": 0, "lines": []}
+    for ln in lines:
+        if REALLOW_RE.search(ln):
+            out["reallows"] += 1
+            continue
+        m = TRACE_RE.search(ln)
+        if not m:
+            continue
+        out[m.group(1)] += 1
+        k = f"{m.group(1)} by {m.group(2)}"
+        out["by"][k] = out["by"].get(k, 0) + 1
+        if len(out["lines"]) < TRACE_KEEP:
+            out["lines"].append(ln[ln.find("dm_idle_trace:"):])
+    return out
+
+
 class SimHw:
-    """--dry-run: the PSP suspends at once; with it suspended bit 16 reads idle only with the
-    screen off (bit 10 = 1) and the socket loses 0.4 W; the version read wakes it once."""
+    """--dry-run: the PSP suspends at once and stays down; display idle holds only with both
+    parameters on and the screen off (9908), and then bit 16 reads idle only with the PSP
+    suspended too; the socket loses 0.4 W for bit 16; the version read wakes it once."""
 
     def __init__(self):
-        self.ctl, self.delay, self.debug, self.on, self.t = "on", 0, "N", True, 0.0
-        self.rng = random.Random(249)
-        self.log = []
+        self.ctl, self.delay, self.debug, self.on = "on", 0, "N", True
+        self.params = {p: "N" for p in BOOL_PARAMS}
+        self.t, self.rng, self.log = 0.0, random.Random(249), []
 
     def start(self):
         return {"control": "on", "delay": "0", "debug": "N", "status": "active", "state": "D0",
-                "version": "00.2d.00.6a", "version_attr": "bootloader_version"}
+                "version": "00.2d.00.6a", "version_attr": "bootloader_version",
+                "params": dict(self.params)}
+
+    def has(self, p):
+        return True
 
     def set_rpm(self, delay, debug, control):
         self.delay, self.debug, self.ctl = delay, debug, control
+        return True
+
+    def set_control(self, control):
+        self.ctl = control
+        return True
+
+    def set_params(self, paths, v):
+        for p in paths:
+            self.params[p] = "Y" if v else "N"
         return True
 
     def suspended(self):
@@ -271,23 +376,43 @@ class SimHw:
         self.on = on
         return True
 
+    def display_idle(self):
+        return not self.on and self.params[P_IDLE] == "Y"
+
+    def ips(self):
+        return f"Idle optimization: {1 if self.display_idle() else 0}\n"
+
     def times(self):
         self.t += 1
         return {"suspended_ms": int(self.t * 1000) if self.suspended() else 0, "active_ms": 1000}
 
-    def sample(self, secs):
+    def sample(self, secs, screen_off):
         n = int(secs * 10)
         base = 0xffce9add
         if not self.on:
             base |= 1 << 10
-        if not self.on and self.suspended():
-            base |= 1 << 16
+        if self.display_idle():
+            base |= (1 << 5) | (1 << 20)
+            if self.suspended():
+                base |= 1 << 16
         masks = [base if self.rng.random() > 0.05 else base & ~(1 << 7) for _ in range(n)]
         drop = 0.4 if base & (1 << 16) else 0
         sock = [(4.4 - drop + (0.8 if self.on else 0)) + self.rng.uniform(-0.05, 0.05) for _ in range(n // 5)]
         bat = [(5.9 - drop + (1.5 if self.on else 0)) + self.rng.uniform(-0.2, 0.2) for _ in range(n // 10)]
         rs = ["suspended" if self.suspended() else "active"] * (n // 10)
-        return {"masks": masks, "sock": sock, "bat": bat, "rpm": rs, "status": ["Discharging"]}
+        io = [1 if self.display_idle() else 0] * (n // 10)
+        if screen_off and self.params[P_TRACE] == "Y":
+            self.log += ["amdgpu 0000:65:00.0: [drm] dm_idle_trace: allow by dm_idle_all_off_worker -> allowed=1; "
+                         "vblank irqs 0, active CRTCs 0, streams 0; dm_idle_all_off_worker+0x9c/0x140 [amdgpu] <- "
+                         "process_one_work+0x17b/0x330 <- worker_thread+0x2ce/0x3f0 <- kthread+0xf0/0x120",
+                         "amdgpu 0000:65:00.0: [drm] dm_idle_all_off: idle re-allowed #1 (allowed=1)"] \
+                if self.display_idle() else \
+                ["amdgpu 0000:65:00.0: [drm] dm_idle_trace: disallow by amdgpu_dm_commit_streams -> allowed=0; "
+                 "vblank irqs 0, active CRTCs 0, streams 0; amdgpu_dm_commit_streams+0x2a1/0x9c0 [amdgpu] <- "
+                 "amdgpu_dm_atomic_commit_tail+0x3e5/0x1f20 [amdgpu] <- commit_tail+0x91/0x130 <- "
+                 "commit_work+0x12/0x20"]
+        return {"masks": masks, "koff": [True] * n if screen_off else [], "hypr": [False] * (n // 50 or 1)
+                if screen_off else [], "sock": sock, "bat": bat, "rpm": rs, "idleopt": io, "status": ["Discharging"]}
 
     def read_version(self, attr):
         if self.suspended():
@@ -299,7 +424,7 @@ class SimHw:
         return True
 
     def metrics_read(self):
-        return {"dump": "ok 0", "timein_s0i2": 0 if self.on else 1200000, "hint_count": 0}
+        return {"dump": "ok 0", "timein_s0i2": 1200000 if self.display_idle() else 0, "hint_count": 0}
 
     def tpm_read(self):
         return {"ok": True, "secs": 0.031, "status_after": "suspended" if self.suspended() else "active"}
@@ -316,7 +441,7 @@ class Hw:
     def __init__(self, display, psp):
         self.display, self.psp = display, psp
         self.dev, self.bat = amdgpu_dev(), battery()
-        self.lines = []
+        self.ips_path = ips_status_path(self.dev)
 
     def start(self):
         attr = next((a for a in ("bootloader_version", "tee_version")
@@ -324,13 +449,28 @@ class Hw:
         return {"control": rd(self.psp + "/power/control", ""), "delay": rd(P_DELAY, ""),
                 "debug": rd(P_DEBUG, ""), "status": rd(self.psp + "/power/runtime_status", ""),
                 "state": rd(self.psp + "/power_state", ""), "version_attr": attr,
-                "version": rd(f"{self.psp}/{attr}", "") if attr else ""}
+                "version": rd(f"{self.psp}/{attr}", "") if attr else "",
+                "params": {p: rd(p, "") for p in BOOL_PARAMS}}
+
+    def has(self, p):
+        return rd(p) in ("Y", "N")
 
     def set_rpm(self, delay, debug, control):
         # Order: the debug knob first (to log the first suspend), power/control last.
         ok = wr(P_DEBUG, debug) and rd(P_DEBUG) == debug
         ok = wr(P_DELAY, delay) and rd(P_DELAY) == str(delay) and ok
-        return wr(self.psp + "/power/control", control) and rd(self.psp + "/power/control") == control and ok
+        return self.set_control(control) and ok
+
+    def set_control(self, control):
+        return wr(self.psp + "/power/control", control) and rd(self.psp + "/power/control") == control
+
+    def set_params(self, paths, v):
+        """Bool parameters that exist; one this kernel lacks is skipped (the report says so)."""
+        ok = True
+        for p in paths:
+            if self.has(p):
+                ok = wr(p, 1 if v else 0) and rd(p) == ("Y" if v else "N") and ok
+        return ok
 
     def wait_suspended(self, secs):
         t0 = time.monotonic()
@@ -343,22 +483,31 @@ class Hw:
     def screen(self, on):
         return self.display.set(on)
 
+    def ips(self):
+        return rd(self.ips_path, "") if self.ips_path else ""
+
     def times(self):
         s, a = rd(self.psp + "/power/runtime_suspended_time", ""), rd(self.psp + "/power/runtime_active_time", "")
         return {"suspended_ms": int(s) if s.isdigit() else None, "active_ms": int(a) if a.isdigit() else None}
 
-    def sample(self, secs):
-        out = {"masks": [], "sock": [], "bat": [], "rpm": [], "status": set()}
+    def sample(self, secs, screen_off):
+        out = {"masks": [], "koff": [], "hypr": [], "sock": [], "bat": [], "rpm": [], "idleopt": [],
+               "status": set()}
         t0, k = time.monotonic(), 0
         while time.monotonic() - t0 < secs:
             out["masks"].append(parse_mask(rd(IDLEMASK, "")))
+            if screen_off:
+                out["koff"].append(self.display.kernel_off())
             if k % 5 == 0 and self.dev:
                 out["sock"].append(socket_w(self.dev))
             if k % 10 == 0:
                 out["rpm"].append(rd(self.psp + "/power/runtime_status", ""))
+                out["idleopt"].append(idle_opt(self.ips()))
                 if self.bat:
                     out["bat"].append(bat_w(self.bat))
                     out["status"].add(rd(self.bat + "/status"))
+            if screen_off and k % 50 == 25:
+                out["hypr"].append(self.display.hypr())
             k += 1
             time.sleep(max(0.0, t0 + k * 0.1 - time.monotonic()))
         out["status"] = sorted(x for x in out["status"] if x)
@@ -394,12 +543,17 @@ class Hw:
 
     def lines_between(self, t0, t1):
         j = journal(t0 - 1) or []
-        return [m for t, m in j if t0 <= t <= t1 and "psp rpm:" in m]
+        return [m for t, m in j if t0 <= t <= t1 and ("psp rpm:" in m or "dm_idle_" in m)]
 
 
 def mean(xs):
     xs = [x for x in xs if x is not None]
     return sum(xs) / len(xs) if xs else None
+
+
+def share(xs, want):
+    xs = [x for x in xs if x is not None and x != ""]
+    return sum(1 for x in xs if x == want) / len(xs) if xs else None
 
 
 def summarize(s):
@@ -408,46 +562,55 @@ def summarize(s):
     top = {}
     for m in good:
         top[f"0x{m:08x}"] = top.get(f"0x{m:08x}", 0) + 1
-    rpm = [x for x in s["rpm"] if x]
     return {"idle": idle, "reads": len(good), "masks": sorted(top.items(), key=lambda x: -x[1])[:3],
             "never_idle": [b for b in range(32) if good and all(not (m >> b) & 1 for m in good)],
             "sock": mean(s["sock"]), "bat": mean(s["bat"]),
-            "suspended_share": (sum(1 for x in rpm if x == "suspended") / len(rpm)) if rpm else None}
+            "suspended_share": share(s["rpm"], "suspended"), "idleopt_share": share(s["idleopt"], 1),
+            "koff_reads": len(s["koff"]), "koff_all": bool(s["koff"]) and all(x is True for x in s["koff"]),
+            "hypr_all_off": bool(s["hypr"]) and all(x is False for x in s["hypr"])}
 
 
-def measure(hw, name, label, screen_on, secs, log, dry):
-    """One measured phase: the screen, settle, sample, the screen back on."""
-    off = True if screen_on else hw.screen(False)
+def measure(hw, name, label, screen_off, secs, log, dry, psp_suspended):
+    """One measured phase: settle, sample (with the screen as it already is), read the logs."""
     if not dry:
         time.sleep(3)
+    ips0 = idle_opt(hw.ips())
     started = hw.metrics_start()
     t0, tm0 = time.time(), hw.times()
-    s = hw.sample(secs if not dry else 3)
+    s = hw.sample(secs if not dry else 3, screen_off)
     t1, tm1 = time.time(), hw.times()
     met = hw.metrics_read() if started else None
-    back = True if screen_on else hw.screen(True)
-    if not dry and not screen_on:
-        time.sleep(3)
-    ev = rpm_events(hw.lines_between(t0, t1))
+    ips1 = idle_opt(hw.ips())
+    lines = hw.lines_between(t0, t1)
+    ev = rpm_events(lines)
+    tr = trace_summary(lines)
     d = {k: (None if tm0[k] is None or tm1[k] is None else tm1[k] - tm0[k]) for k in tm0}
-    p = {"phase": name, "label": label, "screen_on": screen_on, "screen_off_ok": off, "panel_back": back,
-         "status": s["status"], "secs": secs, "rpm_ms": d, "smu": met, **ev, **summarize(s)}
-    log(f"phase {name} ({label}): bit16 idle {fmt_share(p['idle'][16])} bit10 {fmt_share(p['idle'][10])} "
-        f"suspended {fmt_share(p['suspended_share'])} suspends {ev['suspends']} resumes {ev['resumes']} "
-        f"socket {fmt_w(p['sock'])} battery {fmt_w(p['bat'])}" + ("" if back else " PANEL DID NOT READ BACK ON"))
+    p = {"phase": name, "label": label, "screen_off": screen_off, "psp_suspended": psp_suspended,
+         "status": s["status"], "secs": secs, "rpm_ms": d, "smu": met, "ips_before": ips0, "ips_after": ips1,
+         "trace": tr, **ev, **summarize(s)}
+    p["screen_ok"] = (not screen_off) or (p["koff_all"] and p["hypr_all_off"])
+    log(f"phase {name} ({label}): bit16 idle {fmt_share(p['idle'][16])} bit5 {fmt_share(p['idle'][5])} "
+        f"idle-opt {ips0}->{ips1} ({fmt_share(p['idleopt_share'])}) suspended {fmt_share(p['suspended_share'])} "
+        f"socket {fmt_w(p['sock'])}" + ("" if p["screen_ok"] else " SCREEN NOT VERIFIED OFF"))
     return p
 
 
 def run(hw, log, dry):
-    """Phases a, the switch, b, c and the checks; -> dict. The caller puts everything back."""
-    res = {"start": hw.start(), "phases": [], "reached": None, "checks": {}}
+    """Phases a-e and the checks; -> dict. The caller puts everything back."""
+    res = {"start": hw.start(), "phases": [], "reached": None, "checks": {}, "screen": {}}
+    res["has"] = {os.path.basename(p): hw.has(p) for p in BOOL_PARAMS}
 
     def charger(p):
         return not dry and any(x != "Discharging" for x in p["status"])
 
-    res["phases"].append(measure(hw, "a", "baseline: PSP in D0, screen on", True, BASELINE_S, log, dry))
-    if charger(res["phases"][-1]):
-        log("on the charger: stopping (the run counts as incomplete)")
+    def stop_if_bad():
+        if charger(res["phases"][-1]):
+            log("on the charger: stopping (the run counts as incomplete)")
+            return True
+        return False
+
+    res["phases"].append(measure(hw, "a", "baseline: PSP in D0, screen on", False, BASELINE_S, log, dry, False))
+    if stop_if_bad():
         return res
     if not hw.set_rpm(DELAY_MS, "Y", "auto"):
         raise RuntimeError("could not set psp_rpm_debug=Y, psp_rpm_delay_ms and power/control=auto")
@@ -457,17 +620,49 @@ def run(hw, log, dry):
         f", power_state {state or '?'}")
     if not ok:
         return res
-    for name, label, on, secs in (("b", "PSP runtime-suspended, screen on", True, ON_S),
-                                  ("c", "PSP runtime-suspended, screen off", False, OFF_S)):
-        res["phases"].append(measure(hw, name, label, on, secs, log, dry))
-        if charger(res["phases"][-1]):
-            log("the charger came back: stopping (the run counts as incomplete)")
-            return res
-        if not res["phases"][-1]["panel_back"]:
-            log("the panel did not come back: stopping")
-            return res
-    # The checks, with the PSP suspended again (2 s after the last command).
-    hw.wait_suspended(5)
+    res["phases"].append(measure(hw, "b", "PSP runtime-suspended, screen on", False, ON_S, log, dry, True))
+    if stop_if_bad():
+        return res
+    if not hw.set_params(TRACE_PARAMS, 1):
+        raise RuntimeError("could not set amdgpu.dm_idle_trace / dm_idle_all_off_debug")
+    res["screen"]["off"] = hw.screen(False)
+    if not res["screen"]["off"]:
+        log("the screen did not read off (Hyprland and the kernel): stopping")
+        return res
+    res["phases"].append(measure(hw, "c", "PSP runtime-suspended, screen off, display idle params 0",
+                                 True, OFF_S, log, dry, True))
+    if stop_if_bad():
+        return res
+    # The parameters only act on a commit (DPMS off), so: screen on, both 1, screen off.
+    if not hw.screen(True):
+        res["screen"]["back"] = False
+        log("the screen did not read back on: stopping")
+        return res
+    if not hw.set_params(DISPLAY_PARAMS, 1):
+        raise RuntimeError("could not set amdgpu.dcn35_s0i2 / dm_idle_all_off to 1")
+    res["screen"]["off2"] = hw.screen(False)
+    if not res["screen"]["off2"]:
+        log("the screen did not read off again: stopping")
+        return res
+    res["phases"].append(measure(hw, "d", "PSP runtime-suspended, screen off, display idle re-allowed",
+                                 True, OFF_S, log, dry, True))
+    if stop_if_bad():
+        return res
+    if not hw.set_control("on"):
+        raise RuntimeError("could not set power/control=on")
+    res["phases"].append(measure(hw, "e", "PSP in D0, screen off, display idle re-allowed",
+                                 True, OFF_S, log, dry, False))
+    if stop_if_bad():
+        return res
+    hw.set_params(TRACE_PARAMS, 0)
+    hw.set_params(DISPLAY_PARAMS, 0)
+    res["screen"]["back"] = hw.screen(True)
+    if not res["screen"]["back"]:
+        log("the screen did not read back on: stopping")
+        return res
+    # The checks, with the PSP runtime-suspended again.
+    hw.set_control("auto")
+    hw.wait_suspended(SUSPEND_WAIT_S)
     attr = res["start"].get("version_attr")
     t0 = time.time()
     tpm = hw.tpm_read()
@@ -492,11 +687,29 @@ def fmt_w(x):
     return "-" if x is None else f"{x:.2f} W"
 
 
+def restore(start, psp, disp):
+    """Everything back to its start value; -> [problems]."""
+    probs = []
+    ctl = start.get("control") or "on"
+    if psp and not (wr(psp + "/power/control", ctl) and rd(psp + "/power/control") == ctl):
+        probs.append(f"could not put power/control back to {ctl}")
+    for p, v in (start.get("params") or {}).items():
+        if v in ("Y", "N") and not (wr(p, 1 if v == "Y" else 0) and rd(p) == v):
+            probs.append(f"could not put {os.path.basename(p)} back to {v}")
+    if not (wr(P_DELAY, start.get("delay") or 0) and rd(P_DELAY) == (start.get("delay") or "0")):
+        probs.append(f"could not put psp_rpm_delay_ms back to {start.get('delay')}")
+    dbg = start.get("debug") or "N"
+    if not (wr(P_DEBUG, dbg) and rd(P_DEBUG) == dbg):
+        probs.append(f"could not put psp_rpm_debug back to {dbg}")
+    if disp and not disp.back_on():
+        probs.append("the screen did not read back on (hyprctl): press a key")
+    return probs
+
+
 def watchdog(a):
     """Root, own session: if the kit's root stage dies (or passes its deadline), put
-    power/control, both parameters and the screen back."""
+    power/control, every parameter and the screen back."""
     deadline = time.monotonic() + a.deadline
-    disp = Display(a.user, a.uid, a.hypr)
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     while time.monotonic() < deadline:
@@ -513,17 +726,16 @@ def watchdog(a):
         return 0
     start = json.loads(a.restore)
     psp = start.get("psp", "")
-    if psp.startswith("/sys/bus/pci/devices/"):
-        wr(psp + "/power/control", start.get("control") or "on")
-    wr(P_DELAY, start.get("delay") or 0)
-    wr(P_DEBUG, start.get("debug") or "N")
-    disp.back_on()
+    if not psp.startswith("/sys/bus/pci/devices/"):
+        psp = ""
+    start["params"] = {p: v for p, v in (start.get("params") or {}).items() if p in BOOL_PARAMS}
+    restore(start, psp, Display(a.user, a.uid, a.hypr, edp_connectors(amdgpu_dev())))
     return 0
 
 
-def start_watchdog(pw, uid, a, restore, done, deadline):
+def start_watchdog(pw, uid, a, restore_state, done, deadline):
     args = [sys.executable, "-I", SELF, "--stage", "watchdog", "--parent", str(os.getpid()),
-            "--user", pw.pw_name, "--uid", str(uid), "--hypr", a.hypr, "--restore", json.dumps(restore),
+            "--user", pw.pw_name, "--uid", str(uid), "--hypr", a.hypr, "--restore", json.dumps(restore_state),
             "--done", done, "--deadline", str(deadline)]
     try:
         return subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
@@ -555,28 +767,20 @@ def stage_root(a):
     if parse_mask(rd(IDLEMASK, "")) is None:
         print(f"psp-rpm: can't read {IDLEMASK}", file=sys.stderr)
         return 1
-    hw = Hw(Display(pw.pw_name, uid, a.hypr), psp)
+    conns = edp_connectors(amdgpu_dev())
+    if not conns:
+        print("psp-rpm: no connected eDP connector to verify the screen-off with", file=sys.stderr)
+        return 1
+    hw = Hw(Display(pw.pw_name, uid, a.hypr, conns), psp)
     start = hw.start()
-    restore = {"psp": psp, "control": start["control"], "delay": start["delay"], "debug": start["debug"]}
     t0 = time.time()
     res = {"phases": [], "problems": [], "errors": [], "address": os.path.basename(psp)}
     done_dir = tempfile.mkdtemp(prefix="psp-rpm-")
     done = os.path.join(done_dir, "done")
-    wd = start_watchdog(pw, uid, a, restore, done, BASELINE_S + ON_S + OFF_S + SUSPEND_WAIT_S + 240)
+    wd = start_watchdog(pw, uid, a, {"psp": psp, **{k: start[k] for k in ("control", "delay", "debug", "params")}},
+                        done, BASELINE_S + ON_S + 3 * OFF_S + 2 * SUSPEND_WAIT_S + 300)
     if wd is None:
         res["problems"].append("the watchdog did not start")
-
-    def back():
-        if not (wr(psp + "/power/control", start["control"] or "on")
-                and rd(psp + "/power/control") == (start["control"] or "on")):
-            res["problems"].append(f"could not put power/control back to {start['control']}")
-        if not (wr(P_DELAY, start["delay"] or 0) and rd(P_DELAY) == (start["delay"] or "0")):
-            res["problems"].append(f"could not put psp_rpm_delay_ms back to {start['delay']}")
-        if not (wr(P_DEBUG, start["debug"] or "N") and rd(P_DEBUG) == (start["debug"] or "N")):
-            res["problems"].append(f"could not put psp_rpm_debug back to {start['debug']}")
-        if not hw.display.back_on():
-            res["panel_restore"] = False
-            res["problems"].append("the screen did not read back on (hyprctl): press a key")
 
     def on_term(*_):
         raise KeyboardInterrupt
@@ -593,7 +797,10 @@ def stage_root(a):
         # From here on nothing interrupts the restore or the results.
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, signal.SIG_IGN)
-        back()
+        probs = restore(start, psp, hw.display)
+        res["problems"] += probs
+        if any("screen" in x for x in probs):
+            res["panel_restore"] = False
         try:
             open(done, "w").close()
         except OSError:
@@ -629,47 +836,57 @@ def phase(res, name):
 
 def verdict(res):
     """-> (verdict, facts). See the module docstring."""
-    a, b, c = phase(res, "a"), phase(res, "b"), phase(res, "c")
+    a, d, e = phase(res, "a"), phase(res, "d"), phase(res, "e")
     ck = res.get("checks") or {}
     ver, tpm = ck.get("version"), ck.get("tpm")
-    panel = all(p["panel_back"] for p in res.get("phases", [])) and res.get("panel_restore", True)
+    scr = res.get("screen") or {}
+    panel = res.get("panel_restore", True) and scr.get("back", True) is not False
     charger = any(st != "Discharging" for p in res.get("phases", []) for st in p["status"])
+    sus_cells = [p for p in res.get("phases", []) if p["psp_suspended"]]
     f = {"panel": panel,
          "version_ok": None if not ver else ver["value"] == ver["expected"] and ver["value"] not in ("", "ff.ff.ff.ff"),
          "tpm_ok": None if not tpm else tpm["ok"],
-         "screen_off": None if not c else (c["idle"][10] or 0) >= IDLE_SHARE,
-         "idle16": {p["phase"]: p["idle"][16] for p in (b, c) if p},
+         "invalid": [p["phase"] for p in res.get("phases", []) if not p["screen_ok"]],
+         "awake": [p["phase"] for p in sus_cells if (p["suspended_share"] or 0) < IDLE_SHARE],
+         "idle16": {p["phase"]: p["idle"][16] for p in res.get("phases", [])},
+         "bit16_cells": [p["phase"] for p in sus_cells if (p["idle"][16] or 0) >= IDLE_SHARE],
+         "display_idle_d": None if not d else (d["idleopt_share"] or 0) >= IDLE_SHARE,
+         "e16": None if not e else (e["idle"][16] or 0) >= IDLE_SHARE,
          "d_sock": {p["phase"]: (None if a is None or p["sock"] is None or a["sock"] is None else p["sock"] - a["sock"])
-                    for p in (b, c) if p}}
+                    for p in res.get("phases", []) if p["phase"] != "a"}}
     reached = res.get("reached") or {}
     if not panel or res.get("errors") or f["version_ok"] is False or f["tpm_ok"] is False:
         return "FAIL", f
-    if res.get("problems") or charger or not a:
+    if res.get("problems") or charger or not a or f["invalid"] or False in (scr.get("off"), scr.get("off2")):
         return "INCOMPLETE", f
     if not reached.get("ok"):
         return "NOT SUSPENDED", f
-    if not b or not c or not ver or f["screen_off"] is False:
+    if not d or not e or not ver:
         return "INCOMPLETE", f
-    if any((x or 0) >= IDLE_SHARE for x in f["idle16"].values()):
+    if f["awake"]:
+        return "PSP KEPT AWAKE", f
+    if f["bit16_cells"]:
         return "BIT 16 IDLE", f
+    if not f["display_idle_d"]:
+        return "NO DISPLAY IDLE", f
     return "NO EFFECT", f
 
 
 WHAT = {"FAIL": "FAIL", "INCOMPLETE": "INCOMPLETE",
         "NOT SUSPENDED": "NOT SUSPENDED (the PSP never reached runtime_status=suspended)",
-        "NO EFFECT": "NO EFFECT (the PSP in D3hot, bit 16 still not idle)",
+        "PSP KEPT AWAKE": "PSP KEPT AWAKE (suspended in under 80% of a cell's reads; see the wakers)",
+        "NO DISPLAY IDLE": "NO DISPLAY IDLE (Idle optimization did not stay 1 in d; see the trace)",
+        "NO EFFECT": "NO EFFECT (display idle and the PSP in D3hot, bit 16 still not idle)",
         "BIT 16 IDLE": "BIT 16 IDLE with the PSP in runtime D3hot"}
 
 
 def where16(f):
-    on, off = (f["idle16"].get(k) or 0 for k in ("b", "c"))
-    if on >= IDLE_SHARE and off >= IDLE_SHARE:
-        return "with the screen on and off"
-    if off >= IDLE_SHARE:
-        return "with the screen off only"
-    if on >= IDLE_SHARE:
-        return "with the screen on only"
-    return "in neither"
+    cells = f["bit16_cells"]
+    s = "in " + ", ".join(cells)
+    if "d" in cells:
+        s += "; with the PSP back in D0 (e): " + ("idle too, so display idle alone does it" if f["e16"]
+                                                 else "not idle, so it needs the PSP in D3hot")
+    return s
 
 
 def smu_cell(met):
@@ -696,16 +913,20 @@ def report(res, kernel, dry):
     head = WHAT[v] + (f", {where16(f)}" if v == "BIT 16 IDLE" else "")
     o = [f"## PSP runtime D3hot on the G16: {head} (#249)", "",
          f"Kernel {kernel}, on battery. PSP function {res.get('address', '?')} (1022:17E0) with "
-         f"ccp.psp_rpm_delay_ms={DELAY_MS} and power/control=auto (patch 9906); idlemask at 10 Hz, socket "
-         "power from gpu_metrics, battery watts." + (" **Dry run: simulated readings.**" if dry else ""), "",
+         f"ccp.psp_rpm_delay_ms={DELAY_MS} and power/control=auto (9906); display idle with amdgpu.dcn35_s0i2=1 "
+         "and amdgpu.dm_idle_all_off=1 (9901, 9902, 9908); idlemask at 10 Hz, socket power from gpu_metrics, "
+         "battery watts. Screen off verified by Hyprland's dpmsStatus and the eDP connector's kernel DPMS "
+         "state." + (" **Dry run: simulated readings.**" if dry else ""), "",
          "- runtime_status=suspended: " + (f"after {reached['secs']} s, power_state {reached.get('power_state') or '?'}"
                                           if reached.get("ok") else "**not reached**" if reached else "not tried"),
-         f"- bit 16 idle with the PSP suspended: screen on {fmt_share(f['idle16'].get('b'))}, screen off "
-         f"{fmt_share(f['idle16'].get('c'))} of reads",
-         f"- screen really off in (c) (bit 10 idle in most reads): "
-         + {True: "yes", False: "**NO**", None: "-"}[f["screen_off"]],
-         f"- socket power against the baseline (a): screen on {sign(f['d_sock'].get('b'))}, screen off "
-         f"{sign(f['d_sock'].get('c'))}"]
+         "- bit 16 idle: " + ", ".join(f"{k} {fmt_share(x)}" for k, x in f["idle16"].items()) + " of reads",
+         "- display idle kept in d (Idle optimization 1 in most reads): "
+         + {True: "yes", False: "**NO**", None: "-"}[f["display_idle_d"]],
+         "- screen-off cells verified off: " + ("all" if not f["invalid"] else "**INVALID: " + ", ".join(f["invalid"]) + "**"),
+         "- socket power against the baseline (a): " + ", ".join(f"{k} {sign(x)}" for k, x in f["d_sock"].items())]
+    missing = [k for k, x in (res.get("has") or {}).items() if not x]
+    if missing:
+        o.append("- parameters this kernel lacks (skipped): " + ", ".join(missing))
     ver, tpm = ck.get("version"), ck.get("tpm")
     if ver:
         o.append(f"- `{ver['attr']}` read with the PSP {ver['status_before']}: {ver['value'] or '(empty)'} "
@@ -716,25 +937,37 @@ def report(res, kernel, dry):
                  + ({True: "ok", False: "**FAILED**", None: "no TPM PCR file"}[tpm["ok"]])
                  + ("" if tpm["secs"] is None else f", {tpm['secs'] * 1000:.0f} ms")
                  + f"; the PSP {tpm['status_after']} after it")
-    o += [f"- panel back every time: {'yes' if f['panel'] else 'NO'}",
+    o += [f"- panel back: {'yes' if f['panel'] else 'NO'}",
           f"- ccp / TEE / TPM / amdgpu errors in the kernel log: {len(res.get('errors') or []) or 'none'}", "",
-          "| phase | what | PSP suspended | suspends | resumes | runtime suspended ms | bit 16 | bit 10 "
-          "| never idle | socket W | battery W | SMU timein_s0i2 | idlemask (most read) |",
-          "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+          "| phase | what | screen off verified | PSP suspended | suspends | resumes | Idle optimization "
+          "before -> after (share) | bit 5 | bit 16 | bit 20 | never idle | socket W | battery W | SMU timein_s0i2 "
+          "| idlemask (most read) |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for p in res.get("phases", []):
         masks = ", ".join(f"{m} x{n}" for m, n in p["masks"][:2])
-        sms = p["rpm_ms"].get("suspended_ms")
-        o.append(f"| {p['phase']} | {p['label']} | {fmt_share(p['suspended_share'])} | {p['suspends']} | "
-                 f"{p['resumes']} | {'-' if sms is None else sms} of {p['secs'] * 1000} | {fmt_share(p['idle'][16])} | "
-                 f"{fmt_share(p['idle'][10])} | {bits_list(p['never_idle'])} | "
-                 f"{'-' if p['sock'] is None else '%.2f' % p['sock']} | {'-' if p['bat'] is None else '%.2f' % p['bat']} | "
-                 f"{smu_cell(p.get('smu'))} | {masks} |")
+        scr = "-" if not p["screen_off"] else ("yes" if p["screen_ok"] else "**INVALID**")
+        o.append(f"| {p['phase']} | {p['label']} | {scr} | {fmt_share(p['suspended_share'])} | {p['suspends']} | "
+                 f"{p['resumes']} | {p['ips_before']} -> {p['ips_after']} ({fmt_share(p['idleopt_share'])}) | "
+                 f"{fmt_share(p['idle'][5])} | {fmt_share(p['idle'][16])} | {fmt_share(p['idle'][20])} | "
+                 f"{bits_list(p['never_idle'])} | {'-' if p['sock'] is None else '%.2f' % p['sock']} | "
+                 f"{'-' if p['bat'] is None else '%.2f' % p['bat']} | {smu_cell(p.get('smu'))} | {masks} |")
     wakers = {}
     for p in res.get("phases", []) + ([ck["events"]] if ck.get("events") else []):
         for w, n in p.get("wakers", {}).items():
             wakers[w] = wakers.get(w, 0) + n
     o += ["", "Who woke the PSP (psp_rpm_debug): "
           + ("; ".join(f"{w} x{n}" for w, n in sorted(wakers.items(), key=lambda x: -x[1])) or "nobody")]
+    for p in res.get("phases", []):
+        tr = p.get("trace") or {}
+        if not p["screen_off"]:
+            continue
+        o += ["", f"Display idle trace, {p['phase']} (dm_idle_trace): {tr.get('allow', 0)} allows, "
+              f"{tr.get('disallow', 0)} disallows, {tr.get('reallows', 0)} re-allows by 9908's worker"
+              + ("; " + "; ".join(f"{k} x{n}" for k, n in sorted(tr.get('by', {}).items(), key=lambda x: -x[1]))
+                 if tr.get("by") else "")]
+        if tr.get("lines"):
+            o += ["", f"<details><summary>{p['phase']}: the first {len(tr['lines'])} trace lines</summary>", "",
+                  "```", *tr["lines"], "```", "", "</details>"]
     st, rs = res.get("start"), res.get("restored")
     if st and rs:
         o += ["", f"Before: power/control {st['control']}, psp_rpm_delay_ms {st['delay']}, psp_rpm_debug {st['debug']}, "
@@ -760,7 +993,6 @@ def front(a):
         res = {"phases": [], "problems": [], "errors": [], "address": "0000:65:00.2"}
         hw = SimHw()
         res.update(run(hw, print, True))
-        hw.set_rpm(0, "N", "on")
         res["restored"] = {"control": "on", "status": "active", "delay": "0", "debug": "N"}
         res = normalize(json.loads(json.dumps(res)))
         kernel += " (dry run)"
@@ -771,6 +1003,8 @@ def front(a):
             bad.append("not a GA605 (the G16)")
         if rd(P_DELAY) is None:
             bad.append("no ccp.psp_rpm_delay_ms: boot a kernel with patch 9906 (7.2.8-9.110 or later)")
+        if rd(P_IDLE) not in ("Y", "N"):
+            bad.append("no amdgpu.dm_idle_all_off: boot a kernel with patches 9901-9908 (7.2.8-9.110 or later)")
         if not psp_dev():
             bad.append("no PSP function (1022:17E0) bound to ccp")
         if not bat or rd(bat + "/status") != "Discharging":
@@ -786,9 +1020,10 @@ def front(a):
         os.makedirs(state, exist_ok=True)
         out = tempfile.mkdtemp(prefix="psp-rpm-", dir=state)
         args = [sys.executable, "-I", SELF, "--stage", "root", "--out", out, "--hypr", sig]
-        mins = (BASELINE_S + ON_S + OFF_S + SUSPEND_WAIT_S + 40) // 60 + 1
+        mins = (BASELINE_S + ON_S + 3 * OFF_S + 2 * SUSPEND_WAIT_S + 60) // 60 + 1
         why = (f"G16 PSP runtime D3hot test (#249): ccp.psp_rpm_delay_ms={DELAY_MS} and power/control=auto on the "
-               f"PSP, the screen off for {OFF_S} s, about {mins} minutes; everything goes back to its value now")
+               f"PSP, the screen off for {3 * OFF_S} s with and without display idle, about {mins} minutes; "
+               "everything goes back to its value now")
         if os.environ.get("G16_POLKIT_REASON"):
             cmd = [os.environ["G16_POLKIT_REASON"], "run", why, "--", "pkexec", *args]
         elif os.environ.get("G16_ROOT") == "sudo":

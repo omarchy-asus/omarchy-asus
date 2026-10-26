@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Mon, 26 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: drm/amd/display: keep idle optimizations
+ allowed while every CRTC is off, and trace their changes (default off)
+
+EXPERIMENTAL, DEFAULT OFF (local carry for ROG Zephyrus G16 GA605KM idle
+power testing; not submitted upstream).
+
+On the G16 with 9902's amdgpu.dm_idle_all_off=1 and the panel off (DPMS,
+Hyprland; the connector's dpms reads Off), amdgpu_dm_ips_status's "Idle
+optimization" read 0 for the whole 30 s. 9902 allows idle once, at the end
+of the all-off commit, but nothing keeps it allowed:
+
+- every DC register access (dm_read_reg_func()/dm_write_reg_func() ->
+  amdgpu_dm_exit_ips_for_hw_access() -> dc_exit_ips_for_hw_access()), every
+  display IRQ state change (amdgpu_dm_set_crtc_irq_state()) and the HPD
+  and backlight paths disallow idle again;
+- with no live CRTC, no vblank event drives the ISM, and the ISM never
+  allows idle for a CRTC without a stream (dm_ism_get_sso_delay() and the
+  idle-allow delay are 0, so OPTIMIZED_IDLE commits nothing);
+- the CRTC's vblank-off can land after the commit's check, through the
+  vblank control worker.
+
+With dm_idle_all_off set, a delayed work now re-checks: right after a
+commit that leaves no stream, when the vblank IRQ count drops to 0, and
+then once a second while no stream comes back. When the vblank IRQ count
+is 0, the DC state has no stream, idle is disallowed and the stock headless
+idle worker isn't running, it allows idle optimizations again. It stops
+when a stream comes back (the next modeset disallows idle first, as
+before), when the parameter is cleared, or in suspend; dm_suspend()
+cancels it before taking dc_lock, amdgpu_dm_fini() disables it.
+
+Caveat (as with the headless idle worker this leaves alone): with the
+panel off and idle allowed, an external display plugged in may not be
+detected until the next disallow (a register access, DPMS on).
+
+  amdgpu.dm_idle_all_off_debug (bool, 0644, default off)
+    logs each re-allow: "dm_idle_all_off: idle re-allowed #N".
+  amdgpu.dm_idle_trace (bool, 0644, default off)
+    logs every change of DC's idle optimizations (an allow or disallow
+    that differs from the current state, from dc_allow_idle_optimizations()
+    and dc_exit_ips_for_hw_access()) with the call site, the call chain,
+    the vblank IRQ count, the active CRTCs and the stream count:
+    "dm_idle_trace: disallow by <caller> -> allowed=0; vblank irqs 0,
+    active CRTCs 0, streams 0; <chain>". Calls that change nothing are not
+    logged. Chatty with a display on; meant for short screen-off runs.
+
+With all three parameters at 0 the driver takes the stock path (the work
+is initialised but never queued; the trace check is one READ_ONCE()).
+
+Tracked in omarchy-asus #353 (refs #249).
+---
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -74,6 +74,7 @@
+ #include <linux/moduleparam.h>
+ #include <linux/types.h>
+ #include <linux/pm_runtime.h>
++#include <linux/stacktrace.h>
+ #include <linux/pci.h>
+ #include <linux/power_supply.h>
+ #include <linux/firmware.h>
+@@ -175,6 +176,7 @@
+ /* basic init/fini API */
+ static int amdgpu_dm_init(struct amdgpu_device *adev);
+ static void amdgpu_dm_fini(struct amdgpu_device *adev);
++static void dm_idle_all_off_worker(struct work_struct *work);
+ static bool is_freesync_video_mode(const struct drm_display_mode *mode, struct amdgpu_dm_connector *aconnector);
+ static void reset_freesync_config_for_crtc(struct dm_crtc_state *new_crtc_state);
+ static struct amdgpu_i2c_adapter *
+@@ -2111,6 +2113,8 @@
+ 
+ 	mutex_init(&adev->dm.dpia_aux_lock);
+ 	mutex_init(&adev->dm.dc_lock);
++	/* EXPERIMENTAL: amdgpu.dm_idle_all_off's re-check (9908) */
++	INIT_DELAYED_WORK(&adev->dm.idle_all_off_work, dm_idle_all_off_worker);
+ 	mutex_init(&adev->dm.audio_lock);
+ 
+ 	spin_lock_init(&adev->dm.dmub_lock);
+@@ -2490,6 +2494,9 @@
+ {
+ 	int i;
+ 
++	/* EXPERIMENTAL (9908): the worker takes dc_lock and uses dm->dc */
++	disable_delayed_work_sync(&adev->dm.idle_all_off_work);
++
+ 	if (adev->dm.vblank_control_workqueue) {
+ 		destroy_workqueue(adev->dm.vblank_control_workqueue);
+ 		adev->dm.vblank_control_workqueue = NULL;
+@@ -3568,6 +3575,9 @@
+ 	struct amdgpu_device *adev = ip_block->adev;
+ 	struct amdgpu_display_manager *dm = &adev->dm;
+ 
++	/* EXPERIMENTAL (9908): before dc_lock, the worker takes it */
++	cancel_delayed_work_sync(&dm->idle_all_off_work);
++
+ 	if (amdgpu_in_reset(adev)) {
+ 		enum dc_status res;
+ 
+@@ -11388,6 +11398,101 @@
+ 	       adev->dm.dc->current_state->stream_count == 0;
+ }
+ 
++/*
++ * EXPERIMENTAL: with dm_idle_all_off, keep idle optimizations allowed while
++ * every CRTC is off. Allowing them once at the end of the all-off commit is
++ * not enough: every DC register access (dm_read_reg_func()/dm_write_reg_func()
++ * -> dc_exit_ips_for_hw_access()), every display IRQ state change and every
++ * HPD or backlight call disallows them again, and with no live CRTC no vblank
++ * event of the ISM ever re-allows them. The vblank-off of the CRTC that went
++ * off can also land after the commit's check. So a delayed work re-checks:
++ * right after the all-off commit, when the vblank IRQ count drops to 0, and
++ * then once a second while every CRTC stays off. It stops when a stream
++ * comes back (the next modeset disallows idle first, as before) or the
++ * parameter is cleared. It leaves the stock headless idle worker alone,
++ * whose periodic disallow keeps hotplug detection working; without it an
++ * external display plugged in with the panel off may go undetected until
++ * the next disallow (a register access, a key press turning DPMS on).
++ */
++#define DM_IDLE_ALL_OFF_RECHECK_MS	1000
++
++static bool dm_idle_all_off_debug;
++module_param(dm_idle_all_off_debug, bool, 0644);
++MODULE_PARM_DESC(dm_idle_all_off_debug,
++	"EXPERIMENTAL: log each idle re-allow by amdgpu.dm_idle_all_off (0 = off (default), 1 = on)");
++
++/*
++ * EXPERIMENTAL: amdgpu.dm_idle_trace logs every change of DC's idle
++ * optimizations (an allow or disallow that differs from the current state,
++ * from dc_allow_idle_optimizations() and dc_exit_ips_for_hw_access()) with
++ * the call site, the call chain, the vblank IRQ count, the active CRTCs and
++ * the stream count. Calls that change nothing are not logged. Very chatty
++ * with a display on (each register access while idle is allowed disallows
++ * it); meant for short screen-off measurements. Default off.
++ */
++bool amdgpu_dm_idle_trace;
++module_param_named(dm_idle_trace, amdgpu_dm_idle_trace, bool, 0644);
++MODULE_PARM_DESC(dm_idle_trace,
++	"EXPERIMENTAL: log every change of DC idle optimizations with its caller (0 = off (default), 1 = on)");
++
++void amdgpu_dm_trace_idle_allow(struct dc *dc, bool allow, const char *caller_name)
++{
++	struct amdgpu_device *adev = dc->ctx->driver_context;
++	unsigned long st[4] = {};
++	unsigned int active = 0;
++	struct drm_crtc *crtc;
++
++	stack_trace_save(st, ARRAY_SIZE(st), 1);
++	/* Unlocked reads: a debug log, it may race with a commit */
++	drm_for_each_crtc(crtc, adev_to_drm(adev))
++		if (crtc->state && READ_ONCE(crtc->state->active))
++			active++;
++
++	drm_info(adev_to_drm(adev),
++		 "dm_idle_trace: %s by %s -> allowed=%d; vblank irqs %u, active CRTCs %u, streams %d; %pS <- %pS <- %pS <- %pS\n",
++		 allow ? "allow" : "disallow", caller_name, dc->idle_optimizations_allowed,
++		 adev->dm.active_vblank_irq_count, active,
++		 dc->current_state ? (int)dc->current_state->stream_count : -1,
++		 (void *)st[0], (void *)st[1], (void *)st[2], (void *)st[3]);
++}
++
++void amdgpu_dm_idle_all_off_kick(struct amdgpu_display_manager *dm, unsigned int delay_ms)
++{
++	if (READ_ONCE(dm_idle_all_off))
++		mod_delayed_work(system_dfl_wq, &dm->idle_all_off_work,
++				 msecs_to_jiffies(delay_ms));
++}
++
++static void dm_idle_all_off_worker(struct work_struct *work)
++{
++	struct amdgpu_display_manager *dm =
++		container_of(work, struct amdgpu_display_manager, idle_all_off_work.work);
++	struct amdgpu_device *adev = dm->adev;
++	bool again = false;
++
++	mutex_lock(&dm->dc_lock);
++	if (!READ_ONCE(dm_idle_all_off) || !dm->dc || adev->in_suspend ||
++	    amdgpu_in_reset(adev) || !dm->dc->current_state ||
++	    dm->dc->current_state->stream_count != 0)
++		goto out;
++
++	again = true;
++	if (dm->idle_workqueue && dm->idle_workqueue->running)
++		goto out;
++	if (dm->active_vblank_irq_count != 0 || dm->dc->idle_optimizations_allowed)
++		goto out;
++
++	dc_allow_idle_optimizations(dm->dc, true);
++	dm->idle_all_off_reallows++;
++	if (READ_ONCE(dm_idle_all_off_debug))
++		drm_info(adev_to_drm(adev), "dm_idle_all_off: idle re-allowed #%u (allowed=%d)\n",
++			 dm->idle_all_off_reallows, dm->dc->idle_optimizations_allowed);
++out:
++	mutex_unlock(&dm->dc_lock);
++	if (again)
++		amdgpu_dm_idle_all_off_kick(dm, DM_IDLE_ALL_OFF_RECHECK_MS);
++}
++
+ static void amdgpu_dm_commit_streams(struct drm_atomic_commit *state,
+ 					struct dc_state *dc_state)
+ {
+@@ -11570,6 +11675,9 @@
+ 	/* Allow idle optimization when vblank count is 0 for display off */
+ 	if ((dm->active_vblank_irq_count == 0) && amdgpu_dm_idle_headless(dm->adev))
+ 		dc_allow_idle_optimizations(dm->dc, true);
++	/* EXPERIMENTAL (9908): keep it allowed while every CRTC stays off */
++	if (dc_state->stream_count == 0)
++		amdgpu_dm_idle_all_off_kick(dm, 0);
+ 	mutex_unlock(&dm->dc_lock);
+ 
+ 	for_each_new_crtc_in_state(state, crtc, new_crtc_state, i) {
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.h
+@@ -750,6 +750,19 @@
+ 	unsigned int hdmi_frl_status_polling_delay_ms;
+ 
+ 	/**
++	 * @idle_all_off_work:
++	 *
++	 * EXPERIMENTAL (amdgpu.dm_idle_all_off): re-allows idle optimizations
++	 * while every CRTC is off, after anything disallowed them.
++	 */
++	struct delayed_work idle_all_off_work;
++	/**
++	 * @idle_all_off_reallows: times @idle_all_off_work found idle
++	 * disallowed with every CRTC off and allowed it again
++	 */
++	unsigned int idle_all_off_reallows;
++
++	/**
+ 	 * @dm_boot_time_crc_info:
+ 	 *
+ 	 * Buffer info for the boot time crc.
+@@ -1197,6 +1210,7 @@
+ 
+ bool amdgpu_dm_is_headless(struct amdgpu_device *adev);
+ bool amdgpu_dm_idle_headless(struct amdgpu_device *adev);
++void amdgpu_dm_idle_all_off_kick(struct amdgpu_display_manager *dm, unsigned int delay_ms);
+ 
+ void hdmi_cec_set_edid(struct amdgpu_dm_connector *aconnector);
+ void hdmi_cec_unset_edid(struct amdgpu_dm_connector *aconnector);
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_crtc.c
+@@ -230,6 +230,9 @@
+ 			dm->active_vblank_irq_count--;
+ 		amdgpu_dm_ism_commit_event(&vblank_work->acrtc->ism,
+ 				DM_ISM_EVENT_ENTER_IDLE_REQUESTED);
++		/* EXPERIMENTAL (9908): the last vblank IRQ is off */
++		if (dm->active_vblank_irq_count == 0)
++			amdgpu_dm_idle_all_off_kick(dm, 0);
+ 	}
+ 
+ 	mutex_unlock(&dm->dc_lock);
+diff --git a/drivers/gpu/drm/amd/display/dc/core/dc.c b/drivers/gpu/drm/amd/display/dc/core/dc.c
+--- a/drivers/gpu/drm/amd/display/dc/core/dc.c
++++ b/drivers/gpu/drm/amd/display/dc/core/dc.c
+@@ -6510,6 +6510,10 @@
+ 		DC_LOG_DEBUG("%s: %s\n", __func__, allow ? "enabled" : "disabled");
+ 	}
+ 
++	/* EXPERIMENTAL: amdgpu.dm_idle_trace (9908) */
++	if (READ_ONCE(amdgpu_dm_idle_trace))
++		amdgpu_dm_trace_idle_allow(dc, allow, caller_name);
++
+ 	// log idle clocks and sub vp pipe types at idle optimization time
+ 	if (dc->clk_mgr != NULL && dc->clk_mgr->funcs->get_hard_min_fclk)
+ 		idle_fclk_khz = dc->clk_mgr->funcs->get_hard_min_fclk(dc->clk_mgr);
+diff --git a/drivers/gpu/drm/amd/display/dc/dc.h b/drivers/gpu/drm/amd/display/dc/dc.h
+--- a/drivers/gpu/drm/amd/display/dc/dc.h
++++ b/drivers/gpu/drm/amd/display/dc/dc.h
+@@ -2924,6 +2924,9 @@
+ 
+ void dc_allow_idle_optimizations_internal(struct dc *dc, bool allow, const char *caller_name);
+ void dc_exit_ips_for_hw_access_internal(struct dc *dc, const char *caller_name);
++/* EXPERIMENTAL: amdgpu.dm_idle_trace, in amdgpu_dm.c */
++extern bool amdgpu_dm_idle_trace;
++void amdgpu_dm_trace_idle_allow(struct dc *dc, bool allow, const char *caller_name);
+ bool dc_dmub_is_ips_idle_state(struct dc *dc);
+ 
+ /* set min and max memory clock to lowest and highest DPM level, respectively */

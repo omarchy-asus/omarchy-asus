@@ -18,7 +18,7 @@ Compared with upstream, only:
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906 and 9907.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -49,6 +49,7 @@ Compared with upstream, only:
 14. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
 15. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
 16. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
+17. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -325,10 +326,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902, 9903, 9904, 9905, 9906 and 9907, last.
+   9900, then 9901, 9902, 9903, 9904, 9905, 9906, 9907 and 9908, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -611,12 +612,14 @@ display keep working, the shape for upstream is a ccp runtime-PM patch for PSP-o
 **Remove** if the G16 shows no effect.
 
 **Test** (on the G16 booted on this kernel, on battery): `g16-test/psp-rpm` (one root
-prompt, about 3 minutes): a 15 s baseline, then `psp_rpm_delay_ms=2000` and
+prompt, about 4 minutes): a 15 s baseline, then `psp_rpm_delay_ms=2000` and
 `power/control=auto`, a check that the function reaches `runtime_status=suspended`, 60 s
-screen on and 30 s with the screen off (DPMS; idlemask bit 10 must read 1) reading the
-idlemask (bit 16), socket power, battery watts and the PSP's suspend/resume counts and
-wakers; then, still suspended, one fTPM PCR read and one firmware-version read (which
-resumes it), and everything goes back.
+screen on, then 30 s cells with the screen off (DPMS, verified by Hyprland and the eDP
+connector's kernel DPMS state): display idle parameters 0 (c), display idle re-allowed
+(9901/9902/9908, d) and the same with the PSP back in D0 (e). It reads the idlemask (bits 5,
+16, 20), "Idle optimization", socket power, battery watts and the PSP's suspend/resume counts
+and wakers, with 9908's idle trace in the screen-off cells; then, the PSP suspended again, one
+fTPM PCR read and one firmware-version read (which resumes it), and everything goes back.
 
 ## EXPERIMENTAL: 9907 the SMU metrics table at runtime (debug only, #249)
 
@@ -648,6 +651,46 @@ accepts it outside a suspend is what the first read on the G16 shows.
 
 **Test:** `g16-test/psp-rpm` restarts the logging at each phase and reads the file at its
 end (the report's `SMU timein_s0i2` column, or the SMU's refusal).
+
+## EXPERIMENTAL: 9908 display idle kept allowed with every CRTC off, and an idle trace (default off, #353)
+
+`9908-EXPERIMENTAL-drm-amd-display-keep-idle-allowed-with-every-crtc-off-default-off.patch`
+(ours, compile-tested only, after 9907, on top of 9902). It touches `amdgpu_dm.c`, `amdgpu_dm.h`,
+`amdgpu_dm_crtc.c`, `dc/core/dc.c` and `dc/dc.h`.
+
+**Why.** On 9.109 with `dm_idle_all_off=1` and `dcn35_s0i2=1`, the panel verified off (Hyprland
+and the connector's kernel DPMS state), `amdgpu_dm_ips_status`'s "Idle optimization" read 0 for
+the whole 30 s. 9902 allows idle once, at the end of the all-off commit, and nothing keeps it
+allowed: every DC register access (`dm_read_reg_func()`/`dm_write_reg_func()` ->
+`dc_exit_ips_for_hw_access()`), every display IRQ state change and the HPD and backlight paths
+disallow it again; with no live CRTC no vblank event drives the ISM, which never allows idle for
+a CRTC without a stream; and the CRTC's vblank-off can land after the commit's check.
+
+**What.** With `dm_idle_all_off` set, a delayed work re-checks right after a commit that leaves
+no stream, when the vblank IRQ count drops to 0, and then once a second while no stream comes
+back. With the vblank IRQ count at 0, no stream, idle disallowed and the stock headless idle
+worker not running, it allows idle again. It stops when a stream comes back (the next modeset
+disallows idle first, as before), when the parameter is cleared, or in suspend (`dm_suspend()`
+cancels it before taking dc_lock; `amdgpu_dm_fini()` disables it). Two debug parameters:
+
+- `amdgpu.dm_idle_all_off_debug` (bool, 0644, default off): logs each re-allow
+  (`dm_idle_all_off: idle re-allowed #N`).
+- `amdgpu.dm_idle_trace` (bool, 0644, default off): logs every change of DC's idle
+  optimizations (an allow or disallow that differs from the current state) with the call site,
+  a four-entry call chain, the vblank IRQ count, the active CRTCs and the stream count. Calls
+  that change nothing are not logged. Chatty with a display on: for short screen-off runs.
+
+**Caveat.** As with the stock headless idle worker (which this leaves alone): with the panel off
+and idle allowed, an external display plugged in may not be detected until the next disallow (a
+register access, DPMS on). The re-check wakes a CPU once a second while every CRTC is off.
+
+**Default behaviour.** None: with the three parameters at 0 the work is never queued and the
+trace is one `READ_ONCE()`.
+
+**Upstream.** Not submitted, with 9902. **Remove** with 9902.
+
+**Test:** `g16-test/psp-rpm`, cells d and e (display idle re-allowed, the PSP runtime-suspended
+and in D0), with `dm_idle_trace` and `dm_idle_all_off_debug` on in the screen-off cells.
 
 ## 0810: panel_power_savings applies when written (#172)
 

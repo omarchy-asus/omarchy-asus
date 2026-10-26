@@ -55,6 +55,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [EXPERIMENTAL idlemask trace after each PCI device's noirq suspend](#kernel-9905-idlemask-noirq-devices) | linux-omarchy | 9905 | RC only | ours-only |
 | [EXPERIMENTAL runtime PM for the PSP function](#kernel-9906-psp-rpm) | linux-omarchy | 9906 | RC only | not submitted |
 | [EXPERIMENTAL SMU metrics table at runtime](#kernel-9907-smu-metrics-runtime) | linux-omarchy | 9907 | RC only | ours-only |
+| [EXPERIMENTAL display idle kept allowed with every CRTC off](#kernel-9908-dm-idle-kept) | linux-omarchy | 9908 | RC only | not submitted |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -397,7 +398,7 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
   the delay at 0, or `power/control` at `on`, nothing changes. Idlemask bit 16 (the runtime
   deep-idle blocker) turns idle where s2idle's noirq phase puts this function in D3hot (#353);
   this tries that at runtime.
-- **Test:** `g16-test/psp-rpm` (on battery, about 3 minutes): bit 16, socket power and the
+- **Test:** `g16-test/psp-rpm` (on battery, about 4 minutes): bit 16, socket power and the
   PSP's suspend/resume counts with it runtime-suspended, screen on and off; an fTPM read and a
   version read with it suspended (#249).
 - **Upstream: not submitted.** An experiment; a ccp runtime-PM patch for PSP-only parts if it
@@ -416,6 +417,23 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Test:** `g16-test/psp-rpm` reads it at the end of each phase (#249).
 - **Upstream: ours-only.** A debug aid.
 - **Drop when:** with 9903.
+
+<a id="kernel-9908-dm-idle-kept"></a>
+### EXPERIMENTAL display idle kept allowed with every CRTC off (9908)
+
+- **Component:** `linux-omarchy`, `9908-EXPERIMENTAL-drm-amd-display-keep-idle-allowed-with-every-crtc-off-default-off.patch`,
+  after 9907, on top of 9902. RC only (since 9.110).
+- **What:** on 9.109, 9902's `dm_idle_all_off` allowed display idle once at the all-off commit
+  and every later register access, IRQ change or HPD/backlight call disallowed it for good
+  ("Idle optimization" 0 with the panel off). With the parameter set, a delayed work re-allows
+  idle while every CRTC stays off (after the commit, when the vblank IRQ count reaches 0, then
+  once a second). `amdgpu.dm_idle_trace` logs every idle allow/disallow with its caller, the
+  vblank IRQ count, the active CRTCs and the streams; `amdgpu.dm_idle_all_off_debug` logs each
+  re-allow. All default off. Caveat: hotplug of an external display with the panel off may go
+  undetected until the next disallow.
+- **Test:** `g16-test/psp-rpm`, cells d and e (#249, #353).
+- **Upstream: not submitted.** With 9902.
+- **Drop when:** with 9902.
 
 ## NVIDIA: nvidia-open-dkms
 
