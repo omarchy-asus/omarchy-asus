@@ -14,11 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.107` (kernel release string becomes `7.2.8-9.107-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.108` (kernel release string becomes `7.2.8-9.108-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904.
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -45,6 +45,7 @@ Compared with upstream, only:
 11. `9901-EXPERIMENTAL-...` after 9900 (see "EXPERIMENTAL: 9901" below).
 12. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
     "EXPERIMENTAL: 9903" below).
+13. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -321,10 +322,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902 and 9903, last.
+   9900, then 9901, 9902, 9903 and 9904, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -482,6 +483,39 @@ screen back on, then both at 0 and the screen off for 30 s (the control);
 stage lines. It samples the idlemask at 10 Hz, `amdgpu_dm_ips_status`, socket
 power and battery watts, restores everything on exit (Ctrl-C included), and a
 watchdog turns the screen back on and the parameters off if it dies.
+
+## EXPERIMENTAL: 9904 idlemask trace between amdgpu's suspend and amd_pmc's prepare (debug only, #353)
+
+`9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch` (ours,
+compile-tested only, after 9903). It touches `kernel/power/suspend.c`,
+`drivers/acpi/x86/s2idle.c`, `drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c` and 9903's
+`include/linux/platform_data/x86/amd-pmc.h`.
+
+**What.** More stages for 9903's trace, same line format (`SMU idlemask <stage>: 0x...`),
+in the order an s2idle runs them: `suspend-late` (after every device's suspend_late),
+`s2idle-prepare` (after the s2idle platform prepare), `amdgpu-noirq` (end of amdgpu's
+suspend_noirq, s0ix only), `noirq` (after every device's suspend_noirq), then in
+`acpi_s2idle_prepare_late` one after each LPS0 `_DSM` call: `dsm-screen-off-amd` and
+`dsm-entry-amd` (AMD GUID), `dsm-screen-off` (Microsoft GUID func 3), `dsm-ms-entry`
+(func 7) and `dsm-entry` (func 5). A `_DSM` that did not run (its mask is below 1 or lacks
+the function) logs `SMU idlemask <stage>: not run (func N, mask M)`. The `_DSM` stages
+are AMD machines only, and the `_DSM` calls themselves are unchanged. A header helper,
+`amd_pmc_trace_idlemask_stage()`, looks up amd_pmc's trace with `symbol_get()`, so the
+built-in callers don't depend on amd_pmc.
+
+**Why.** On 9.107 the display bits (5, 16, 17-19, 20, 25) read idle at amd_pmc's
+`prepare` but not at `amdgpu-ip`. This shows whether a device's late or noirq suspend
+idles them, or the firmware's screen-off `_DSM`.
+
+**Default behaviour.** None: with `pm_debug_messages` at 0 nothing is read or logged.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9903, or once the stage
+that idles bit 16 is known.
+
+**Test** (on the G16 booted on this kernel, any power): `g16-test/idlemask-trace` needs
+one root prompt and takes about a minute. It sets `pm_debug_messages` to 1, suspends once
+for 15 s (`rtcwake -m freeze`), puts it back, and reports one row per stage, which `_DSM`
+calls ran, and the first stage where each of bits 5, 16, 17, 18, 19, 20 and 25 reads idle.
 
 ## 0810: panel_power_savings applies when written (#172)
 

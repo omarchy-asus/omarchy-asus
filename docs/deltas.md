@@ -51,6 +51,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [EXPERIMENTAL DCN 3.5 S0i2-ready display idle](#kernel-9901-dcn35-s0i2) | linux-omarchy | 9901 | RC only | not submitted |
 | [EXPERIMENTAL display idle with every CRTC off](#kernel-9902-dm-idle-all-off) | linux-omarchy | 9902 | RC only | not submitted |
 | [EXPERIMENTAL SMU idlemask trace through s2idle](#kernel-9903-idlemask-trace) | linux-omarchy | 9903 | RC only | ours-only |
+| [EXPERIMENTAL idlemask trace between amdgpu's suspend and the LPS0 calls](#kernel-9904-idlemask-window) | linux-omarchy | 9904 | RC only | ours-only |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -347,6 +348,22 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Test:** phase (d) of `g16-test/dm-idle-all-off`: the first stage where bit 16 reads idle (#353).
 - **Upstream: ours-only.** A debug aid.
 - **Drop when:** with 9902, or once the stage that sets bit 16 is known.
+
+<a id="kernel-9904-idlemask-window"></a>
+### EXPERIMENTAL idlemask trace between amdgpu's suspend and the LPS0 calls (9904)
+
+- **Component:** `linux-omarchy`, `9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch`,
+  after 9903. RC only (since 9.108).
+- **What:** more stages for 9903's trace, with `/sys/power/pm_debug_messages` at 1: after every
+  device's suspend_late (`suspend-late`), the s2idle prepare (`s2idle-prepare`), amdgpu's noirq
+  (`amdgpu-noirq`), every device's noirq (`noirq`), and each LPS0 `_DSM` call (`dsm-screen-off-amd`,
+  `dsm-screen-off`, `dsm-entry-amd`, `dsm-ms-entry`, `dsm-entry`; a call that didn't run logs
+  `not run`). On 9.107 the display bits turned idle between `amdgpu-ip` and `prepare`; this
+  narrows that window. With `pm_debug_messages` at 0 nothing is read or logged.
+- **Test:** `g16-test/idlemask-trace` (one 15 s suspend): the first stage where each display bit
+  reads idle (#353).
+- **Upstream: ours-only.** A debug aid.
+- **Drop when:** with 9903, or once the stage that idles bit 16 is known.
 
 ## NVIDIA: nvidia-open-dkms
 

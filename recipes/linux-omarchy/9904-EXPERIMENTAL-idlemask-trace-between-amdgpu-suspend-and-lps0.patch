@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Sun, 25 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: PM, ACPI: s2idle, drm/amdgpu: log the SMU
+ idlemask between amdgpu's suspend and amd_pmc's prepare (pm_debug_messages
+ only)
+
+EXPERIMENTAL, DEBUG ONLY (local carry for ROG Zephyrus G16 GA605KM idle
+power testing; not submitted upstream).
+
+On the G16, 9903's trace shows the display bits of the SMU idlemask
+turning idle between "amdgpu-ip" (the end of amdgpu's device suspend) and
+amd_pmc's "prepare". Narrow that window with more stages, in the order an
+s2idle runs them:
+
+  suspend-late         after dpm_suspend_late() (every suspend_late)
+  s2idle-prepare       after the s2idle platform prepare
+  amdgpu-noirq         at the end of amdgpu's suspend_noirq (s0ix only)
+  noirq                after dpm_suspend_noirq() (every suspend_noirq)
+  dsm-screen-off-amd   after the AMD-GUID LPS0 screen-off _DSM
+  dsm-screen-off       after the Microsoft-GUID screen-off _DSM (func 3)
+  dsm-entry-amd        after the AMD-GUID LPS0 entry _DSM
+  dsm-ms-entry         after the Microsoft-GUID Modern Standby entry (7)
+  dsm-entry            after the Microsoft-GUID LPS0 entry (func 5)
+
+Each stage logs "SMU idlemask <stage>: 0x..." through amd_pmc's exported
+amd_pmc_trace_idlemask(). A _DSM stage whose call did not run (its mask
+is below 1 or lacks the function) logs "SMU idlemask <stage>: not run
+(func N, mask M)" instead; the _DSM stages are AMD machines only. The new
+header helper amd_pmc_trace_idlemask_stage() looks the trace up with
+symbol_get(), so built-in code does not depend on amd_pmc. The _DSM calls
+themselves are unchanged.
+
+Nothing is read or logged unless /sys/power/pm_debug_messages is 1 during
+an s2idle. With it at 0 nothing changes.
+
+Tracked in omarchy-asus #353 (refs #249).
+---
+diff --git a/drivers/acpi/x86/s2idle.c b/drivers/acpi/x86/s2idle.c
+index b6b1dd76a..e6732d612 100644
+--- a/drivers/acpi/x86/s2idle.c
++++ b/drivers/acpi/x86/s2idle.c
+@@ -18,6 +18,7 @@
+ #include <linux/acpi.h>
+ #include <linux/device.h>
+ #include <linux/dmi.h>
++#include <linux/platform_data/x86/amd-pmc.h>
+ #include <linux/suspend.h>
+ 
+ #include "../sleep.h"
+@@ -535,6 +536,27 @@ static int acpi_s2idle_begin_lps0(void)
+ 	return acpi_s2idle_begin();
+ }
+ 
++/*
++ * EXPERIMENTAL: after an LPS0 _DSM call on an AMD machine, log the SMU
++ * idlemask, or that the call did not run (its function is not in the mask).
++ * pm_debug_messages only.
++ */
++static void acpi_s2idle_trace_lps0_dsm(unsigned int func, int func_mask,
++				       const char *stage)
++{
++#if IS_ENABLED(CONFIG_AMD_PMC) && defined(CONFIG_PM_SLEEP_DEBUG)
++	if (!acpi_s2idle_vendor_amd() || !pm_debug_messages_should_print())
++		return;
++
++	/* The same test as the call: a mask below 1 runs nothing. */
++	if (func_mask > 0 && (func_mask & (1 << func)))
++		amd_pmc_trace_idlemask_stage(stage);
++	else
++		pm_pr_dbg("SMU idlemask %s: not run (func %u, mask %d)\n",
++			  stage, func, func_mask);
++#endif
++}
++
+ static int acpi_s2idle_prepare_late_lps0(void)
+ {
+ 	struct acpi_s2idle_dev_ops *handler;
+@@ -551,22 +573,37 @@ static int acpi_s2idle_prepare_late_lps0(void)
+ 					ACPI_LPS0_SCREEN_OFF_AMD :
+ 					ACPI_LPS0_SCREEN_OFF,
+ 					lps0_dsm_func_mask, lps0_dsm_guid);
++	acpi_s2idle_trace_lps0_dsm(ACPI_LPS0_SCREEN_OFF_AMD, lps0_dsm_func_mask,
++				   "dsm-screen-off-amd");
+ 
+ 	if (lps0_dsm_func_mask_microsoft > 0)
+ 		acpi_sleep_run_lps0_dsm(ACPI_LPS0_SCREEN_OFF,
+ 				lps0_dsm_func_mask_microsoft, lps0_dsm_guid_microsoft);
++	acpi_s2idle_trace_lps0_dsm(ACPI_LPS0_SCREEN_OFF, lps0_dsm_func_mask_microsoft,
++				   "dsm-screen-off");
+ 
+ 	/* LPS0 entry */
+ 	if (lps0_dsm_func_mask > 0 && acpi_s2idle_vendor_amd())
+ 		acpi_sleep_run_lps0_dsm(ACPI_LPS0_ENTRY_AMD,
+ 					lps0_dsm_func_mask, lps0_dsm_guid);
++	acpi_s2idle_trace_lps0_dsm(ACPI_LPS0_ENTRY_AMD, lps0_dsm_func_mask,
++				   "dsm-entry-amd");
+ 
+ 	if (lps0_dsm_func_mask_microsoft > 0) {
+ 		/* Modern Standby entry */
+ 		acpi_sleep_run_lps0_dsm(ACPI_LPS0_MS_ENTRY,
+ 				lps0_dsm_func_mask_microsoft, lps0_dsm_guid_microsoft);
++		acpi_s2idle_trace_lps0_dsm(ACPI_LPS0_MS_ENTRY,
++					   lps0_dsm_func_mask_microsoft, "dsm-ms-entry");
+ 		acpi_sleep_run_lps0_dsm(ACPI_LPS0_ENTRY,
+ 				lps0_dsm_func_mask_microsoft, lps0_dsm_guid_microsoft);
++		acpi_s2idle_trace_lps0_dsm(ACPI_LPS0_ENTRY,
++					   lps0_dsm_func_mask_microsoft, "dsm-entry");
++	} else {
++		acpi_s2idle_trace_lps0_dsm(ACPI_LPS0_MS_ENTRY,
++					   lps0_dsm_func_mask_microsoft, "dsm-ms-entry");
++		acpi_s2idle_trace_lps0_dsm(ACPI_LPS0_ENTRY,
++					   lps0_dsm_func_mask_microsoft, "dsm-entry");
+ 	}
+ 
+ 	if (lps0_dsm_func_mask > 0 && !acpi_s2idle_vendor_amd())
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+index 3569c8660..9f6cc26e9 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+@@ -55,6 +55,7 @@
+ #include "amdgpu_userq.h"
+ #include "amdgpu_userq_fence.h"
+ #include "../amdxcp/amdgpu_xcp_drv.h"
++#include <linux/platform_data/x86/amd-pmc.h>
+ 
+ /*
+  * KMS wrapper.
+@@ -2681,6 +2682,9 @@ static int amdgpu_pmops_suspend_noirq(struct device *dev)
+ 		return r;
+ 	}
+ 
++	if (adev->in_s0ix)
++		amd_pmc_trace_idlemask_stage("amdgpu-noirq");
++
+ 	return 0;
+ }
+ 
+diff --git a/include/linux/platform_data/x86/amd-pmc.h b/include/linux/platform_data/x86/amd-pmc.h
+index 380571504..fb36a83de 100644
+--- a/include/linux/platform_data/x86/amd-pmc.h
++++ b/include/linux/platform_data/x86/amd-pmc.h
+@@ -2,6 +2,9 @@
+ #ifndef _PLATFORM_DATA_X86_AMD_PMC_H
+ #define _PLATFORM_DATA_X86_AMD_PMC_H
+ 
++#include <linux/module.h>
++#include <linux/suspend.h>
++
+ /*
+  * EXPERIMENTAL: log the SMU idlemask at a stage of an s2idle, only while
+  * /sys/power/pm_debug_messages is on. Callers outside amd_pmc look it up
+@@ -9,4 +12,25 @@
+  */
+ void amd_pmc_trace_idlemask(const char *stage);
+ 
++/*
++ * EXPERIMENTAL: the same trace for any caller, built-in code included. A
++ * no-op unless pm_debug_messages is on during a suspend and amd_pmc is
++ * loaded and probed.
++ */
++static inline void amd_pmc_trace_idlemask_stage(const char *stage)
++{
++#if IS_ENABLED(CONFIG_AMD_PMC) && defined(CONFIG_PM_SLEEP_DEBUG)
++	void (*trace)(const char *stage);
++
++	if (!pm_debug_messages_should_print())
++		return;
++
++	trace = symbol_get(amd_pmc_trace_idlemask);
++	if (trace) {
++		trace(stage);
++		symbol_put(amd_pmc_trace_idlemask);
++	}
++#endif
++}
++
+ #endif /* _PLATFORM_DATA_X86_AMD_PMC_H */
+diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
+index 57c442686..86574af1a 100644
+--- a/kernel/power/suspend.c
++++ b/kernel/power/suspend.c
+@@ -27,6 +27,7 @@
+ #include <linux/syscore_ops.h>
+ #include <linux/swait.h>
+ #include <linux/ftrace.h>
++#include <linux/platform_data/x86/amd-pmc.h>
+ #include <trace/events/power.h>
+ #include <linux/compiler.h>
+ #include <linux/moduleparam.h>
+@@ -429,15 +430,22 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
+ 		pr_err("late suspend of devices failed\n");
+ 		goto Platform_finish;
+ 	}
++	if (state == PM_SUSPEND_TO_IDLE)
++		amd_pmc_trace_idlemask_stage("suspend-late");
++
+ 	error = platform_suspend_prepare_late(state);
+ 	if (error)
+ 		goto Devices_early_resume;
++	if (state == PM_SUSPEND_TO_IDLE)
++		amd_pmc_trace_idlemask_stage("s2idle-prepare");
+ 
+ 	error = dpm_suspend_noirq(PMSG_SUSPEND);
+ 	if (error) {
+ 		pr_err("noirq suspend of devices failed\n");
+ 		goto Platform_early_resume;
+ 	}
++	if (state == PM_SUSPEND_TO_IDLE)
++		amd_pmc_trace_idlemask_stage("noirq");
+ 	error = platform_suspend_prepare_noirq(state);
+ 	if (error)
+ 		goto Platform_wake;

@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.8
-pkgrel=9.107
+pkgrel=9.108
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -230,6 +230,8 @@ source=(
   9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch
   # EXPERIMENTAL, pm_debug_messages-only SMU idlemask trace through s2idle for GA605KM idle testing; see NOTES.md
   9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch
+  # EXPERIMENTAL, pm_debug_messages-only idlemask trace between amdgpu's suspend and amd_pmc's prepare (suspend_late, noirq, LPS0 _DSMs) for GA605KM idle testing; see NOTES.md
+  9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch
 )
 source_x86_64=(config.x86_64)
 validpgpkeys=(
@@ -595,7 +597,8 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         '99ee66fddb731be724ff229a47336ae2a91631c060c4314c26280741a8ef27b7435d4e8023652b722526bc50e45abe31936f3870d2ca0535d84dfb22eca58072'
         '2956797a088e4a1e342776290eb4cdc72cf405f617b168afadd95e1c51832b25cbd934a7aab84d0b6093260788ff09e6ddb1f390ae0bdfd43d416ee5bcd4b503'
         '0a8003b58aeebb165c32fc56b81fb055b752dcb9619d0518a896c02690f9fb2b432026704d7248a712b2e1c51dc679a333e6346c2593f0113a80e07ce6644371'
-        '0a059fca89a804364fcdb488127c8f599b717a9d118110bb2da435d34b3f99a2605c2792b99a481dc2f42479dbe3ba863fb6d3489bcc92234cf95b2a09efdfb7')
+        '0a059fca89a804364fcdb488127c8f599b717a9d118110bb2da435d34b3f99a2605c2792b99a481dc2f42479dbe3ba863fb6d3489bcc92234cf95b2a09efdfb7'
+        'e2f85140c36ecb7e30b30d9d4f38a5701bd8ed5c7612629ea18af2b8c8e9b53c0509a23651d43865eace8ce303b73aa781e28971a22bc8a1c506b6a4884f3743')
 b2sums_x86_64=('c42cea9a386e1d10e53974a18fe560f369bc9a561882fc3330a8f2aac4b406ebb66eff02cfd3b1bdcb45cb67f64a5690ce17ed9edc6c775dcbd534a7ede6cbfa')
 
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
@@ -957,7 +960,8 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             '8e27311cf13056ac55fdcd5385ec52271a5a1420efda27a110d24fce84ef42e3'
             'c70a0bfe3f24c4864de671bd0f9d800d71642a9bffdd3806ca3529c75ef76a6e'
             '3a320ae6fea7c8c4f01f4058957bd937e109d472088d0553e1b4adf7f0547ace'
-            'cefd4f323e893ff1d8c5c664a2303c9730d02cbfd4a3401c6ff068f4aa621ffc')
+            'cefd4f323e893ff1d8c5c664a2303c9730d02cbfd4a3401c6ff068f4aa621ffc'
+            'fb16635f961c7feaf8e781a38e055293b32929e544c285c62f24b39fb1868481')
 
 export KBUILD_BUILD_HOST=omarchy
 export KBUILD_BUILD_USER=$pkgbase
