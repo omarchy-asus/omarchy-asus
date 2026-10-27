@@ -632,7 +632,7 @@ For a human to post as a hyprwm/Hyprland Discussion.
 
 ## Omarchy: omarchy and omarchy-settings
 
-RC 4.5.0rc1-1.112 (`main`, from fork branch `asus/v4-5-0-rc1`), Quattro 4.0.6-1.3 (from
+RC 4.5.0rc1-1.113 (`main`, from fork branch `asus/v4-5-0-rc1`), Quattro 4.0.6-1.3 (from
 `asus/v4-0-5`). Both packages build from the same source tree and carry the **same** patch list
 (their `DELTA` files stay in lockstep, and they publish as one cohort). Their migrations apply the
 fixes that live in user config or `/etc` on `omarchy update`, and leave fixes made by hand alone.
@@ -1394,21 +1394,27 @@ omacom/omarchy#6505. Not opened; a human decides.
 ### The RTX stays asleep while apps start (0026)
 
 - **Component:** `omarchy`/`omarchy-settings`, patch 0026 (`omarchy-launch-all-gpus`,
-  `OMARCHY_DESKTOP_GPU_PINS`, migration `1792823623`). RC only (since 1.107). Fork commits
-  `c02f91e3` + `8769c24c` + `02c9d61f` + `6ef8e273`, squashed.
+  `OMARCHY_DESKTOP_GPU_PINS`, migrations `1792823623` and `1793053364`). RC only (since 1.107;
+  1.113 keeps the pins out of Hyprland itself). Fork commits `c02f91e3` + `8769c24c` + `02c9d61f`
+  + `6ef8e273` + `e71057d9` + `f1a38066`, squashed.
 - **Fixes:** nvidia-open resumes a runtime-suspended GPU for any call into the driver, so any app
   that lists Vulkan devices or opens surfaceless or device EGL at startup (GTK, Chromium, Electron)
   woke the RTX for about 20 s, and so did screen lock and unlock. On a hybrid whose iGPU drives the
   display (Turing and newer), Hyprland sets `VK_LOADER_DRIVERS_DISABLE=*nvidia*` and lists only
   Mesa's EGL vendor for the desktop. Games get every GPU back on each path they start by (terminal,
   login autostart, a game entry in the launcher, `omarchy-launch-all-gpus`). What still inherits
-  the pins is listed in NOTES.md.
+  the pins is listed in NOTES.md. Hyprland itself never gets them: `desktop-gpu-pins.lua` wraps the
+  ways Hyprland runs a command (`hl.exec_cmd`, `hl.dsp.exec_cmd`, `hl.dsp.exec_raw`, a workspace
+  rule's `on_created_empty`) so each exports them in its own shell, and aquamarine can still open
+  EGL on the RTX for a monitor on its ports. 1.107 to 1.112 set them for Hyprland too (`hl.env`), and
+  an HDMI monitor plugged in after login never appeared (#372).
 - **Test:** with the RTX `suspended`, start GTK and Chromium apps from the launcher and lock and
   unlock: `runtime_status` stays `suspended`; a game from Steam or the launcher still runs on the
-  RTX.
+  RTX. Log in with HDMI unplugged, then plug a monitor into the RTX's HDMI port: it appears in
+  `hyprctl monitors`, with no `initMgpu: no renderer` in the Hyprland log.
 - **Upstream: not submitted.**
 - **Drop when:** the driver stops waking for device enumeration, or Omarchy ships an equivalent.
-  Bug: #218.
+  Bugs: #218, #372.
 
 #### Upstream report draft
 
@@ -1421,9 +1427,13 @@ omacom/omarchy, PR against `quattro` from patch 0026. Not opened; a human decide
 > GPU for about 20 s: nvidia-open resumes the GPU for any call into the driver. Screen lock and
 > unlock do too.
 >
-> **Change.** On those machines (Turing and newer), `nvidia.lua` sets
+> **Change.** On those machines (Turing and newer), Omarchy sets
 > `VK_LOADER_DRIVERS_DISABLE=*nvidia*` and lists only Mesa's EGL vendor for the desktop session
-> (`OMARCHY_DESKTOP_GPU_PINS` names the two). Games get every GPU back however they start:
+> (`OMARCHY_DESKTOP_GPU_PINS` names the two). Only what Hyprland starts gets them: the new
+> `desktop-gpu-pins.lua` wraps `hl.exec_cmd`, `hl.dsp.exec_cmd`, `hl.dsp.exec_raw` and a workspace
+> rule's `on_created_empty` so each command exports them in its own shell. Hyprland itself keeps
+> NVIDIA's EGL vendor and can still drive a monitor on the dGPU's ports. Games get every GPU back
+> however they start:
 >
 > - login autostart takes the pins out of the systemd user environment;
 > - an interactive bash drops them, so anything run from a terminal has both GPUs;
