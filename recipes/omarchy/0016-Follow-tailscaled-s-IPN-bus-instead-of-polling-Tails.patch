@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Fri, 23 Oct 2026 01:00:00 -0400
-Subject: [PATCH 16/24] Follow tailscaled's IPN bus instead of polling Tailscale
- status
+Subject: [PATCH 16/24] Follow tailscaled's IPN bus instead of polling Tailscale status
 
 Every 30 seconds each bar ran three tailscale clients: status, the exit-node
 list and the account list, though the bar icon needs status alone and only
@@ -22,6 +21,8 @@ loadedContent focus call on open, and only the tailscale.refresh() call is
 removed. Fork commits cf5cf22a, 2a1d84b0 and d3e137d8 on asus/v4-5-0-rc1,
 squashed (perf/tailscale-poll a843b2b2 + 56579319 + 63d0a63a).
 
+Backport to v4.5.0-rc2: v4.5.0-rc2 carries omacom/omarchy#7623, which polls status without peers while the panel is closed (peersWanted). The IPN-bus watch replaces that poll. The open panel's full refresh, every peer included, moves from Panel.qml's open handler to onPanelOpenChanged, so exit nodes and accounts load with it. A full-peer request made during a light call keeps #7623's pending rerun; any other request made mid-call reruns once the call ends.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  shell/plugins/panels/tailscale/Model.js    |  19 +++-
@@ -31,7 +32,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  4 files changed, 147 insertions(+), 21 deletions(-)
 
 diff --git a/shell/plugins/panels/tailscale/Model.js b/shell/plugins/panels/tailscale/Model.js
-index ecfb581a..afe37cee 100644
+index ecfb581a3..afe37ceec 100644
 --- a/shell/plugins/panels/tailscale/Model.js
 +++ b/shell/plugins/panels/tailscale/Model.js
 @@ -308,6 +308,21 @@ function parseAccounts(raw, tr) {
@@ -67,29 +68,29 @@ index ecfb581a..afe37cee 100644
    }
  }
 diff --git a/shell/plugins/panels/tailscale/Panel.qml b/shell/plugins/panels/tailscale/Panel.qml
-index 331670fd..15b26353 100644
+index 0018b6d0d..27a786005 100644
 --- a/shell/plugins/panels/tailscale/Panel.qml
 +++ b/shell/plugins/panels/tailscale/Panel.qml
-@@ -350,7 +350,6 @@ Panel {
-   onOpenedChanged: if (opened) {
-     cursorActive = false
-     if (panelFlick) panelFlick.contentY = 0
--    tailscale.refresh()
+@@ -441,7 +441,6 @@ Panel {
+       peerList.rememberedY = 0
+       peerList.positionViewAtBeginning()
+     }
+-    tailscale.refresh(false, true)
      Qt.callLater(function() { if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
-   }
-   onPeerIndexChanged: scrollCursorIntoView()
-@@ -364,6 +363,9 @@ Panel {
-   Service {
+   } else if (peerSearch && peerSearch.text !== "") {
+     // A query must not survive the panel: reopening to a silently filtered
+@@ -461,6 +460,9 @@ Panel {
      id: tailscale
      settings: root.settings
-+    // Opening the panel refreshes everything it shows, exit nodes and accounts
-+    // included; see Service.panelOpen.
+     peersWanted: root.opened
++    // Opening the panel refreshes everything it shows, every peer, exit nodes
++    // and accounts included; see Service.panelOpen.
 +    panelOpen: root.opened
    }
  
    Connections {
 diff --git a/shell/plugins/panels/tailscale/Service.qml b/shell/plugins/panels/tailscale/Service.qml
-index 95fbc40e..39a21a42 100644
+index b4a139ebd..2598e31cc 100644
 --- a/shell/plugins/panels/tailscale/Service.qml
 +++ b/shell/plugins/panels/tailscale/Service.qml
 @@ -42,7 +42,15 @@ Item {
@@ -104,14 +105,14 @@ index 95fbc40e..39a21a42 100644
 +  // icon needs status alone. Fetch them while the panel is open rather than
 +  // spawning two more tailscale clients on every status refresh.
 +  property bool panelOpen: false
-+  onPanelOpenChanged: if (panelOpen) refresh()
++  onPanelOpenChanged: if (panelOpen) refresh(false, true)
    readonly property bool busy: whichProcess.running || statusProcess.running || mullvadExitNodesProcess.running || accountsProcess.running || actionProcess.running || loginProcess.running || switchProcess.running || operatorProcess.running || exitNodeProcess.running
    readonly property string userName: Quickshell.env("USER") || Quickshell.env("LOGNAME")
  
-@@ -66,6 +74,10 @@ Item {
-   property string _exitNodeError: ""
-   property string _operatorOutput: ""
-   property string _operatorError: ""
+@@ -106,6 +114,10 @@ Item {
+     _exitNodesSig = sig
+     exitNodes = next
+   }
 +  property bool _statusRerun: false
 +  property bool _ipnConnected: false
 +  property bool _ipnStatusChanged: false
@@ -119,10 +120,10 @@ index 95fbc40e..39a21a42 100644
  
    function setting(name, fallback) {
      var value = settings ? settings[name] : undefined
-@@ -168,8 +180,14 @@ Item {
-       statusProcess.command = ["tailscale", "status", "--json"]
-       statusProcess.running = true
-       launched = true
+@@ -216,8 +228,14 @@ Item {
+       // A full-peer request arrived while a light poll is in flight; remember
+       // it so the panel is not left stale until the next periodic refresh.
+       _pendingFullPeers = true
 +    } else {
 +      // The running call may have read the state before the change that asked
 +      // for this refresh, and with the panel closed no later poll would fix
@@ -135,7 +136,7 @@ index 95fbc40e..39a21a42 100644
        _mullvadExitNodesOutput = ""
        _mullvadExitNodesError = ""
        mullvadExitNodesProcess.command = ["tailscale", "exit-node", "list"]
-@@ -177,7 +195,7 @@ Item {
+@@ -225,7 +243,7 @@ Item {
        launched = true
      }
      var now = Date.now()
@@ -144,7 +145,7 @@ index 95fbc40e..39a21a42 100644
      if (shouldRefreshAccounts && !accountsProcess.running) {
        _accountsOutput = ""
        _accountsError = ""
-@@ -193,6 +211,38 @@ Item {
+@@ -241,6 +259,38 @@ Item {
      if (launched && !pollWatchdog.running) pollWatchdog.start()
    }
  
@@ -183,7 +184,7 @@ index 95fbc40e..39a21a42 100644
    function elideStatus(text) {
      var value = String(text || "").replace(/\s+/g, " ").trim()
      return value.length > 140 ? value.substring(0, 137) + "…" : value
-@@ -387,29 +437,32 @@ Item {
+@@ -455,29 +505,32 @@ Item {
      if (_loginInProgress && !_loginUrlOpened) openAuthUrlFrom(text, false)
    }
  
@@ -231,7 +232,7 @@ index 95fbc40e..39a21a42 100644
    }
  
    Timer {
-@@ -461,14 +514,26 @@ Item {
+@@ -529,14 +582,26 @@ Item {
      command: []
      onExited: function(exitCode) {
        root.installed = exitCode === 0
@@ -260,22 +261,23 @@ index 95fbc40e..39a21a42 100644
    Process {
      id: statusProcess
      running: false
-@@ -484,6 +549,10 @@ Item {
-         root.resetUnavailable("Disconnected")
-         root.lastError = stderr.trim()
+@@ -554,7 +619,11 @@ Item {
        }
-+      if (root._statusRerun) {
+       if (root._pendingFullPeers) {
+         root._pendingFullPeers = false
++        root._statusRerun = false
+         root.refreshStatusAndAccounts(false, true)
++      } else if (root._statusRerun) {
 +        root._statusRerun = false
 +        Qt.callLater(root.refresh)
-+      }
+       }
      }
    }
- 
 diff --git a/test/shell.d/tailscale-test.sh b/test/shell.d/tailscale-test.sh
-index 9c04cca9..5f3937df 100644
+index d46925a08..035c53e9d 100644
 --- a/test/shell.d/tailscale-test.sh
 +++ b/test/shell.d/tailscale-test.sh
-@@ -208,3 +208,41 @@ assertDeepEqual(
+@@ -204,3 +204,41 @@ assertDeepEqual(
  assertDeepEqual(tailscale.parseStatus('{'), { ok: false, unavailable: true, message: 'Status error', error: 'Failed to parse tailscale status' }, 'tailscale reports invalid status JSON')
  assertDeepEqual(tailscale.parseAccounts('{'), { accounts: [], selectedAccountId: '', selectedAccountLabel: '' }, 'tailscale handles invalid account JSON')
  JS
@@ -288,7 +290,7 @@ index 9c04cca9..5f3937df 100644
 +  grep -F 'if (panelData && !mullvadExitNodesProcess.running) {' "$service_qml" >/dev/null &&
 +  grep -F 'var shouldRefreshAccounts = panelData && (' "$service_qml" >/dev/null ||
 +  fail "tailscale polls exit nodes and accounts only for the open panel"
-+grep -F 'onPanelOpenChanged: if (panelOpen) refresh()' "$service_qml" >/dev/null &&
++grep -F 'onPanelOpenChanged: if (panelOpen) refresh(false, true)' "$service_qml" >/dev/null &&
 +  grep -F 'panelOpen: root.opened' "$panel_qml" >/dev/null ||
 +  fail "opening the tailscale panel refreshes what it shows"
 +pass "tailscale polls exit nodes and accounts only for the open panel"
@@ -317,3 +319,6 @@ index 9c04cca9..5f3937df 100644
 +  grep -F 'if (root._statusRerun) {' "$service_qml" >/dev/null ||
 +  fail "tailscale asks again for status requested while a status call runs"
 +pass "tailscale follows the IPN bus and polls only while the panel is open"
+-- 
+2.56.0
+

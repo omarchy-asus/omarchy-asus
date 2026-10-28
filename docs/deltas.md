@@ -632,7 +632,7 @@ For a human to post as a hyprwm/Hyprland Discussion.
 
 ## Omarchy: omarchy and omarchy-settings
 
-RC 4.5.0rc1-1.113 (`main`, from fork branch `asus/v4-5-0-rc1`), Quattro 4.0.6-1.3 (from
+RC 4.5.0rc2-1.101 (`main`, from fork branch `asus/v4-5-0-rc2`), Quattro 4.0.6-1.3 (from
 `asus/v4-0-5`). Both packages build from the same source tree and carry the **same** patch list
 (their `DELTA` files stay in lockstep, and they publish as one cohort). Their migrations apply the
 fixes that live in user config or `/etc` on `omarchy update`, and leave fixes made by hand alone.
@@ -1173,7 +1173,8 @@ bullets.)
   - **RC** (since 1.102, #250): the bar follows tailscaled's IPN bus (one `tailscale debug
     watch-ipn` per panel) and runs no client while the panel is closed; the open panel refreshes
     everything on its interval. Fork commits `cf5cf22a` + `2a1d84b0` + `d3e137d8` on
-    `asus/v4-5-0-rc1`, squashed.
+    `asus/v4-5-0-rc1`, squashed. Since 4.5.0rc2-1.101 it sits on top of #7623 (below), whose
+    light closed-panel poll the IPN-bus watch replaces; opening the panel fetches every peer.
   - **Quattro:** polls only `tailscale status` while the panel is closed (fork branch
     `perf/tailscale-poll`, `1b780450`).
 - **Fixes:** the Tailscale bar panel polled full Tailscale state even with the panel closed, which
@@ -1181,9 +1182,10 @@ bullets.)
 - **Test:** with the panel closed, `sudo powertop` or `pidstat -p $(pgrep -d, tailscale) 5` shows
   fewer wakeups than stock; opening the panel still shows full peer state.
 - **Upstream:** two parts.
-  - **merged-unreleased:** the closed-panel light poll (`tailscale status --json --peers=false`,
+  - **released (RC):** the closed-panel light poll (`tailscale status --json --peers=false`,
     full fetch on open) was merged another way, in omacom/omarchy#7623 (`c872d57cf`, on `quattro`
-    2026-10-22). v4.5.0-rc1, which RC builds from, doesn't have it (checked 2026-10-25). Our
+    2026-10-22), and is in v4.5.0-rc2, which RC builds from (checked 2026-10-28); Quattro's
+    4.0.6 doesn't have it. Our
     [omacom/omarchy#15671](https://github.com/omacom/omarchy/pull/15671) "Poll only Tailscale
     status while its panel is closed" was closed on 2026-10-26 in favour of #7623 (`c872d57cf`),
     which makes it redundant and conflicts with it.
@@ -1529,7 +1531,8 @@ omacom/omarchy#13782 offering it as an alternative. Not opened; a human decides.
 - **Fixes:** quickshell's `DesktopEntries` watches every ancestor of the applications directories,
   the home directory included, so any dotfile save re-ran the hidden-entries scan and the icon index
   (2-12% of a core with nothing installed). It now rescans only when the app list really changes
-  (a key of id, NoDisplay, icon and name per entry). Upstream's commit and test, taken as is.
+  (a key of id, NoDisplay, icon and name per entry). Upstream's commit, taken as is; its test, a
+  source-text check, is left out since 4.5.0rc2, which dropped such tests (omacom/omarchy#16334).
 - **Test:** save a dotfile in the home directory: no rescan; install an app: it and its icon
   appear.
 - **Upstream: open.** omacom/omarchy#14992 "Rescan the app library only when the app list changes"

@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Diogo Chaves
 Date: Mon, 19 Oct 2026 19:39:14 -0300
-Subject: [PATCH 27/27] Count only lockers under this Hyprland as holding its
- lock
+Subject: [PATCH 27/27] Count only lockers under this Hyprland as holding its lock
 
 A Quickshell or hyprlock started under another Hyprland (a second login, a
 nested or sandboxed desktop) can't hold this compositor's lock, yet it made
@@ -11,14 +10,16 @@ lock while one ran. Skip a locker whose HYPRLAND_INSTANCE_SIGNATURE names
 another instance; one with no signature, or an unreadable environment, still
 counts.
 
+Backport to v4.5.0-rc2: the stranded-lock test is now part of hyprland-session-lock-test.sh (omacom/omarchy#16337); the cases are ported there.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- bin/omarchy-hyprland-session-lock-stranded    | 27 ++++++++++++++--
- .../hyprland-session-lock-stranded-test.sh    | 32 ++++++++++++++++++-
- 2 files changed, 55 insertions(+), 4 deletions(-)
+ bin/omarchy-hyprland-session-lock-stranded | 27 ++++++++++++++++---
+ test/shell.d/hyprland-session-lock-test.sh | 31 ++++++++++++++++++++++
+ 2 files changed, 55 insertions(+), 3 deletions(-)
 
 diff --git a/bin/omarchy-hyprland-session-lock-stranded b/bin/omarchy-hyprland-session-lock-stranded
-index 24ab5b80..3421ce7a 100755
+index 24ab5b809..3421ce7af 100755
 --- a/bin/omarchy-hyprland-session-lock-stranded
 +++ b/bin/omarchy-hyprland-session-lock-stranded
 @@ -7,8 +7,9 @@
@@ -61,11 +62,11 @@ index 24ab5b80..3421ce7a 100755
 -  [[ $pid == "$1" ]] || is_voxtype_osd "$pid" || exit 2
 +  [[ $pid == "$1" ]] || in_other_hyprland "$pid" || is_voxtype_osd "$pid" || exit 2
  done < <(pgrep -u "$UID" -x 'quickshell|qs|hyprlock')
-diff --git a/test/shell.d/hyprland-session-lock-stranded-test.sh b/test/shell.d/hyprland-session-lock-stranded-test.sh
-index 6a1a8756..55f668d6 100755
---- a/test/shell.d/hyprland-session-lock-stranded-test.sh
-+++ b/test/shell.d/hyprland-session-lock-stranded-test.sh
-@@ -32,6 +32,13 @@ locker() {
+diff --git a/test/shell.d/hyprland-session-lock-test.sh b/test/shell.d/hyprland-session-lock-test.sh
+index e47ffa7ef..f77f4a3ac 100644
+--- a/test/shell.d/hyprland-session-lock-test.sh
++++ b/test/shell.d/hyprland-session-lock-test.sh
+@@ -39,6 +39,13 @@ locker() {
    printf '%s\0' "$@" >"$proc/$pid/cmdline"
  }
  
@@ -79,7 +80,7 @@ index 6a1a8756..55f668d6 100755
  locker 100 quickshell -n -p /usr/share/omarchy/shell
  locker 200 quickshell -n -p /tmp/tmp.abc/omarchy/shell
  locker 201 quickshell -n -p "/data/voxtype/quickshell backup/omarchy/shell"
-@@ -41,11 +48,25 @@ locker 301 qs -d -p /data/.local/share/voxtype/quickshell
+@@ -48,6 +55,20 @@ locker 301 qs -d -p /data/.local/share/voxtype/quickshell
  locker 302 /usr/bin/qs -p "/data/User Data/voxtype/quickshell/"
  locker 400 hyprlock
  locker 401 hyprlock -c /usr/share/voxtype/quickshell/lock.conf
@@ -98,24 +99,29 @@ index 6a1a8756..55f668d6 100755
 +# The Hyprland the asking shell runs under.
 +signature=this-hyprland
  
- assert_status() {
-   local expected="$1" locked="$2" lockers="$3" description="$4" actual=0
+ LOCKED=0
+ UNLOCKED=1
+@@ -66,6 +87,7 @@ exit_status() {
+   OMARCHY_TEST_HYPRCTL_FAILS="$hyprctl_fails" \
+   OMARCHY_TEST_LOCKERS="$lockers" \
+   OMARCHY_PROC_ROOT="$proc" \
++  HYPRLAND_INSTANCE_SIGNATURE="$signature" \
+     "$ROOT/bin/$command" 100 || actual=$?
  
--  PATH="$fake_bin:$PATH" OMARCHY_PROC_ROOT="$proc" OMARCHY_TEST_LOCKED="$locked" OMARCHY_TEST_LOCKERS="$lockers" \
-+  PATH="$fake_bin:$PATH" HYPRLAND_INSTANCE_SIGNATURE="$signature" OMARCHY_PROC_ROOT="$proc" OMARCHY_TEST_LOCKED="$locked" OMARCHY_TEST_LOCKERS="$lockers" \
-     "$ROOT/bin/omarchy-hyprland-session-lock-stranded" 100 || actual=$?
- 
-   (( actual == expected )) || fail "$description" "expected exit $expected, got $actual"
-@@ -66,3 +87,12 @@ assert_status 2 0 "100 202" "a shell beside voxtype's config is still a locker"
- assert_status 2 0 "100 201" "a shell whose path only contains voxtype's config, after a space, is still a locker"
- assert_status 2 0 "100 401" "hyprlock is a locker whatever its arguments name"
- assert_status 2 0 "100 500" "a locker gone before its arguments are read is still counted"
-+assert_status 0 0 "100 600" "a shell under another Hyprland cannot hold this one's lock"
-+assert_status 2 0 "100 601" "a shell under this Hyprland is still a locker"
-+assert_status 0 0 "100 602" "nor can hyprlock under another Hyprland"
-+assert_status 2 0 "100 603" "a shell with an empty signature is still a locker"
-+assert_status 2 0 "100 604" "a shell with no signature is still a locker"
-+assert_status 2 0 "600 601" "a shell under another Hyprland does not hide one under this"
+   printf '%s\n' "$actual"
+@@ -146,3 +168,12 @@ assert_stranded 2 "$locked_monitors" "100 202" "a shell beside voxtype's config
+ assert_stranded 2 "$locked_monitors" "100 201" "a shell whose path only contains voxtype's config, after a space, is still a locker"
+ assert_stranded 2 "$locked_monitors" "100 401" "hyprlock is a locker whatever its arguments name"
+ assert_stranded 2 "$locked_monitors" "100 500" "a locker gone before its arguments are read is still counted"
++assert_stranded 0 "$locked_monitors" "100 600" "a shell under another Hyprland cannot hold this one's lock"
++assert_stranded 2 "$locked_monitors" "100 601" "a shell under this Hyprland is still a locker"
++assert_stranded 0 "$locked_monitors" "100 602" "nor can hyprlock under another Hyprland"
++assert_stranded 2 "$locked_monitors" "100 603" "a shell with an empty signature is still a locker"
++assert_stranded 2 "$locked_monitors" "100 604" "a shell with no signature is still a locker"
++assert_stranded 2 "$locked_monitors" "600 601" "a shell under another Hyprland does not hide one under this"
 +signature=
-+assert_status 2 0 "100 600" "with no signature of its own, the asking shell counts every locker"
++assert_stranded 2 "$locked_monitors" "100 600" "with no signature of its own, the asking shell counts every locker"
 +signature=this-hyprland
+-- 
+2.56.0
+
