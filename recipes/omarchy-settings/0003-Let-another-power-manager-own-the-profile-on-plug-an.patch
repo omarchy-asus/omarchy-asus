@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:25:29 -0400
-Subject: [PATCH 03/24] Let another power manager own the profile on plug and
- unplug
+Subject: [PATCH 03/24] Let another power manager own the profile on plug and unplug
 
 The battery service re-applies the remembered AC or battery profile on every
 power-source change. On machines where a vendor daemon or the user's own tool
@@ -15,6 +14,8 @@ Backport to v4.5.0-rc1: the toggle check goes ahead of the ASUS ROG USB-C source
 resolution added by the previous backport, so a skipped restore never probes
 charge_mode.
 
+Backport to v4.5.0-rc2: upstream dropped the source-text checks this test ended with (omacom/omarchy#16334), so the new cases follow the init check.
+
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 308e4a372f72cc09191b73c22196b4680a5f8bda
 Backport-of: 524481be00a132f117b6b04c40bcb8816ff22c75 (fixup)
@@ -23,11 +24,11 @@ Backport-of: 524481be00a132f117b6b04c40bcb8816ff22c75 (fixup)
 ---
  bin/omarchy-powerprofiles-set          |  8 ++++++++
  manual/36-system-sleep.md              |  2 ++
- test/shell.d/powerprofiles-set-test.sh | 18 ++++++++++++++++++
- 3 files changed, 28 insertions(+)
+ test/shell.d/powerprofiles-set-test.sh | 19 +++++++++++++++++++
+ 3 files changed, 29 insertions(+)
 
 diff --git a/bin/omarchy-powerprofiles-set b/bin/omarchy-powerprofiles-set
-index 6358bc53..a6afc2ad 100755
+index 6358bc53a..a6afc2adb 100755
 --- a/bin/omarchy-powerprofiles-set
 +++ b/bin/omarchy-powerprofiles-set
 @@ -29,6 +29,14 @@ case "$action" in
@@ -46,7 +47,7 @@ index 6358bc53..a6afc2ad 100755
  # USB-C charger delivers far less (100 W, against 200-330 W from the
  # barrel), so there it saves power as on battery: balanced unless a profile was
 diff --git a/manual/36-system-sleep.md b/manual/36-system-sleep.md
-index f981fd01..611fb3a0 100644
+index f981fd014..611fb3a0d 100644
 --- a/manual/36-system-sleep.md
 +++ b/manual/36-system-sleep.md
 @@ -10,6 +10,8 @@ On a laptop, Omarchy remembers your power profile separately for plugged in and
@@ -59,7 +60,7 @@ index f981fd01..611fb3a0 100644
  
  You toggle suspend by running `omarchy toggle suspend` from the terminal. That just reveals/hides the option under _System_ (or `Super + Esc`), and then you can see if it works consistently on your system. If not, you can hide it again with the same command.
 diff --git a/test/shell.d/powerprofiles-set-test.sh b/test/shell.d/powerprofiles-set-test.sh
-index b3c1a2ca..5cbf596e 100755
+index eccb82fee..8558ac9e7 100755
 --- a/test/shell.d/powerprofiles-set-test.sh
 +++ b/test/shell.d/powerprofiles-set-test.sh
 @@ -38,6 +38,9 @@ export OMARCHY_POWERPROFILES_STATE_DIR="$tmp_dir/state"
@@ -72,10 +73,11 @@ index b3c1a2ca..5cbf596e 100755
  
  "$ROOT/bin/omarchy-powerprofiles-set" ac balanced
  [[ $(<"$tmp_dir/state/ac") == "balanced" ]] || fail "power profile stores AC preference"
-@@ -76,6 +79,21 @@ pass "power profile retains performance as AC default"
+@@ -75,3 +78,19 @@ pass "power profile retains performance as AC default"
+ "$ROOT/bin/omarchy-powerprofiles-init"
  [[ $(tail -n 1 "$tmp_dir/calls") == "power-saver" ]] || fail "init restores the autodetected preference"
  pass "power profile init restores the autodetected preference"
- 
++
 +mkdir -p "$HOME/.local/state/omarchy/toggles"
 +touch "$HOME/.local/state/omarchy/toggles/powerprofiles-autoswitch-off"
 +calls_before=$(wc -l <"$tmp_dir/calls")
@@ -91,6 +93,6 @@ index b3c1a2ca..5cbf596e 100755
 +  fail "an explicit profile still applies when autoswitch is off"
 +pass "an explicit profile still applies when autoswitch is off"
 +
- rg -F '["omarchy-powerprofiles-set", pendingPowerSource]' "$ROOT/shell/plugins/services/battery/Service.qml" >/dev/null ||
-   fail "battery service applies profiles through Omarchy command"
- pass "battery service applies profiles through Omarchy command"
+-- 
+2.56.0
+

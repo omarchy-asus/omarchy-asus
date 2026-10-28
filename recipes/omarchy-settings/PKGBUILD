@@ -10,10 +10,10 @@
 #    provenance only (empty when cut from a bare commit). omarchy and
 #    omarchy-settings must always carry identical _tag/_commit/pkgver/sha256sums.
 pkgname='omarchy-settings'
-_tag='v4.5.0-rc1'
-_commit='03ff1eff3812933f7088484533784d2f63eaf19a'
-pkgver=4.5.0rc1
-pkgrel=1.113
+_tag='v4.5.0-rc2'
+_commit='5978d93ae7da0a325b7493501911e3f1266cadd3'
+pkgver=4.5.0rc2
+pkgrel=1.101
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
 # architecture for older sources: their zram and oomd drop-ins belong to the
@@ -164,10 +164,10 @@ else
         general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch
         general-0002-Keep-the-sleep-monitor-running-across-suspends.patch
         general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch)
-  sha256sums=('532a3d500a3b96d429ec14a113f577b49406b11071a99105eaaf59506975485f'
+  sha256sums=('53485968f6057f66ad7ff11af6d7e0a96ab83974182c5dbedf2f288a1b1dd628'
               'b86866617b28d01f3c59a963a2c8202802d3960d549a54c9d0cb926b60eb6433'
               'd88f78f5a59dbd031b3a42b5c4cf604e3f14f0b4d237ddae2bad579580f7949e'
-              '04b38059006e7869af62dcbd03ab9d2a43d8144691c1507e94f57958b859736f'
+              '42967248ba964cc7d21c4e99ca151ea18a9be4192ded150c2e17685063795914'
               '5383d200ea3a24d342ae0042e9900d6370ad0405b2d7e07f6a5e6fdf75a016b6'
               'bb2b08741850535f2ea03a7b4ec84e96c1c60ad97c53ec5d218bbb49db5c202b'
               '862067554f69867a558114da5d1b22dffffe29ba039fd463460bb07981358692'
@@ -180,20 +180,20 @@ else
               '3b56da054d6126dfa64715c45c85124f927e564a74b38aa7d6cd29e4762fd6c6'
               '821965b3d2b7caece587b1869731c3cfdca0e2af31ddb19fba2e64eb93397da5'
               'ce314a38b3958f72fa32fc74f8beff767d906876554ed65bb8cc36957edb2170'
-              '6bc1cf36292c878357aef33b20101d04c2f66be372a6fe3d27abd00ee478c5ed'
-              'c94044fa6a7fc732190d1df89c5da5f9613701fdd7ca959c3602ae6957398115'
+              'eee3a7232fd99f79ca5e2147352c69aa57963ddf858a40ce724ce661fc266c42'
+              '57091f37e8d5e6480b27e282bf9cf7cce8943954de12b98dc57ace9ed2f3447c'
               '6f9aeb0ec6b52d995ea1afd6755ff66cd8bec8ae930dedfbde0268d501514b39'
               '1f7b0dec99c60830061d36c12524b77fbd96082ae25f564b9ad777d0a05c71db'
               'ae380acd6edee4e028c294e54978a87cd64e5da59bf5b861ab2acdbd03203749'
               'bd5c52f6c42113944ee3486354e816613fb37c1fe78c349f151b00ba74498fd6'
               '236fd084a6fca8f6805743069eb5f73121c758002be1d24ac774b621be750489'
-              '5c930fa21b4e83a280d04b7d07b19bb739ddce140f01580b5aeca21a8eb2a379'
+              'bd983de9aaaac2b2a2ae07ad779f6028113c85b19cd1719e437b421c11ed957d'
               '21b75af7231909ce026cf2e4c35333a11cf7af50b9ef91c345c6ef06d0f82b1c'
-              '5564364971dfa9def25b54d163916ea8d5c13dd5bcd7886ec49853dc02b44df7'
-              'e096ed430e51f6d4e1f8404f5ee72bd88359541a4ccc6730977cf66a1d86ba04'
-              '74b7b6ee369764da1d086bf48bf5580c60dbacaa92a44d435a5973b22334f967'
+              '2acb18f575ad44556aa907fc64fdfe421c1cb2adab258b72a600300db9a277e6'
+              'cfac1fa948909274c90e1ed7b3f7b08e2eb0dfa1e664e6a852e9262b01122c00'
+              '4ebb0e7fc6a36374c7c4f79677b275e5ca0c5be8e19f865ce6f2233a03078b1f'
               '517940a31b8549c5e8fd454a52b74f1b2817b1865bc3b5e978743653b43b1c44'
-              '24f07e9ba99f0b3a1373ce1cc05d8da438b8e149de53675725d476d1d894741d')
+              '87329ded30f1239736f4428263db391d0f84e0c9a17d99824a10ff0a9aac0e1b')
 fi
 
 prepare() {
@@ -348,6 +348,12 @@ package() {
   # Older release pins still configure locate through install/config/locate.sh.
   if [[ -f default/systemd/system/plocate-updatedb.service.d/10-omarchy.conf ]]; then
     install -Dm644 default/systemd/system/plocate-updatedb.service.d/10-omarchy.conf "$pkgdir/usr/lib/systemd/system/plocate-updatedb.service.d/10-omarchy.conf"
+  fi
+  # Omarchy's time servers (ntp.omarchy.org) in place of systemd's built-in
+  # Arch pool, on both architectures. Conditional until the pinned source
+  # carries the drop-in.
+  if [[ -f default/systemd/timesyncd.conf.d/10-omarchy.conf ]]; then
+    install -Dm644 default/systemd/timesyncd.conf.d/10-omarchy.conf "$pkgdir/usr/lib/systemd/timesyncd.conf.d/10-omarchy.conf"
   fi
   # systemd 262's NvPCR setup fails without a signed PCR policy in the UKI.
   local unit
