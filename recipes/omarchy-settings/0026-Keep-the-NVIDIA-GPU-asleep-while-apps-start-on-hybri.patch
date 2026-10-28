@@ -47,6 +47,8 @@ monitor plugged in after login never appeared).
 Fork commits c02f91e3, 8769c24c, 02c9d61f, 6ef8e273, e71057d9 and
 f1a38066 on asus/v4-5-0-rc1, squashed.
 
+Backport to v4.5.0-rc2: upstream dropped the source-text checks in app-search-test.sh and the installer grep in desktop-entry-launch-test.sh (omacom/omarchy#16334); the launch test keeps the launcher argument.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  bin/omarchy-install-gaming-steam          |   2 +-
@@ -60,11 +62,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  migrations/1792823623.sh                  |  11 ++
  migrations/1793053364.sh                  |  10 ++
  shell/services/AppLibrary.qml             |   4 +-
- test/shell.d/app-search-test.sh           |   4 +-
- test/shell.d/desktop-entry-launch-test.sh |  10 +-
+ test/shell.d/desktop-entry-launch-test.sh |   8 +-
  test/shell.d/hw-nvidia-test.sh            | 142 +++++++++++++++++++---
  test/shell.d/launch-all-gpus-test.sh      | 108 ++++++++++++++++
- 15 files changed, 461 insertions(+), 26 deletions(-)
+ 14 files changed, 458 insertions(+), 23 deletions(-)
  create mode 100755 bin/omarchy-launch-all-gpus
  create mode 100755 bin/omarchy-launch-desktop-entry
  create mode 100644 default/hypr/desktop-gpu-pins.lua
@@ -212,7 +213,7 @@ index ac608cb70..fccd5fcb9 100644
    *":$HOME/.local/bin:"*) ;;
    *) export PATH="$PATH:$HOME/.local/bin" ;;
 diff --git a/default/hypr/autostart.lua b/default/hypr/autostart.lua
-index cb49fc11e..800a478cb 100644
+index d1529d712..1c4da2201 100644
 --- a/default/hypr/autostart.lua
 +++ b/default/hypr/autostart.lua
 @@ -9,7 +9,14 @@ hl.on("hyprland.start", function()
@@ -399,26 +400,11 @@ index 66f399f52..061fc269c 100644
    }
  
    // The command a terminal entry runs, without the field codes it leaves for a
-diff --git a/test/shell.d/app-search-test.sh b/test/shell.d/app-search-test.sh
-index 5ebd1cfe3..2cadd6a6a 100644
---- a/test/shell.d/app-search-test.sh
-+++ b/test/shell.d/app-search-test.sh
-@@ -108,8 +108,8 @@ assert(
- 
- assert(
-   /function launch\(desktopId, name\) \{[\s\S]*?uwsm-app[\s\S]*?\n  \}/.test(appLibraryQml) &&
--    appLibraryQml.includes('Util.execDetached("uwsm-app -- gtk-launch "'),
--  'app library launches desktop entries through gtk-launch in their own scope'
-+    appLibraryQml.includes('Util.execDetached("uwsm-app -- omarchy-launch-desktop-entry "'),
-+  'app library launches desktop entries through omarchy-launch-desktop-entry in their own scope'
- )
- 
- assert(
 diff --git a/test/shell.d/desktop-entry-launch-test.sh b/test/shell.d/desktop-entry-launch-test.sh
-index 16fe5a055..b58c0a5c0 100644
+index 62d61f2a9..c1bb750d9 100644
 --- a/test/shell.d/desktop-entry-launch-test.sh
 +++ b/test/shell.d/desktop-entry-launch-test.sh
-@@ -60,13 +60,14 @@ wait_for_launch() {
+@@ -60,12 +60,13 @@ wait_for_launch() {
  assert_detached_installer_launch() {
    local script="$1"
    local desktop_id="$2"
@@ -428,15 +414,13 @@ index 16fe5a055..b58c0a5c0 100644
    bash "$ROOT/bin/$script"
  
 -  wait_for_launch "launch:uwsm-app -- gtk-launch $desktop_id" ||
--    fail "$script launches its desktop entry through gtk-launch in a UWSM scope"
--  grep -Fqx "setsid uwsm-app -- gtk-launch $desktop_id >/dev/null 2>&1 &" "$ROOT/bin/$script" ||
+-    fail "$script launches its desktop entry through setsid and gtk-launch in a UWSM scope"
 +  wait_for_launch "launch:uwsm-app -- $launcher $desktop_id" ||
-+    fail "$script launches its desktop entry through $launcher in a UWSM scope"
-+  grep -Fqx "setsid uwsm-app -- $launcher $desktop_id >/dev/null 2>&1 &" "$ROOT/bin/$script" ||
-     fail "$script detaches its scoped desktop-entry launch"
++    fail "$script launches its desktop entry through setsid and $launcher in a UWSM scope"
    pass "$script detaches its scoped desktop-entry launch"
  }
-@@ -75,7 +76,8 @@ assert_detached_installer_launch omarchy-install-editor-emacs emacsclient
+ 
+@@ -73,7 +74,8 @@ assert_detached_installer_launch omarchy-install-editor-emacs emacsclient
  assert_detached_installer_launch omarchy-install-editor-vscode code
  assert_detached_installer_launch omarchy-install-editor-zed dev.zed.Zed
  assert_detached_installer_launch omarchy-install-gaming-heroic heroic
@@ -730,3 +714,6 @@ index 000000000..c10a62e1d
 +  fail "omarchy-launch-all-gpus refuses to run without a command"
 +fi
 +pass "omarchy-launch-all-gpus refuses to run without a command"
+-- 
+2.56.0
+

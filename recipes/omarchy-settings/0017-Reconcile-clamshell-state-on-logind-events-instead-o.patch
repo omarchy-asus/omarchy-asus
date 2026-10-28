@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Sun, 18 Oct 2026 03:29:49 -0400
-Subject: [PATCH 17/24] Reconcile clamshell state on logind events instead of a
- 2s poll
+Subject: [PATCH 17/24] Reconcile clamshell state on logind events instead of a 2s poll
 
 While a laptop was docked, the monitor watcher re-ran the whole clamshell sync
 (hyprctl, jq, flock and friends) every 2 seconds as a backstop for lid drift
@@ -17,6 +16,8 @@ Backport to v4.5.0-rc1: as on quattro, with the lid-inhibit test's gdbus stub
 (that test is new since v4.0.5), so the watcher never listens to the real
 system bus in tests.
 
+Backport to v4.5.0-rc2: monitor-recovery-test.sh no longer reads source text (omacom/omarchy#16334), so its edits are dropped; monitor-watch-events-test.sh covers the change.
+
 Co-Authored-By: Claude Opus 5.5
 Backport-of: 092904dd002552e851bd40439f197b1465c2381b
 Backport-of: 58a8d2e1f7cef99c6096b2f6a3929b5649bbbed2 (fixup)
@@ -26,13 +27,12 @@ Backport-of: 58a8d2e1f7cef99c6096b2f6a3929b5649bbbed2 (fixup)
  bin/omarchy-hyprland-monitor-watch        |  62 ++++---
  test/shell.d/lid-inhibit-test.sh          |   7 +
  test/shell.d/monitor-modeless-test.sh     |   7 +
- test/shell.d/monitor-recovery-test.sh     |  12 +-
  test/shell.d/monitor-watch-events-test.sh | 196 ++++++++++++++++++++++
- 5 files changed, 254 insertions(+), 30 deletions(-)
+ 4 files changed, 247 insertions(+), 25 deletions(-)
  create mode 100644 test/shell.d/monitor-watch-events-test.sh
 
 diff --git a/bin/omarchy-hyprland-monitor-watch b/bin/omarchy-hyprland-monitor-watch
-index b7199e17..4d9115fa 100755
+index b7199e17c..4d9115fa2 100755
 --- a/bin/omarchy-hyprland-monitor-watch
 +++ b/bin/omarchy-hyprland-monitor-watch
 @@ -61,48 +61,55 @@ recover_modeless() {
@@ -128,7 +128,7 @@ index b7199e17..4d9115fa 100755
 -done < <(socat -U - "UNIX-CONNECT:$SOCKET")
 +done < <(events)
 diff --git a/test/shell.d/lid-inhibit-test.sh b/test/shell.d/lid-inhibit-test.sh
-index 064ea063..de7077f4 100755
+index ac508db30..9de220f6e 100755
 --- a/test/shell.d/lid-inhibit-test.sh
 +++ b/test/shell.d/lid-inhibit-test.sh
 @@ -103,6 +103,13 @@ cat >"$fake_bin/omarchy-hw-laptop" <<'SH'
@@ -146,7 +146,7 @@ index 064ea063..de7077f4 100755
  #!/bin/bash
  
 diff --git a/test/shell.d/monitor-modeless-test.sh b/test/shell.d/monitor-modeless-test.sh
-index 10242b1e..1c71c916 100755
+index 10242b1e8..1c71c9161 100755
 --- a/test/shell.d/monitor-modeless-test.sh
 +++ b/test/shell.d/monitor-modeless-test.sh
 @@ -93,6 +93,13 @@ cat >"$fake_bin/socat" <<'SH'
@@ -163,39 +163,9 @@ index 10242b1e..1c71c916 100755
  # A desktop, so the clamshell half of the watcher stays idle.
  cat >"$fake_bin/omarchy-hw-laptop" <<'SH'
  #!/bin/bash
-diff --git a/test/shell.d/monitor-recovery-test.sh b/test/shell.d/monitor-recovery-test.sh
-index 1e8d119a..3804acb3 100755
---- a/test/shell.d/monitor-recovery-test.sh
-+++ b/test/shell.d/monitor-recovery-test.sh
-@@ -18,7 +18,6 @@ utilities="$ROOT/default/hypr/bindings/utilities.lua"
- 
- grep -F 'sleep "$delay"' "$monitor_watch" >/dev/null
- grep -F 'for delay in 1 3 7; do' "$monitor_watch" >/dev/null
--grep -F 'poll_clamshell_state &' "$monitor_watch" >/dev/null
- grep -F 'flock -n 9' "$monitor_watch" >/dev/null
- grep -F 'omarchy-hyprland-monitor-clamshell' "$monitor_watch" >/dev/null
- pass "monitor watcher retries internal monitor recovery after removal"
-@@ -31,10 +30,13 @@ grep -F 'sync_clamshell_after_monitor_change' "$monitor_watch" >/dev/null
- grep -F 'socat -U - "UNIX-CONNECT:$SOCKET"' "$monitor_watch" >/dev/null
- pass "monitor watcher reconciles clamshell state on startup"
- 
--grep -F 'omarchy-hw-laptop && omarchy-hyprland-monitor-external-active' "$monitor_watch" >/dev/null
--grep -F 'sync_poll_state' "$monitor_watch" >/dev/null
--grep -F 'done < <(socat' "$monitor_watch" >/dev/null
--pass "clamshell poll only runs on a docked laptop, not desktops or undocked laptops"
-+# Drift the lid binds miss is caught by logind's lid and resume events (see
-+# monitor-watch-events-test.sh), not by a timer.
-+! grep -E '^[[:space:]]*sleep 2$' "$monitor_watch" >/dev/null ||
-+  fail "monitor watcher does not poll the clamshell state"
-+grep -F 'PrepareForSleep (false,)' "$monitor_watch" >/dev/null
-+grep -F "'LidClosed'" "$monitor_watch" >/dev/null
-+pass "monitor watcher reconciles on logind lid and resume events instead of polling"
- 
- # Recovery costs a reload per attempt, so it must not run on a healthy machine,
- # and only one loop may run across the events that start it.
 diff --git a/test/shell.d/monitor-watch-events-test.sh b/test/shell.d/monitor-watch-events-test.sh
 new file mode 100644
-index 00000000..bb45e126
+index 000000000..bb45e126c
 --- /dev/null
 +++ b/test/shell.d/monitor-watch-events-test.sh
 @@ -0,0 +1,196 @@
@@ -395,3 +365,6 @@ index 00000000..bb45e126
 +wait "$watch_pid" 2>/dev/null || true
 +watch_pid=""
 +pass "a machine without a lid runs no logind monitor"
+-- 
+2.56.0
+

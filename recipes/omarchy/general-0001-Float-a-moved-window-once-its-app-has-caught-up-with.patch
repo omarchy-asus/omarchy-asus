@@ -14,6 +14,8 @@ and 16 ms lose the size every time and 50 ms keeps it; 100 ms leaves room
 for apps slower than foot. The test records each timer's delay and checks
 the move waits at least 50 ms.
 
+Backport to v4.5.0-rc2: the test's timer stub sits beside upstream's new get_loaded_plugins stub.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  default/hypr/workspace-modes.lua              |  8 ++++--
@@ -21,10 +23,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  2 files changed, 30 insertions(+), 3 deletions(-)
 
 diff --git a/default/hypr/workspace-modes.lua b/default/hypr/workspace-modes.lua
-index a8a30968b..e1c509d79 100644
+index 07eed9556..9c23142c9 100644
 --- a/default/hypr/workspace-modes.lua
 +++ b/default/hypr/workspace-modes.lua
-@@ -350,11 +350,15 @@ local function watch()
+@@ -354,11 +354,15 @@ local function watch()
    end)
  
    -- A move is still being committed when this fires, and changing the window's
@@ -43,7 +45,7 @@ index a8a30968b..e1c509d79 100644
  
    -- A fullscreen window is left as it is, so it is arranged once it comes back
 diff --git a/test/shell.d/hyprland-floating-workspaces-test.sh b/test/shell.d/hyprland-floating-workspaces-test.sh
-index 659f5104f..dd7a9b709 100755
+index 405a07de7..f218e9c72 100755
 --- a/test/shell.d/hyprland-floating-workspaces-test.sh
 +++ b/test/shell.d/hyprland-floating-workspaces-test.sh
 @@ -223,6 +223,7 @@ local buttons = {}
@@ -63,10 +65,10 @@ index 659f5104f..dd7a9b709 100755
 +    table.insert(timeouts, options and options.timeout)
 +    callback()
 +  end,
-   get_active_workspace = function() return active end,
-   get_config = function(key) return config[key] end,
-   config = function(values)
-@@ -360,6 +364,7 @@ function state()
+   get_loaded_plugins = function()
+     return os.getenv("HYPRBARS_RESIDENT") == "1" and { { name = "hyprbars" } } or {}
+   end,
+@@ -363,6 +367,7 @@ function state()
      rules = rules,
      placed = placed,
      subscriptions = subscriptions,
@@ -74,7 +76,7 @@ index 659f5104f..dd7a9b709 100755
      active = active,
    }
  end
-@@ -583,6 +588,24 @@ assert(not moving.floating, "a window carried to a tiled workspace kept floating
+@@ -670,6 +675,24 @@ assert(not moving.floating, "a window carried to a tiled workspace kept floating
  fi
  pass "the mode leaves windows on their way to a special workspace alone"
  

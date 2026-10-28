@@ -1,21 +1,21 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: rdoupe
 Date: Thu, 22 Oct 2026 03:04:35 -0400
-Subject: [PATCH 24/24] Recover a stranded lock while voxtype's dictation OSD
- is running
+Subject: [PATCH 24/24] Recover a stranded lock while voxtype's dictation OSD is running
 
+Backport to v4.5.0-rc2: the stranded-lock test is now part of hyprland-session-lock-test.sh (omacom/omarchy#16337); the voxtype cases are ported there, with the fake /proc in its scratch directory.
 Backport-of: omacom/omarchy#15912 (ab447851), applies to v4.5.0-rc1 unchanged
 but for the test's locker paths, which sit under /data instead of a home
 directory. Fork commits f87801d1 and d528fca1 on asus/v4-5-0-rc1, squashed.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- bin/omarchy-hyprland-session-lock-stranded    | 27 +++++++++++++--
- .../hyprland-session-lock-stranded-test.sh    | 34 +++++++++++++++++--
- 2 files changed, 55 insertions(+), 6 deletions(-)
+ bin/omarchy-hyprland-session-lock-stranded | 27 ++++++++++++++++---
+ test/shell.d/hyprland-session-lock-test.sh | 31 +++++++++++++++++++++-
+ 2 files changed, 54 insertions(+), 4 deletions(-)
 
 diff --git a/bin/omarchy-hyprland-session-lock-stranded b/bin/omarchy-hyprland-session-lock-stranded
-index 05b8a56c..24ab5b80 100755
+index 05b8a56cc..24ab5b809 100755
 --- a/bin/omarchy-hyprland-session-lock-stranded
 +++ b/bin/omarchy-hyprland-session-lock-stranded
 @@ -12,8 +12,29 @@
@@ -51,21 +51,19 @@ index 05b8a56c..24ab5b80 100755
 +while read -r pid; do
 +  [[ $pid == "$1" ]] || is_voxtype_osd "$pid" || exit 2
 +done < <(pgrep -u "$UID" -x 'quickshell|qs|hyprlock')
-diff --git a/test/shell.d/hyprland-session-lock-stranded-test.sh b/test/shell.d/hyprland-session-lock-stranded-test.sh
-index ba1db1f1..6a1a8756 100755
---- a/test/shell.d/hyprland-session-lock-stranded-test.sh
-+++ b/test/shell.d/hyprland-session-lock-stranded-test.sh
-@@ -5,7 +5,8 @@ set -euo pipefail
- source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
+diff --git a/test/shell.d/hyprland-session-lock-test.sh b/test/shell.d/hyprland-session-lock-test.sh
+index cf441019e..e47ffa7ef 100644
+--- a/test/shell.d/hyprland-session-lock-test.sh
++++ b/test/shell.d/hyprland-session-lock-test.sh
+@@ -10,6 +10,7 @@ test_tmp=$(mktemp -d)
+ trap 'rm -rf "$test_tmp"' EXIT
  
- fake_bin=$(mktemp -d)
--trap 'rm -rf "$fake_bin"' EXIT
-+proc=$(mktemp -d)
-+trap 'rm -rf "$fake_bin" "$proc"' EXIT
+ fake_bin="$test_tmp/bin"
++proc="$test_tmp/proc"
+ mkdir -p "$fake_bin"
  
- cat >"$fake_bin/omarchy-hyprland-session-locked" <<'SH'
- #!/bin/bash
-@@ -23,10 +24,28 @@ printf '%s\n' $OMARCHY_TEST_LOCKERS
+ cat >"$fake_bin/hyprctl" <<'SH'
+@@ -30,6 +31,24 @@ printf '%s\n' $OMARCHY_TEST_LOCKERS
  SH
  chmod +x "$fake_bin"/*
  
@@ -87,29 +85,32 @@ index ba1db1f1..6a1a8756 100755
 +locker 400 hyprlock
 +locker 401 hyprlock -c /usr/share/voxtype/quickshell/lock.conf
 +
- assert_status() {
-   local expected="$1" locked="$2" lockers="$3" description="$4" actual=0
+ LOCKED=0
+ UNLOCKED=1
+ UNDETERMINED=2
+@@ -46,6 +65,7 @@ exit_status() {
+   OMARCHY_TEST_MONITORS="$monitors" \
+   OMARCHY_TEST_HYPRCTL_FAILS="$hyprctl_fails" \
+   OMARCHY_TEST_LOCKERS="$lockers" \
++  OMARCHY_PROC_ROOT="$proc" \
+     "$ROOT/bin/$command" 100 || actual=$?
  
--  PATH="$fake_bin:$PATH" OMARCHY_TEST_LOCKED="$locked" OMARCHY_TEST_LOCKERS="$lockers" \
-+  PATH="$fake_bin:$PATH" OMARCHY_PROC_ROOT="$proc" OMARCHY_TEST_LOCKED="$locked" OMARCHY_TEST_LOCKERS="$lockers" \
-     "$ROOT/bin/omarchy-hyprland-session-lock-stranded" 100 || actual=$?
- 
-   (( actual == expected )) || fail "$description" "expected exit $expected, got $actual"
-@@ -37,4 +56,13 @@ assert_status 0 0 "" "a lock with no locker alive is stranded"
- assert_status 0 0 "100" "the asking shell does not count as another locker"
- assert_status 1 1 "" "an unlocked session is not stranded"
- assert_status 2 2 "" "a compositor that cannot say leaves it undetermined"
--assert_status 2 0 "100 200" "a lock another locker may hold is left undetermined, so it is never taken"
-+assert_status 2 0 "100 200" "a lock another shell may hold is left undetermined, so it is never taken"
-+assert_status 2 0 "100 400" "a lock hyprlock may hold is left undetermined"
-+assert_status 0 0 "100 300" "voxtype's dictation OSD does not count as a locker"
-+assert_status 2 0 "300 200" "voxtype's OSD does not hide another shell"
-+assert_status 0 0 "100 301" "voxtype's OSD from the user's data directory does not count either"
-+assert_status 0 0 "100 302" "nor from a data directory with a space in it"
-+assert_status 2 0 "100 202" "a shell beside voxtype's config is still a locker"
-+assert_status 2 0 "100 201" "a shell whose path only contains voxtype's config, after a space, is still a locker"
-+assert_status 2 0 "100 401" "hyprlock is a locker whatever its arguments name"
-+assert_status 2 0 "100 500" "a locker gone before its arguments are read is still counted"
+   printf '%s\n' "$actual"
+@@ -116,4 +136,13 @@ assert_stranded 0 "$locked_monitors" "" "a lock with no locker alive is stranded
+ assert_stranded 0 "$locked_monitors" "100" "the asking shell does not count as another locker"
+ assert_stranded 1 "$unlocked_monitors" "" "an unlocked session is not stranded"
+ assert_stranded 2 '[]' "" "a compositor that cannot say leaves it undetermined" 1
+-assert_stranded 2 "$locked_monitors" "100 200" "a lock another locker may hold is left undetermined, so it is never taken"
++assert_stranded 2 "$locked_monitors" "100 200" "a lock another shell may hold is left undetermined, so it is never taken"
++assert_stranded 2 "$locked_monitors" "100 400" "a lock hyprlock may hold is left undetermined"
++assert_stranded 0 "$locked_monitors" "100 300" "voxtype's dictation OSD does not count as a locker"
++assert_stranded 2 "$locked_monitors" "300 200" "voxtype's OSD does not hide another shell"
++assert_stranded 0 "$locked_monitors" "100 301" "voxtype's OSD from the user's data directory does not count either"
++assert_stranded 0 "$locked_monitors" "100 302" "nor from a data directory with a space in it"
++assert_stranded 2 "$locked_monitors" "100 202" "a shell beside voxtype's config is still a locker"
++assert_stranded 2 "$locked_monitors" "100 201" "a shell whose path only contains voxtype's config, after a space, is still a locker"
++assert_stranded 2 "$locked_monitors" "100 401" "hyprlock is a locker whatever its arguments name"
++assert_stranded 2 "$locked_monitors" "100 500" "a locker gone before its arguments are read is still counted"
 -- 
 2.56.0
 
