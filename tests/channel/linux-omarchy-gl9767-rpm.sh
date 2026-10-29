@@ -4,7 +4,9 @@
 #      that match the file, and DELTA re-applies it;
 #   2. the patch keeps the shape that fixes the first version's resume loop on
 #      the G16: suspend waits for a stable card detect, a resume for a host
-#      claim queues no rescan, and quick empty wakes stop runtime suspend;
+#      claim queues no rescan, and quick empty wakes stop runtime suspend,
+#      also when each wake latched an insert with no card (the resume is
+#      compiled against stubs and replayed; needs gcc);
 #   3. if the kernel tarball and a 7.2.8 linux-omarchy headers tree are on this
 #      machine (the build host), 0570 applies at fuzz 0 to stock 7.2.8 and
 #      sdhci-pci compiles as a module with W=1 and no warnings. Elsewhere
@@ -47,6 +49,83 @@ d=$(grep -n 'mmc_detect_change' <<<"$res" | head -n1 | cut -d: -f1)
   ok "a resume for a host claim queues no rescan" || bad "resume can queue a rescan for a claim"
 grep -q 'GL9767_EMPTY_WAKES' <<<"$res" && grep -q 'rpm_stopped = true' <<<"$res" &&
   ok "quick empty wakes stop runtime suspend" || bad "no limit on empty wakes"
+# Behaviour, not just shape: the patch's resume, compiled against stubs, fed
+# quick wakes with the slot empty. A latched insert with no card (a bouncing
+# card-detect line) must still count towards the limit; a card present resets it.
+if command -v gcc >/dev/null; then
+  H=$(mktemp -d)
+  cat >"$H/sim.c" <<'EOF'
+#include <stdbool.h>
+#include <stdio.h>
+typedef unsigned int u32;
+typedef unsigned char u8;
+#define HZ 1000
+#define SDHCI_INT_STATUS 0x30
+#define SDHCI_PRESENT_STATE 0x24
+#define SDHCI_WAKE_UP_CONTROL 0x2b
+#define SDHCI_INT_CARD_INSERT 0x40
+#define SDHCI_CARD_PRESENT 0x10000
+#define SDHCI_CD_STABLE 0x20000
+#define SDHCI_WAKE_ON_INSERT 0x02
+#define GL9767_EMPTY_WAKES 8
+#define READ_ONCE(x) (x)
+#define time_before(a, b) ((long)((a) - (b)) < 0)
+#define msecs_to_jiffies(m) (m)
+#define dev_dbg(...) ((void)0)
+#define dev_info(...) ((void)0)
+struct mmc_host { int claimed; };
+struct sdhci_host { struct mmc_host *mmc; };
+struct pci_dev { int dev; };
+struct sdhci_pci_chip;
+struct gl9767_host { unsigned long suspended_at; unsigned int empty_wakes, settle_tries; bool rpm_stopped; };
+struct sdhci_pci_slot { struct sdhci_host *host; struct gl9767_host gl; };
+struct sdhci_pci_chip { struct sdhci_pci_slot *slots[1]; struct pci_dev *pdev; };
+static unsigned long jiffies;
+static u32 reg_status, reg_present;
+static int rescans;
+static struct gl9767_host *sdhci_pci_priv(struct sdhci_pci_slot *s) { return &s->gl; }
+static u32 sdhci_readl(struct sdhci_host *h, int r) { (void)h; return r == SDHCI_INT_STATUS ? reg_status : reg_present; }
+static u8 sdhci_readb(struct sdhci_host *h, int r) { (void)h; (void)r; return 0; }
+static void sdhci_writeb(struct sdhci_host *h, u8 v, int r) { (void)h; (void)v; (void)r; }
+static void gl9767_hw_setting(struct sdhci_pci_slot *s) { (void)s; }
+static void gl9767_vendor_init(struct sdhci_host *h) { (void)h; }
+static void sdhci_runtime_resume_host(struct sdhci_host *h, int x) { (void)h; (void)x; }
+static void mmc_detect_change(struct mmc_host *m, int d) { (void)m; (void)d; rescans++; }
+#include "resume.c"
+static struct mmc_host mmc;
+static struct sdhci_host host = { &mmc };
+static struct sdhci_pci_slot slot = { &host, { 0 } };
+static struct pci_dev pdev;
+static struct sdhci_pci_chip chip = { { &slot }, &pdev };
+static void wake(u32 status, u32 present) {
+  slot.gl.suspended_at = jiffies; jiffies += 100;
+  reg_status = status; reg_present = present;
+  gl9767_runtime_resume(&chip);
+}
+int main(void) {
+  int i;
+  jiffies = 5000;
+  for (i = 0; i < GL9767_EMPTY_WAKES; i++) wake(SDHCI_INT_CARD_INSERT, SDHCI_CD_STABLE);
+  printf("latched_empty %d %d\n", slot.gl.rpm_stopped, rescans);
+  slot.gl = (struct gl9767_host){ 0 }; rescans = 0;
+  for (i = 0; i < GL9767_EMPTY_WAKES; i++) wake(SDHCI_INT_CARD_INSERT, SDHCI_CARD_PRESENT | SDHCI_CD_STABLE);
+  printf("card %d %d\n", slot.gl.rpm_stopped, rescans);
+  return 0;
+}
+EOF
+  fn gl9767_runtime_resume | sed 's/^+//' >"$H/resume.c"
+  if gcc -std=gnu11 -Wall -Werror -o "$H/sim" "$H/sim.c" 2>"$H/cc.log" && out=$("$H/sim"); then
+    grep -qx 'latched_empty 1 8' <<<"$out" &&
+      ok "latched inserts with an empty slot still reach the empty-wake limit" ||
+      bad "latched inserts with an empty slot bypass the empty-wake limit: $out"
+    grep -qx 'card 0 8' <<<"$out" && ok "a card present resets the empty-wake count" || bad "card present: $out"
+  else
+    cat "$H/cc.log"; bad "resume simulation did not build or run"
+  fi
+  rm -rf "$H"
+else
+  echo "SKIP resume simulation: no gcc"
+fi
 grep -q '^+	.allow_runtime_pm = true,' "$P" && grep -q '^+	.priv_size	= sizeof(struct gl9767_host),' "$P" &&
   ok "GL9767 fixes: allow_runtime_pm and its private state" || bad "fixes entry"
 

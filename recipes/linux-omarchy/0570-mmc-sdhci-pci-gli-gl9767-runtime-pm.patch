@@ -29,9 +29,11 @@ Allow runtime PM for GL9767, conservatively:
   (the mmc core's own rescan among them) does nothing more, since the
   claimer checks the slot itself. A wakeup that finds a card, latched
   or stably present, starts a rescan;
-- wakes that find no card within a second of suspending are counted;
-  after 8 in a row, runtime suspend stops until the next card insert or
-  removal, so the reader can never cycle through D3.
+- wakes within a second of suspending that find the slot empty are
+  counted, by the card-present bit and not the latched insert, so a
+  card-detect line that keeps latching inserts with no card is counted
+  too; after 8 in a row, runtime suspend stops until the next card
+  insert or removal, so the reader can never cycle through D3.
 
 A first version rescanned whenever the card-present bit read set on
 resume, did not wait for card detect to settle, and had no limit. On
@@ -45,7 +47,7 @@ upstream (linux-mmc); hardware-tested status is in the omarchy-asus
 issue for the GL9767 reader.
 ---
  drivers/mmc/host/sdhci-pci-gli.c | 137 +++++++++++++++++++++++++++++++
- 1 file changed, 137 insertions(+)
+ 1 file changed, 145 insertions(+)
 
 diff --git a/drivers/mmc/host/sdhci-pci-gli.c b/drivers/mmc/host/sdhci-pci-gli.c
 --- a/drivers/mmc/host/sdhci-pci-gli.c
@@ -83,7 +85,7 @@ diff --git a/drivers/mmc/host/sdhci-pci-gli.c b/drivers/mmc/host/sdhci-pci-gli.c
  }
  
  static void gli_set_9767(struct sdhci_host *host)
-@@ -1785,6 +1801,121 @@
+@@ -1785,6 +1801,129 @@
  	.post_disable   = sdhci_gl9763e_cqe_post_disable,
  };
  
@@ -152,7 +154,7 @@ diff --git a/drivers/mmc/host/sdhci-pci-gli.c b/drivers/mmc/host/sdhci-pci-gli.c
 +	struct gl9767_host *gl = sdhci_pci_priv(slot);
 +	struct sdhci_host *host = slot->host;
 +	u32 present, status;
-+	bool inserted;
++	bool card, rescan;
 +	u8 wake;
 +
 +	/* The vendor settings live in config space beyond what PCI restores. */
@@ -165,9 +167,10 @@ diff --git a/drivers/mmc/host/sdhci-pci-gli.c b/drivers/mmc/host/sdhci-pci-gli.c
 +	/* Before the reset in sdhci_runtime_resume_host() clears the status. */
 +	status = sdhci_readl(host, SDHCI_INT_STATUS);
 +	present = sdhci_readl(host, SDHCI_PRESENT_STATE);
-+	inserted = (status & SDHCI_INT_CARD_INSERT) ||
-+		   (present & (SDHCI_CD_STABLE | SDHCI_CARD_PRESENT)) ==
-+		   (SDHCI_CD_STABLE | SDHCI_CARD_PRESENT);
++	card = present & SDHCI_CARD_PRESENT;
++	rescan = (status & SDHCI_INT_CARD_INSERT) ||
++		 (present & (SDHCI_CD_STABLE | SDHCI_CARD_PRESENT)) ==
++		 (SDHCI_CD_STABLE | SDHCI_CARD_PRESENT);
 +
 +	gl9767_vendor_init(host);
 +	sdhci_runtime_resume_host(host, 0);
@@ -184,9 +187,16 @@ diff --git a/drivers/mmc/host/sdhci-pci-gli.c b/drivers/mmc/host/sdhci-pci-gli.c
 +		return 0;
 +
 +	/* It only suspends with the slot empty: a card now was inserted meanwhile. */
-+	if (inserted) {
-+		gl->empty_wakes = 0;
++	if (rescan)
 +		mmc_detect_change(host->mmc, msecs_to_jiffies(200));
++
++	/*
++	 * Whether the wake was empty follows the slot itself, not the latched
++	 * insert: a card-detect line that keeps latching inserts with no card
++	 * must still reach the limit.
++	 */
++	if (card) {
++		gl->empty_wakes = 0;
 +	} else if (time_before(jiffies, gl->suspended_at + HZ)) {
 +		if (++gl->empty_wakes >= GL9767_EMPTY_WAKES) {
 +			gl->rpm_stopped = true;
@@ -205,7 +215,7 @@ diff --git a/drivers/mmc/host/sdhci-pci-gli.c b/drivers/mmc/host/sdhci-pci-gli.c
  static int gl9763e_add_host(struct sdhci_pci_slot *slot)
  {
  	struct device *dev = &slot->chip->pdev->dev;
-@@ -2127,7 +2258,13 @@
+@@ -2127,7 +2266,13 @@
  	.add_host	= sdhci_pci_uhs2_add_host,
  	.remove_host	= sdhci_pci_uhs2_remove_host,
  	.ops		= &sdhci_gl9767_ops,
