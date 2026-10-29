@@ -17,10 +17,18 @@
 #   0810       a panel_power_savings write reaches the display firmware at once
 #              (kprobe on dmub_cacp_set_level; level 1 for 3 s, then back to 0)
 #   0773       gpiolib-acpi ignores GPIO 16 wakeups (the quirk, not a command-line option)
+#   0570       GL9767 SD reader runtime PM (#226): with the slot empty it suspends and
+#              stays suspended (under 10% active over 10 s); then a card cycle: seen
+#              when inserted while suspended, suspended and settled again after
+#              removal (the resume loop the first version had). Without the cycle
+#              (declined, or no terminal) it is a WARN: removal untested
 #   0482       amdgpu replays DMUB HPDs skipped during resume (#205): the module has it,
 #              and no USB4 DP tunnel was torn down as "not active" this boot. With --dock
 #              it walks you through #205's dock scenario (unplug the dock with the lid
 #              closed, replug it while suspended, resume) and checks the monitors return
+#   0809       amd_pmf hwmon: APU/dGPU/socket power read as numbers; reading leaves a
+#              runtime-suspended RTX asleep; awake (nvidia-smi), dGPU within 25%
+#              of NVML. Anything it can't establish is a FAIL, so the HOLD stays
 #   suspend    one s2idle cycle (RTC wakes it after 30 s): at least 10 s of s0i3
 #   hibernate  only with --hibernate: hibernate, power-off, resume (needs a button press)
 #   9901       amdgpu.dcn35_s0i2 exists and is off; nothing sets it (the A/B is
@@ -76,7 +84,7 @@ while (($#)); do
     --no-suspend) SUSPEND=0 ;;
     --dock) DOCK=1 ;;
     --yes | -y) YES=1 ;;
-    -h | --help) sed -n '2,47s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,52s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -400,6 +408,60 @@ check_gpio16() {
   result "$st" 0773 "GPIO 16 wakeups ignored (AMDI0030:00@16); suspend with HDMI connected should now sleep" "${det[@]}"
 }
 
+# 0570 (#226): the GL9767 reader (Genesys 17a0:9767) runtime-suspends with the slot empty.
+sd_dir() {
+  local d
+  for d in /sys/bus/pci/devices/*; do
+    [[ $(<"$d/vendor") == 0x17a0 && $(<"$d/device") == 0x9767 ]] 2>/dev/null && { echo "$d"; return; }
+  done
+}
+sd_card() { compgen -G '/sys/class/mmc_host/mmc*/mmc*:*' >/dev/null; }
+sd_state() { echo "$(<"$1/power/runtime_status") $(<"$1/power_state" 2>/dev/null) control=$(<"$1/power/control")"; }
+sd_settled() { # dir label -> 0 when suspended within 10 s and under 10% active for the next 10 s
+  local d=$1 i a0 a1
+  for ((i = 0; i < 20; i++)); do [[ $(<"$d/power/runtime_status") == suspended ]] && break; sleep 0.5; done
+  a0=$(<"$d/power/runtime_active_time")
+  sleep 10
+  a1=$(<"$d/power/runtime_active_time")
+  det+=("$2: $(sd_state "$d"), active $((a1 - a0)) ms of 10000")
+  [[ $(<"$d/power/runtime_status") == suspended ]] && ((a1 - a0 < 1000))
+}
+check_sdreader() {
+  local st=PASS det=() d i msg cycled=0
+  d=$(sd_dir)
+  [[ -n $d ]] || { result SKIP 0570 "no GL9767 SD reader on the PCI bus"; return; }
+  if sd_card; then
+    result SKIP 0570 "a card is in the SD reader: take it out and run the test again"
+    return
+  fi
+  det+=("reader ${d##*/}: $(sd_state "$d")")
+  [[ $(<"$d/power/control") == auto ]] || { result FAIL 0570 "runtime PM not allowed (power/control is not auto)" "${det[@]}"; return; }
+  sd_settled "$d" "slot empty" || st=FAIL
+  if [[ $st == PASS ]] && ((INTERACTIVE)) && ask "Cycle an SD card through the reader (insert, then remove)?"; then
+    cycled=1
+    read -r -p "    Insert an SD card, then press Enter... " _
+    for ((i = 0; i < 10; i++)); do [[ -e /dev/mmcblk0 ]] && break; sleep 0.5; done
+    if [[ -e /dev/mmcblk0 ]]; then det+=("card seen: $(lsblk -dno NAME,SIZE /dev/mmcblk0)")
+    else st=FAIL; det+=("no /dev/mmcblk0 within 5 s of inserting a card while suspended"); fi
+    read -r -p "    Remove the card, then press Enter... " _
+    sleep 2
+    sd_settled "$d" "after removal" || { st=FAIL; det+=("the reader does not settle in runtime suspend after the card is removed"); }
+  fi
+  msg=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -m1 'times in a row with no card')
+  [[ -z $msg ]] || { st=FAIL; det+=("$msg"); }
+  # The empty slot passed with the first version too; only the card cycle tests the fix.
+  if [[ $st == PASS ]] && ((!cycled)); then
+    st=WARN
+    det+=("card removal untested (no card cycle): run the test again at the G16 with an SD card")
+  fi
+  case $st in
+    PASS) msg='runtime-suspends with the slot empty and settles again after a card is removed' ;;
+    WARN) msg='runtime-suspends with the slot empty; card removal untested' ;;
+    *) msg='does not stay runtime-suspended' ;;
+  esac
+  result "$st" 0570 "SD reader $msg" "${det[@]}"
+}
+
 # 0482 (#205): DP connectors of the amdgpu card, one "name status [link_settings]"
 # line each. link_settings (debugfs, root) shows Current vs Verified link rates.
 dp_links() {
@@ -476,6 +538,86 @@ check_dock() {
   else
     result "$st" 0482 "all $n0 DP monitors back after the dock was replugged in suspend; $skipped HPD(s) skipped, $(grep -c . <<<"$replayed") replayed" "${det[@]}"
   fi
+}
+
+# 0809 (#238): amd_pmf's hwmon. Read only power*_input under it, never `sensors`
+# (which reads the RTX's own hwmon too, and that wakes it).
+pmf_hwmon_dir() {
+  local h
+  for h in /sys/class/hwmon/hwmon*; do
+    [[ $(cat "$h/name" 2>/dev/null) == amd_pmf ]] && { printf '%s\n' "$h"; return 0; }
+  done
+  return 1
+}
+pmf_watts() { # hwmon dir -> "APU x W, dGPU y W, socket z W"
+  local i out=''
+  for i in 1 2 3; do
+    out+="$(cat "$1/power${i}_label" 2>/dev/null) $(awk '{printf "%.2f", $1 / 1e6}' "$1/power${i}_input" 2>/dev/null) W, "
+  done
+  printf '%s\n' "${out%, }"
+}
+
+check_pmf_hwmon() {
+  local h d rs0 rs1 st=PASS det=() i v w smi pm nm sp at0 at1
+  pmf_fail() { st=FAIL; det+=("$1"); }
+  h=$(pmf_hwmon_dir) || { result FAIL 0809 "no amd_pmf hwmon device (is amd_pmf loaded? amd_pmf.hwmon_support=0 on the command line?)"; return; }
+  d=$(dgpu_dir) || { result FAIL 0809 "no NVIDIA GPU on the PCI bus"; return; }
+  # Asleep: all three channels read as numbers, and reading leaves the RTX in D3cold.
+  for ((i = 0; i < 60; i++)); do
+    rs0=$(cat "$d/power/runtime_status" 2>/dev/null)
+    [[ $rs0 == suspended ]] && break
+    sleep 1
+  done
+  det+=("hwmon: ${h##*/}" "RTX runtime_status before reading: $rs0 (waited ${i}s)")
+  # runtime_active_time only grows while the RTX is awake, so a wake that is
+  # already over by the second status read still shows here.
+  at0=$(cat "$d/power/runtime_active_time" 2>/dev/null)
+  for i in 1 2 3; do
+    v=$(cat "$h/power${i}_input" 2>/dev/null)
+    [[ $v =~ ^[0-9]+$ ]] || pmf_fail "power${i}_input ($(cat "$h/power${i}_label" 2>/dev/null)) did not read as a number: '${v}'"
+  done
+  w=$(pmf_watts "$h")
+  v=$(cat "$h/power2_input" 2>/dev/null)
+  sleep 2
+  rs1=$(cat "$d/power/runtime_status" 2>/dev/null)
+  at1=$(cat "$d/power/runtime_active_time" 2>/dev/null)
+  det+=("asleep read: $w" "RTX runtime_status 2 s after reading: $rs1, runtime_active_time ${at0:-?} -> ${at1:-?} ms")
+  if [[ $rs0 == suspended ]]; then
+    [[ $rs1 == suspended ]] || pmf_fail "reading amd_pmf's hwmon woke the RTX"
+    [[ $at0 =~ ^[0-9]+$ && $at1 =~ ^[0-9]+$ ]] || pmf_fail "runtime_active_time unreadable, so a short wake can't be ruled out"
+    [[ $at0 =~ ^[0-9]+$ && $at1 =~ ^[0-9]+$ ]] && ((at1 > at0)) && pmf_fail "the RTX was awake for $((at1 - at0)) ms during the reads"
+    [[ $v =~ ^[0-9]+$ ]] && ((v > 500000)) && pmf_fail "dGPU reads over 0.5 W while the RTX is in D3cold"
+  else
+    pmf_fail "the RTX never runtime-suspended in 60 s, so the asleep reading is untested"
+  fi
+  # Awake: nvidia-smi wakes the RTX on purpose; amd_pmf's dGPU figure must track NVML.
+  if have nvidia-smi; then
+    smi=$(mktemp)
+    timeout 15 nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits -lms 1000 >"$smi" 2>/dev/null &
+    sp=$!
+    sleep 4
+    pm=0
+    for ((i = 0; i < 8; i++)); do
+      v=$(cat "$h/power2_input" 2>/dev/null)
+      if [[ $v =~ ^[0-9]+$ ]]; then pm=$((pm + v)); else pmf_fail "awake read $((i + 1)) of power2_input failed: '${v}'"; fi
+      sleep 1
+    done
+    wait "$sp"
+    pm=$(awk -v s="$pm" 'BEGIN {printf "%.2f", s / 8 / 1e6}')
+    nm=$(awk '$1 + 0 > 0 {s += $1; c++} END {if (c) printf "%.2f", s / c}' "$smi")
+    rm -f "$smi"
+    det+=("awake: amd_pmf dGPU mean $pm W, NVML power.draw mean ${nm:-?} W")
+    if [[ -z $nm ]]; then
+      pmf_fail "nvidia-smi gave no power.draw, so the awake reading is unchecked"
+    elif awk -v p="$pm" 'BEGIN {exit !(p < 0.5)}'; then
+      pmf_fail "dgpu_power is not populated: about 0 W with the RTX awake (NVML $nm W)"
+    elif ! awk -v p="$pm" -v n="$nm" 'BEGIN {d = p - n; if (d < 0) d = -d; exit !(d / n <= 0.25)}'; then
+      pmf_fail "dGPU reading is more than 25% from NVML"
+    fi
+  else
+    pmf_fail "no nvidia-smi: the awake reading is unchecked"
+  fi
+  result "$st" 0809 "amd_pmf hwmon: $w; RTX $rs0 -> $rs1; awake dGPU ${pm:-?} W vs NVML ${nm:-?} W" "${det[@]}"
 }
 
 check_dcn35_s0i2() {
@@ -614,9 +756,11 @@ run_checks() {
     check_panel
     check_cacp_apply
     check_gpio16
+    check_sdreader
     check_dock
     check_dcn35_s0i2
     check_dm_idle_all_off
+    check_pmf_hwmon
     check_nvidia
     check_suspend
     check_hibernate
