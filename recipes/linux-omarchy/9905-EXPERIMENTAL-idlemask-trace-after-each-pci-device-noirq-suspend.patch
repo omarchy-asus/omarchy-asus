@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Mon, 26 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: PM: sleep: log the SMU idlemask after each PCI
+ device's noirq suspend (pm_debug_messages only)
+
+EXPERIMENTAL, DEBUG ONLY (local carry for ROG Zephyrus G16 GA605KM idle
+power testing; not submitted upstream).
+
+On the G16, 9904's trace shows idlemask bits 16-19 turning idle between
+"s2idle-prepare" and "amdgpu-noirq", and bits 5, 20 and 25 by "noirq",
+while amdgpu's own noirq callback does nothing in s2idle there. So the
+noirq phase of other devices idles them: the PCI core puts each device
+into D3 in pci_pm_suspend_noirq(). Log the idlemask once as the noirq
+phase starts and after each PCI device's noirq suspend:
+
+  SMU idlemask noirq-start: 0x...
+  SMU idlemask noirq <device> <power state>: 0x...
+
+for example "SMU idlemask noirq 0000:65:00.0 D3hot: 0x...". The power
+state is the one the noirq suspend left the device in (pci_power_name()).
+A device suspended asynchronously logs from its async thread when it
+finishes, so the lines are in the order the devices finished. Devices
+skipped by direct_complete or syscore don't log; non-PCI devices don't
+either, to keep the log readable.
+
+It goes through 9904's amd_pmc_trace_idlemask_stage() (symbol_get() of
+amd_pmc's exported trace), so the PM core does not depend on amd_pmc.
+Only in an s2idle (PM_EVENT_SUSPEND to PM_SUSPEND_TO_IDLE).
+
+Nothing is read or logged unless /sys/power/pm_debug_messages is 1 during
+an s2idle. With it at 0 nothing changes.
+
+Tracked in omarchy-asus #353 (refs #249).
+---
+diff --git a/drivers/base/power/main.c b/drivers/base/power/main.c
+--- a/drivers/base/power/main.c
++++ b/drivers/base/power/main.c
+@@ -37,6 +37,8 @@
+ #include <linux/thermal.h>
+ #include <linux/timer.h>
+ #include <linux/nmi.h>
++#include <linux/pci.h>
++#include <linux/platform_data/x86/amd-pmc.h>
+ 
+ #include "../base.h"
+ #include "power.h"
+@@ -1494,6 +1496,37 @@
+ 
+ static void async_suspend_noirq(void *data, async_cookie_t cookie);
+ 
++/*
++ * EXPERIMENTAL: in an s2idle with pm_debug_messages on, log the SMU idlemask
++ * (through amd_pmc) as the noirq phase starts and after each PCI device's
++ * noirq suspend, with the power state that left the device in. A no-op
++ * otherwise, and without amd_pmc loaded.
++ */
++static bool dpm_noirq_trace_idlemask_on(pm_message_t state)
++{
++#if IS_ENABLED(CONFIG_AMD_PMC) && defined(CONFIG_PM_SLEEP_DEBUG)
++	return state.event == PM_EVENT_SUSPEND &&
++	       pm_suspend_target_state == PM_SUSPEND_TO_IDLE &&
++	       pm_debug_messages_should_print();
++#else
++	return false;
++#endif
++}
++
++static void dpm_noirq_trace_idlemask(struct device *dev, pm_message_t state)
++{
++#if IS_ENABLED(CONFIG_AMD_PMC) && defined(CONFIG_PM_SLEEP_DEBUG) && defined(CONFIG_PCI)
++	char stage[64];
++
++	if (!dev_is_pci(dev) || !dpm_noirq_trace_idlemask_on(state))
++		return;
++
++	snprintf(stage, sizeof(stage), "noirq %s %s", dev_name(dev),
++		 pci_power_name(to_pci_dev(dev)->current_state));
++	amd_pmc_trace_idlemask_stage(stage);
++#endif
++}
++
+ /**
+  * device_suspend_noirq - Execute a "noirq suspend" callback for given device.
+  * @dev: Device to handle.
+@@ -1555,6 +1588,7 @@
+ 
+ Skip:
+ 	dev->power.is_noirq_suspended = true;
++	dpm_noirq_trace_idlemask(dev, state);
+ 
+ 	/*
+ 	 * Devices must be resumed unless they are explicitly allowed to be left
+@@ -1595,6 +1629,9 @@
+ 
+ 	trace_suspend_resume(TPS("dpm_suspend_noirq"), state.event, true);
+ 
++	if (dpm_noirq_trace_idlemask_on(state))
++		amd_pmc_trace_idlemask_stage("noirq-start");
++
+ 	pm_transition = state;
+ 	async_error = 0;
+ 

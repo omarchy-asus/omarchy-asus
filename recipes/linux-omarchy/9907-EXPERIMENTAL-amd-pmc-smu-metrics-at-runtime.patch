@@ -1,0 +1,196 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Mon, 26 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: platform/x86/amd/pmc: debugfs smu_metrics_runtime
+ refreshes the SMU metrics table on read
+
+EXPERIMENTAL, DEBUG ONLY (local carry for ROG Zephyrus G16 GA605KM idle
+power testing; not submitted upstream).
+
+smu_fw_info only shows what the SMU last wrote to its metrics table, and
+the SMU writes it when amd_pmc sends SMU_MSG_LOG_DUMP_DATA on s2idle
+resume (amd_pmc_s2idle_restore()). So at runtime the table is stale, and
+timein_s0i2 is never printed anywhere.
+
+Add /sys/kernel/debug/amd_pmc/smu_metrics_runtime (0600):
+
+  read     sends SMU_MSG_LOG_DUMP_DATA now, then prints every field of
+           the table: the header fields, timein_s0i2, the S0i3, resume
+           and SW DRIPS times, active_ips, and both per-IP arrays
+           (timecondition_notmet_lastcapture and _totaltime, all 32
+           entries, named where the CPU's IP list names them). If the SMU
+           rejects the message, the first line says so with the error and
+           the table is printed as it was; it never retries.
+  "start"  (write) resets and starts the SMU's logging, as s2idle's
+           prepare does, so the next read covers the time since.
+
+When the table is not mapped yet (no s2idle since boot), it is mapped
+from the SMU's DRAM address queries only, without the logging reset that
+smu_fw_info's first read does. The message is the one the resume path
+sends from a running system, over the same mailbox under amd_pmc's lock.
+
+Nothing is sent to the SMU unless the file is read or written.
+
+Tracked in omarchy-asus #249 (refs #353).
+---
+diff --git a/drivers/platform/x86/amd/pmc/pmc.c b/drivers/platform/x86/amd/pmc/pmc.c
+--- a/drivers/platform/x86/amd/pmc/pmc.c
++++ b/drivers/platform/x86/amd/pmc/pmc.c
+@@ -26,6 +26,8 @@
+ #include <linux/platform_data/x86/amd-pmc.h>
+ #include <linux/rtc.h>
+ #include <linux/serio.h>
++#include <linux/slab.h>
++#include <linux/string.h>
+ #include <linux/suspend.h>
+ #include <linux/seq_file.h>
+ #include <linux/uaccess.h>
+@@ -507,6 +509,138 @@
+ DEFINE_SHOW_ATTRIBUTE(amd_pmc_idlemask);
+ 
+ /*
++ * EXPERIMENTAL: the SMU metrics table at runtime. smu_fw_info only shows
++ * what the SMU last wrote to the table, which it does when amd_pmc sends
++ * SMU_MSG_LOG_DUMP_DATA on s2idle resume. A read of smu_metrics_runtime
++ * sends that message now and prints every field, timein_s0i2 and both
++ * per-IP counter arrays included. If the SMU rejects it, the read says so
++ * and prints the table as it was; it never retries. Writing "start" resets
++ * and starts the SMU's logging (what s2idle's prepare does), so the next
++ * read covers the time since. Nothing is sent unless the file is read or
++ * written. Debug only.
++ */
++static int amd_pmc_map_smu_table(struct amd_pmc_dev *dev)
++{
++	u32 phys_addr_low = 0, phys_addr_hi = 0;
++	u64 smu_phys_addr;
++	int rc;
++
++	if (dev->smu_virt_addr)
++		return 0;
++
++	/* Address queries only: no logging reset or start */
++	rc = amd_pmc_send_cmd(dev, 0, &phys_addr_low, SMU_MSG_LOG_GETDRAM_ADDR_LO, true);
++	if (rc)
++		return rc;
++	rc = amd_pmc_send_cmd(dev, 0, &phys_addr_hi, SMU_MSG_LOG_GETDRAM_ADDR_HI, true);
++	if (rc)
++		return rc;
++	smu_phys_addr = ((u64)phys_addr_hi << 32 | phys_addr_low);
++	if (!smu_phys_addr)
++		return -ENXIO;
++
++	dev->smu_virt_addr = devm_ioremap(dev->dev, smu_phys_addr, sizeof(struct smu_metrics));
++
++	return dev->smu_virt_addr ? 0 : -ENOMEM;
++}
++
++static int smu_metrics_runtime_show(struct seq_file *s, void *unused)
++{
++	struct amd_pmc_dev *dev = s->private;
++	struct smu_metrics *table;
++	int idx, rc;
++
++	if (dev->cpu_id == AMD_CPU_ID_PCO)
++		return -ENODEV;
++
++	rc = amd_pmc_map_smu_table(dev);
++	if (rc) {
++		seq_printf(s, "SMU table address: error %d\n", rc);
++		return 0;
++	}
++	if (!dev->active_ips)
++		amd_pmc_send_cmd(dev, 0, &dev->active_ips, SMU_MSG_GET_SUP_CONSTRAINTS, true);
++
++	rc = amd_pmc_send_cmd(dev, 0, NULL, SMU_MSG_LOG_DUMP_DATA, false);
++	seq_printf(s, "Dump data (0x%x): %s %d\n", SMU_MSG_LOG_DUMP_DATA,
++		   rc ? "rejected, table not refreshed:" : "ok", rc);
++
++	table = kzalloc_obj(*table);
++	if (!table)
++		return -ENOMEM;
++	memcpy_fromio(table, dev->smu_virt_addr, sizeof(*table));
++
++	seq_printf(s, "table_version: %u\n", table->table_version);
++	seq_printf(s, "hint_count: %u\n", table->hint_count);
++	seq_printf(s, "s0i3_last_entry_status: %u\n", table->s0i3_last_entry_status);
++	seq_printf(s, "timein_s0i2: %u\n", table->timein_s0i2);
++	seq_printf(s, "timeentering_s0i3_lastcapture: %llu\n",
++		   table->timeentering_s0i3_lastcapture);
++	seq_printf(s, "timeentering_s0i3_totaltime: %llu\n", table->timeentering_s0i3_totaltime);
++	seq_printf(s, "timeto_resume_to_os_lastcapture: %llu\n",
++		   table->timeto_resume_to_os_lastcapture);
++	seq_printf(s, "timeto_resume_to_os_totaltime: %llu\n",
++		   table->timeto_resume_to_os_totaltime);
++	seq_printf(s, "timein_s0i3_lastcapture: %llu\n", table->timein_s0i3_lastcapture);
++	seq_printf(s, "timein_s0i3_totaltime: %llu\n", table->timein_s0i3_totaltime);
++	seq_printf(s, "timein_swdrips_lastcapture: %llu\n", table->timein_swdrips_lastcapture);
++	seq_printf(s, "timein_swdrips_totaltime: %llu\n", table->timein_swdrips_totaltime);
++	seq_printf(s, "active_ips: 0x%x\n", dev->active_ips);
++	seq_puts(s, "idx name active timecondition_notmet_lastcapture timecondition_notmet_totaltime\n");
++	for (idx = 0; idx < ARRAY_SIZE(table->timecondition_notmet_lastcapture); idx++) {
++		bool named = idx < dev->cpu_info->num_ips;
++
++		seq_printf(s, "%2d %-8s %d %llu %llu\n", idx,
++			   named ? dev->cpu_info->ips_ptr[idx].name : "-",
++			   named && (dev->cpu_info->ips_ptr[idx].bit_mask & dev->active_ips),
++			   table->timecondition_notmet_lastcapture[idx],
++			   table->timecondition_notmet_totaltime[idx]);
++	}
++	kfree(table);
++
++	return 0;
++}
++
++static int smu_metrics_runtime_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, smu_metrics_runtime_show, inode->i_private);
++}
++
++static ssize_t smu_metrics_runtime_write(struct file *file, const char __user *ubuf,
++					 size_t count, loff_t *ppos)
++{
++	struct amd_pmc_dev *dev = file_inode(file)->i_private;
++	char buf[8] = {};
++	int rc;
++
++	if (count >= sizeof(buf) || copy_from_user(buf, ubuf, count))
++		return -EINVAL;
++	if (strcmp(strim(buf), "start"))
++		return -EINVAL;
++	if (dev->cpu_id == AMD_CPU_ID_PCO)
++		return -ENODEV;
++
++	rc = amd_pmc_map_smu_table(dev);
++	if (rc)
++		return rc;
++	memset_io(dev->smu_virt_addr, 0, sizeof(struct smu_metrics));
++	rc = amd_pmc_send_cmd(dev, 0, NULL, SMU_MSG_LOG_RESET, false);
++	if (!rc)
++		rc = amd_pmc_send_cmd(dev, 0, NULL, SMU_MSG_LOG_START, false);
++
++	return rc ? rc : count;
++}
++
++static const struct file_operations smu_metrics_runtime_fops = {
++	.owner = THIS_MODULE,
++	.open = smu_metrics_runtime_open,
++	.read = seq_read,
++	.write = smu_metrics_runtime_write,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
++/*
+  * EXPERIMENTAL: the idlemask at a stage of an s2idle, only with
+  * pm_debug_messages on. Cezanne needs an SMU version check first; skip it.
+  */
+@@ -545,6 +679,9 @@
+ 			    &s0ix_stats_fops);
+ 	debugfs_create_file("amd_pmc_idlemask", 0644, dev->dbgfs_dir, dev,
+ 			    &amd_pmc_idlemask_fops);
++	/* EXPERIMENTAL: sends the SMU a message on each read (see above) */
++	debugfs_create_file("smu_metrics_runtime", 0600, dev->dbgfs_dir, dev,
++			    &smu_metrics_runtime_fops);
+ }
+ 
+ static char *amd_pmc_get_msg_port(struct amd_pmc_dev *dev)

@@ -4,7 +4,7 @@
 # in source=() is the whole edit.
 upstream omarchy-pkgs pkgbuilds/linux-omarchy
 mode overlay
-keep NOTES.md g16-test/deploy g16-test/test g16-test/lib.sh g16-test/probe-verdict.py
+keep NOTES.md g16-test/deploy g16-test/test g16-test/lib.sh g16-test/probe-verdict.py g16-test/dcn35-s0i2-ab g16-test/dm-idle-all-off g16-test/idlemask-trace g16-test/psp-rpm
 patch 0481-drm-amd-display-power-backports.patch after 0480-*
 patch 0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch after 0481-*
 patch 0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch after 0567-*
@@ -13,4 +13,13 @@ patch 0773-gpiolib-acpi-ignore-wake-on-gpio16-asus-ga605km.patch after 0772-*
 patch 0807-platform-x86-asus-armoury-ga605km-power-limits.patch after 0806-*
 patch 0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernation.patch after 0807-*
 patch 0810-drm-amd-display-panel-power-savings-apply-now.patch after 0808-*
-patch 9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch end -- EXPERIMENTAL, default-off scheduler series for GA605KM battery testing; see NOTES.md
+patch 9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch end -- EXPERIMENTAL, default-off amdgpu switch (DCN 3.5 S0i2-ready display idle) for GA605KM idle testing; see NOTES.md
+patch 9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch end -- EXPERIMENTAL, default-off amdgpu switch (display idle with every CRTC off) for GA605KM idle testing; see NOTES.md
+patch 9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch end -- EXPERIMENTAL, pm_debug_messages-only SMU idlemask trace through s2idle for GA605KM idle testing; see NOTES.md
+patch 9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch end -- EXPERIMENTAL, pm_debug_messages-only idlemask trace between amdgpu's suspend and amd_pmc's prepare (suspend_late, noirq, LPS0 _DSMs) for GA605KM idle testing; see NOTES.md
+patch 9905-EXPERIMENTAL-idlemask-trace-after-each-pci-device-noirq-suspend.patch end -- EXPERIMENTAL, pm_debug_messages-only idlemask trace after each PCI device's noirq suspend for GA605KM idle testing; see NOTES.md
+patch 9906-EXPERIMENTAL-ccp-psp-runtime-pm-default-off.patch end -- EXPERIMENTAL, default-off ccp runtime PM for the PSP-only function (ccp.psp_rpm_delay_ms) for GA605KM idle testing; see NOTES.md
+patch 9907-EXPERIMENTAL-amd-pmc-smu-metrics-at-runtime.patch end -- EXPERIMENTAL, debug-only amd_pmc debugfs smu_metrics_runtime (SMU metrics table refreshed on read) for GA605KM idle testing; see NOTES.md
+patch 9908-EXPERIMENTAL-drm-amd-display-keep-idle-allowed-with-every-crtc-off-default-off.patch end -- EXPERIMENTAL, default-off amdgpu: keep display idle allowed while every CRTC is off (dm_idle_all_off) and trace idle changes (dm_idle_trace) for GA605KM idle testing; see NOTES.md
+patch 9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch end -- EXPERIMENTAL, GA605KM only: hid-asus declares only the built-in keyboard's Caps Lock LED (it has no Num/Scroll Lock lights), so a lit Num Lock no longer blocks its USB autosuspend; see NOTES.md
+patch 9910-EXPERIMENTAL-amd-pm-smu-allow-zstates-debugfs.patch end -- EXPERIMENTAL, sends nothing by default: amdgpu debugfs amdgpu_smu_allow_zstates sends the SMU AllowZstates message (0x25) on an explicit write, for GA605KM idle testing; see NOTES.md

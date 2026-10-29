@@ -47,7 +47,16 @@ An upstream state that changes is updated here, with the date it was checked.
 | [asus-armoury GA605KM power limits](#kernel-0807-armoury-power-limits) | linux-omarchy | 0807 | both | not submitted |
 | [asus-wmi restores the thermal policy after hibernation](#kernel-0808-thermal-policy-restore) | linux-omarchy | 0808 | RC only | not submitted |
 | [panel_power_savings applies when written](#kernel-0810-panel-power-savings) | linux-omarchy | 0810 | RC only | not submitted |
-| [EXPERIMENTAL Zen 5c-first soft park](#kernel-9900-zen5c-soft-park) | linux-omarchy | 9900 | both | ours-only |
+| [EXPERIMENTAL DCN 3.5 S0i2-ready display idle](#kernel-9901-dcn35-s0i2) | linux-omarchy | 9901 | RC only | not submitted |
+| [EXPERIMENTAL display idle with every CRTC off](#kernel-9902-dm-idle-all-off) | linux-omarchy | 9902 | RC only | not submitted |
+| [EXPERIMENTAL SMU idlemask trace through s2idle](#kernel-9903-idlemask-trace) | linux-omarchy | 9903 | RC only | ours-only |
+| [EXPERIMENTAL idlemask trace between amdgpu's suspend and the LPS0 calls](#kernel-9904-idlemask-window) | linux-omarchy | 9904 | RC only | ours-only |
+| [EXPERIMENTAL idlemask trace after each PCI device's noirq suspend](#kernel-9905-idlemask-noirq-devices) | linux-omarchy | 9905 | RC only | ours-only |
+| [EXPERIMENTAL runtime PM for the PSP function](#kernel-9906-psp-rpm) | linux-omarchy | 9906 | RC only | not submitted |
+| [EXPERIMENTAL SMU metrics table at runtime](#kernel-9907-smu-metrics-runtime) | linux-omarchy | 9907 | RC only | ours-only |
+| [EXPERIMENTAL display idle kept allowed with every CRTC off](#kernel-9908-dm-idle-kept) | linux-omarchy | 9908 | RC only | not submitted |
+| [EXPERIMENTAL the GA605KM keyboard declares only its Caps Lock LED](#kernel-9909-nkey-caps-led-only) | linux-omarchy | 9909 | RC only | not submitted |
+| [EXPERIMENTAL debugfs to send the SMU AllowZstates message](#kernel-9910-smu-allow-zstates) | linux-omarchy | 9910 | RC only | ours-only |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -81,6 +90,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [nvidia-powerd start limit](#g16-nvidia-powerd-start-limit) | omarchy-asus-g16 | unit drop-in | both | not submitted |
 | [rcu_nocbs=all](#g16-rcu-nocbs) | omarchy-asus-g16 | limine-entry-tool drop-in | RC only | ours-only |
 | [Wi-Fi back after a wake (mt7925)](#g16-mt7925-auth-retries) | omarchy-asus-g16 | NetworkManager drop-in | RC only | not submitted |
+| [EXPERIMENTAL built-in keyboard autosuspend](#g16-keyboard-autosuspend) | omarchy-asus-g16 | udev rule | RC only | ours-only |
 | [Win-lock helper](#pkg-asus-rog-nkey-winlock) | asus-rog-nkey-winlock | package | both | ours-only |
 | [keyring and setup script](#pkg-omarchy-asus-keyring) | omarchy-asus-keyring, `bin/omarchy-asus-setup` | package | both | ours-only |
 | [G16 fix applier](#pkg-omarchy-asus-g16-apply) | omarchy-asus-g16-apply | package | both | ours-only |
@@ -92,7 +102,7 @@ we no longer carry.
 
 ## Kernel: linux-omarchy
 
-RC 7.2.8-9.103 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
+RC 7.2.8-9.107 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
 why, the risks and the long test scripts are in `recipes/linux-omarchy/NOTES.md`. Our patches have
 no `.sig` (upstream's patch signatures use the Omarchy kernel maintainer's key); their checksums
 pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for each patch.
@@ -404,19 +414,188 @@ kernel's rules on AI assistants ask for.
 > `dmub_cacp_set_level` fires within 3 s of the write. Mainline (7.4-rc1) has the same store
 > function.
 
-<a id="kernel-9900-zen5c-soft-park"></a>
-### EXPERIMENTAL Zen 5c-first soft park (9900)
+<a id="kernel-9901-dcn35-s0i2"></a>
+### EXPERIMENTAL DCN 3.5 S0i2-ready display idle (9901)
 
-- **Component:** `linux-omarchy`, `9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch`,
-  applied last. Both channels.
-- **What:** five scheduler changes for GA605KM battery testing (amd_hfi ITMT ranking, soft wakeup
-  CPU preference, AMD workload-class steering, optional SMT packing, NOHZ idle-load-balancer
-  preference). Every knob defaults off and nothing enables it, so the scheduler takes the stock
-  paths. Compile-tested only.
-- **Test:** the kit checks that every 9900 knob is at its default. The battery A/B is the work
-  in experiment issue #10.
-- **Upstream: ours-only.** Not meant for upstream.
-- **Drop when:** the A/B shows no win (or move it to a separate `-experimental` kernel).
+- **Component:** `linux-omarchy`,
+  `9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch`, first of the 99xx series. RC only
+  (since 9.106).
+- **What:** a new `amdgpu.dcn35_s0i2` parameter (bool, writable at runtime, default 0). When it is 1,
+  the DCN 3.5 clock manager sends `SetDisplayIdleOptimizations` with `df_request_disabled`,
+  `phy_ref_clk_off` and `s0i2_rdy` when the active display count drops to 0, as DCN 3.1 does. Stock
+  DCN 3.5 never sends them, so the SMU's display-idle bit (idlemask bit 5) and IPS2 (bit 20) stay
+  not idle even with every display off (#249). With 0, the driver takes the stock path.
+  Compile-tested only.
+- **Test:** the kit's `9901` check (present, off, nothing sets it). The one-boot A/B is
+  `g16-test/dcn35-s0i2-ab`, and its results go to experiment issue #353.
+- **Upstream: not submitted.** Mainline master is unchanged (2026-10-25). An amd-gfx report will be
+  drafted after the G16 numbers.
+- **Drop when:** the A/B shows no effect or a wake problem, or upstream sends the flags itself.
+
+<a id="kernel-9902-dm-idle-all-off"></a>
+### EXPERIMENTAL display idle with every CRTC off (9902)
+
+- **Component:** `linux-omarchy`,
+  `9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch`, after 9901. RC
+  only (since 9.107).
+- **What:** a new `amdgpu.dm_idle_all_off` parameter (bool, writable at runtime, default 0). When
+  it is 1, amdgpu's display manager treats "no stream in DC's state" as headless where that check
+  gates allowing idle optimizations (the end of a stream commit, the idle worker, periodic
+  detection). Stock only re-allows idle with no connector connected, and the internal panel always
+  is, so with the screen off (DPMS off) idle stays disallowed and IPS never runs (#249). The paths
+  that disallow idle are unchanged. With 0, the driver takes the stock path. Compile-tested only.
+- **Test:** `g16-test/dm-idle-all-off` (with 9901 and 9903); results go to experiment issue #353.
+- **Upstream: not submitted.** An amd-gfx report will be drafted after the G16 numbers.
+- **Drop when:** the A/B shows no effect, or upstream re-allows idle with every CRTC off.
+
+<a id="kernel-9903-idlemask-trace"></a>
+### EXPERIMENTAL SMU idlemask trace through s2idle (9903)
+
+- **Component:** `linux-omarchy`, `9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch`,
+  after 9902. RC only (since 9.107).
+- **What:** with `/sys/power/pm_debug_messages` at 1, each s2idle logs `amd_pmc: SMU idlemask
+  <stage>: 0x...` after amdgpu's display suspend (`amdgpu-display`), after its other IP suspend
+  (`amdgpu-ip`), at amd_pmc's prepare before and after the OS hint (`prepare`, `os-hint`), next to
+  the existing `s0i3` line. amd_pmc exports the helper and amdgpu finds it with `symbol_get()`.
+  With `pm_debug_messages` at 0 nothing is read or logged.
+- **Test:** phase (d) of `g16-test/dm-idle-all-off`: the first stage where bit 16 reads idle (#353).
+- **Upstream: ours-only.** A debug aid.
+- **Drop when:** with 9902, or once the stage that sets bit 16 is known.
+
+<a id="kernel-9904-idlemask-window"></a>
+### EXPERIMENTAL idlemask trace between amdgpu's suspend and the LPS0 calls (9904)
+
+- **Component:** `linux-omarchy`, `9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch`,
+  after 9903. RC only (since 9.108).
+- **What:** more stages for 9903's trace, with `/sys/power/pm_debug_messages` at 1: after every
+  device's suspend_late (`suspend-late`), the s2idle prepare (`s2idle-prepare`), amdgpu's noirq
+  (`amdgpu-noirq`), every device's noirq (`noirq`), and each LPS0 `_DSM` call (`dsm-screen-off-amd`,
+  `dsm-screen-off`, `dsm-entry-amd`, `dsm-ms-entry`, `dsm-entry`; a call that didn't run logs
+  `not run`). On 9.107 the display bits turned idle between `amdgpu-ip` and `prepare`; this
+  narrows that window. With `pm_debug_messages` at 0 nothing is read or logged.
+- **Test:** `g16-test/idlemask-trace` (one 15 s suspend): the first stage where each display bit
+  reads idle (#353).
+- **Upstream: ours-only.** A debug aid.
+- **Drop when:** with 9903, or once the stage that idles bit 16 is known.
+
+<a id="kernel-9905-idlemask-noirq-devices"></a>
+### EXPERIMENTAL idlemask trace after each PCI device's noirq suspend (9905)
+
+- **Component:** `linux-omarchy`, `9905-EXPERIMENTAL-idlemask-trace-after-each-pci-device-noirq-suspend.patch`,
+  after 9904. RC only (since 9.109).
+- **What:** in an s2idle with `/sys/power/pm_debug_messages` at 1, 9903's trace as the noirq phase
+  starts (`noirq-start`) and after each PCI device's noirq suspend, with the device and its
+  resulting power state (`SMU idlemask noirq 0000:65:00.0 D3hot: 0x...`). On 9.108 bits 16-19
+  turned idle between `s2idle-prepare` and `amdgpu-noirq`, and bits 5, 20 and 25 by `noirq`; this
+  names the device whose D3 idles each. With `pm_debug_messages` at 0 nothing is read or logged.
+- **Test:** `g16-test/idlemask-trace` (one 15 s suspend): the per-device noirq rows and the first
+  device after which each bit reads idle (#353).
+- **Upstream: ours-only.** A debug aid.
+- **Drop when:** with 9903 and 9904, or once the device that holds bit 16 is known.
+
+<a id="kernel-9906-psp-rpm"></a>
+### EXPERIMENTAL runtime PM for the PSP function (9906)
+
+- **Component:** `linux-omarchy`, `9906-EXPERIMENTAL-ccp-psp-runtime-pm-default-off.patch`, after
+  9905. RC only (since 9.110).
+- **What:** ccp runtime PM for a PSP-only PCI function without SEV (the G16's 1022:17E0,
+  65:00.2). `ccp.psp_rpm_delay_ms` (default 0 = off) > 0 gives up the PCI core's probe
+  reference and uses autosuspend with that delay, so with `power/control=auto` the function
+  sits in D3hot between commands; every register user (mailbox, TEE ring, platform access,
+  dbc, the version attributes) holds a runtime PM reference. A write applies at once.
+  `ccp.psp_rpm_debug` logs each runtime suspend and resume with the caller that woke it. With
+  the delay at 0, or `power/control` at `on`, nothing changes. Idlemask bit 16 (the runtime
+  deep-idle blocker) turns idle where s2idle's noirq phase puts this function in D3hot (#353);
+  this tries that at runtime.
+- **Test:** `g16-test/psp-rpm` (on battery, about 4 minutes): bit 16, socket power and the
+  PSP's suspend/resume counts with it runtime-suspended, screen on and off; an fTPM read and a
+  version read with it suspended (#249).
+- **Upstream: not submitted.** An experiment; a ccp runtime-PM patch for PSP-only parts if it
+  works and the TEE, TPM and display keep working.
+- **Drop when:** the G16 shows no effect on bit 16 or socket power.
+
+<a id="kernel-9907-smu-metrics-runtime"></a>
+### EXPERIMENTAL SMU metrics table at runtime (9907)
+
+- **Component:** `linux-omarchy`, `9907-EXPERIMENTAL-amd-pmc-smu-metrics-at-runtime.patch`, after
+  9906. RC only (since 9.110).
+- **What:** `/sys/kernel/debug/amd_pmc/smu_metrics_runtime`: a read sends the SMU the metrics dump
+  message that amd_pmc otherwise sends only on s2idle resume, and prints every field of the table
+  (`timein_s0i2` and both per-IP counter arrays included); a rejection is reported, never retried.
+  Writing `start` resets and starts the SMU's logging. Nothing is sent unless the file is used.
+- **Test:** `g16-test/psp-rpm` reads it at the end of each phase (#249).
+- **Upstream: ours-only.** A debug aid.
+- **Drop when:** with 9903.
+
+<a id="kernel-9908-dm-idle-kept"></a>
+### EXPERIMENTAL display idle kept allowed with every CRTC off (9908)
+
+- **Component:** `linux-omarchy`, `9908-EXPERIMENTAL-drm-amd-display-keep-idle-allowed-with-every-crtc-off-default-off.patch`,
+  after 9907, on top of 9902. RC only (since 9.110).
+- **What:** on 9.109, 9902's `dm_idle_all_off` allowed display idle once at the all-off commit
+  and every later register access, IRQ change or HPD/backlight call disallowed it for good
+  ("Idle optimization" 0 with the panel off). With the parameter set, a delayed work re-allows
+  idle while every CRTC stays off (after the commit, when the vblank IRQ count reaches 0, then
+  once a second). `amdgpu.dm_idle_trace` logs every idle allow/disallow with its caller, the
+  vblank IRQ count, the active CRTCs and the streams; `amdgpu.dm_idle_all_off_debug` logs each
+  re-allow. All default off. Caveat: hotplug of an external display with the panel off may go
+  undetected until the next disallow.
+- **Test:** `g16-test/psp-rpm`, cells d and e (#249, #353).
+- **Upstream: not submitted.** With 9902.
+- **Drop when:** with 9902.
+
+<a id="kernel-9909-nkey-caps-led-only"></a>
+### EXPERIMENTAL the GA605KM keyboard declares only its Caps Lock LED (9909)
+
+- **Component:** `linux-omarchy`, `9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch`,
+  after 9908. RC only (since 9.111). Goes with
+  [the keyboard autosuspend rule](#g16-keyboard-autosuspend) in omarchy-asus-g16.
+- **What:** the G16's tenkeyless N-Key keyboard (USB 0b05:19b6) declares Num Lock, Caps Lock,
+  Scroll Lock, Compose and Kana LEDs but has only a Caps Lock light. usbhid refuses autosuspend
+  while a declared LED is lit, and Omarchy turns Num Lock on, so the keyboard and its xHCI
+  (67:00.0) never runtime-suspend, which holds idlemask bit 16 (#249). On a GA605KM (DMI board
+  name), with the exact 745-byte descriptor, hid-asus rewrites the 18 LED bytes in place so only
+  Caps Lock is declared, at the same bit; the report layout is unchanged. Caps Lock lit still
+  blocks autosuspend, by design. Other machines and keyboards: unchanged.
+- **Test:** on 9.111 with the udev rule, Num Lock on, Caps Lock off: `dmesg | grep 'Caps Lock
+  only'`; the keyboard's `power/runtime_status` reads `suspended` a few seconds after the last
+  key press, and 67:00.0 too with no Bluetooth device connected (#249).
+- **Upstream: not submitted.** A HID-tree candidate once the G16 test passes.
+- **Drop when:** upstream fixes it, or the G16 test shows no gain.
+
+#### Upstream report draft
+
+linux-input (the HID maintainers), as a patch with 9909's commit message, without the
+EXPERIMENTAL lines, once the G16 test passes; the cover text below. Not sent; a human decides.
+Add the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
+
+> **Subject:** HID: asus: declare only the Caps Lock LED on the GA605KM keyboard
+>
+> The ROG Zephyrus G16 GA605KM's tenkeyless N-Key keyboard (0b05:19b6) declares Num Lock, Caps
+> Lock, Scroll Lock, Compose and Kana LEDs but only has a Caps Lock light. usbhid refuses
+> autosuspend while a declared LED is on, so with Num Lock on (the desktop default here) the
+> keyboard and its xHCI never runtime-suspend. The patch rewrites the LED items in place for this
+> board's exact descriptor, so only Caps Lock is declared, at the same bit.
+>
+> Tested on the GA605KM: with Num Lock on and Caps Lock off, the keyboard runtime-suspends a few
+> seconds after the last key press and wakes on the next one.
+
+<a id="kernel-9910-smu-allow-zstates"></a>
+### EXPERIMENTAL debugfs to send the SMU AllowZstates message (9910)
+
+- **Component:** `linux-omarchy`, `9910-EXPERIMENTAL-amd-pm-smu-allow-zstates-debugfs.patch`, after
+  9909. RC only (since 9.111).
+- **What:** maps swsmu's `SMU_MSG_AllowZstates` to `PPSMC_MSG_AllowZstates` (0x25) for SMU 14.0.x
+  and adds the debugfs file `amdgpu_smu_allow_zstates` (root, write-only) in amdgpu's DRM debugfs
+  directory. Writing 0 (disallow), 8 (Z8) or 9 (Z9 and Z8) sends it; other values are refused;
+  each write is logged. Linux never sends this message otherwise; a static read of the SMU
+  firmware suggests its runtime S0i2 gate needs the Z-state enable it feeds (#249). Nothing is
+  sent unless the file is written.
+- **Test:** on battery with the screen off and the PSP and keyboard xHCI suspended, write 9, then
+  read `timein_s0i2` (9907) and socket power (#249). The display's own AllowZstatesEntry is
+  logged by `echo 'file dcn35_smu.c +p' > /sys/kernel/debug/dynamic_debug/control`.
+- **Upstream: ours-only.** An experiment.
+- **Drop when:** the test is done.
 
 ## NVIDIA: nvidia-open-dkms
 
@@ -1786,6 +1965,23 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
 > secrets when no agent is registered? For now `auth-retries=6` for `match-device=driver:mt7925e`
 > works around it.
 
+<a id="g16-keyboard-autosuspend"></a>
+### EXPERIMENTAL built-in keyboard autosuspend
+
+- **Component:** `omarchy-asus-g16`,
+  `/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules`. RC only (since
+  1.0.0-104). Goes with [9909](#kernel-9909-nkey-caps-led-only) in linux-omarchy.
+- **Fixes:** the built-in N-Key keyboard (USB 0b05:19b6) keeps `power/control` at the USB
+  default `on`, so it never runtime-suspends, and neither does the keyboard/Bluetooth xHCI
+  (67:00.0); idlemask bit 16 read idle only with that xHCI and the PSP both suspended (#249).
+  The rule sets `power/control=auto` and `autosuspend_delay_ms=2000`; a key press wakes it.
+  Without 9909 a lit Num Lock still keeps it awake (usbhid's LED check).
+- **Test:** `cat /sys/bus/usb/devices/3-4/power/control` prints `auto`; on 9.111 with Num Lock
+  on and Caps Lock off, its `power/runtime_status` reads `suspended` a few seconds after the last
+  key press (#249).
+- **Upstream: ours-only** (a power setting for one laptop's keyboard).
+- **Drop when:** the G16 test shows no gain, or the kernel autosuspends this keyboard by default.
+
 ## Our packages
 
 <a id="pkg-asus-rog-nkey-winlock"></a>
@@ -1953,13 +2149,14 @@ Work still in issues, not in any recipe on `main` today:
   plugin).
 - Bugs: HDMI on the RTX sometimes not detected after boot (#158); a Hyprland reload on battery
   blanks the panel twice (#204).
-- The 9900 battery A/B is experiment #10. Tooling work (#309, #258, #212, #284) and the project
+- Tooling work (#309, #258, #212, #284) and the project
   status page (#47) are issues too.
 
 ## Dropped
 
 | change | was | dropped in | why |
 |---|---|---|---|
+| 9900, EXPERIMENTAL Zen 5c-first soft park (five default-off scheduler knobs: amd_hfi ranking, soft wakeup preference, workload-class steering, SMT packing, NOHZ idle balancer) | linux-omarchy, both channels, ours-only | RC linux-omarchy 7.2.8-9.112; Quattro keeps its frozen build until it picks up the trunk | the battery A/B (#10, 2026-10-27, console only on the G16) found no win at idle: ranking efficiency or inverted, wake_preferred all and wake_pack each within 0.03 W of stock, all three together 0.14 W worse; RAPL package power is only 0.36-0.43 W at idle, so the cores have almost nothing left to save. The light-load half was not run; the CPU-setting A/B (#328) found nothing under light load either |
 | general-0003, the lock's password field lost the keyboard after a suspend (#295) | omarchy RC | RC 4.5.0rc1-1.110 (#306) | the Hyprland seat fix ([seat-leave](#hyprland-seat-leave)) sends `wl_keyboard.leave`, so Qt re-activates the lock window with stock `LockView.qml`; reverted on the fork by `b5af08c6` |
 | 0018, launcher icon index throttle | omarchy RC | RC 4.5.0rc1-1.109 (#299) | replaced by upstream's [#14992](#omarchy-general-0004-app-library); still on Quattro ([0018](#omarchy-0018-launcher-icon-index)) |
 | `asus-zephyrus-g16-control`, the G16 Control widget package | asus-rog-nkey-winlock | RC (0.1.0-103 replaces it) | the widget is the omarchy-asus plugin (#183); RC's `asus-rog-nkey-winlock` replaces the transitional package |

@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.103**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.112**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,10 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.103` (kernel release string becomes `7.2.8-9.103-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.112` (kernel release string becomes `7.2.8-9.112-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
-   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808.
+   range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910; 9.112 dropped 9900 (#10).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -40,7 +41,16 @@ Compared with upstream, only:
    back after hibernation; see "0808" below).
 9. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
    `0808-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
-10. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
+10. `9901-EXPERIMENTAL-...` after all upstream patches, first of the 99xx series (see "EXPERIMENTAL: 9901" below).
+11. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
+    "EXPERIMENTAL: 9903" below).
+12. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
+13. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
+14. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
+15. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
+16. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
+17. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
+18. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -295,7 +305,7 @@ recipes/linux-omarchy/g16-test/test --resume-profile --hibernates 6   # #185, on
   baseline, Win-lock key press, touchpad IRQs per report, asus-armoury ranges
   and the fan-curve gate, `panel_power_savings`, one s2idle cycle that must
   reach at least 10 s of s0i3 (a suspend that wakes at once fails, #133),
-  9900 knobs at their defaults, nvidia and runtime PM; hibernate with
+  nvidia and runtime PM; hibernate with
   `--hibernate`), writes a report without host or user names to
   `~/omarchy-asus-g16-test-<kernel>-<date>.md` and offers to post it on the PR.
   `--temps [MIN]` is the #42 measurement (quiet fan table on battery,
@@ -307,7 +317,7 @@ recipes/linux-omarchy/g16-test/test --resume-profile --hibernates 6   # #185, on
 
 `prepare()` applies every `*.patch` with `patch -Np1 --fuzz=0`, so a
 successful `makepkg --nobuild` proves all patches apply cleanly. On 7.2.8 all
-178 patches (including 0481, 0568, 0569, 0807 and 9900) apply at fuzz 0 with no
+178 patches (including 0481, 0568, 0569, 0807 and 9900, since dropped) apply at fuzz 0 with no
 offsets (checked for 9.3 on 2026-10-18, after the rebase onto the DELTA layout). The two files touched by 0569 and
 0807 were also compiled with `W=1` in the patched tree (no warnings).
 
@@ -319,10 +329,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900 last.
+   9901, then 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909 and 9910, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -350,23 +360,403 @@ outranks ours, so rebase promptly.
 - Config has DWARF5 debug info and BTF, no LTO: expect a build tree of about
   20-30 GB and roughly 30-60 minutes on 16 cores.
 
-## EXPERIMENTAL: 9900 Zen 5c-first soft park (default off)
+## EXPERIMENTAL: 9901 DCN 3.5 S0i2-ready display idle (default off, #353)
 
-`9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch` is a local carry
-for battery testing on the ROG Zephyrus G16 GA605KM (Ryzen AI 300, Zen 5 +
-Zen 5c). It is **experimental**, **compile-tested only**, and **not intended
-for upstream**.
+`9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch` (ours,
+compile-tested only, applied after all upstream patches). It only touches
+`drivers/gpu/drm/amd/display/dc/clk_mgr/dcn35/dcn35_clk_mgr.c`.
 
-- Five changes combined into one patch: amd_hfi ITMT ranking knob, soft wakeup
-  CPU preference, AMD workload-class tracking/steering, optional SMT packing,
-  and NOHZ idle-load-balancer preference. Details are in the patch header.
-- Every knob defaults OFF (static keys and sysfs). This package enables
-  nothing: no kernel cmdline, udev rule or sysctl. With defaults the
-  scheduler takes the stock code paths.
-- Applied last, after all upstream patches and 0568, at fuzz 0 (regenerated
-  against 7.2.8-9 without offsets).
-- Remove it if the battery A/B testing shows no win, or move it to a
-  separate `-experimental` kernel package.
+**What.** A new parameter `amdgpu.dcn35_s0i2` (bool, 0644, default 0). When it
+is 1, `dcn35_update_clocks()` (`safe_to_lower`) and `dcn35_set_low_power_state()`
+send `SetDisplayIdleOptimizations` with `df_request_disabled`,
+`phy_ref_clk_off` and `s0i2_rdy` set when the active display count drops to 0,
+before setting `DCN_PWR_STATE_LOW_POWER`. That is what DCN 3.1/3.14/3.15/3.16
+do in the same places, and DCN 4.2 does it in its `set_low_power_state`. The
+existing path back to mission mode sends 0, so leaving low power clears them.
+
+**Why.** Stock DCN 3.5 sets `DCN_PWR_STATE_LOW_POWER` without sending anything,
+and `dcn35_smu_enable_phy_refclk_pwrdwn()` has no caller, so the SMU never
+hears that the display is idle. On the G16 the `amd_pmc` idlemask bits 5
+(display idle) and 20 (IPS2, which needs bit 5) stay not idle even with the
+screen off (#249). Mainline master is unchanged (checked 2026-10-25).
+
+**Default behaviour.** None: with the parameter at 0 the driver takes the stock
+path. The parameter is read on every transition, so a write takes effect the
+next time the displays go off (turn the screen on and off again after
+changing it). Nothing in this repo sets it.
+
+**Test** (on the G16, booted on this kernel, on battery):
+`g16-test/dcn35-s0i2-ab` runs the one-boot A/B: each phase writes the parameter, turns the
+screen off for 30 s, samples the idlemask at 10 Hz and the socket and battery
+power, then turns the screen back on and checks the journal for amdgpu or DMUB
+errors. Pass: with 1, bit 5 (ideally bit 20 too) reads idle with the screen off
+and socket power drops; the panel comes back; the journal is clean.
+
+**Upstream.** Not submitted (target: amd-gfx), drafted after the G16 numbers.
+**Remove** if the A/B shows no effect or a wake problem, or once upstream sends
+the flags itself.
+
+## EXPERIMENTAL: 9902 display idle with every CRTC off (default off, #353)
+
+`9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch`
+(ours, compile-tested only, applied after 9901). It touches `amdgpu_dm.c`,
+`amdgpu_dm.h`, `amdgpu_dm_crtc.c` and `amdgpu_dm_helpers.c`.
+
+**What.** A new parameter `amdgpu.dm_idle_all_off` (bool, 0644, default 0) and
+a helper `amdgpu_dm_idle_headless()`: true when `amdgpu_dm_is_headless()` is,
+or, with the parameter at 1, when DC's current state has no stream. The three
+places where the headless check gates allowing idle use it: the end of
+`amdgpu_dm_commit_streams()`, the idle worker and
+`dm_helpers_enable_periodic_detection()`. The paths that disallow idle are
+unchanged, so a modeset (DPMS on) still leaves idle first.
+
+**Why.** With the screen off (DPMS off) the G16's `amdgpu_dm_ips_status` reads
+"Idle optimization: 0" and the IPS counters stop (#249, #353). The commit that
+turns the CRTC off disallows idle, and the only re-allow after a modeset needs
+`amdgpu_dm_is_headless()`, which is false while any connector is connected:
+the internal panel always is. The ISM only re-allows on the vblank events of a
+live CRTC.
+
+**Default behaviour.** None: with the parameter at 0 the helper returns what
+`amdgpu_dm_is_headless()` returns. The parameter is read on every check, so a
+write takes effect at the next commit: turn the screen on and off again after
+changing it. Nothing in this repo sets it.
+
+**Known limit.** DC lowers the clocks (and asks for periodic detection) before
+it swaps in the new state, so with the internal panel connected the periodic
+detection worker usually doesn't start. A display plugged into an AMD-driven
+port while every CRTC is off may then not be noticed until the screen comes
+back on. Only the A/B turns the parameter on.
+
+**Test.** `g16-test/dm-idle-all-off` (with 9901 and 9903; see below). Pass: with
+both parameters at 1 and the screen off, idlemask bits 5 and 20 read idle; if
+bit 16 does too and socket power drops, the screen-off blocker is found.
+
+**Upstream.** Not submitted; an amd-gfx report is drafted after the G16
+numbers. **Remove** if the A/B shows no effect, or once upstream re-allows
+idle with every CRTC off itself.
+
+## EXPERIMENTAL: 9903 SMU idlemask trace through s2idle (debug only, #353)
+
+`9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch` (ours,
+compile-tested only, after 9902). It touches `drivers/platform/x86/amd/pmc/pmc.c`,
+`drivers/gpu/drm/amd/amdgpu/amdgpu_device.c` and adds
+`include/linux/platform_data/x86/amd-pmc.h`.
+
+**What.** While `/sys/power/pm_debug_messages` is 1, each s2idle logs
+`amd_pmc: SMU idlemask <stage>: 0x...` at these stages, in order:
+`amdgpu-display` (after amdgpu's display IP suspend), `amdgpu-ip` (after the
+rest of amdgpu's IP suspend), `prepare` (amd_pmc's s2idle prepare, before the
+OS hint), `os-hint` (right after it) and the existing `s0i3` (amd_pmc's check).
+amd_pmc exports `amd_pmc_trace_idlemask()`; amdgpu finds it with
+`symbol_get()`, so it doesn't need amd_pmc loaded, and calls it only in s0ix.
+Cezanne is skipped (its read needs an SMU version check). `amd_pmc_remove()`
+clears `regbase` so a later trace can't read through a stale mapping.
+
+**Why.** The G16's idlemask reads 0xffff9efd at the s0i3 check (bits 5, 16 and
+20 idle), but with the screen off bit 16 never reads idle. The stages show
+which step of the suspend sequence sets it.
+
+**Default behaviour.** None: with `pm_debug_messages` at 0 nothing is read or
+logged.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9902, or once
+the first stage where bit 16 turns idle is known.
+
+**Test** (9902 and 9903 together, on the G16 booted on this kernel, on
+battery): `g16-test/dm-idle-all-off` needs one root prompt and takes about
+5 minutes, hands off. Phases: (a) a baseline with the screen on; (b) both
+`dcn35_s0i2` and `dm_idle_all_off` at 1 and the screen off for 30 s; (c) the
+screen back on, then both at 0 and the screen off for 30 s (the control);
+(d) `pm_debug_messages` at 1 and one 15 s s2idle, and the `SMU idlemask`
+stage lines. It samples the idlemask at 10 Hz, `amdgpu_dm_ips_status`, socket
+power and battery watts, restores everything on exit (Ctrl-C included), and a
+watchdog turns the screen back on and the parameters off if it dies.
+
+## EXPERIMENTAL: 9904 idlemask trace between amdgpu's suspend and amd_pmc's prepare (debug only, #353)
+
+`9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch` (ours,
+compile-tested only, after 9903). It touches `kernel/power/suspend.c`,
+`drivers/acpi/x86/s2idle.c`, `drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c` and 9903's
+`include/linux/platform_data/x86/amd-pmc.h`.
+
+**What.** More stages for 9903's trace, same line format (`SMU idlemask <stage>: 0x...`),
+in the order an s2idle runs them: `suspend-late` (after every device's suspend_late),
+`s2idle-prepare` (after the s2idle platform prepare), `amdgpu-noirq` (end of amdgpu's
+suspend_noirq, s0ix only), `noirq` (after every device's suspend_noirq), then in
+`acpi_s2idle_prepare_late` one after each LPS0 `_DSM` call: `dsm-screen-off-amd` and
+`dsm-entry-amd` (AMD GUID), `dsm-screen-off` (Microsoft GUID func 3), `dsm-ms-entry`
+(func 7) and `dsm-entry` (func 5). A `_DSM` that did not run (its mask is below 1 or lacks
+the function) logs `SMU idlemask <stage>: not run (func N, mask M)`. The `_DSM` stages
+are AMD machines only, and the `_DSM` calls themselves are unchanged. A header helper,
+`amd_pmc_trace_idlemask_stage()`, looks up amd_pmc's trace with `symbol_get()`, so the
+built-in callers don't depend on amd_pmc.
+
+**Why.** On 9.107 the display bits (5, 16, 17-19, 20, 25) read idle at amd_pmc's
+`prepare` but not at `amdgpu-ip`. This shows whether a device's late or noirq suspend
+idles them, or the firmware's screen-off `_DSM`.
+
+**Default behaviour.** None: with `pm_debug_messages` at 0 nothing is read or logged.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9903, or once the stage
+that idles bit 16 is known.
+
+**Test** (on the G16 booted on this kernel, any power): `g16-test/idlemask-trace` needs
+one root prompt and takes about a minute. It sets `pm_debug_messages` to 1, suspends once
+for 15 s (`rtcwake -m freeze`), puts it back, and reports one row per stage, which `_DSM`
+calls ran, and the first stage where each of bits 5, 16, 17, 18, 19, 20 and 25 reads idle.
+
+## EXPERIMENTAL: 9905 idlemask trace after each PCI device's noirq suspend (debug only, #353)
+
+`9905-EXPERIMENTAL-idlemask-trace-after-each-pci-device-noirq-suspend.patch` (ours,
+compile-tested only, after 9904). It touches `drivers/base/power/main.c` only.
+
+**What.** In the noirq phase of an s2idle, 9903's trace once as the phase starts
+(`SMU idlemask noirq-start: 0x...`) and after each PCI device's noirq suspend, with the
+device and the power state the suspend left it in:
+`SMU idlemask noirq 0000:65:00.0 D3hot: 0x...` (`pci_power_name()`: D0, D3hot, D3cold, ...).
+The call is in `device_suspend_noirq()`, so an asynchronously suspended device logs from its
+async thread when it finishes, and the lines are in the order the devices finished. Devices
+skipped by direct_complete or syscore, and non-PCI devices, don't log. It goes through
+9904's `amd_pmc_trace_idlemask_stage()`, so the PM core does not depend on amd_pmc.
+
+**Why.** On 9.108 bit 16 (the runtime deep-idle blocker) and bits 17-19 turned idle between
+`s2idle-prepare` and `amdgpu-noirq`, and bits 5, 20 and 25 by `noirq`, while amdgpu's own
+noirq callback does nothing in s2idle on the G16. So it is another device's noirq suspend,
+where the PCI core puts it into D3. The candidates are the PCI devices that stay in D0 at
+runtime (the SMBus controller, the NVMe, the SD reader, the Wi-Fi, the GPU's audio and
+crypto functions, an unbound function, and the xHCI controller with the keyboard and
+Bluetooth). This names the device after whose D3 each bit reads idle.
+
+**Default behaviour.** None: with `pm_debug_messages` at 0 nothing is read or logged.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9903 and 9904, or once the
+device that holds bit 16 is known.
+
+**Test** (on the G16 booted on this kernel, any power): `g16-test/idlemask-trace` (the same
+one root prompt and 15 s suspend) also prints the per-device noirq rows in order and names
+the first device after whose noirq suspend each of bits 5, 16, 17, 18, 19, 20 and 25 reads
+idle.
+
+## EXPERIMENTAL: 9906 runtime PM for the PSP function (default off, #249)
+
+`9906-EXPERIMENTAL-ccp-psp-runtime-pm-default-off.patch` (ours, compile-tested only, after
+9905). It touches `drivers/crypto/ccp/` only: `sp-pci.c`, `psp-dev.c`/`.h`, `tee-dev.c`,
+`platform-access.c` and `dbc.c`.
+
+**What.** ccp has no runtime PM: it never gives back the reference the PCI core takes in
+`local_pci_probe()`, so the PSP function (1022:17E0, 65:00.2 on the G16) stays in D0 even
+with `power/control` at `auto` (so an earlier `control=auto` A/B on a stock kernel never put
+it in D3). Two module parameters:
+
+- `ccp.psp_rpm_delay_ms` (int, 0644, default 0 = off). When it is > 0, for a PSP-only PCI
+  function without SEV (no CCP engines, no SEV vdata: pspv5 parts like the G16's), the
+  driver gives up the probe reference and uses autosuspend with that delay
+  (`pm_runtime_set_autosuspend_delay`, `pm_runtime_use_autosuspend`,
+  `pm_runtime_put_autosuspend`). With `power/control=auto` as well, the function goes to
+  D3hot once no command has touched its registers for that long. A write applies at once
+  to the bound function (no reprobe): > 0 drops the reference or changes the delay, 0 takes
+  it back and resumes the function.
+- `ccp.psp_rpm_debug` (bool, 0644, default off) logs `psp rpm: runtime suspend #N` and
+  `psp rpm: runtime resume #N for <caller> (<task>)` (or `not for a ccp command`, for
+  `power/control`, system sleep and the PCI core), to see who wakes it.
+
+Every path that touches the function's registers holds a runtime PM reference
+(`psp_pm_get()`/`psp_pm_put()`): `psp_mailbox_command()` (TEE ring init/destroy, SFS, the
+extended commands), `psp_tee_process_cmd()` (every amdtee and amd-pmf call, held until the
+reply is copied), `psp_send_platform_access_msg()` and `psp_ring_platform_doorbell()`
+(I2C arbitration, HSTI), the dbc ioctl, and the `bootloader_version`/`tee_version` sysfs
+attributes and their `is_visible()`. The reference is taken on these devices whether or
+not runtime PM is on, so switching never unbalances a command in flight; on every other
+ccp/PSP device the helpers do nothing. The PSP interrupt handler is not wrapped: a function
+in D3hot can't raise MSI-X, and the handler only serves SEV.
+
+The runtime_suspend callback sends the PSP nothing (it has no such command). The PCI core
+then saves config space and sets D3hot (`pci_pm_runtime_suspend()` ->
+`pci_finish_runtime_suspend()`; the G16's PSP node has no `_PS3`/`_PR3`, so it is the
+PMCSR write that s2idle's noirq phase does too, after which the TEE ring works without a
+re-init). runtime_resume has nothing to restore. The system-sleep callbacks are unchanged:
+without `DPM_FLAG_SMART_SUSPEND` the PCI core resumes a runtime-suspended function before
+its suspend callback, and the noirq D3hot follows as before.
+
+Not through this function: the fTPM (`tpm_crb`, CRB registers at 0xFED40000) and amdgpu's
+PSP block (MP0 C2PMSG registers through amdgpu's own MMIO BAR) never resume it. Whether the
+PSP firmware serves them while its function is in D3hot is checked on the G16 (Windows
+idles this function in S0 with both in use).
+
+**Why.** SMU idlemask bit 16, the runtime deep-idle blocker, turns idle in s2idle's noirq
+phase, where the PCI core moves this function to D3hot (9905, #353). This tries that at
+runtime.
+
+**Default behaviour.** None: with `psp_rpm_delay_ms` at 0 the probe reference is kept, so
+the function never runtime-suspends whatever `power/control` says; with `power/control` at
+`on` (the PCI core's default) a delay alone changes nothing either.
+
+**Upstream.** Not submitted: an experiment. If D3hot releases bit 16 and the TEE, TPM and
+display keep working, the shape for upstream is a ccp runtime-PM patch for PSP-only parts.
+**Remove** if the G16 shows no effect.
+
+**Test** (on the G16 booted on this kernel, on battery): `g16-test/psp-rpm` (one root
+prompt, about 4 minutes): a 15 s baseline, then `psp_rpm_delay_ms=2000` and
+`power/control=auto`, a check that the function reaches `runtime_status=suspended`, 60 s
+screen on, then 30 s cells with the screen off (DPMS, verified by Hyprland and the eDP
+connector's kernel DPMS state): display idle parameters 0 (c), display idle re-allowed
+(9901/9902/9908, d) and the same with the PSP back in D0 (e). It reads the idlemask (bits 5,
+16, 20), "Idle optimization", socket power, battery watts and the PSP's suspend/resume counts
+and wakers, with 9908's idle trace in the screen-off cells; then, the PSP suspended again, one
+fTPM PCR read and one firmware-version read (which resumes it), and everything goes back.
+
+## EXPERIMENTAL: 9907 the SMU metrics table at runtime (debug only, #249)
+
+`9907-EXPERIMENTAL-amd-pmc-smu-metrics-at-runtime.patch` (ours, compile-tested only, after
+9906, on top of 9903's `pmc.c`). It touches `drivers/platform/x86/amd/pmc/pmc.c` only.
+
+**What.** `/sys/kernel/debug/amd_pmc/smu_metrics_runtime` (0600). A read sends
+`SMU_MSG_LOG_DUMP_DATA` (0x08) now and prints every field of the SMU metrics table:
+`table_version`, `hint_count`, `s0i3_last_entry_status`, `timein_s0i2`, the S0i3, resume and
+SW DRIPS times, `active_ips`, and both per-IP arrays (`timecondition_notmet_lastcapture` and
+`_totaltime`, all 32 entries, named where the CPU's IP list names them). If the SMU rejects
+the message, the first line says `rejected, table not refreshed: <error>` and the table is
+printed as it was; it never retries. Writing `start` resets and starts the SMU's logging
+(`SMU_MSG_LOG_RESET` and `SMU_MSG_LOG_START`, what s2idle's prepare does), so the next read
+covers the time since. Without an s2idle since boot, the table is mapped from the SMU's DRAM
+address queries only, with no logging reset.
+
+**Why.** `smu_fw_info` shows only what the SMU last wrote, and the SMU writes the table when
+amd_pmc sends the dump message on s2idle resume, so at runtime it is stale and
+`timein_s0i2` is never printed.
+
+**Safety.** The message is the one `amd_pmc_s2idle_restore()` sends from a running system,
+over the same mailbox under amd_pmc's lock; nothing else uses that port. Whether the SMU
+accepts it outside a suspend is what the first read on the G16 shows.
+
+**Default behaviour.** None: nothing is sent unless the file is read or written.
+
+**Upstream.** Debug aid, not meant for upstream. **Remove** with 9903.
+
+**Test:** `g16-test/psp-rpm` restarts the logging at each phase and reads the file at its
+end (the report's `SMU timein_s0i2` column, or the SMU's refusal).
+
+## EXPERIMENTAL: 9908 display idle kept allowed with every CRTC off, and an idle trace (default off, #353)
+
+`9908-EXPERIMENTAL-drm-amd-display-keep-idle-allowed-with-every-crtc-off-default-off.patch`
+(ours, compile-tested only, after 9907, on top of 9902). It touches `amdgpu_dm.c`, `amdgpu_dm.h`,
+`amdgpu_dm_crtc.c`, `dc/core/dc.c` and `dc/dc.h`.
+
+**Why.** On 9.109 with `dm_idle_all_off=1` and `dcn35_s0i2=1`, the panel verified off (Hyprland
+and the connector's kernel DPMS state), `amdgpu_dm_ips_status`'s "Idle optimization" read 0 for
+the whole 30 s. 9902 allows idle once, at the end of the all-off commit, and nothing keeps it
+allowed: every DC register access (`dm_read_reg_func()`/`dm_write_reg_func()` ->
+`dc_exit_ips_for_hw_access()`), every display IRQ state change and the HPD and backlight paths
+disallow it again; with no live CRTC no vblank event drives the ISM, which never allows idle for
+a CRTC without a stream; and the CRTC's vblank-off can land after the commit's check.
+
+**What.** With `dm_idle_all_off` set, a delayed work re-checks right after a commit that leaves
+no stream, when the vblank IRQ count drops to 0, and then once a second while no stream comes
+back. With the vblank IRQ count at 0, no stream, idle disallowed and the stock headless idle
+worker not running, it allows idle again. It stops when a stream comes back (the next modeset
+disallows idle first, as before), when the parameter is cleared, or in suspend (`dm_suspend()`
+cancels it before taking dc_lock; `amdgpu_dm_fini()` disables it). Two debug parameters:
+
+- `amdgpu.dm_idle_all_off_debug` (bool, 0644, default off): logs each re-allow
+  (`dm_idle_all_off: idle re-allowed #N`).
+- `amdgpu.dm_idle_trace` (bool, 0644, default off): logs every change of DC's idle
+  optimizations (an allow or disallow that differs from the current state) with the call site,
+  a four-entry call chain, the vblank IRQ count, the active CRTCs and the stream count. Calls
+  that change nothing are not logged. Chatty with a display on: for short screen-off runs.
+
+**Caveat.** As with the stock headless idle worker (which this leaves alone): with the panel off
+and idle allowed, an external display plugged in may not be detected until the next disallow (a
+register access, DPMS on). The re-check wakes a CPU once a second while every CRTC is off.
+
+**Default behaviour.** None: with the three parameters at 0 the work is never queued and the
+trace is one `READ_ONCE()`.
+
+**Upstream.** Not submitted, with 9902. **Remove** with 9902.
+
+**Test:** `g16-test/psp-rpm`, cells d and e (display idle re-allowed, the PSP runtime-suspended
+and in D0), with `dm_idle_trace` and `dm_idle_all_off_debug` on in the screen-off cells.
+
+## EXPERIMENTAL: 9909 the GA605KM keyboard declares only its Caps Lock LED (#249)
+
+`9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch` (ours, compile-tested
+with W=1, after 9908). It touches `drivers/hid/hid-asus.c` only.
+
+**Why.** On the G16, idlemask bit 16 (the runtime deep-idle blocker) read idle only with the PSP
+runtime-suspended *and* the keyboard/Bluetooth xHCI (67:00.0) runtime-suspended (#249). That
+xHCI stays awake because the built-in N-Key keyboard (USB 0b05:19b6) never autosuspends. Two
+things hold it: its `power/control` is `on` (the USB default; omarchy-asus-g16's udev rule sets
+`auto`), and usbhid's `hid_suspend()` refuses autosuspend while any declared LED is lit
+(`ledcount && !ignoreled`). The keyboard is tenkeyless with only a Caps Lock light, but its
+report descriptor declares Num Lock, Caps Lock, Scroll Lock, Compose and Kana, and Omarchy turns
+Num Lock on at login (`numlock_by_default = true` in its Hyprland input defaults), so
+`input::numlock` reads 1 and the count is never 0.
+
+**What.** A new quirk, `QUIRK_ROG_NKEY_CAPS_LED_ONLY`, on the 0b05:19b6 entry. In
+`asus_report_fixup()`, when the board is `GA605KM` (DMI board name), the descriptor is the
+745-byte one this keyboard reports and the 18 bytes at offset 167 are exactly its LED items, they
+are rewritten in place: bit 0 becomes padding, Caps Lock stays at bit 1, bits 2-4 join the three
+padding bits. The output report keeps its size and layout, so the Caps Lock report the keyboard
+gets is byte-identical. The kernel logs `Fixing up GA605KM keyboard LEDs: Caps Lock only` once
+per probe.
+
+**Effect.** `/sys/class/leds/input*::numlock` and `::scrolllock` (and compose/kana) are gone
+for this keyboard; `::capslock` stays and works. Num Lock is still a modifier in the input
+layer and the compositor. A lit Caps Lock still blocks autosuspend, by design (the light is
+real, and the state is rare and visible).
+
+**Default behaviour.** Unchanged on every other machine and keyboard: 0b05:19b6 is shared by many
+ROG laptops' N-Key keyboards (some with a number pad), hence the DMI and exact-bytes match.
+
+**Alternatives not taken.** `usbhid.ignoreled=1` is global: every USB HID keyboard would
+autosuspend with its LEDs lit. Turning Omarchy's `numlock_by_default` off is upstream's choice
+and would change number-pad keyboards.
+
+**Upstream.** Not submitted; a candidate for the HID tree once the G16 test passes. **Remove**
+when upstream fixes it, or if the G16 test shows no gain.
+
+**Test:** on the G16 with the udev rule in omarchy-asus-g16 (`power/control=auto`):
+`dmesg | grep 'Caps Lock only'`; `ls /sys/class/leds | grep -E 'num|scroll'` lists nothing for
+the keyboard's input; with Num Lock on and Caps Lock off,
+`cat /sys/bus/usb/devices/3-4/power/runtime_status` reads `suspended` a few seconds after the
+last key press, and 67:00.0 too when no Bluetooth device is connected. Before 9.111, a live
+try stands in for 9909 with `usbhid.ignoreled=1` for a 30 s window only (not packaged).
+
+## EXPERIMENTAL: 9910 debugfs to send the SMU AllowZstates message (nothing sent by default, #249)
+
+`9910-EXPERIMENTAL-amd-pm-smu-allow-zstates-debugfs.patch` (ours, compile-tested with W=1, after
+9909). It touches `pm/amdgpu_dpm.c`, `pm/swsmu/amdgpu_smu.c`, `pm/swsmu/inc/amdgpu_smu.h` and
+`pm/swsmu/smu14/smu_v14_0_0_ppt.{c,h}`.
+
+**Why.** On the G16 every idlemask bit reads idle at runtime with the screen off and the PSP and
+the keyboard xHCI suspended, but `timein_s0i2` stays 0. A static read of the SMU firmware's
+runtime deep-idle gate (#249) found it also needs a Z-state enable that only the driver-mailbox
+message AllowZstates (0x25) or the display's AllowZstatesEntry (display mailbox 0x15) appear to
+feed. Linux's display code sends 0x15; nothing in Linux sends 0x25 (swsmu has
+`SMU_MSG_AllowZstates`, but the 14.0.x message map has no entry for it).
+
+**What.** A `MSG_MAP(AllowZstates, PPSMC_MSG_AllowZstates)` entry for SMU 14.0.x, and a debugfs
+file `amdgpu_smu_allow_zstates` (0200, root only, write-only) in the amdgpu DRM debugfs
+directory, created on MP1 14.0.0, 14.0.1, 14.0.4 (the G16) and 14.0.5. Writing `0` (disallow),
+`8` (Z8) or `9` (Z9 and Z8; `ZStates_e` in `smu_v14_0_0_ppsmc.h`) sends the message with that
+argument; anything else is `-EINVAL`, and during reset or suspend `-EBUSY`. Each write logs
+`EXPERIMENTAL: SMU AllowZstates(N) sent: <ret>, arg register 0x...`.
+
+**Default behaviour.** None: the message is only sent on a write to the file.
+
+**What the display sends.** dcn35_smu.c already logs each AllowZstatesEntry through `smu_print()`
+(`DC_LOG_SMU`, a `pr_debug`); turn it on at runtime with
+`echo 'file dcn35_smu.c +p' > /sys/kernel/debug/dynamic_debug/control` and read
+`[SMU_MSG]:dcn35_smu_set_zstate_support: SMC_MSG_AllowZstatesEntry msg = ..., param = 0x...` in
+the journal (`-p` to turn it off).
+
+**Upstream.** Not submitted; an experiment. **Remove** when the test is done, or turn it into a
+proper send if AllowZstates turns out to be what gates runtime S0i2.
+
+**Test:** on battery, screen off, PSP and keyboard xHCI suspended:
+`echo 9 | sudo tee /sys/kernel/debug/dri/<amdgpu minor>/amdgpu_smu_allow_zstates`, then
+`timein_s0i2` from 9907's `smu_metrics_runtime` and socket power; `echo 0` afterwards. The
+SMU's state after a resume is not known: send again after each resume.
 
 ## 0810: panel_power_savings applies when written (#172)
 
@@ -394,7 +784,7 @@ that cannot run is a FAIL: the merge gate is this check passing.
 
 `0481-drm-amd-display-power-backports.patch` combines three amdgpu display
 backports for the GA605's OLED eDP. It sits right after `0480` and applies at
-fuzz 0 with every later patch, including 9900.
+fuzz 0 with every later patch.
 
 1. Disable self-refresh on tearing flips (upstream 2e54a92e0136). This is also
    in 7.2.11 stable, so drop it once the base is 7.2.11 or later.

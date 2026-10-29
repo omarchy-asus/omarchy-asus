@@ -168,7 +168,6 @@ armoury_read() { # attr -> "min-max cur=N" or the error
 }
 
 panel_power_path() { compgen -G '/sys/class/drm/card*-eDP-*/amdgpu/panel_power_savings' | head -n1; }
-hfi_dir() { local f; f=$(compgen -G '/sys/bus/platform/drivers/amd_hfi/*/ranking' | head -n1); [[ -n $f ]] && dirname "$f"; }
 
 # Touchpad: the event node and the DesignWare IRQ lines.
 touchpad_event() {
@@ -263,12 +262,6 @@ collect_state() {
   printf 'armoury_nomatch=%s\n' "$(klog | grep -c 'No matching power limits' || true)"
   p=$(panel_power_path || true)
   if [[ -n $p ]]; then printf 'panel_power_savings=%s\n' "$(cat "$p" 2>&1)"; else printf 'panel_power_savings=absent\n'; fi
-  d=$(hfi_dir || true)
-  if [[ -n $d ]]; then
-    for a in ranking wake_preferred wlc_track wake_pack; do printf 'hfi_%s=%s\n' "$a" "$(cat "$d/$a" 2>/dev/null || echo absent)"; done
-  else
-    printf 'hfi_ranking=absent\n'
-  fi
   for a in success fail last_hw_sleep total_hw_sleep; do
     printf 'suspend_%s=%s\n' "$a" "$(cat "/sys/power/suspend_stats/$a" 2>/dev/null || echo absent)"
   done

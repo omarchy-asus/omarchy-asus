@@ -1,0 +1,200 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Mon, 26 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: drm/amd/pm: debugfs to send AllowZstates to SMU
+ 14.0.x APUs
+
+EXPERIMENTAL, NOTHING SENT BY DEFAULT (local carry for ROG Zephyrus G16
+GA605KM idle power testing; not submitted upstream).
+
+SMU 14.0.0 firmware defines a driver-mailbox message AllowZstates
+(PPSMC_MSG_AllowZstates, 0x25; argument ZStates_e: 0 = disallow, 8 = Z8,
+9 = Z9 and Z8) "to inform PMFW of allowing Zstate entry". swsmu has a
+generic SMU_MSG_AllowZstates but the 14.0.0 message map has no entry for
+it, and nothing in the driver sends it. On the G16 (MP1 14.0.4) every
+idlemask bit reads idle at runtime with the screen off, the PSP and the
+keyboard xHCI suspended, yet timein_s0i2 stays 0. Static analysis of the
+SMU firmware suggests that its runtime deep-idle gate also needs a
+Z-state enable that only this message (or the display's
+AllowZstatesEntry) appears to feed.
+
+Map SMU_MSG_AllowZstates to PPSMC_MSG_AllowZstates for 14.0.x, and add a
+root-only, write-only debugfs file, amdgpu_smu_allow_zstates, in the
+device's DRM debugfs directory (MP1 14.0.0, 14.0.1, 14.0.4 and 14.0.5).
+Writing 0, 8 or 9 sends the message with that argument; any other value
+is rejected with -EINVAL, and -EBUSY is returned during reset or
+suspend. Each write logs the result and the argument register the SMU
+leaves behind:
+
+  EXPERIMENTAL: SMU AllowZstates(9) sent: 0, arg register 0x...
+
+The message is sent only on an explicit write; nothing else changes.
+
+What the display code sends for AllowZstatesEntry is already logged by
+dcn35_smu.c's smu_print() (DC_LOG_SMU), which dynamic debug can turn on:
+
+  echo 'file dcn35_smu.c +p' > /sys/kernel/debug/dynamic_debug/control
+---
+ drivers/gpu/drm/amd/pm/amdgpu_dpm.c           |  1 +
+ drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c     | 20 ++++++
+ drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h |  1 +
+ .../drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.c  | 64 +++++++++++++++++++
+ .../drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.h  |  1 +
+ 5 files changed, 87 insertions(+)
+
+diff --git a/drivers/gpu/drm/amd/pm/amdgpu_dpm.c b/drivers/gpu/drm/amd/pm/amdgpu_dpm.c
+index 68a1e78cd..7c35dd885 100644
+--- a/drivers/gpu/drm/amd/pm/amdgpu_dpm.c
++++ b/drivers/gpu/drm/amd/pm/amdgpu_dpm.c
+@@ -1756,6 +1756,7 @@ void amdgpu_dpm_stb_debug_fs_init(struct amdgpu_device *adev)
+ 		return;
+ 
+ 	amdgpu_smu_stb_debug_fs_init(adev);
++	amdgpu_smu_allow_zstates_debug_fs_init(adev);
+ }
+ 
+ int amdgpu_dpm_display_configuration_change(struct amdgpu_device *adev,
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c b/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
+index 3969a7670..99d9c0966 100644
+--- a/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/amdgpu_smu.c
+@@ -4134,6 +4134,26 @@ void amdgpu_smu_stb_debug_fs_init(struct amdgpu_device *adev)
+ #endif
+ }
+ 
++/* EXPERIMENTAL: see smu_v14_0_0_allow_zstates_debugfs_init() */
++void amdgpu_smu_allow_zstates_debug_fs_init(struct amdgpu_device *adev)
++{
++	struct smu_context *smu = adev->powerplay.pp_handle;
++
++	if (!smu)
++		return;
++
++	switch (amdgpu_ip_version(adev, MP1_HWIP, 0)) {
++	case IP_VERSION(14, 0, 0):
++	case IP_VERSION(14, 0, 1):
++	case IP_VERSION(14, 0, 4):
++	case IP_VERSION(14, 0, 5):
++		smu_v14_0_0_allow_zstates_debugfs_init(smu);
++		break;
++	default:
++		break;
++	}
++}
++
+ int smu_send_hbm_bad_pages_num(struct smu_context *smu, uint32_t size)
+ {
+ 	int ret = 0;
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h b/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h
+index 64a64973f..570493f81 100644
+--- a/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h
++++ b/drivers/gpu/drm/amd/pm/swsmu/inc/amdgpu_smu.h
+@@ -1994,6 +1994,7 @@ int smu_wait_for_event(struct smu_context *smu, enum smu_event_type event,
+ int smu_get_ecc_info(struct smu_context *smu, void *umc_ecc);
+ int smu_stb_collect_info(struct smu_context *smu, void *buff, uint32_t size);
+ void amdgpu_smu_stb_debug_fs_init(struct amdgpu_device *adev);
++void amdgpu_smu_allow_zstates_debug_fs_init(struct amdgpu_device *adev);
+ int smu_send_hbm_bad_pages_num(struct smu_context *smu, uint32_t size);
+ int smu_send_hbm_bad_channel_flag(struct smu_context *smu, uint32_t size);
+ int smu_send_rma_reason(struct smu_context *smu);
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.c b/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.c
+index 568665265..96abd5450 100644
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.c
+@@ -21,6 +21,9 @@
+  *
+  */
+ 
++#include <linux/debugfs.h>
++#include <linux/pm_runtime.h>
++
+ #include "smu_types.h"
+ #define SWSMU_CODE_LAYER_L2
+ 
+@@ -146,6 +149,7 @@ static struct cmn2asic_msg_mapping smu_v14_0_0_message_map[SMU_MSG_MAX_COUNT] =
+ 	MSG_MAP(SetSoftMinVpe,                  PPSMC_MSG_SetSoftMinVpe,			1),
+ 	MSG_MAP(MALLPowerController,            PPSMC_MSG_MALLPowerController,		1),
+ 	MSG_MAP(MALLPowerState,                 PPSMC_MSG_MALLPowerState,			1),
++	MSG_MAP(AllowZstates,                   PPSMC_MSG_AllowZstates,			1),
+ };
+ 
+ static struct cmn2asic_mapping smu_v14_0_0_feature_mask_map[SMU_FEATURE_COUNT] = {
+@@ -1796,6 +1800,66 @@ static void smu_v14_0_0_init_msg_ctl(struct smu_context *smu)
+ 	ctl->message_map = smu_v14_0_0_message_map;
+ }
+ 
++/*
++ * EXPERIMENTAL: amdgpu_smu_allow_zstates (debugfs, root, write-only).
++ *
++ * Writing 0, 8 or 9 sends the driver-mailbox message AllowZstates
++ * (PPSMC_MSG_AllowZstates, 0x25) with that argument: 0 disallows
++ * Z-states, 8 allows Z8, 9 allows Z9 and Z8 (ZStates_e). Nothing is sent
++ * unless the file is written; the driver never sends this message on its
++ * own. Each write is logged with the result and the argument register the
++ * SMU leaves behind.
++ */
++#if defined(CONFIG_DEBUG_FS)
++static ssize_t smu_v14_0_0_allow_zstates_write(struct file *filp,
++					       const char __user *ubuf,
++					       size_t size, loff_t *pos)
++{
++	struct smu_context *smu = file_inode(filp)->i_private;
++	struct amdgpu_device *adev = smu->adev;
++	u32 arg, read_arg = 0;
++	int ret;
++
++	ret = kstrtou32_from_user(ubuf, size, 0, &arg);
++	if (ret)
++		return ret;
++	if (arg != DISALLOW_ZSTATES && arg != ALLOW_ZSTATES_Z8 &&
++	    arg != ALLOW_ZSTATES_Z9)
++		return -EINVAL;
++	if (!smu->pm_enabled || amdgpu_in_reset(adev) || adev->in_suspend)
++		return -EBUSY;
++
++	ret = pm_runtime_resume_and_get(adev->dev);
++	if (ret < 0)
++		return ret;
++	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_AllowZstates, arg,
++					      &read_arg);
++	pm_runtime_put_autosuspend(adev->dev);
++
++	dev_info(adev->dev,
++		 "EXPERIMENTAL: SMU AllowZstates(%u) sent: %d, arg register 0x%08x\n",
++		 arg, ret, read_arg);
++
++	return ret ? ret : size;
++}
++
++static const struct file_operations smu_v14_0_0_allow_zstates_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = smu_v14_0_0_allow_zstates_write,
++	.llseek = default_llseek,
++};
++#endif
++
++void smu_v14_0_0_allow_zstates_debugfs_init(struct smu_context *smu)
++{
++#if defined(CONFIG_DEBUG_FS)
++	debugfs_create_file("amdgpu_smu_allow_zstates", 0200,
++			    adev_to_drm(smu->adev)->primary->debugfs_root,
++			    smu, &smu_v14_0_0_allow_zstates_fops);
++#endif
++}
++
+ void smu_v14_0_0_set_ppt_funcs(struct smu_context *smu)
+ {
+ 	struct amdgpu_device *adev = smu->adev;
+diff --git a/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.h b/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.h
+index 93e645ee3..c023b4e87 100644
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.h
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu14/smu_v14_0_0_ppt.h
+@@ -24,5 +24,6 @@
+ #define __SMU_V14_0_0_PPT_H__
+ 
+ extern void smu_v14_0_0_set_ppt_funcs(struct smu_context *smu);
++void smu_v14_0_0_allow_zstates_debugfs_init(struct smu_context *smu);
+ 
+ #endif
+\ No newline at end of file

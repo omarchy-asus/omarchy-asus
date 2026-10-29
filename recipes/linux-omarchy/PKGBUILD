@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.8
-pkgrel=9.103
+pkgrel=9.112
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -222,8 +222,26 @@ source=(
   8207-mm-classify-huge-page-allocations-as-failable.patch{,.sig}
   8209-xe-shrinker-use-opportunistic-hint.patch{,.sig}
   8210-xe-shrinker-single-backup-decision.patch{,.sig}
-  # EXPERIMENTAL, default-off scheduler series for GA605KM battery testing; see NOTES.md
-  9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch
+  # EXPERIMENTAL, default-off amdgpu switch (DCN 3.5 S0i2-ready display idle) for GA605KM idle testing; see NOTES.md
+  9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch
+  # EXPERIMENTAL, default-off amdgpu switch (display idle with every CRTC off) for GA605KM idle testing; see NOTES.md
+  9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch
+  # EXPERIMENTAL, pm_debug_messages-only SMU idlemask trace through s2idle for GA605KM idle testing; see NOTES.md
+  9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch
+  # EXPERIMENTAL, pm_debug_messages-only idlemask trace between amdgpu's suspend and amd_pmc's prepare (suspend_late, noirq, LPS0 _DSMs) for GA605KM idle testing; see NOTES.md
+  9904-EXPERIMENTAL-idlemask-trace-between-amdgpu-suspend-and-lps0.patch
+  # EXPERIMENTAL, pm_debug_messages-only idlemask trace after each PCI device's noirq suspend for GA605KM idle testing; see NOTES.md
+  9905-EXPERIMENTAL-idlemask-trace-after-each-pci-device-noirq-suspend.patch
+  # EXPERIMENTAL, default-off ccp runtime PM for the PSP-only function (ccp.psp_rpm_delay_ms) for GA605KM idle testing; see NOTES.md
+  9906-EXPERIMENTAL-ccp-psp-runtime-pm-default-off.patch
+  # EXPERIMENTAL, debug-only amd_pmc debugfs smu_metrics_runtime (SMU metrics table refreshed on read) for GA605KM idle testing; see NOTES.md
+  9907-EXPERIMENTAL-amd-pmc-smu-metrics-at-runtime.patch
+  # EXPERIMENTAL, default-off amdgpu: keep display idle allowed while every CRTC is off (dm_idle_all_off) and trace idle changes (dm_idle_trace) for GA605KM idle testing; see NOTES.md
+  9908-EXPERIMENTAL-drm-amd-display-keep-idle-allowed-with-every-crtc-off-default-off.patch
+  # EXPERIMENTAL, GA605KM only: hid-asus declares only the built-in keyboard's Caps Lock LED (it has no Num/Scroll Lock lights), so a lit Num Lock no longer blocks its USB autosuspend; see NOTES.md
+  9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch
+  # EXPERIMENTAL, sends nothing by default: amdgpu debugfs amdgpu_smu_allow_zstates sends the SMU AllowZstates message (0x25) on an explicit write, for GA605KM idle testing; see NOTES.md
+  9910-EXPERIMENTAL-amd-pm-smu-allow-zstates-debugfs.patch
 )
 source_x86_64=(config.x86_64)
 validpgpkeys=(
@@ -586,7 +604,16 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         'SKIP'
         '576fd826f28d945782840865f3e5b7c87d7f6f91f08e473ff0d06a37caa2f89cdd9cb4a7aafef5551363aab9c60e887ee794d5b6292874c12baf88c23ea5668e'
         'SKIP'
-        '99ee66fddb731be724ff229a47336ae2a91631c060c4314c26280741a8ef27b7435d4e8023652b722526bc50e45abe31936f3870d2ca0535d84dfb22eca58072')
+        '2956797a088e4a1e342776290eb4cdc72cf405f617b168afadd95e1c51832b25cbd934a7aab84d0b6093260788ff09e6ddb1f390ae0bdfd43d416ee5bcd4b503'
+        '0a8003b58aeebb165c32fc56b81fb055b752dcb9619d0518a896c02690f9fb2b432026704d7248a712b2e1c51dc679a333e6346c2593f0113a80e07ce6644371'
+        '0a059fca89a804364fcdb488127c8f599b717a9d118110bb2da435d34b3f99a2605c2792b99a481dc2f42479dbe3ba863fb6d3489bcc92234cf95b2a09efdfb7'
+        'e2f85140c36ecb7e30b30d9d4f38a5701bd8ed5c7612629ea18af2b8c8e9b53c0509a23651d43865eace8ce303b73aa781e28971a22bc8a1c506b6a4884f3743'
+        '6aedcd040c495b1ad65ac3c53740addbbcf05232c3dcbb6a144711b33c81520e564d24a4f52da2992a68a4145ca855da9298f17cc83526051287eb5a06c8aff0'
+        '6317fbcffa9911cb966f54e0895fb71c3780a6fc575c09a55d9e5ae5f0c28c531d2d3f0c19b8ac2d3ebdaee8e6ec1288941db96732944889e5d8de2bc9381710'
+        '7abf5b34b5deba8a48e527ad64eb5636c2e0014371649e831fc06a10481c133a565d5e6a3730a7b3548538b49c2714ed5c942094b031f9625845c2072e3db5aa'
+        '6a5635f04d9a0fe82e313a2f076bb1ec63c9e67c0f4f692307b286ce251c5b5bf6f5bcb5c3ffd7e85afa67ea580ebac46fc06bcfc5153a03108a99a7d50cce72'
+        'ce2ed1ca1cb5424bb9837d095cc0b6dabe96db35067fc33299fcc64087c2182b726eaa5e3f0d8adbe41e90e5f47811453523eb0acfaad05df71fe599503da271'
+        'dec25bcacdd7209760d85e9b6ef8c6da9d89b2a3bf4f00fe305cdcdd43f7a762492c1b465d61ea0b0808c19de8869e601d2beab1a9493fb15683d5f4eb8f2277')
 b2sums_x86_64=('c42cea9a386e1d10e53974a18fe560f369bc9a561882fc3330a8f2aac4b406ebb66eff02cfd3b1bdcb45cb67f64a5690ce17ed9edc6c775dcbd534a7ede6cbfa')
 
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
@@ -945,7 +972,16 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             'SKIP'
             'c0111614ec44014cbf621eedf5a4ef302a855423bc1633ee692392950e971d0e'
             'SKIP'
-            '8e27311cf13056ac55fdcd5385ec52271a5a1420efda27a110d24fce84ef42e3')
+            'c70a0bfe3f24c4864de671bd0f9d800d71642a9bffdd3806ca3529c75ef76a6e'
+            '3a320ae6fea7c8c4f01f4058957bd937e109d472088d0553e1b4adf7f0547ace'
+            'cefd4f323e893ff1d8c5c664a2303c9730d02cbfd4a3401c6ff068f4aa621ffc'
+            'fb16635f961c7feaf8e781a38e055293b32929e544c285c62f24b39fb1868481'
+            'c895104b034add9ec80aa6de5f207eab5c67fad1e04fea4e34571a0c1e2b8862'
+            'ad4b237803a075c6cd2df52f7b0049cb02233eb32d6dfc4467c6527f702296a1'
+            '2f660fd955f013169ddfe3b78da2ae1bc834ece054073c43dc47c3c23e7b0fa9'
+            '7792744f2b346137302442a68923c55a404414fd9825261afdac61a980d9c0b5'
+            'ea1d86cc15688404d6712fc2a19d43b9272f19de20550b631f68af33581db1b1'
+            '098f9420f8818078c2e0f56f604b7a62934d822d25c01f977e247d4418ae3a34')
 
 export KBUILD_BUILD_HOST=omarchy
 export KBUILD_BUILD_USER=$pkgbase

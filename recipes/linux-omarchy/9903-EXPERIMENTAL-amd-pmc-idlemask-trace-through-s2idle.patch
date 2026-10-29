@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Sun, 25 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: platform/x86/amd/pmc, drm/amdgpu: log the SMU
+ idlemask through s2idle (pm_debug_messages only)
+
+EXPERIMENTAL, DEBUG ONLY (local carry for ROG Zephyrus G16 GA605KM idle
+power testing; not submitted upstream).
+
+amd_pmc logs the SMU idlemask once per s2idle, at its check ("SMU idlemask
+s0i3"), when the SoC is already as idle as it gets. To find which step of
+the suspend sequence makes an IP block idle, log it at more stages:
+
+  amdgpu-display  after amdgpu's display IP suspend (phase 1)
+  amdgpu-ip       after amdgpu's other IP suspend (phase 2)
+  prepare         amd_pmc's s2idle prepare, before the OS hint
+  os-hint         right after the OS hint
+  s0i3            amd_pmc's s2idle check (existing)
+
+Each line reads "amd_pmc: SMU idlemask <stage>: 0x...". amd_pmc exports
+amd_pmc_trace_idlemask(); amdgpu looks it up with symbol_get(), so it does
+not depend on amd_pmc being loaded, and only calls it in s0ix. Nothing is
+read or logged unless /sys/power/pm_debug_messages is 1 during a suspend.
+Cezanne, which needs an SMU version check before the read, is skipped.
+amd_pmc_remove() clears regbase so a later trace can't use a stale mapping.
+
+With pm_debug_messages at 0 nothing changes.
+
+Tracked in omarchy-asus #353 (refs #249).
+---
+--- /dev/null
++++ b/include/linux/platform_data/x86/amd-pmc.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _PLATFORM_DATA_X86_AMD_PMC_H
++#define _PLATFORM_DATA_X86_AMD_PMC_H
++
++/*
++ * EXPERIMENTAL: log the SMU idlemask at a stage of an s2idle, only while
++ * /sys/power/pm_debug_messages is on. Callers outside amd_pmc look it up
++ * with symbol_get(), so they do not need amd_pmc loaded.
++ */
++void amd_pmc_trace_idlemask(const char *stage);
++
++#endif /* _PLATFORM_DATA_X86_AMD_PMC_H */
+--- a/drivers/platform/x86/amd/pmc/pmc.c
++++ b/drivers/platform/x86/amd/pmc/pmc.c
+@@ -23,6 +23,7 @@
+ #include <linux/module.h>
+ #include <linux/pci.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/x86/amd-pmc.h>
+ #include <linux/rtc.h>
+ #include <linux/serio.h>
+ #include <linux/suspend.h>
+@@ -505,6 +506,31 @@
+ }
+ DEFINE_SHOW_ATTRIBUTE(amd_pmc_idlemask);
+ 
++/*
++ * EXPERIMENTAL: the idlemask at a stage of an s2idle, only with
++ * pm_debug_messages on. Cezanne needs an SMU version check first; skip it.
++ */
++static void amd_pmc_idlemask_trace(struct amd_pmc_dev *pdev, const char *stage)
++{
++#ifdef CONFIG_PM_SLEEP_DEBUG
++	if (!pm_debug_messages_should_print())
++		return;
++
++	if (!pdev->regbase || !pdev->cpu_info || !pdev->cpu_info->scratch_reg ||
++	    pdev->cpu_id == AMD_CPU_ID_CZN)
++		return;
++
++	pm_pr_dbg("SMU idlemask %s: 0x%x\n", stage,
++		  amd_pmc_reg_read(pdev, pdev->cpu_info->scratch_reg));
++#endif
++}
++
++void amd_pmc_trace_idlemask(const char *stage)
++{
++	amd_pmc_idlemask_trace(&pmc, stage);
++}
++EXPORT_SYMBOL_GPL(amd_pmc_trace_idlemask);
++
+ static void amd_pmc_dbgfs_unregister(struct amd_pmc_dev *dev)
+ {
+ 	debugfs_remove_recursive(dev->dbgfs_dir);
+@@ -788,12 +814,16 @@
+ 		}
+ 	}
+ 
++	amd_pmc_idlemask_trace(pdev, "prepare");
++
+ 	rc = amd_pmc_send_cmd(pdev, arg, NULL, pdev->cpu_info->os_hint, false);
+ 	if (rc) {
+ 		dev_err(pdev->dev, "suspend failed: %d\n", rc);
+ 		return;
+ 	}
+ 
++	amd_pmc_idlemask_trace(pdev, "os-hint");
++
+ 	rc = amd_stb_write(pdev, AMD_PMC_STB_S2IDLE_PREPARE);
+ 	if (rc)
+ 		dev_err(pdev->dev, "error writing to STB: %d\n", rc);
+@@ -970,6 +1000,7 @@
+ 	pci_dev_put(dev->rdev);
+ 	if (IS_ENABLED(CONFIG_AMD_MP2_STB))
+ 		amd_mp2_stb_deinit(dev);
++	dev->regbase = NULL;
+ }
+ 
+ static const struct acpi_device_id amd_pmc_acpi_ids[] = {
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+@@ -48,6 +48,8 @@
+ #include <linux/vgaarb.h>
+ #include <linux/vga_switcheroo.h>
+ #include <linux/efi.h>
++#include <linux/platform_data/x86/amd-pmc.h>
++#include <linux/suspend.h>
+ #include "amdgpu.h"
+ #include "amdgpu_trace.h"
+ #include "amdgpu_i2c.h"
+@@ -4643,6 +4645,27 @@
+ 	}
+ }
+ 
++/*
++ * EXPERIMENTAL: log the SMU idlemask through amd_pmc at a stage of an s2idle,
++ * only with pm_debug_messages on. amd_pmc is optional: look it up at run time.
++ */
++static void amdgpu_device_trace_idlemask(struct amdgpu_device *adev,
++					 const char *stage)
++{
++#if IS_ENABLED(CONFIG_AMD_PMC) && defined(CONFIG_PM_SLEEP_DEBUG)
++	void (*trace)(const char *stage);
++
++	if (!adev->in_s0ix || !pm_debug_messages_should_print())
++		return;
++
++	trace = symbol_get(amd_pmc_trace_idlemask);
++	if (trace) {
++		trace(stage);
++		symbol_put(amd_pmc_trace_idlemask);
++	}
++#endif
++}
++
+ /**
+  * amdgpu_device_suspend - initiate device suspend
+  *
+@@ -4687,6 +4710,8 @@
+ 	if (r)
+ 		goto unwind_smartshift;
+ 
++	amdgpu_device_trace_idlemask(adev, "amdgpu-display");
++
+ 	amdgpu_amdkfd_suspend(adev, !amdgpu_sriov_vf(adev) && !adev->in_runpm);
+ 	r = amdgpu_userq_suspend(adev);
+ 	if (r)
+@@ -4704,6 +4729,8 @@
+ 	if (r)
+ 		goto unwind_evict;
+ 
++	amdgpu_device_trace_idlemask(adev, "amdgpu-ip");
++
+ 	if (amdgpu_sriov_vf(adev))
+ 		amdgpu_virt_release_full_gpu(adev, false);
+ 

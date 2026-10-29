@@ -5,13 +5,14 @@
 # byte-identical to what the omarchy-asus fork's install leaf and migration
 # write; only the path differs: vendor directories under /usr/lib instead of
 # /etc, with basenames no omarchy package or migration uses, so pacman never
-# meets a file it does not own. The rcu_nocbs drop-in (#229) is ours alone.
+# meets a file it does not own. The rcu_nocbs drop-in (#229) and the keyboard
+# autosuspend rule (#249, EXPERIMENTAL) are ours alone.
 # See README.md for what each file fixes and when to remove it.
 
 pkgbase=omarchy-asus-g16
 pkgname=omarchy-asus-g16
 pkgver=1.0.0
-pkgrel=103
+pkgrel=104
 pkgdesc='System fixes for the ASUS ROG Zephyrus G16 GA605KM on Omarchy (EXPERIMENTAL)'
 arch=('x86_64')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -23,6 +24,7 @@ source=('99-omarchy-asus-g16-touchpad-wake.rules'
         'omarchy-asus-g16-rcu-nocbs.conf'
         'omarchy-asus-g16-limine.hook'
         'omarchy-asus-g16-mt7925-auth-retries.conf'
+        '99-omarchy-asus-g16-keyboard-autosuspend.rules'
         'omarchy-asus-g16.install'
         'README.md'
         'LICENSE')
@@ -32,12 +34,13 @@ sha256sums=('48c521b2ebdc5840f21d6e90931c7fc5b302d14837de5e2039852e308ba7579f'
             '96e5ed436514c68642dc8064f4b7bda61adae2062da04d7bd8003eb94d01fbe9'
             'ce84fc6c73c8323a06a9394e1dbc8b82662e55fe2987fff9319f0e12a3279acd'
             '1a425601f082673b4145af86b4848878d44d8eb249584994bac947703767b664'
+            '7032e5e4462333109f517bf9a6ef4fe314d1761f3b0afb00b45ed5ac47e27aa5'
             '8b128d53a94087daae5a0c3d52dc4f6c8048675c037598f88943a2811209c408'
-            'a0364acedab025aa642a77f29fb7b4b72691f77bb5591590dc0c675c45fcf179'
+            '4d10faa9bc1e36739126a7a9cced0ed4631c728419b6264d99b1ae1aee91a16b'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 package() {
-  pkgdesc='Touchpad wake, hibernate mode, nvidia-powerd start-limit, rcu_nocbs and Wi-Fi reconnect fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
+  pkgdesc='Touchpad wake, hibernate mode, nvidia-powerd start-limit, rcu_nocbs, Wi-Fi reconnect and keyboard autosuspend fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
   depends=('systemd')
   optdepends=('limine-mkinitcpio-hook: limine-update, which puts rcu_nocbs=all on the boot entries'
               'nvidia-utils: provides nvidia-powerd.service'
@@ -62,6 +65,9 @@ package() {
   # #196: more 4-way handshake tries for the mt7925 before NetworkManager gives up.
   install -Dm644 omarchy-asus-g16-mt7925-auth-retries.conf \
     "$pkgdir/usr/lib/NetworkManager/conf.d/omarchy-asus-g16-mt7925-auth-retries.conf"
+  # #249 (EXPERIMENTAL): the built-in keyboard runtime-suspends between key presses.
+  install -Dm644 99-omarchy-asus-g16-keyboard-autosuspend.rules \
+    "$pkgdir/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules"
 
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

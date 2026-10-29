@@ -23,7 +23,10 @@
 #              closed, replug it while suspended, resume) and checks the monitors return
 #   suspend    one s2idle cycle (RTC wakes it after 30 s): at least 10 s of s0i3
 #   hibernate  only with --hibernate: hibernate, power-off, resume (needs a button press)
-#   9900       Zen 5c soft park knobs all at their defaults (off)
+#   9901       amdgpu.dcn35_s0i2 exists and is off; nothing sets it (the A/B is
+#              g16-test/dcn35-s0i2-ab, #353)
+#   9902       amdgpu.dm_idle_all_off exists and is off; nothing sets it (the test is
+#              g16-test/dm-idle-all-off, with 9903's suspend idlemask trace, #353)
 #   nvidia     module, dkms, nvidia-smi, runtime PM back to suspended
 # --no-suspend skips the suspend cycle; --yes answers the yes/no prompts with yes
 # (the Fn+Super and touchpad steps still wait for you). --dock adds the 0482 dock
@@ -475,22 +478,30 @@ check_dock() {
   fi
 }
 
-check_hfi() {
-  local d st=PASS det=() hits
-  grep -q 'amd_hfi.ranking' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amd_hfi.ranking"); }
-  hits=$(grep -rlsE 'wake_preferred|wlc_track|wake_pack|amd_hfi' /etc/udev/rules.d /usr/lib/udev/rules.d /etc/tmpfiles.d /usr/lib/tmpfiles.d /etc/sysctl.d /etc/modprobe.d 2>/dev/null)
-  [[ -z $hits ]] || { st=FAIL; det+=("files that set the knobs: $hits"); }
-  d=$(hfi_dir)
-  if [[ -z $d ]]; then
-    det+=("amd_hfi has no bound device, so the knobs are not reachable; the static keys default off")
-    result "$([[ $st == PASS ]] && echo SKIP || echo FAIL)" 9900 "amd_hfi not bound; nothing configures the knobs" "${det[@]}"
+check_dcn35_s0i2() {
+  local p=/sys/module/amdgpu/parameters/dcn35_s0i2 v st=PASS det=() hits
+  grep -q 'dcn35_s0i2' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amdgpu.dcn35_s0i2"); }
+  hits=$(grep -rls 'dcn35_s0i2' /etc/modprobe.d /usr/lib/modprobe.d /etc/udev/rules.d /usr/lib/udev/rules.d /etc/tmpfiles.d /usr/lib/tmpfiles.d 2>/dev/null)
+  [[ -z $hits ]] || { st=FAIL; det+=("files that set it: $hits"); }
+  if ! v=$(cat "$p" 2>/dev/null); then
+    result FAIL 9901 "no $p: this kernel lacks patch 9901" "${det[@]}"
     return
   fi
-  local r w t k
-  r=$(cat "$d/ranking") w=$(cat "$d/wake_preferred") t=$(cat "$d/wlc_track") k=$(cat "$d/wake_pack")
-  det+=("ranking: $r" "wake_preferred: $w" "wlc_track: $t" "wake_pack: $k")
-  [[ $r == *"[performance]"* && $w == off && $t == 0 && $k == 0 ]] || st=FAIL
-  result "$st" 9900 "soft park knobs: ranking $r, wake_preferred $w, wlc_track $t, wake_pack $k" "${det[@]}"
+  [[ $v == N ]] || st=FAIL
+  result "$st" 9901 "amdgpu.dcn35_s0i2 reads $v (default N)" "${det[@]}"
+}
+
+check_dm_idle_all_off() {
+  local p=/sys/module/amdgpu/parameters/dm_idle_all_off v st=PASS det=() hits
+  grep -q 'dm_idle_all_off' /proc/cmdline && { st=FAIL; det+=("kernel command line sets amdgpu.dm_idle_all_off"); }
+  hits=$(grep -rls 'dm_idle_all_off' /etc/modprobe.d /usr/lib/modprobe.d /etc/udev/rules.d /usr/lib/udev/rules.d /etc/tmpfiles.d /usr/lib/tmpfiles.d 2>/dev/null)
+  [[ -z $hits ]] || { st=FAIL; det+=("files that set it: $hits"); }
+  if ! v=$(cat "$p" 2>/dev/null); then
+    result FAIL 9902 "no $p: this kernel lacks patch 9902" "${det[@]}"
+    return
+  fi
+  [[ $v == N ]] || st=FAIL
+  result "$st" 9902 "amdgpu.dm_idle_all_off reads $v (default N)" "${det[@]}"
 }
 
 check_nvidia() {
@@ -604,7 +615,8 @@ run_checks() {
     check_cacp_apply
     check_gpio16
     check_dock
-    check_hfi
+    check_dcn35_s0i2
+    check_dm_idle_all_off
     check_nvidia
     check_suspend
     check_hibernate

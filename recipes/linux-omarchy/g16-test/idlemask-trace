@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""idlemask-trace: the G16's SMU idlemask at every stage of one s2idle (#353).
+
+Patches 9903 and 9904 (EXPERIMENTAL, debug only) log "SMU idlemask <stage>: 0x..." at
+each stage of an s2idle while /sys/power/pm_debug_messages is 1. On 9.107 the display
+bits (5, 16, 17-19, 20, 25) turned idle between amdgpu's IP suspend and amd_pmc's
+prepare; 9904 adds the stages in between (suspend_late, the s2idle prepare, amdgpu's
+noirq, noirq, and each LPS0 _DSM call). On 9.108 they turned idle in the noirq phase;
+9905 logs "SMU idlemask noirq <device> <power state>: 0x..." after each PCI device's
+noirq suspend (and "noirq-start" before the first), so the report also lists those rows
+in order and names the first device after whose noirq suspend each bit reads idle.
+
+  idlemask-trace            run it: any power, one root prompt, about 1 minute
+  idlemask-trace --post     and post the report to #353 (bin/issue)
+  idlemask-trace --dry-run  simulated kernel log, no root, nothing changed
+
+It sets pm_debug_messages to 1, suspends once for 15 s (rtcwake -m freeze), puts
+pm_debug_messages back, and reads the kernel log of that suspend: the stage lines, the
+LPS0 _DSM transitions, and amdgpu/DMUB errors. The report has one row per stage and the
+first stage where each of bits 5, 16, 17, 18, 19, 20 and 25 reads idle, then (9905) the
+noirq phase device by device and the first device after which each of those bits reads idle. It has no host
+or user names and goes to ~/omarchy-asus-g16-idlemask-trace-<kernel>-<date>.md.
+
+Root: pkexec through the desktop's polkit agent (G16_POLKIT_REASON=<wrapper> runs
+`<wrapper> run REASON -- pkexec ...`; G16_ROOT=sudo uses sudo).
+Exit status: 0 the run finished (whatever the verdict), 1 a problem, 2 bad usage.
+"""
+import argparse
+import glob
+import json
+import os
+import pwd
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+ISSUE = 353
+SELF = os.path.realpath(__file__)
+KIT = os.path.dirname(SELF)
+PM_DEBUG = "/sys/power/pm_debug_messages"
+BITS = (5, 16, 17, 18, 19, 20, 25)
+SLEEP_S = 15
+# The order an s2idle runs them (9903's and 9904's stages).
+STAGES = ("amdgpu-display", "amdgpu-ip", "suspend-late", "s2idle-prepare", "noirq-start", "amdgpu-noirq", "noirq",
+          "dsm-screen-off-amd", "dsm-screen-off", "dsm-entry-amd", "dsm-ms-entry", "dsm-entry",
+          "prepare", "os-hint", "s0i3")
+NEW = {"suspend-late", "s2idle-prepare", "amdgpu-noirq", "noirq"}   # 9904, not the _DSM ones
+NOIRQ_START = "noirq-start"                                          # 9905
+# 9905: "SMU idlemask noirq 0000:65:00.0 D3hot: 0x..." after each PCI device's noirq suspend.
+DEV_RE = re.compile(r"SMU idlemask noirq (\S+) (D[0-3]\w*|unknown|error): (0x[0-9a-fA-F]+)")
+STAGE_RE = re.compile(r"SMU idlemask ([a-z0-9-]+): (?:(0x[0-9a-fA-F]+)|not run \(func (\d+), mask (-?\d+)\))")
+DSM_RE = re.compile(r"(Successfully|Failed to) transitioned to state (.+?)\s*$")
+ERR_RE = re.compile(r"\*ERROR\*|dmub.*(timeout|timed out|error|fail)|REG_WAIT timeout|"
+                    r"amdgpu.*(timeout|timed out|failed|hang|reset|error)", re.I)
+
+
+def rd(p, d=None):
+    try:
+        with open(p, errors="replace") as f:
+            return f.read(8192).strip()
+    except OSError:
+        return d
+
+
+def wr(p, v):
+    try:
+        with open(p, "w") as f:
+            f.write(f"{v}\n")
+        return True
+    except OSError:
+        return False
+
+
+def hypr_instance():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if re.match(r"^[A-Za-z0-9_]+$", sig):
+        return sig
+    run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    socks = [x for x in glob.glob(run + "/hypr/*/.socket.sock")
+             if re.match(r"^[A-Za-z0-9_]+$", os.path.basename(os.path.dirname(x)))]
+    return os.path.basename(os.path.dirname(max(socks, key=os.path.getmtime))) if socks else ""
+
+
+class Display:
+    """After the resume: does every output read DPMS on? If not, turn it on (Hyprland)."""
+
+    def __init__(self, user, uid, sig):
+        self.base = ["runuser", "-u", user, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                     f"HYPRLAND_INSTANCE_SIGNATURE={sig}", "hyprctl"]
+
+    def _ctl(self, *a):
+        try:
+            return subprocess.run(self.base + list(a), capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def reads_on(self):
+        try:
+            mons = json.loads(self._ctl("monitors", "-j") or "x")
+        except ValueError:
+            return None
+        return all(bool(m.get("dpmsStatus")) for m in mons if not m.get("disabled"))
+
+    def back_on(self, tries=5):
+        for _ in range(tries):
+            if self.reads_on():
+                return True
+            self._ctl("dispatch", 'hl.dsp.dpms({ action = "enable" })')
+            self._ctl("dispatch", "dpms", "on")
+            time.sleep(2)
+        return bool(self.reads_on())
+
+
+def power_status():
+    """'Discharging', 'Charging', ... of the system battery, or ''."""
+    for s in sorted(glob.glob("/sys/class/power_supply/*")):
+        if rd(s + "/type") == "Battery" and rd(s + "/scope") != "Device":
+            return rd(s + "/status", "")
+    return ""
+
+
+def kernel_text(since):
+    try:
+        r = subprocess.run(["journalctl", "-k", "-q", "-o", "cat", "--since", f"@{int(since)}"],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def parse_stages(lines):
+    """-> [(stage, mask or None, note)] in the order logged; mask None is a _DSM not run."""
+    out = []
+    for ln in lines:
+        m = STAGE_RE.search(ln)
+        if not m:
+            continue
+        if m.group(2):
+            out.append((m.group(1), int(m.group(2), 16), ""))
+        else:
+            out.append((m.group(1), None, f"not run (func {m.group(3)}, mask {m.group(4)})"))
+    return out
+
+
+def parse_devices(lines):
+    """9905's noirq phase in log order: -> [(device, power state, mask)]; device None is a
+    stage line inside the phase (noirq-start, amdgpu-noirq, noirq) with the stage as state."""
+    out, inside = [], False
+    for ln in lines:
+        m = DEV_RE.search(ln)
+        if m:
+            out.append((m.group(1), m.group(2), int(m.group(3), 16)))
+            continue
+        m = STAGE_RE.search(ln)
+        if not m or not m.group(2):
+            continue
+        if m.group(1) == NOIRQ_START:
+            inside = True
+        if inside:
+            out.append((None, m.group(1), int(m.group(2), 16)))
+        if m.group(1) == "noirq":
+            inside = False
+    return out
+
+
+def first_device(devices, bit):
+    """-> the first noirq row after which bit reads idle: (device, state), or ("", stage) when
+    that row is a stage line (noirq-start: idle before the phase; amdgpu-noirq or noirq: no
+    PCI row before it reads idle, so a non-PCI device or amdgpu's own noirq), or None.
+    Devices finish asynchronously, so a row's mask can include a device that finished at
+    about the same time."""
+    for dev, st, m in devices:
+        if (m >> bit) & 1:
+            return ("", st) if dev is None else (dev, st)
+    return None
+
+
+def parse_dsm(lines):
+    """'Successfully transitioned to state screen off' -> [(state, ok)]."""
+    out = []
+    for ln in lines:
+        m = DSM_RE.search(ln)
+        if m:
+            out.append((m.group(2), m.group(1) == "Successfully"))
+    return out
+
+
+def first_idle(stages, bit):
+    for st, m, _ in stages:
+        if m is not None and (m >> bit) & 1:
+            return st
+    return None
+
+
+def not_idle(mask):
+    return [b for b in range(32) if not (mask >> b) & 1]
+
+
+def collect(text):
+    lines = (text or "").splitlines()
+    errs = [ln for ln in lines if ERR_RE.search(ln)][:20]
+    if text is None:
+        errs = ["(journalctl failed)"]
+    return {"stages": [[st, None if m is None else f"0x{m:08x}", n] for st, m, n in parse_stages(lines)],
+            "devices": [[d, st, f"0x{m:08x}"] for d, st, m in parse_devices(lines)],
+            "dsm": [[s, ok] for s, ok in parse_dsm(lines)], "errors": errs}
+
+
+SIM_LOG = """\
+PM: suspend entry (s2idle)
+amd_pmc: SMU idlemask amdgpu-display: 0xfdc098dd
+amd_pmc: SMU idlemask amdgpu-ip: 0xfdc09add
+amd_pmc: SMU idlemask suspend-late: 0xfdc09add
+amd_pmc: SMU idlemask s2idle-prepare: 0xfdc09add
+amd_pmc: SMU idlemask noirq-start: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:66:00.0 D3hot: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:65:00.6 D3hot: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:63:00.0 D3hot: 0xfdc09add
+amd_pmc: SMU idlemask noirq 0000:67:00.0 D3hot: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:65:00.2 D3hot: 0xfdcf9add
+amd_pmc: SMU idlemask amdgpu-noirq: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:65:00.0 D0: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:62:00.0 D3hot: 0xfdcf9add
+amd_pmc: SMU idlemask noirq 0000:61:00.0 D0: 0xfdcf9afd
+amd_pmc: SMU idlemask noirq 0000:00:14.0 D0: 0xfdcf9afd
+amd_pmc: SMU idlemask noirq 0000:00:08.1 D0: 0xffdf9afd
+amd_pmc: SMU idlemask noirq: 0xffdf9afd
+SMU idlemask dsm-screen-off-amd: not run (func 4, mask 0)
+ACPI: \\_SB_.PEP_: Successfully transitioned to state screen off
+amd_pmc: SMU idlemask dsm-screen-off: 0xffdf9afd
+SMU idlemask dsm-entry-amd: not run (func 2, mask 0)
+ACPI: \\_SB_.PEP_: Successfully transitioned to state lps0 ms entry
+amd_pmc: SMU idlemask dsm-ms-entry: 0xffdf9afd
+ACPI: \\_SB_.PEP_: Successfully transitioned to state lps0 entry
+amd_pmc: SMU idlemask dsm-entry: 0xffdf9afd
+amd_pmc: SMU idlemask prepare: 0xffdf9afd
+amd_pmc: SMU idlemask os-hint: 0xffff9afd
+amd_pmc: SMU idlemask s0i3: 0xffff9afd
+PM: suspend exit
+"""
+
+
+def stage_root(a):
+    """Root: one s2idle with pm_debug_messages on; results.json into the user's directory."""
+    if os.geteuid() != 0:
+        print("idlemask-trace: the root stage needs root", file=sys.stderr)
+        return 1
+    uid = int(os.environ.get("PKEXEC_UID") or os.environ.get("SUDO_UID") or -1)
+    try:
+        pw = pwd.getpwuid(uid)
+    except (KeyError, OverflowError):
+        print("idlemask-trace: can't tell who asked (no PKEXEC_UID/SUDO_UID)", file=sys.stderr)
+        return 1
+    out = os.path.realpath(a.out)
+    if not out.startswith(pw.pw_dir.rstrip("/") + "/") or os.stat(out).st_uid != uid:
+        print("idlemask-trace: the output directory must be the user's own, in their home", file=sys.stderr)
+        return 1
+    pm0 = rd(PM_DEBUG, "")
+    if pm0 not in ("0", "1"):
+        print(f"idlemask-trace: can't read {PM_DEBUG}", file=sys.stderr)
+        return 1
+    res = {"ok": False, "hw_sleep_us": None, "panel_back": None, "problems": [],
+           "status": power_status()}
+    disp = Display(pw.pw_name, uid, a.hypr) if a.hypr else None
+
+    def on_term(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGHUP, on_term)
+    t0 = time.time()
+    try:
+        if not wr(PM_DEBUG, 1):
+            raise RuntimeError(f"could not write {PM_DEBUG}")
+        print(f"one {SLEEP_S} s s2idle (rtcwake) with pm_debug_messages on", flush=True)
+        r = subprocess.run(["rtcwake", "-m", "freeze", "-s", str(SLEEP_S)],
+                           capture_output=True, text=True, timeout=SLEEP_S + 120)
+        res["ok"] = r.returncode == 0
+        if not res["ok"]:
+            res["problems"].append(f"rtcwake exited {r.returncode}")
+    except KeyboardInterrupt:
+        res["problems"].append("interrupted")
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        res["problems"].append(str(e))
+    finally:
+        # From here on nothing interrupts the restore or the results.
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
+        if not (wr(PM_DEBUG, pm0) and rd(PM_DEBUG) == pm0):
+            res["problems"].append(f"could not put {PM_DEBUG} back to {pm0}")
+    time.sleep(3)
+    if disp:
+        res["panel_back"] = disp.back_on()
+    hw = rd("/sys/power/suspend_stats/last_hw_sleep", "")
+    res["hw_sleep_us"] = int(hw) if hw.isdigit() else None
+    res.update(collect(kernel_text(t0 - 1)))
+    # Written as the user, never following a link: the directory is theirs.
+    os.setegid(pw.pw_gid)
+    os.seteuid(uid)
+    try:
+        fd = os.open(os.path.join(out, "results.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(res, f, indent=1)
+    finally:
+        os.seteuid(0)
+        os.setegid(0)
+    return 0
+
+
+def verdict(res):
+    """-> (verdict, stages). FAIL: kernel-log errors or the panel stayed off. INCOMPLETE: the
+    suspend failed, or 9904's stages or 9905's noirq rows are missing. Otherwise TRACED."""
+    stages = [(st, None if m is None else int(m, 16), n) for st, m, n in res.get("stages", [])]
+    seen = {st for st, _, _ in stages}
+    if res.get("errors") or res.get("panel_back") is False:
+        return "FAIL", stages
+    if not res.get("ok") or res.get("problems") or not NEW <= seen or not has_9905(res):
+        return "INCOMPLETE", stages
+    return "TRACED", stages
+
+
+def devices_of(res):
+    return [(d, st, int(m, 16)) for d, st, m in res.get("devices", [])]
+
+
+def has_9905(res):
+    devs = devices_of(res)
+    return any(d is None and st == NOIRQ_START for d, st, _ in devs) and any(d for d, _, _ in devs)
+
+
+def bits_list(xs):
+    return ", ".join(str(x) for x in xs) if xs else "none"
+
+
+def report(res, kernel, dry):
+    v, stages = verdict(res)
+    first = {b: first_idle(stages, b) for b in BITS}
+    hw_s = "-" if res.get("hw_sleep_us") is None else f"{res['hw_sleep_us'] / 1e6:.1f} s"
+    panel = {True: "yes", False: "NO", None: "not checked"}[res.get("panel_back")]
+    o = [f"## Idlemask through one s2idle on the G16: {v} (#353)", "",
+         f"Kernel {kernel}, {res.get('status') or 'power unknown'}. One {SLEEP_S} s s2idle (rtcwake) with "
+         f"pm_debug_messages on: rtcwake {'ok' if res.get('ok') else 'FAILED'}, hardware sleep {hw_s}, "
+         f"panel back {panel}." + (" **Dry run: simulated kernel log.**" if dry else ""), "",
+         "First stage where each bit reads idle:", ""]
+    o += [f"- bit {b}: {first[b] or 'never'}" for b in BITS]
+    o += ["", "| stage | idlemask | " + " | ".join(f"bit {b}" for b in BITS) + " | not idle |",
+          "|---|---|" + "---|" * len(BITS) + "---|"]
+    for st, m, note in stages:
+        if m is None:
+            o.append(f"| {st} | {note} |" + " |" * len(BITS) + " |")
+        else:
+            o.append(f"| {st} | 0x{m:08x} | " + " | ".join("idle" if (m >> b) & 1 else "-" for b in BITS)
+                     + f" | {bits_list(not_idle(m))} |")
+    if not stages:
+        o.append("| (no `SMU idlemask <stage>` lines in the kernel log) |" + " |" * (len(BITS) + 1))
+    missing = [s for s in STAGES if s not in {st for st, _, _ in stages}]
+    if missing:
+        o += ["", "Stages not logged: " + ", ".join(missing)
+              + (" (this kernel lacks patch 9904)" if NEW <= set(missing) else "")]
+    o += noirq_section(res)
+    if res.get("dsm"):
+        o += ["", "LPS0 _DSM calls: " + "; ".join(f"{s} {'ok' if ok else 'FAILED'}" for s, ok in res["dsm"])]
+    if res.get("errors"):
+        o += ["", "<details><summary>Kernel log</summary>", "", "```", *res["errors"], "```", "", "</details>"]
+    if res.get("problems"):
+        o += ["", "Problems: " + "; ".join(res["problems"])]
+    o += ["", "<sub>recipes/linux-omarchy/g16-test/idlemask-trace</sub>"]
+    return "\n".join(o) + "\n", v
+
+
+def noirq_section(res):
+    """9905's rows: the noirq phase device by device, and the first device per bit."""
+    devs = devices_of(res)
+    if not has_9905(res):
+        return ["", "No per-device noirq rows (this kernel lacks patch 9905)."]
+    o = ["", "Noirq phase, first PCI device after whose noirq suspend each bit reads idle:", ""]
+    for b in BITS:
+        f = first_device(devs, b)
+        if f is None:
+            o.append(f"- bit {b}: not idle by the end of the noirq phase")
+        elif not f[0] and f[1] == NOIRQ_START:
+            o.append(f"- bit {b}: already idle at {f[1]}")
+        elif not f[0]:
+            o.append(f"- bit {b}: first idle at the {f[1]} stage, with no PCI device row before it "
+                     "reading idle (a non-PCI device, or amdgpu's own noirq)")
+        else:
+            o.append(f"- bit {b}: {f[0]} ({f[1]})")
+    o += ["", "Devices finish asynchronously: a row can include a device that finished at about "
+          "the same time, so a bit is pinned to the named device or one just before it.", "",
+          "| # | device | state | idlemask | " + " | ".join(f"bit {b}" for b in BITS) + " | newly idle |",
+          "|---|---|---|---|" + "---|" * len(BITS) + "---|"]
+    prev, n = None, 0
+    for dev, st, m in devs:
+        new = [] if prev is None else [b for b in range(32) if (m >> b) & 1 and not (prev >> b) & 1]
+        prev = m
+        cells = " | ".join("idle" if (m >> b) & 1 else "-" for b in BITS)
+        if dev is None:
+            o.append(f"| | ({st}) | | 0x{m:08x} | {cells} | {bits_list(new)} |")
+        else:
+            n += 1
+            o.append(f"| {n} | {dev} | {st} | 0x{m:08x} | {cells} | {bits_list(new)} |")
+    return o
+
+
+def front(a):
+    kernel = os.uname().release
+    if a.dry_run:
+        res = {"ok": True, "hw_sleep_us": 11400000, "panel_back": True, "problems": [],
+               "status": "Discharging", **collect(SIM_LOG)}
+        kernel += " (dry run)"
+    else:
+        bad = []
+        if "GA605" not in (rd("/sys/class/dmi/id/product_name", "") + rd("/sys/class/dmi/id/board_name", "")):
+            bad.append("not a GA605 (the G16)")
+        if not os.path.exists(PM_DEBUG):
+            bad.append(f"no {PM_DEBUG} (CONFIG_PM_SLEEP_DEBUG)")
+        if rd("/sys/power/mem_sleep", "").find("[s2idle]") < 0:
+            bad.append("mem_sleep is not s2idle")
+        if bad:
+            print("idlemask-trace: not starting, nothing was changed:\n  - " + "\n  - ".join(bad), file=sys.stderr)
+            return 1
+        state = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                             "omarchy-asus-g16-test")
+        os.makedirs(state, exist_ok=True)
+        out = tempfile.mkdtemp(prefix="idlemask-trace-", dir=state)
+        args = [sys.executable, "-I", SELF, "--stage", "root", "--out", out, "--hypr", hypr_instance()]
+        why = (f"G16 suspend idlemask trace (#353): one {SLEEP_S} s suspend with pm_debug_messages on, "
+               "about 1 minute; pm_debug_messages goes back to its value now")
+        if os.environ.get("G16_POLKIT_REASON"):
+            cmd = [os.environ["G16_POLKIT_REASON"], "run", why, "--", "pkexec", *args]
+        elif os.environ.get("G16_ROOT") == "sudo":
+            cmd = ["sudo", *args]
+        else:
+            cmd = ["pkexec", "--disable-internal-agent", *args]
+        print(f"==> {why}\n    hands off the keyboard and the lid until it says done", flush=True)
+        if subprocess.run(cmd).returncode != 0:
+            print("idlemask-trace: the root stage failed", file=sys.stderr)
+            return 1
+        try:
+            with open(os.path.join(out, "results.json")) as f:
+                res = json.load(f)
+        except (OSError, ValueError):
+            print("idlemask-trace: no results from the root stage", file=sys.stderr)
+            return 1
+    text, v = report(res, kernel, a.dry_run)
+    path = os.path.expanduser(f"~/omarchy-asus-g16-idlemask-trace-{os.uname().release}-{time.strftime('%Y%m%d-%H%M')}.md")
+    if a.dry_run:
+        path = os.path.join(tempfile.gettempdir(), os.path.basename(path))
+    with open(path, "w") as f:
+        f.write(text)
+    print(f"\n{text}\n==> {v}; report: {path}")
+    if a.post and not a.dry_run:
+        helper = os.path.realpath(os.path.join(KIT, "..", "..", "..", "bin", "issue"))
+        if os.access(helper, os.X_OK):
+            r = subprocess.run([helper, "comment", str(ISSUE), "--agent", "laptop-claude", "--body-file", path])
+            print(f"posted to #{ISSUE}" if r.returncode == 0 else f"not posted (bin/issue refused it); the text is in {path}")
+        else:
+            print(f"not posted: no bin/issue in this checkout; the text is in {path}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="idlemask-trace", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--post", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--stage", choices=["front", "root"], default="front", help=argparse.SUPPRESS)
+    ap.add_argument("--out", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--hypr", default="", help=argparse.SUPPRESS)
+    a = ap.parse_args()
+    if a.hypr and not re.match(r"^[A-Za-z0-9_]+$", a.hypr):
+        ap.error("bad --hypr")
+    if a.stage == "root":
+        if not a.out:
+            ap.error("the root stage is started by the kit")
+        return stage_root(a)
+    return front(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

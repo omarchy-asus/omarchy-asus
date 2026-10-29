@@ -32,6 +32,7 @@ the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 | `omarchy-asus-g16` | `/usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf` | [nvidia-powerd start limit](#nvidia-powerd-start-limit) |
 | `omarchy-asus-g16` | `/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf`, `/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook` | [`rcu_nocbs=all`](#rcu_nocbsall) |
 | `omarchy-asus-g16` | `/usr/lib/NetworkManager/conf.d/omarchy-asus-g16-mt7925-auth-retries.conf` | [Wi-Fi back after a wake](#wi-fi-stays-down-after-a-wake) |
+| `omarchy-asus-g16` | `/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules` | [built-in keyboard autosuspend](#built-in-keyboard-autosuspend) (EXPERIMENTAL) |
 
 ## Touchpad doesn't wake the laptop
 
@@ -215,6 +216,51 @@ reported.
 **When to remove:** when mt7925 keeps its first handshake after a wake, or when
 NetworkManager stops treating a handshake timeout as a wrong key.
 
+## Built-in keyboard autosuspend
+
+> [!WARNING]
+> EXPERIMENTAL (#249): waits on its G16 test. It needs linux-omarchy 7.2.8-9.111 or later
+> (patch 9909) to make a difference while Num Lock is on.
+
+**Fixes:** the G16's SoC can't reach its runtime deep idle while the xHCI that carries the
+built-in keyboard and Bluetooth (67:00.0) is awake, and that xHCI stays awake because the
+keyboard (USB 0b05:19b6) never runtime-suspends. The USB core leaves a keyboard's
+`power/control` at `on`. The rule sets it to `auto`, with a 2 s autosuspend delay (the USB
+default, set explicitly). The keyboard supports remote wakeup: a key press wakes it.
+
+usbhid also refuses to suspend a keyboard while one of its declared LEDs is lit. This keyboard
+declares Num Lock, Scroll Lock, Compose and Kana LEDs it doesn't have, and Omarchy turns Num
+Lock on at login. linux-omarchy 9909 makes it declare only its real Caps Lock light. A lit Caps
+Lock still keeps it awake, by design. A connected Bluetooth device keeps the same xHCI awake.
+
+**This one isn't a fork mirror:** the fork has no equivalent.
+
+**Path:** `/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules`. No Omarchy
+rule writes this keyboard's `power/control`; systemd's `60-autosuspend.rules` only covers
+devices its hwdb lists, and this keyboard isn't one of them.
+
+**Timing:** the rule takes effect at the next boot, or immediately after:
+
+```bash
+sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=0b05 --attr-match=idProduct=19b6
+```
+
+**Check:** `cat /sys/bus/usb/devices/3-4/power/control` prints `auto`; with Num Lock on and
+Caps Lock off, `power/runtime_status` reads `suspended` a few seconds after the last key press.
+
+**Cost:** the first key press after a pause wakes the keyboard (a few milliseconds). If it ever
+drops that key, remove the package or write `on` to `power/control`.
+
+**Not chosen:** `usbhid.ignoreled=1` would do the LED half without a kernel patch, but it is
+global: every USB HID keyboard would autosuspend with its LEDs lit. Turning Omarchy's
+`numlock_by_default` off is upstream's choice and changes keyboards with a number pad.
+
+**Upstream:** ours-only (a power setting for one laptop's keyboard). The kernel half may go to
+the HID tree once the G16 test passes.
+
+**When to remove:** if the G16 test shows no gain, or when the kernel autosuspends this
+keyboard by default.
+
 ## Not packaged
 
 Not packaged, so stock behaviour stays unchanged. These fixes live in the fork
@@ -246,5 +292,5 @@ sudo pacman -Rns omarchy-asus-g16
 
 Removal deletes the files and rebuilds the Limine entries without
 `rcu_nocbs=all`, which stays in effect until the next boot. The touchpad stays
-disarmed until the next boot. A
+disarmed, and the keyboard on autosuspend, until the next boot. A
 copy the fork's migration wrote to `/etc` isn't owned by this package and stays.

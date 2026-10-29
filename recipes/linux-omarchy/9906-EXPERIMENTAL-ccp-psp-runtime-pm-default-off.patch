@@ -1,0 +1,574 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Mon, 26 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: crypto: ccp: runtime PM for PSP-only PCI
+ functions (ccp.psp_rpm_delay_ms, default off)
+
+EXPERIMENTAL, DEFAULT OFF (local carry for ROG Zephyrus G16 GA605KM idle
+power testing; not submitted upstream).
+
+ccp has no runtime PM: the reference the PCI core takes in
+local_pci_probe() is never given back, so the PSP function (1022:17E0 on
+the G16, 65:00.2) stays in D0 even with power/control at "auto". Windows
+idles this function in S0. On the G16, SMU idlemask bit 16 (the runtime
+deep-idle blocker) turns idle in s2idle's noirq phase, where the PCI core
+moves this function to D3hot; this lets that be tried at runtime.
+
+  ccp.psp_rpm_delay_ms (int, 0644, default 0 = off)
+
+When it is > 0, for a PSP-only PCI function without SEV (no CCP engines,
+no SEV vdata), the driver gives up the probe reference and uses
+autosuspend with that delay. With power/control at "auto" as well, the
+function goes to D3hot once no command has touched its registers for
+that long. A write applies at once to bound functions: > 0 drops the
+reference (or changes the delay), 0 takes it back and resumes the
+function. With 0, or with power/control at "on" (the PCI core's default),
+nothing changes.
+
+Every path that touches the function's registers holds a runtime PM
+reference, psp_pm_get()/psp_pm_put() (pm_runtime_resume_and_get() and
+pm_runtime_put_autosuspend()): the PSP mailbox (psp_mailbox_command(), so
+the TEE ring init/destroy, SFS and the extended commands), the TEE ring
+commands (psp_tee_process_cmd(), every amdtee and amd-pmf call), platform
+access (psp_send_platform_access_msg(), psp_ring_platform_doorbell(),
+HSTI), the dbc ioctl and the firmware-version sysfs attributes and their
+is_visible(). The reference is taken on these devices whether or not
+runtime PM is on, so turning it on or off never unbalances a command in
+flight; on every other ccp/PSP device the helpers do nothing. The PSP
+interrupt handler is left alone: a function in D3hot cannot raise MSI-X,
+and the handler only serves SEV.
+
+The runtime_suspend callback sends the PSP nothing (it has no such
+command): pci_pm_runtime_suspend() saves config space and
+pci_finish_runtime_suspend() sets D3hot (no ACPI _PS3/_PR3 on the G16's
+PSP node), the same register write as s2idle's noirq D3hot, after which
+the TEE ring keeps working without a re-init. runtime_resume has nothing
+to restore. The system-sleep callbacks are unchanged; without
+DPM_FLAG_SMART_SUSPEND the PCI core resumes a runtime-suspended function
+before its suspend callback.
+
+  ccp.psp_rpm_debug (bool, 0644, default off)
+
+logs each runtime suspend and resume with a running count, and for a
+resume the ccp entry point's caller that woke the function (or "not for a
+ccp command": power/control, system sleep, the PCI core), to see who
+wakes it.
+
+The fTPM (tpm_crb, CRB at 0xFED40000) and amdgpu's PSP block (MP0
+C2PMSG registers through amdgpu's own MMIO BAR) do not use this
+function's BARs, so they never resume it; whether the PSP firmware serves
+them with its function in D3hot is what the G16 test checks.
+
+Tracked in omarchy-asus #249.
+---
+diff --git a/drivers/crypto/ccp/dbc.c b/drivers/crypto/ccp/dbc.c
+--- a/drivers/crypto/ccp/dbc.c
++++ b/drivers/crypto/ccp/dbc.c
+@@ -128,7 +128,7 @@
+ 	psp->dbc_data = NULL;
+ }
+ 
+-static long dbc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
++static long __dbc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {
+ 	struct psp_device *psp_master = psp_get_master_device();
+ 	void __user *argp = (void __user *)arg;
+@@ -184,6 +184,21 @@
+ 	return 0;
+ }
+ 
++/* EXPERIMENTAL: one runtime PM reference across the ioctl's commands */
++static long dbc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
++{
++	struct psp_device *psp_master = psp_get_master_device();
++	long ret;
++
++	ret = psp_pm_get(psp_master, _RET_IP_);
++	if (ret)
++		return ret;
++	ret = __dbc_ioctl(filp, cmd, arg);
++	psp_pm_put(psp_master);
++
++	return ret;
++}
++
+ static const struct file_operations dbc_fops = {
+ 	.owner	= THIS_MODULE,
+ 	.unlocked_ioctl = dbc_ioctl,
+diff --git a/drivers/crypto/ccp/platform-access.c b/drivers/crypto/ccp/platform-access.c
+--- a/drivers/crypto/ccp/platform-access.c
++++ b/drivers/crypto/ccp/platform-access.c
+@@ -76,6 +76,10 @@
+ 	lo = psp->io_regs + pa_dev->vdata->cmdbuff_addr_lo_reg;
+ 	hi = psp->io_regs + pa_dev->vdata->cmdbuff_addr_hi_reg;
+ 
++	ret = psp_pm_get(psp, _RET_IP_);
++	if (ret)
++		return ret;
++
+ 	mutex_lock(&pa_dev->mailbox_mutex);
+ 
+ 	if (check_recovery(cmd)) {
+@@ -140,6 +144,7 @@
+ 
+ unlock:
+ 	mutex_unlock(&pa_dev->mailbox_mutex);
++	psp_pm_put(psp);
+ 
+ 	return ret;
+ }
+@@ -159,6 +164,10 @@
+ 	button = psp->io_regs + pa_dev->vdata->doorbell_button_reg;
+ 	cmd = psp->io_regs + pa_dev->vdata->doorbell_cmd_reg;
+ 
++	ret = psp_pm_get(psp, _RET_IP_);
++	if (ret)
++		return ret;
++
+ 	mutex_lock(&pa_dev->doorbell_mutex);
+ 
+ 	if (wait_cmd(cmd)) {
+@@ -186,6 +195,7 @@
+ 	ret = 0;
+ unlock:
+ 	mutex_unlock(&pa_dev->doorbell_mutex);
++	psp_pm_put(psp);
+ 
+ 	return ret;
+ }
+diff --git a/drivers/crypto/ccp/psp-dev.c b/drivers/crypto/ccp/psp-dev.c
+--- a/drivers/crypto/ccp/psp-dev.c
++++ b/drivers/crypto/ccp/psp-dev.c
+@@ -12,6 +12,9 @@
+ #include <linux/mutex.h>
+ #include <linux/bitfield.h>
+ #include <linux/delay.h>
++#include <linux/moduleparam.h>
++#include <linux/pci.h>
++#include <linux/pm_runtime.h>
+ 
+ #include "sp-dev.h"
+ #include "psp-dev.h"
+@@ -26,6 +29,52 @@
+ 
+ #define PSP_C2PMSG_17_CMDRESP_CMD	GENMASK(19, 16)
+ 
++/* EXPERIMENTAL: log the PSP's runtime suspends and resumes, with the waker */
++bool psp_rpm_debug;
++module_param(psp_rpm_debug, bool, 0644);
++MODULE_PARM_DESC(psp_rpm_debug, "EXPERIMENTAL: log PSP runtime suspend/resume and who wakes it (default: off)");
++
++/*
++ * EXPERIMENTAL: take a runtime PM reference on a PSP-only PCI function
++ * (rpm_capable) before touching its registers, resuming it from D3hot if
++ * it is runtime-suspended. Balanced by psp_pm_put(). A no-op for every
++ * other PSP. The reference is taken whether or not runtime PM is on, so
++ * turning it on or off never unbalances a command in flight.
++ */
++int psp_pm_get(struct psp_device *psp, unsigned long caller)
++{
++	int ret;
++
++	if (!psp || !psp->rpm_capable)
++		return 0;
++
++	if (pm_runtime_status_suspended(psp->dev))
++		WRITE_ONCE(psp->rpm_waker, caller);
++
++	ret = pm_runtime_resume_and_get(psp->dev);
++	if (ret == -EACCES) {
++		/*
++		 * Runtime PM is disabled (a system sleep transition): the
++		 * device is where the PM core put it, as without this patch.
++		 */
++		pm_runtime_get_noresume(psp->dev);
++		return 0;
++	}
++	if (ret)
++		dev_warn_ratelimited(psp->dev, "psp: runtime resume for %pS failed (%d)\n",
++				     (void *)caller, ret);
++
++	return ret;
++}
++
++void psp_pm_put(struct psp_device *psp)
++{
++	if (!psp || !psp->rpm_capable)
++		return;
++
++	pm_runtime_put_autosuspend(psp->dev);
++}
++
+ static int psp_mailbox_poll(const void __iomem *cmdresp_reg, unsigned int *cmdresp,
+ 			    unsigned int timeout_msecs)
+ {
+@@ -57,6 +106,10 @@
+ 	cmdbuff_lo_reg = psp->io_regs + psp->vdata->cmdbuff_addr_lo_reg;
+ 	cmdbuff_hi_reg = psp->io_regs + psp->vdata->cmdbuff_addr_hi_reg;
+ 
++	ret = psp_pm_get(psp, _RET_IP_);
++	if (ret)
++		return ret;
++
+ 	mutex_lock(&psp->mailbox_mutex);
+ 
+ 	/* Ensure mailbox is ready for a command */
+@@ -76,6 +129,7 @@
+ 
+ unlock:
+ 	mutex_unlock(&psp->mailbox_mutex);
++	psp_pm_put(psp);
+ 
+ 	return ret;
+ }
+@@ -261,6 +315,14 @@
+ 	psp->io_regs = sp->io_map;
+ 	mutex_init(&psp->mailbox_mutex);
+ 
++	/*
++	 * EXPERIMENTAL: only a PSP-only PCI function without SEV can be
++	 * runtime-suspended (sp-pci's psp_rpm_delay_ms). Decided before the
++	 * first command, so every get/put pair is balanced.
++	 */
++	psp->rpm_capable = dev_is_pci(dev) && !psp->vdata->sev &&
++			   !sp->dev_vdata->ccp_vdata;
++
+ 	ret = psp_get_capability(psp);
+ 	if (ret)
+ 		goto e_disable;
+diff --git a/drivers/crypto/ccp/psp-dev.h b/drivers/crypto/ccp/psp-dev.h
+--- a/drivers/crypto/ccp/psp-dev.h
++++ b/drivers/crypto/ccp/psp-dev.h
+@@ -72,8 +72,28 @@
+ 	void *sfs_data;
+ 
+ 	union psp_cap_register capability;
++
++	/*
++	 * EXPERIMENTAL runtime PM (ccp.psp_rpm_delay_ms): set for a PSP-only
++	 * PCI function without SEV, whose register users then hold a runtime
++	 * PM reference (psp_pm_get()/psp_pm_put()) around each access.
++	 */
++	bool rpm_capable;
++	unsigned long rpm_waker;
++	unsigned int rpm_suspends;
++	unsigned int rpm_resumes;
+ };
+ 
++#ifdef CONFIG_CRYPTO_DEV_SP_PSP
++extern bool psp_rpm_debug;
++
++int psp_pm_get(struct psp_device *psp, unsigned long caller);
++void psp_pm_put(struct psp_device *psp);
++#else
++static inline int psp_pm_get(struct psp_device *psp, unsigned long caller) { return 0; }
++static inline void psp_pm_put(struct psp_device *psp) { }
++#endif
++
+ void psp_set_sev_irq_handler(struct psp_device *psp, psp_irq_handler_t handler,
+ 			     void *data);
+ void psp_clear_sev_irq_handler(struct psp_device *psp);
+diff --git a/drivers/crypto/ccp/sp-pci.c b/drivers/crypto/ccp/sp-pci.c
+--- a/drivers/crypto/ccp/sp-pci.c
++++ b/drivers/crypto/ccp/sp-pci.c
+@@ -21,6 +21,8 @@
+ #include <linux/spinlock.h>
+ #include <linux/delay.h>
+ #include <linux/ccp.h>
++#include <linux/moduleparam.h>
++#include <linux/pm_runtime.h>
+ 
+ #include "ccp-dev.h"
+ #include "psp-dev.h"
+@@ -37,16 +39,104 @@
+ struct sp_pci {
+ 	int msix_count;
+ 	struct msix_entry msix_entry[MSIX_VECTORS];
++	bool rpm_on;
+ };
+ static struct sp_device *sp_dev_master;
+ 
++#ifdef CONFIG_CRYPTO_DEV_SP_PSP
++/*
++ * EXPERIMENTAL runtime PM for PSP-only functions without SEV (no CCP), such
++ * as 1022:17E0. With psp_rpm_delay_ms > 0 the driver gives up the reference
++ * the PCI core takes at probe and uses autosuspend with that delay; with
++ * power/control at "auto" the function then goes to D3hot when no command
++ * has touched its registers for that long. Each register user holds a
++ * reference (psp_pm_get()/psp_pm_put()), so a command always finds it in D0.
++ * 0 (the default) keeps the reference: the function never runtime-suspends,
++ * whatever power/control says. A write applies at once to bound functions.
++ */
++static int psp_rpm_delay_ms;
++static bool sp_pci_registered;
++static DEFINE_MUTEX(psp_rpm_lock);
++static struct pci_driver sp_pci_driver;
++
++/* Called with the device lock held (probe, or sp_pci_rpm_apply_dev()) */
++static void sp_pci_rpm_apply(struct sp_device *sp)
++{
++	struct psp_device *psp = sp->psp_data;
++	struct sp_pci *sp_pci = sp->dev_specific;
++	struct device *dev = sp->dev;
++	int delay = READ_ONCE(psp_rpm_delay_ms);
++
++	if (!psp || !psp->rpm_capable)
++		return;
++
++	if (delay > 0) {
++		pm_runtime_set_autosuspend_delay(dev, delay);
++		if (sp_pci->rpm_on)
++			return;
++		pm_runtime_use_autosuspend(dev);
++		sp_pci->rpm_on = true;
++		/* Gives back local_pci_probe()'s reference */
++		pm_runtime_put_autosuspend(dev);
++		dev_info(dev, "psp: runtime PM on, D3hot after %d ms idle with power/control=auto\n",
++			 delay);
++	} else if (sp_pci->rpm_on) {
++		/* Takes the probe reference back: D0 from here on */
++		pm_runtime_get_sync(dev);
++		pm_runtime_dont_use_autosuspend(dev);
++		sp_pci->rpm_on = false;
++		dev_info(dev, "psp: runtime PM off\n");
++	}
++}
++
++static int sp_pci_rpm_apply_dev(struct device *dev, void *data)
++{
++	struct sp_device *sp;
++
++	device_lock(dev);
++	sp = dev->driver == &sp_pci_driver.driver ? dev_get_drvdata(dev) : NULL;
++	if (sp)
++		sp_pci_rpm_apply(sp);
++	device_unlock(dev);
++
++	return 0;
++}
++
++static int psp_rpm_delay_set(const char *val, const struct kernel_param *kp)
++{
++	int ret;
++
++	mutex_lock(&psp_rpm_lock);
++	ret = param_set_int(val, kp);
++	if (!ret && sp_pci_registered)
++		ret = driver_for_each_device(&sp_pci_driver.driver, NULL, NULL,
++					     sp_pci_rpm_apply_dev);
++	mutex_unlock(&psp_rpm_lock);
++
++	return ret;
++}
++
++static const struct kernel_param_ops psp_rpm_delay_ops = {
++	.set = psp_rpm_delay_set,
++	.get = param_get_int,
++};
++module_param_cb(psp_rpm_delay_ms, &psp_rpm_delay_ops, &psp_rpm_delay_ms, 0644);
++MODULE_PARM_DESC(psp_rpm_delay_ms,
++		 "EXPERIMENTAL: PSP-only functions without SEV: runtime D3hot after this many ms idle, with power/control=auto (default: 0 = off)");
++#endif
++
+ #define version_attribute_show(name, _offset)					\
+ static ssize_t name##_show(struct device *d, struct device_attribute *attr,	\
+ 			   char *buf)						\
+ {										\
+ 	struct sp_device *sp = dev_get_drvdata(d);				\
+ 	struct psp_device *psp = sp->psp_data;					\
+-	unsigned int val = ioread32(psp->io_regs + _offset);			\
++	unsigned int val;							\
++	int ret = psp_pm_get(psp, _RET_IP_);					\
++	if (ret)								\
++		return ret;							\
++	val = ioread32(psp->io_regs + _offset);					\
++	psp_pm_put(psp);							\
+ 	return sysfs_emit(buf, "%02lx.%02lx.%02lx.%02lx\n",			\
+ 			  FIELD_GET(AA, val),			\
+ 			  FIELD_GET(BB, val),			\
+@@ -75,6 +165,9 @@
+ 	if (!psp)
+ 		return 0;
+ 
++	if (psp_pm_get(psp, _RET_IP_))
++		return 0;
++
+ 	if (attr == &dev_attr_bootloader_version.attr &&
+ 	    psp->vdata->bootloader_info_reg)
+ 		val = ioread32(psp->io_regs + psp->vdata->bootloader_info_reg);
+@@ -83,6 +176,8 @@
+ 	    psp->vdata->tee->info_reg)
+ 		val = ioread32(psp->io_regs + psp->vdata->tee->info_reg);
+ 
++	psp_pm_put(psp);
++
+ 	/* If platform disallows accessing this register it will be all f's */
+ 	if (val != 0xffffffff)
+ 		return 0444;
+@@ -306,6 +401,11 @@
+ 	if (ret)
+ 		goto free_irqs;
+ 
++#ifdef CONFIG_CRYPTO_DEV_SP_PSP
++	/* EXPERIMENTAL: psp_rpm_delay_ms > 0 drops the probe reference */
++	sp_pci_rpm_apply(sp);
++#endif
++
+ 	return 0;
+ 
+ free_irqs:
+@@ -330,10 +430,22 @@
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct sp_device *sp = dev_get_drvdata(dev);
++	struct sp_pci *sp_pci;
+ 
+ 	if (!sp)
+ 		return;
+ 
++	/*
++	 * EXPERIMENTAL: pci_device_remove() resumed the function and drops
++	 * local_pci_probe()'s reference after this, so take it back.
++	 */
++	sp_pci = sp->dev_specific;
++	if (sp_pci->rpm_on) {
++		pm_runtime_get_noresume(dev);
++		pm_runtime_dont_use_autosuspend(dev);
++		sp_pci->rpm_on = false;
++	}
++
+ 	sp_destroy(sp);
+ 
+ 	sp_free_irqs(sp);
+@@ -361,6 +473,55 @@
+ }
+ 
+ #ifdef CONFIG_CRYPTO_DEV_SP_PSP
++/*
++ * EXPERIMENTAL: the PSP has no command for this, so nothing is sent: the
++ * PCI core saves config space and moves the function to D3hot
++ * (pci_pm_runtime_suspend() -> pci_finish_runtime_suspend()). The TEE ring
++ * stays set up, as it does through s2idle's noirq D3hot.
++ */
++static int sp_pci_runtime_suspend(struct device *dev)
++{
++	struct sp_device *sp = dev_get_drvdata(dev);
++	struct psp_device *psp = sp ? sp->psp_data : NULL;
++	struct sp_pci *sp_pci = sp ? sp->dev_specific : NULL;
++
++	if (!psp || !psp->rpm_capable || !sp_pci->rpm_on)
++		return -EBUSY;
++
++	psp->rpm_suspends++;
++	if (READ_ONCE(psp_rpm_debug))
++		dev_info(dev, "psp rpm: runtime suspend #%u\n", psp->rpm_suspends);
++
++	return 0;
++}
++
++/* The PCI core has brought the function back to D0 and restored its config space */
++static int sp_pci_runtime_resume(struct device *dev)
++{
++	struct sp_device *sp = dev_get_drvdata(dev);
++	struct psp_device *psp = sp ? sp->psp_data : NULL;
++	unsigned long waker;
++
++	if (!psp)
++		return 0;
++
++	waker = xchg(&psp->rpm_waker, 0);
++	psp->rpm_resumes++;
++	if (!READ_ONCE(psp_rpm_debug))
++		return 0;
++
++	if (waker)
++		dev_info(dev, "psp rpm: runtime resume #%u for %pS (%s)\n",
++			 psp->rpm_resumes, (void *)waker, current->comm);
++	else
++		dev_info(dev, "psp rpm: runtime resume #%u, not for a ccp command (%s)\n",
++			 psp->rpm_resumes, current->comm);
++
++	return 0;
++}
++#endif
++
++#ifdef CONFIG_CRYPTO_DEV_SP_PSP
+ static const struct sev_vdata sevv1 = {
+ 	.cmdresp_reg		= 0x10580,	/* C2PMSG_32 */
+ 	.cmdbuff_addr_lo_reg	= 0x105e0,	/* C2PMSG_56 */
+@@ -577,6 +738,10 @@
+ 	.thaw = pm_sleep_ptr(sp_pci_resume),
+ 	.poweroff = pm_sleep_ptr(sp_pci_suspend),
+ 	.restore_early = pm_sleep_ptr(sp_pci_restore),
++#ifdef CONFIG_CRYPTO_DEV_SP_PSP
++	.runtime_suspend = pm_ptr(sp_pci_runtime_suspend),
++	.runtime_resume = pm_ptr(sp_pci_runtime_resume),
++#endif
+ };
+ 
+ static struct pci_driver sp_pci_driver = {
+@@ -591,10 +756,27 @@
+ 
+ int sp_pci_init(void)
+ {
++#ifdef CONFIG_CRYPTO_DEV_SP_PSP
++	int ret;
++
++	/* EXPERIMENTAL: a psp_rpm_delay_ms write waits until the driver is registered */
++	mutex_lock(&psp_rpm_lock);
++	ret = pci_register_driver(&sp_pci_driver);
++	sp_pci_registered = !ret;
++	mutex_unlock(&psp_rpm_lock);
++
++	return ret;
++#else
+ 	return pci_register_driver(&sp_pci_driver);
++#endif
+ }
+ 
+ void sp_pci_exit(void)
+ {
++#ifdef CONFIG_CRYPTO_DEV_SP_PSP
++	mutex_lock(&psp_rpm_lock);
++	sp_pci_registered = false;
++	mutex_unlock(&psp_rpm_lock);
++#endif
+ 	pci_unregister_driver(&sp_pci_driver);
+ }
+diff --git a/drivers/crypto/ccp/tee-dev.c b/drivers/crypto/ccp/tee-dev.c
+--- a/drivers/crypto/ccp/tee-dev.c
++++ b/drivers/crypto/ccp/tee-dev.c
+@@ -363,14 +363,19 @@
+ 
+ 	tee = psp->tee_data;
+ 
+-	ret = tee_submit_cmd(tee, cmd_id, buf, len, &resp);
++	/* EXPERIMENTAL: the function stays in D0 until the reply is copied */
++	ret = psp_pm_get(psp, _RET_IP_);
+ 	if (ret)
+ 		return ret;
+ 
++	ret = tee_submit_cmd(tee, cmd_id, buf, len, &resp);
++	if (ret)
++		goto out;
++
+ 	ret = tee_wait_cmd_completion(tee, resp, TEE_DEFAULT_RING_TIMEOUT);
+ 	if (ret) {
+ 		resp->flag = CMD_RESPONSE_TIMEDOUT;
+-		return ret;
++		goto out;
+ 	}
+ 
+ 	memcpy(buf, &resp->buf[0], len);
+@@ -378,7 +383,10 @@
+ 
+ 	resp->flag = CMD_RESPONSE_COPIED;
+ 
+-	return 0;
++out:
++	psp_pm_put(psp);
++
++	return ret;
+ }
+ EXPORT_SYMBOL(psp_tee_process_cmd);
+ 

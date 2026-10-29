@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Mon, 26 Oct 2026 00:00:00 -0400
+Subject: [PATCH] EXPERIMENTAL: HID: asus: declare only the Caps Lock LED on
+ the GA605KM keyboard
+
+EXPERIMENTAL (local carry for ROG Zephyrus G16 GA605KM idle power
+testing; not submitted upstream). It changes nothing on any other machine
+or keyboard.
+
+The ROG N-Key keyboard of the Zephyrus G16 GA605KM (USB 0b05:19b6)
+declares five LED outputs in its keyboard report: Num Lock, Caps Lock,
+Scroll Lock, Compose and Kana. The keyboard is tenkeyless and has only a
+Caps Lock light, but the kernel still creates the other LEDs and tracks
+their state.
+
+usbhid refuses runtime suspend while any LED it knows of is on
+(hid_suspend(): ledcount && !ignoreled). Desktops commonly turn Num Lock
+on at login, so the keyboard never autosuspends, even with power/control
+at "auto", and neither does the xHCI controller it sits on, which on the
+GA605KM is also what keeps the SoC out of its runtime deep idle.
+
+Rewrite the 18-byte LED part of this descriptor in place: bit 0 becomes
+padding, Caps Lock stays at bit 1 with the same usage, and bits 2-4 join
+the existing three bits of padding. The report keeps its size and every
+other field its offset, so the Caps Lock output report the device gets is
+byte-identical. Num Lock still works as a modifier (it is keyboard state
+in the input layer and the compositor, not an LED); there is just no LED
+for it, which matches the hardware.
+
+Caps Lock on still blocks autosuspend, as before: the light is real and
+lit, and the state is rare and visible to the user.
+
+The 0b05:19b6 product ID is shared by the N-Key keyboards of many ROG
+laptops, some of them with a number pad, so the fixup applies only when
+the board is a GA605KM, the descriptor is the 745-byte one this keyboard
+reports and the LED items are the exact bytes expected. Anything else
+is left alone.
+---
+ drivers/hid/hid-asus.c | 59 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 58 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/hid/hid-asus.c b/drivers/hid/hid-asus.c
+index 7fca53b92..c616f50c1 100644
+--- a/drivers/hid/hid-asus.c
++++ b/drivers/hid/hid-asus.c
+@@ -100,6 +100,7 @@ MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
+ #define QUIRK_ROG_ALLY_XPAD		BIT(13)
+ #define QUIRK_HID_FN_LOCK		BIT(14)
+ #define QUIRK_HID_WIN_LOCK		BIT(15)
++#define QUIRK_ROG_NKEY_CAPS_LED_ONLY	BIT(16)
+ 
+ #define I2C_KEYBOARD_QUIRKS			(QUIRK_FIX_NOTEBOOK_REPORT | \
+ 						 QUIRK_NO_INIT_REPORTS | \
+@@ -1560,6 +1561,58 @@ static const __u8 asus_g752_fixed_rdesc[] = {
+         0x2A, 0xFF, 0x00,		/*   Usage Maximum (0xFF)       */
+ };
+ 
++/*
++ * The ROG N-Key keyboard of the Zephyrus G16 GA605KM (0b05:19b6) declares
++ * five LED outputs in its keyboard report (Num Lock, Caps Lock, Scroll Lock,
++ * Compose, Kana), but the tenkeyless keyboard only has a Caps Lock light.
++ */
++#define ASUS_GA605KM_KBD_RDESC_SIZE	745
++#define ASUS_GA605KM_KBD_LEDS_OFFSET	167
++
++static const __u8 asus_ga605km_kbd_leds_rdesc[] = {
++	0x95, 0x05,		/*   Report Count (5)			*/
++	0x75, 0x01,		/*   Report Size (1)			*/
++	0x05, 0x08,		/*   Usage Page (LEDs)			*/
++	0x19, 0x01,		/*   Usage Minimum (Num Lock)		*/
++	0x29, 0x05,		/*   Usage Maximum (Kana)		*/
++	0x91, 0x02,		/*   Output (Data,Var,Abs)		*/
++	0x95, 0x01,		/*   Report Count (1)			*/
++	0x75, 0x03,		/*   Report Size (3)			*/
++	0x91, 0x03,		/*   Output (Cnst,Var,Abs)		*/
++};
++
++/* Same bits: Caps Lock stays at bit 1, the rest become padding */
++static const __u8 asus_ga605km_kbd_leds_fixed_rdesc[] = {
++	0x95, 0x01,		/*   Report Count (1)			*/
++	0x75, 0x01,		/*   Report Size (1)			*/
++	0x91, 0x03,		/*   Output (Cnst,Var,Abs)	bit 0	*/
++	0x05, 0x08,		/*   Usage Page (LEDs)			*/
++	0x19, 0x02,		/*   Usage Minimum (Caps Lock)		*/
++	0x29, 0x02,		/*   Usage Maximum (Caps Lock)		*/
++	0x91, 0x02,		/*   Output (Data,Var,Abs)	bit 1	*/
++	0x95, 0x06,		/*   Report Count (6)			*/
++	0x91, 0x03,		/*   Output (Cnst,Var,Abs)	bits 2-7 */
++};
++
++static void asus_fixup_ga605km_kbd_leds(struct hid_device *hdev, __u8 *rdesc,
++					unsigned int rsize)
++{
++	const unsigned int offs = ASUS_GA605KM_KBD_LEDS_OFFSET;
++
++	BUILD_BUG_ON(sizeof(asus_ga605km_kbd_leds_rdesc) !=
++		     sizeof(asus_ga605km_kbd_leds_fixed_rdesc));
++
++	if (rsize != ASUS_GA605KM_KBD_RDESC_SIZE ||
++	    !dmi_match(DMI_BOARD_NAME, "GA605KM") ||
++	    memcmp(rdesc + offs, asus_ga605km_kbd_leds_rdesc,
++		   sizeof(asus_ga605km_kbd_leds_rdesc)))
++		return;
++
++	hid_info(hdev, "Fixing up GA605KM keyboard LEDs: Caps Lock only\n");
++	memcpy(rdesc + offs, asus_ga605km_kbd_leds_fixed_rdesc,
++	       sizeof(asus_ga605km_kbd_leds_fixed_rdesc));
++}
++
+ static const __u8 *asus_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+ 		unsigned int *rsize)
+ {
+@@ -1664,6 +1717,9 @@ static const __u8 *asus_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+ 		}
+ 	}
+ 
++	if (drvdata->quirks & QUIRK_ROG_NKEY_CAPS_LED_ONLY)
++		asus_fixup_ga605km_kbd_leds(hdev, rdesc, *rsize);
++
+ 	return rdesc;
+ }
+ 
+@@ -1687,7 +1743,8 @@ static const struct hid_device_id asus_devices[] = {
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
+ 	    USB_DEVICE_ID_ASUSTEK_ROG_NKEY_KEYBOARD2),
+ 	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD |
+-		QUIRK_HID_FN_LOCK | QUIRK_HID_WIN_LOCK },
++		QUIRK_HID_FN_LOCK | QUIRK_HID_WIN_LOCK |
++		QUIRK_ROG_NKEY_CAPS_LED_ONLY },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
+ 	    USB_DEVICE_ID_ASUSTEK_ROG_Z13_LIGHTBAR),
+ 	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD },
