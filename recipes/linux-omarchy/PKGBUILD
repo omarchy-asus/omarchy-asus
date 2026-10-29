@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.8
-pkgrel=9.111
+pkgrel=9.112
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -222,8 +222,6 @@ source=(
   8207-mm-classify-huge-page-allocations-as-failable.patch{,.sig}
   8209-xe-shrinker-use-opportunistic-hint.patch{,.sig}
   8210-xe-shrinker-single-backup-decision.patch{,.sig}
-  # EXPERIMENTAL, default-off scheduler series for GA605KM battery testing; see NOTES.md
-  9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch
   # EXPERIMENTAL, default-off amdgpu switch (DCN 3.5 S0i2-ready display idle) for GA605KM idle testing; see NOTES.md
   9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch
   # EXPERIMENTAL, default-off amdgpu switch (display idle with every CRTC off) for GA605KM idle testing; see NOTES.md
@@ -606,7 +604,6 @@ b2sums=('5326dde778eb945f282740ef0d8765b46fbd198f1209cdfd7b91e5dac1312fc01f8bf0b
         'SKIP'
         '576fd826f28d945782840865f3e5b7c87d7f6f91f08e473ff0d06a37caa2f89cdd9cb4a7aafef5551363aab9c60e887ee794d5b6292874c12baf88c23ea5668e'
         'SKIP'
-        '99ee66fddb731be724ff229a47336ae2a91631c060c4314c26280741a8ef27b7435d4e8023652b722526bc50e45abe31936f3870d2ca0535d84dfb22eca58072'
         '2956797a088e4a1e342776290eb4cdc72cf405f617b168afadd95e1c51832b25cbd934a7aab84d0b6093260788ff09e6ddb1f390ae0bdfd43d416ee5bcd4b503'
         '0a8003b58aeebb165c32fc56b81fb055b752dcb9619d0518a896c02690f9fb2b432026704d7248a712b2e1c51dc679a333e6346c2593f0113a80e07ce6644371'
         '0a059fca89a804364fcdb488127c8f599b717a9d118110bb2da435d34b3f99a2605c2792b99a481dc2f42479dbe3ba863fb6d3489bcc92234cf95b2a09efdfb7'
@@ -975,7 +972,6 @@ sha256sums=('12e8d5a973d1ad7c5a5c69882e4022b131ed715db7003fdcd760ddf8c3e51941'
             'SKIP'
             'c0111614ec44014cbf621eedf5a4ef302a855423bc1633ee692392950e971d0e'
             'SKIP'
-            '8e27311cf13056ac55fdcd5385ec52271a5a1420efda27a110d24fce84ef42e3'
             'c70a0bfe3f24c4864de671bd0f9d800d71642a9bffdd3806ca3529c75ef76a6e'
             '3a320ae6fea7c8c4f01f4058957bd937e109d472088d0553e1b4adf7f0547ace'
             'cefd4f323e893ff1d8c5c664a2303c9730d02cbfd4a3401c6ff068f4aa621ffc'

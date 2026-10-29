@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.111**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.112**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,11 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.111` (kernel release string becomes `7.2.8-9.111-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.112` (kernel release string becomes `7.2.8-9.112-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910.
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910; 9.112 dropped 9900 (#10).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -41,17 +41,16 @@ Compared with upstream, only:
    back after hibernation; see "0808" below).
 9. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
    `0808-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
-10. `9900-EXPERIMENTAL-...` (see "EXPERIMENTAL: 9900" below).
-11. `9901-EXPERIMENTAL-...` after 9900 (see "EXPERIMENTAL: 9901" below).
-12. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
+10. `9901-EXPERIMENTAL-...` last, after all upstream patches (see "EXPERIMENTAL: 9901" below).
+11. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
     "EXPERIMENTAL: 9903" below).
-13. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
-14. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
-15. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
-16. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
-17. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
-18. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
-19. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
+12. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
+13. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
+14. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
+15. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
+16. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
+17. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
+18. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -306,7 +305,7 @@ recipes/linux-omarchy/g16-test/test --resume-profile --hibernates 6   # #185, on
   baseline, Win-lock key press, touchpad IRQs per report, asus-armoury ranges
   and the fan-curve gate, `panel_power_savings`, one s2idle cycle that must
   reach at least 10 s of s0i3 (a suspend that wakes at once fails, #133),
-  9900 knobs at their defaults, nvidia and runtime PM; hibernate with
+  nvidia and runtime PM; hibernate with
   `--hibernate`), writes a report without host or user names to
   `~/omarchy-asus-g16-test-<kernel>-<date>.md` and offers to post it on the PR.
   `--temps [MIN]` is the #42 measurement (quiet fan table on battery,
@@ -318,7 +317,7 @@ recipes/linux-omarchy/g16-test/test --resume-profile --hibernates 6   # #185, on
 
 `prepare()` applies every `*.patch` with `patch -Np1 --fuzz=0`, so a
 successful `makepkg --nobuild` proves all patches apply cleanly. On 7.2.8 all
-178 patches (including 0481, 0568, 0569, 0807 and 9900) apply at fuzz 0 with no
+178 patches (including 0481, 0568, 0569, 0807 and 9900, since dropped) apply at fuzz 0 with no
 offsets (checked for 9.3 on 2026-10-18, after the rebase onto the DELTA layout). The two files touched by 0569 and
 0807 were also compiled with `W=1` in the patched tree (no warnings).
 
@@ -330,10 +329,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9900, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
    0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9900, then 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909 and 9910, last.
+   9901, then 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909 and 9910, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -361,28 +360,10 @@ outranks ours, so rebase promptly.
 - Config has DWARF5 debug info and BTF, no LTO: expect a build tree of about
   20-30 GB and roughly 30-60 minutes on 16 cores.
 
-## EXPERIMENTAL: 9900 Zen 5c-first soft park (default off)
-
-`9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch` is a local carry
-for battery testing on the ROG Zephyrus G16 GA605KM (Ryzen AI 300, Zen 5 +
-Zen 5c). It is **experimental**, **compile-tested only**, and **not intended
-for upstream**.
-
-- Five changes combined into one patch: amd_hfi ITMT ranking knob, soft wakeup
-  CPU preference, AMD workload-class tracking/steering, optional SMT packing,
-  and NOHZ idle-load-balancer preference. Details are in the patch header.
-- Every knob defaults OFF (static keys and sysfs). This package enables
-  nothing: no kernel cmdline, udev rule or sysctl. With defaults the
-  scheduler takes the stock code paths.
-- Applied last, after all upstream patches and 0568, at fuzz 0 (regenerated
-  against 7.2.8-9 without offsets).
-- Remove it if the battery A/B testing shows no win, or move it to a
-  separate `-experimental` kernel package.
-
 ## EXPERIMENTAL: 9901 DCN 3.5 S0i2-ready display idle (default off, #353)
 
 `9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch` (ours,
-compile-tested only, applied after 9900). It only touches
+compile-tested only, applied after all upstream patches). It only touches
 `drivers/gpu/drm/amd/display/dc/clk_mgr/dcn35/dcn35_clk_mgr.c`.
 
 **What.** A new parameter `amdgpu.dcn35_s0i2` (bool, 0644, default 0). When it
@@ -803,7 +784,7 @@ that cannot run is a FAIL: the merge gate is this check passing.
 
 `0481-drm-amd-display-power-backports.patch` combines three amdgpu display
 backports for the GA605's OLED eDP. It sits right after `0480` and applies at
-fuzz 0 with every later patch, including 9900.
+fuzz 0 with every later patch.
 
 1. Disable self-refresh on tearing flips (upstream 2e54a92e0136). This is also
    in 7.2.11 stable, so drop it once the base is 7.2.11 or later.

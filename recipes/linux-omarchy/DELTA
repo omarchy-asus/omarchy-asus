@@ -13,7 +13,6 @@ patch 0773-gpiolib-acpi-ignore-wake-on-gpio16-asus-ga605km.patch after 0772-*
 patch 0807-platform-x86-asus-armoury-ga605km-power-limits.patch after 0806-*
 patch 0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernation.patch after 0807-*
 patch 0810-drm-amd-display-panel-power-savings-apply-now.patch after 0808-*
-patch 9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch end -- EXPERIMENTAL, default-off scheduler series for GA605KM battery testing; see NOTES.md
 patch 9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch end -- EXPERIMENTAL, default-off amdgpu switch (DCN 3.5 S0i2-ready display idle) for GA605KM idle testing; see NOTES.md
 patch 9902-EXPERIMENTAL-drm-amd-display-idle-with-all-crtcs-off-default-off.patch end -- EXPERIMENTAL, default-off amdgpu switch (display idle with every CRTC off) for GA605KM idle testing; see NOTES.md
 patch 9903-EXPERIMENTAL-amd-pmc-idlemask-trace-through-s2idle.patch end -- EXPERIMENTAL, pm_debug_messages-only SMU idlemask trace through s2idle for GA605KM idle testing; see NOTES.md

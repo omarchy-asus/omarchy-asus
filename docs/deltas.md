@@ -47,7 +47,6 @@ An upstream state that changes is updated here, with the date it was checked.
 | [asus-armoury GA605KM power limits](#kernel-0807-armoury-power-limits) | linux-omarchy | 0807 | both | not submitted |
 | [asus-wmi restores the thermal policy after hibernation](#kernel-0808-thermal-policy-restore) | linux-omarchy | 0808 | RC only | not submitted |
 | [panel_power_savings applies when written](#kernel-0810-panel-power-savings) | linux-omarchy | 0810 | RC only | not submitted |
-| [EXPERIMENTAL Zen 5c-first soft park](#kernel-9900-zen5c-soft-park) | linux-omarchy | 9900 | both | ours-only |
 | [EXPERIMENTAL DCN 3.5 S0i2-ready display idle](#kernel-9901-dcn35-s0i2) | linux-omarchy | 9901 | RC only | not submitted |
 | [EXPERIMENTAL display idle with every CRTC off](#kernel-9902-dm-idle-all-off) | linux-omarchy | 9902 | RC only | not submitted |
 | [EXPERIMENTAL SMU idlemask trace through s2idle](#kernel-9903-idlemask-trace) | linux-omarchy | 9903 | RC only | ours-only |
@@ -415,25 +414,11 @@ kernel's rules on AI assistants ask for.
 > `dmub_cacp_set_level` fires within 3 s of the write. Mainline (7.4-rc1) has the same store
 > function.
 
-<a id="kernel-9900-zen5c-soft-park"></a>
-### EXPERIMENTAL Zen 5c-first soft park (9900)
-
-- **Component:** `linux-omarchy`, `9900-EXPERIMENTAL-zen5c-first-soft-park-default-off.patch`,
-  applied last. Both channels.
-- **What:** five scheduler changes for GA605KM battery testing (amd_hfi ITMT ranking, soft wakeup
-  CPU preference, AMD workload-class steering, optional SMT packing, NOHZ idle-load-balancer
-  preference). Every knob defaults off and nothing enables it, so the scheduler takes the stock
-  paths. Compile-tested only.
-- **Test:** the kit checks that every 9900 knob is at its default. The battery A/B is the work
-  in experiment issue #10.
-- **Upstream: ours-only.** Not meant for upstream.
-- **Drop when:** the A/B shows no win (or move it to a separate `-experimental` kernel).
-
 <a id="kernel-9901-dcn35-s0i2"></a>
 ### EXPERIMENTAL DCN 3.5 S0i2-ready display idle (9901)
 
 - **Component:** `linux-omarchy`,
-  `9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch`, after 9900. RC only
+  `9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch`, applied last. RC only
   (since 9.106).
 - **What:** a new `amdgpu.dcn35_s0i2` parameter (bool, writable at runtime, default 0). When it is 1,
   the DCN 3.5 clock manager sends `SetDisplayIdleOptimizations` with `df_request_disabled`,
@@ -2149,13 +2134,14 @@ Work still in issues, not in any recipe on `main` today:
   plugin).
 - Bugs: HDMI on the RTX sometimes not detected after boot (#158); a Hyprland reload on battery
   blanks the panel twice (#204).
-- The 9900 battery A/B is experiment #10. Tooling work (#309, #258, #212, #284) and the project
+- Tooling work (#309, #258, #212, #284) and the project
   status page (#47) are issues too.
 
 ## Dropped
 
 | change | was | dropped in | why |
 |---|---|---|---|
+| 9900, EXPERIMENTAL Zen 5c-first soft park (five default-off scheduler knobs: amd_hfi ranking, soft wakeup preference, workload-class steering, SMT packing, NOHZ idle balancer) | linux-omarchy, both channels, ours-only | RC linux-omarchy 7.2.8-9.112; Quattro keeps its frozen build until it picks up the trunk | the battery A/B (#10, 2026-10-27, console only on the G16) found no win at idle: ranking efficiency or inverted, wake_preferred all and wake_pack each within 0.03 W of stock, all three together 0.14 W worse; RAPL package power is only 0.36-0.43 W at idle, so the cores have almost nothing left to save. The light-load half was not run; the CPU-setting A/B (#328) found nothing under light load either |
 | general-0003, the lock's password field lost the keyboard after a suspend (#295) | omarchy RC | RC 4.5.0rc1-1.110 (#306) | the Hyprland seat fix ([seat-leave](#hyprland-seat-leave)) sends `wl_keyboard.leave`, so Qt re-activates the lock window with stock `LockView.qml`; reverted on the fork by `b5af08c6` |
 | 0018, launcher icon index throttle | omarchy RC | RC 4.5.0rc1-1.109 (#299) | replaced by upstream's [#14992](#omarchy-general-0004-app-library); still on Quattro ([0018](#omarchy-0018-launcher-icon-index)) |
 | `asus-zephyrus-g16-control`, the G16 Control widget package | asus-rog-nkey-winlock | RC (0.1.0-103 replaces it) | the widget is the omarchy-asus plugin (#183); RC's `asus-rog-nkey-winlock` replaces the transitional package |
