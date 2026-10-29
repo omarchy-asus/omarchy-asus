@@ -30,6 +30,5 @@ Elsewhere:
 ## Waiting on the maintainer
 
 - The queued G16 test sessions, including the SD-card-reader kernel stack (PR #288).
-- Yes/no on installing `omarchy-asus-g16-testd` on the G16, and on carrying the general
-  Proton fix (`proton-experimental-asus`).
+- Yes/no on carrying the general Proton fix (`proton-experimental-asus`).
 - Delete the retired `omarchy-asus/omarchy-pkgs` repo.

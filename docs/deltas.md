@@ -94,7 +94,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [Win-lock helper](#pkg-asus-rog-nkey-winlock) | asus-rog-nkey-winlock | package | both | ours-only |
 | [keyring and setup script](#pkg-omarchy-asus-keyring) | omarchy-asus-keyring, `bin/omarchy-asus-setup` | package | both | ours-only |
 | [G16 fix applier](#pkg-omarchy-asus-g16-apply) | omarchy-asus-g16-apply | package | both | ours-only |
-| [G16 test-session helper (held)](#pkg-omarchy-asus-g16-testd) | omarchy-asus-g16-testd | package | held | ours-only |
+| [G16 test-session helper](#pkg-omarchy-asus-g16-testd) | omarchy-asus-g16-testd | package | RC only | ours-only |
 | [Proton Experimental fullscreen fix (held)](#pkg-proton-experimental-asus) | proton-experimental-asus | package | held | not submitted |
 
 [Not carried](#not-carried) lists the candidates still in issues; [Dropped](#dropped) lists what
@@ -2056,11 +2056,10 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
 - **Drop when:** every fix it applies has shipped upstream.
 
 <a id="pkg-omarchy-asus-g16-testd"></a>
-### G16 test-session helper (omarchy-asus-g16-testd, held)
+### G16 test-session helper (omarchy-asus-g16-testd)
 
-- **Component:** `omarchy-asus-g16-testd` 0.1.0-107. **Held** (`recipes/omarchy-asus-g16-testd/HOLD`):
-  CI builds it, nothing publishes it, until the maintainer agrees to install it on the G16 and its
-  G16 test passes (#277; allowlist gaps in #284).
+- **Component:** `omarchy-asus-g16-testd` 0.1.0-107, RC only. Its G16 test passed (#277;
+  allowlist gaps in #284), so the hold is lifted and it is published.
 - **What:** one root helper per G16 hardware test session: one polkit approval, then fixed
   allowlisted operations (EC reads, RAPL energy counter reads, tracefs instances, A/B knobs,
   module swaps, boot drop-ins, freezing an app scope), each logged with a reason. `rapl-read`
