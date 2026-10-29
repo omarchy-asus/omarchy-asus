@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.112**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.113**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,11 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.112` (kernel release string becomes `7.2.8-9.112-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.113` (kernel release string becomes `7.2.8-9.113-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910; 9.112 dropped 9900 (#10).
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910; 9.112 dropped 9900 (#10); 9.113 added 0809 and 0570 (#288).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -39,18 +39,22 @@ Compared with upstream, only:
 8. New patch `0808-platform-x86-asus-wmi-restore-thermal-policy-after-hibernation.patch`
    after `0807-...` (asus-wmi writes its thermal policy and enabled fan curves
    back after hibernation; see "0808" below).
-9. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
-   `0808-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
-10. `9901-EXPERIMENTAL-...` after all upstream patches, first of the 99xx series (see "EXPERIMENTAL: 9901" below).
-11. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
+9. New patch `0809-platform-x86-amd-pmf-hwmon-apu-dgpu-socket-power.patch` after
+   `0808-...` (amd_pmf hwmon: APU, dGPU and socket power; see "0809" below).
+10. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
+   `0809-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
+11. New patch `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch` after `0569-...`
+    (the GL9767 SD reader runtime-suspends with the slot empty; see "0570" below).
+12. `9901-EXPERIMENTAL-...` after all upstream patches, first of the 99xx series (see "EXPERIMENTAL: 9901" below).
+13. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
     "EXPERIMENTAL: 9903" below).
-12. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
-13. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
-14. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
-15. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
-16. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
-17. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
-18. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
+14. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
+15. `9905-EXPERIMENTAL-...` after 9904 (see "EXPERIMENTAL: 9905" below).
+16. `9906-EXPERIMENTAL-...` after 9905 (see "EXPERIMENTAL: 9906" below).
+17. `9907-EXPERIMENTAL-...` after 9906 (see "EXPERIMENTAL: 9907" below).
+18. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
+19. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
+20. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -144,6 +148,78 @@ cycle that wakes at once.
 
 **Upstream.** Not submitted (target: linux-gpio). Drop it once an equivalent
 entry is merged.
+
+## 0570: GL9767 SD reader runtime PM with the slot empty (#226)
+
+**What.** `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch` gives the GL9767 entry in
+`drivers/mmc/host/sdhci-pci-gli.c` runtime PM: `allow_runtime_pm` with its own
+`runtime_suspend`/`runtime_resume`. It suspends only with the slot empty, the host
+powered off, card detect stable (`SDHCI_CD_STABLE`) and a PME able to wake it
+(`pci_dev_run_wake()`); otherwise it stays in D0 as before. Insert wakeup is armed
+while suspended. On resume it re-applies the vendor config-space settings; a wakeup
+that finds a card starts a rescan, a resume for a host claim does nothing more. Eight
+quick wakes in a row with no card stop runtime suspend until the next card change.
+
+**Why.** Without it sdhci-pci keeps its probe-time runtime-PM reference: the reader and
+its root port 00:02.2 sit in D0 for the whole boot (`runtime_suspended_time` 0 over
+8.5 h). A udev `power/control=auto` rule can't fix that.
+
+**History.** The first version (tested as a module swap on 9.104, 2026-10-24) suspended
+and saw a card inserted while suspended, but after removal it cycled through
+suspend/resume several times a second (74 % active, no mmc interrupts). Its resume
+queued a rescan whenever the card-present bit read set, it suspended before card
+detect had settled, and nothing bounded the cycle. The current version fixes all three.
+
+**Default behaviour and risk.** Only GL9767 readers change. With a card in the slot,
+or no PME from D3, nothing changes. The worst case is the reader staying in D0, as
+before.
+
+**Test.** The kit's `0570` check (slot empty, then an optional card cycle). Power: the
+idle A/B's `sd-off` phase is the upper bound.
+
+**Upstream.** Not submitted yet (target: linux-mmc), pending the G16 result.
+
+## 0809: amd_pmf exposes APU, dGPU and socket power through hwmon (#238)
+
+**What.** `0809-platform-x86-amd-pmf-hwmon-apu-dgpu-socket-power.patch` adds
+`drivers/platform/x86/amd/pmf/hwmon.c`: a read-only hwmon device `amd_pmf`
+with `power1_input` (APU), `power2_input` (dGPU) and `power3_input` (socket),
+each with a label, in microwatts. The values are PMFW's metrics table fields
+`apu_power`, `dgpu_power` and `socket_power` (on Rembrandt and Phoenix, whose
+v1 table names it `current_socketpower`; socket is never APU + dGPU, which
+would count the dGPU's draw as the SoC's). Registered only on the SoCs whose
+table layout the driver knows (Rembrandt, Phoenix, family 1Ah models 20h and
+60h; the G16's Krackan Point is 1Ah 60h).
+
+**Why.** NVML and nvidia-smi resume the RTX from D3cold to answer (#216,
+#171), so nothing could read the dGPU's power without spending it. PMFW
+computes it from platform telemetry, which never touches the dGPU's PCI
+device. The driver already reads the table, but only for Auto Mode, CnQF and
+Smart PC, none of which runs on the G16 (static slider only, "No Smart PC
+policy present").
+
+**Default behaviour.** Nothing is sent to PMFW until someone reads a value.
+A read asks PMFW for a fresh table at most once a second, into hwmon's own
+buffer (allocated before the hwmon device is registered, so it outlives every
+read), under the driver's metrics and update locks. The table address is set
+before every transfer, and a failure to set it, or of the transfer, is returned
+to the reader. The device is not registered when Smart PC, Auto Mode or CnQF
+poll the table (they set its address once and rely on it); on the G16 none of
+them runs. A failed registration only logs a warning. `amd_pmf.hwmon_support=0`
+turns it off. Risk: low (read-only, at most three PMFW mailbox commands per second, only
+while something reads it).
+
+**Open.** Whether the GA605KM's PMFW fills `dgpu_power` at all is what the G16
+test answers (#238): power2 should read about 0 with the RTX in D3cold, track
+NVML's `power.draw` with it awake, and reading it must never change the RTX's
+`runtime_status`.
+
+**Check.** `tests/channel/linux-omarchy-amd-pmf-hwmon.sh` checks the recipe wiring
+and, on the build host, applies 0800-0802 and 0809 to `amd/pmf` and compiles
+the module with `W=1` against the installed linux-omarchy headers.
+
+**Upstream.** Not submitted (target: platform-driver-x86). Draft it with
+`bin/issue template upstream-report` once the G16 shows the data is useful.
 
 ## 0807: asus-armoury power limits for GA605KM
 
@@ -329,9 +405,9 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0773, 0807, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
-2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568 and 0569 after the last `056x` patch,
-   0807 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0570, 0773, 0807, 0808, 0809, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
+2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568, 0569 and 0570 after the last `056x` patch,
+   0807, 0808, 0809 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
    9901, then 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909 and 9910, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)

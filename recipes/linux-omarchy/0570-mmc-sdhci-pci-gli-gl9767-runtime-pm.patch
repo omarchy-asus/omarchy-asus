@@ -1,0 +1,231 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 00:00:00 -0400
+Subject: [PATCH] mmc: sdhci-pci-gli: Runtime PM for GL9767 with the slot empty
+
+The GL9767 entry has no allow_runtime_pm, so sdhci-pci never drops the
+runtime-PM reference it takes at probe: the controller and its root
+port stay in D0 for as long as the machine is up, even though the slot
+is empty nearly all the time (ASUS ROG Zephyrus G16 GA605KM: 100 % of
+an 8.5 h boot in D0, runtime_suspended_time 0). gl9767_hw_setting()
+already enables the chip's card-detect power saving in D3
+(CARD_DET_PWR_SAVING_EN, CORE_PWR_D3_OFF); only the runtime-PM hookup
+is missing.
+
+Allow runtime PM for GL9767, conservatively:
+
+- suspend only with the slot empty and the host powered off, and only
+  when a PME can wake the device from runtime suspend
+  (pci_dev_run_wake()); otherwise refuse with -EBUSY and stay in D0 as
+  before, so a card in use never goes through D3;
+- suspend only once card detect is stable (SDHCI_CD_STABLE). Right
+  after a removal, and after the reset that every runtime resume does,
+  the debounce logic is still settling; the suspend is put off by one
+  autosuspend delay at a time (-EAGAIN), for at most 2 s;
+- arm card-insert wakeup before suspending (insert status enable and
+  SDHCI_WAKE_ON_INSERT, as sdhci does for system sleep);
+- on resume, re-apply the vendor config-space settings, which the PCI
+  core does not restore. A resume that comes from a claim of the host
+  (the mmc core's own rescan among them) does nothing more, since the
+  claimer checks the slot itself. A wakeup that finds a card, latched
+  or stably present, starts a rescan;
+- wakes within a second of suspending that find the slot empty are
+  counted, by the card-present bit and not the latched insert, so a
+  card-detect line that keeps latching inserts with no card is counted
+  too; after 8 in a row, runtime suspend stops until the next card
+  insert or removal, so the reader can never cycle through D3.
+
+A first version rescanned whenever the card-present bit read set on
+resume, did not wait for card detect to settle, and had no limit. On
+the G16 it suspended within 5 s, stayed suspended and saw a card
+inserted while suspended, but after the card was removed it cycled
+through suspend and resume several times a second (74 % active, no
+mmc interrupts) and never settled.
+
+Downstream carry for omarchy-asus (G16 GA605). Not yet submitted
+upstream (linux-mmc); hardware-tested status is in the omarchy-asus
+issue for the GL9767 reader.
+---
+ drivers/mmc/host/sdhci-pci-gli.c | 137 +++++++++++++++++++++++++++++++
+ 1 file changed, 145 insertions(+)
+
+diff --git a/drivers/mmc/host/sdhci-pci-gli.c b/drivers/mmc/host/sdhci-pci-gli.c
+--- a/drivers/mmc/host/sdhci-pci-gli.c
++++ b/drivers/mmc/host/sdhci-pci-gli.c
+@@ -10,6 +10,7 @@
+ #include <linux/bitfield.h>
+ #include <linux/bits.h>
+ #include <linux/pci.h>
++#include <linux/pm_runtime.h>
+ #include <linux/mmc/mmc.h>
+ #include <linux/delay.h>
+ #include <linux/of.h>
+@@ -1303,9 +1304,24 @@
+ 	sdhci_writel(host, value, SDHCI_GLI_9767_SD_HOST_OPERATION_CTL);
+ }
+ 
++/* Runtime PM state of the GL9767 slot */
++struct gl9767_host {
++	unsigned long suspended_at;	/* jiffies at the last runtime suspend */
++	unsigned int empty_wakes;	/* quick wakes in a row that found no card */
++	unsigned int settle_tries;	/* suspends put off for card detect to settle */
++	bool rpm_stopped;		/* too many empty wakes: stay in D0 */
++};
++
+ static void sdhci_gl9767_card_event(struct sdhci_host *host)
+ {
++	struct gl9767_host *gl = sdhci_pci_priv(sdhci_priv(host));
++
+ 	sdhci_gl9767_set_card_detect_debounce_time(host);
++
++	/* A real card change: runtime suspend may try again. */
++	gl->empty_wakes = 0;
++	gl->settle_tries = 0;
++	gl->rpm_stopped = false;
+ }
+ 
+ static void gli_set_9767(struct sdhci_host *host)
+@@ -1785,6 +1801,129 @@
+ 	.post_disable   = sdhci_gl9763e_cqe_post_disable,
+ };
+ 
++#ifdef CONFIG_PM
++/*
++ * Runtime PM for the GL9767 SD reader, with the slot empty only: the host
++ * suspends with card-insert wakeup armed (as sdhci does for system sleep), and
++ * a card inserted meanwhile wakes it through PME and is then scanned. Without
++ * a PME that can wake it from runtime suspend, or with a card in the slot, it
++ * stays in D0 as before.
++ *
++ * Card detect has to be stable before the host suspends: right after a card
++ * is removed, or after the reset in every runtime resume, the debounce logic
++ * is still settling, and a host suspended then is woken straight back up.
++ * Should wakes that find no card still come back to back, runtime suspend
++ * stops until the next card change, so the reader can't cycle through D3.
++ */
++#define GL9767_SETTLE_TRIES	40	/* 2 s at the 50 ms autosuspend delay */
++#define GL9767_EMPTY_WAKES	8
++
++static int gl9767_runtime_suspend(struct sdhci_pci_chip *chip)
++{
++	struct sdhci_pci_slot *slot = chip->slots[0];
++	struct gl9767_host *gl = sdhci_pci_priv(slot);
++	struct sdhci_host *host = slot->host;
++	u32 present;
++	u8 wake;
++
++	if (gl->rpm_stopped || !pci_dev_run_wake(chip->pdev))
++		return -EBUSY;
++
++	if (host->mmc->ios.power_mode != MMC_POWER_OFF)
++		return -EBUSY;
++
++	present = sdhci_readl(host, SDHCI_PRESENT_STATE);
++	if (present & SDHCI_CARD_PRESENT)
++		return -EBUSY;
++
++	if (!(present & SDHCI_CD_STABLE)) {
++		dev_dbg(&chip->pdev->dev, "card detect not stable (%#010x), suspend put off\n",
++			present);
++		if (++gl->settle_tries > GL9767_SETTLE_TRIES)
++			return -EBUSY;
++		/* Try again after another autosuspend delay. */
++		pm_runtime_mark_last_busy(&chip->pdev->dev);
++		return -EAGAIN;
++	}
++	gl->settle_tries = 0;
++
++	sdhci_runtime_suspend_host(host);
++
++	/* Latch an insert in the status register and signal it as a wakeup. */
++	sdhci_writel(host, host->ier | SDHCI_INT_CARD_INSERT, SDHCI_INT_ENABLE);
++	wake = sdhci_readb(host, SDHCI_WAKE_UP_CONTROL);
++	wake |= SDHCI_WAKE_ON_INSERT;
++	sdhci_writeb(host, wake, SDHCI_WAKE_UP_CONTROL);
++
++	gl->suspended_at = jiffies;
++
++	return 0;
++}
++
++static int gl9767_runtime_resume(struct sdhci_pci_chip *chip)
++{
++	struct sdhci_pci_slot *slot = chip->slots[0];
++	struct gl9767_host *gl = sdhci_pci_priv(slot);
++	struct sdhci_host *host = slot->host;
++	u32 present, status;
++	bool card, rescan;
++	u8 wake;
++
++	/* The vendor settings live in config space beyond what PCI restores. */
++	gl9767_hw_setting(slot);
++
++	wake = sdhci_readb(host, SDHCI_WAKE_UP_CONTROL);
++	wake &= ~SDHCI_WAKE_ON_INSERT;
++	sdhci_writeb(host, wake, SDHCI_WAKE_UP_CONTROL);
++
++	/* Before the reset in sdhci_runtime_resume_host() clears the status. */
++	status = sdhci_readl(host, SDHCI_INT_STATUS);
++	present = sdhci_readl(host, SDHCI_PRESENT_STATE);
++	card = present & SDHCI_CARD_PRESENT;
++	rescan = (status & SDHCI_INT_CARD_INSERT) ||
++		 (present & (SDHCI_CD_STABLE | SDHCI_CARD_PRESENT)) ==
++		 (SDHCI_CD_STABLE | SDHCI_CARD_PRESENT);
++
++	gl9767_vendor_init(host);
++	sdhci_runtime_resume_host(host, 0);
++
++	dev_dbg(&chip->pdev->dev, "runtime resume: present %#010x status %#010x claimed %d\n",
++		present, status, READ_ONCE(host->mmc->claimed));
++
++	/*
++	 * A resume for a claim of the host (the mmc core's rescan among them)
++	 * needs nothing more: whoever claimed it looks at the slot itself.
++	 * Queueing a rescan from here would resume the host again, and again.
++	 */
++	if (READ_ONCE(host->mmc->claimed))
++		return 0;
++
++	/* It only suspends with the slot empty: a card now was inserted meanwhile. */
++	if (rescan)
++		mmc_detect_change(host->mmc, msecs_to_jiffies(200));
++
++	/*
++	 * Whether the wake was empty follows the slot itself, not the latched
++	 * insert: a card-detect line that keeps latching inserts with no card
++	 * must still reach the limit.
++	 */
++	if (card) {
++		gl->empty_wakes = 0;
++	} else if (time_before(jiffies, gl->suspended_at + HZ)) {
++		if (++gl->empty_wakes >= GL9767_EMPTY_WAKES) {
++			gl->rpm_stopped = true;
++			dev_info(&chip->pdev->dev,
++				 "woken %u times in a row with no card, staying in D0 until a card is inserted or removed\n",
++				 gl->empty_wakes);
++		}
++	} else {
++		gl->empty_wakes = 0;
++	}
++
++	return 0;
++}
++#endif
++
+ static int gl9763e_add_host(struct sdhci_pci_slot *slot)
+ {
+ 	struct device *dev = &slot->chip->pdev->dev;
+@@ -2127,7 +2266,13 @@
+ 	.add_host	= sdhci_pci_uhs2_add_host,
+ 	.remove_host	= sdhci_pci_uhs2_remove_host,
+ 	.ops		= &sdhci_gl9767_ops,
++	.priv_size	= sizeof(struct gl9767_host),
+ #ifdef CONFIG_PM_SLEEP
+ 	.resume		= sdhci_pci_gli_resume,
+ #endif
++#ifdef CONFIG_PM
++	.runtime_suspend = gl9767_runtime_suspend,
++	.runtime_resume	 = gl9767_runtime_resume,
++	.allow_runtime_pm = true,
++#endif
+ };

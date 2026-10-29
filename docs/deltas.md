@@ -41,11 +41,13 @@ An upstream state that changes is updated here, with the date it was checked.
 |---|---|---|---|---|
 | [hid-asus Win-lock pass-through](#kernel-0568-winlock) | linux-omarchy | 0568 | both | open |
 | [i2c-designware RX FIFO threshold](#kernel-0569-i2c-designware) | linux-omarchy | 0569 | both | merged-unreleased |
+| [GL9767 SD reader runtime PM with the slot empty](#kernel-0570-gl9767-rpm) | linux-omarchy | 0570 | RC only | not submitted |
 | [amdgpu display power backports](#kernel-0481-amdgpu-display-power) | linux-omarchy | 0481 | both | merged-unreleased |
 | [amdgpu replays DMUB HPDs skipped in resume](#kernel-0482-dmub-hpd-replay) | linux-omarchy | 0482 | RC only | not submitted |
 | [gpiolib-acpi ignores GPIO 16 wakeups on the GA605KM](#kernel-0773-gpio16-wake) | linux-omarchy | 0773 | both | not submitted |
 | [asus-armoury GA605KM power limits](#kernel-0807-armoury-power-limits) | linux-omarchy | 0807 | both | not submitted |
 | [asus-wmi restores the thermal policy after hibernation](#kernel-0808-thermal-policy-restore) | linux-omarchy | 0808 | RC only | not submitted |
+| [amd_pmf exposes APU, dGPU and socket power through hwmon](#kernel-0809-amd-pmf-hwmon) | linux-omarchy | 0809 | RC only | not submitted |
 | [panel_power_savings applies when written](#kernel-0810-panel-power-savings) | linux-omarchy | 0810 | RC only | not submitted |
 | [EXPERIMENTAL DCN 3.5 S0i2-ready display idle](#kernel-9901-dcn35-s0i2) | linux-omarchy | 9901 | RC only | not submitted |
 | [EXPERIMENTAL display idle with every CRTC off](#kernel-9902-dm-idle-all-off) | linux-omarchy | 9902 | RC only | not submitted |
@@ -158,6 +160,46 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Drop when:** linux-omarchy is based on a kernel that contains `e7d5d642c089` (7.4 or later),
   or upstream linux-omarchy carries it (0569 then fails to apply at fuzz 0, which shows it).
 - **Notes:** formerly tracked in issue #35.
+
+<a id="kernel-0570-gl9767-rpm"></a>
+### GL9767 SD reader runtime PM with the slot empty (0570)
+
+- **Component:** `linux-omarchy`, `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch`. RC only
+  (7.2.8-9.113; test builds 9.105).
+- **Fixes:** sdhci-pci keeps its probe-time runtime-PM reference on the GL9767, so the G16's SD
+  reader and its root port sit in D0 for the whole boot (`runtime_suspended_time` 0 over 8.5 h); a
+  udev `power/control=auto` rule can't change that. The patch gives the GL9767 runtime PM: it
+  suspends only with the slot empty, the host powered off, card detect stable and a PME able to
+  wake it, and arms insert wakeup while suspended. A resume re-applies the vendor config-space
+  settings and rescans only when a wakeup finds a card; eight quick wakes in a row with no card
+  stop runtime suspend until the next card change. Only GL9767 readers change, and the worst case
+  is the reader staying in D0, as before.
+- **Test:** the kit's `0570` check (`g16-test/test`): with the slot empty the reader reaches
+  `suspended`; with a card cycle, an insert while suspended shows the card, and after removal it suspends
+  again and stays suspended (no suspend/resume loop). Without the card cycle the removal is
+  reported untested (WARN). `tests/channel/linux-omarchy-gl9767-rpm.sh` checks the recipe wiring
+  and compiles the driver. Power: the idle A/B's `sd-off` phase is the upper bound.
+- **Upstream: not submitted** (target linux-mmc). Mainline (checked 2026-10-29) gives runtime PM
+  to the GL9763E only; the GL9767 has none.
+- **Drop when:** mainline gives the GL9767 runtime PM. Issue: #226.
+
+#### Upstream report draft
+
+linux-mmc (sdhci-pci-gli), as a patch with 0570's commit message; the cover text below. Not
+sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
+
+> **Subject:** mmc: sdhci-pci-gli: runtime PM for the GL9767 with the slot empty
+>
+> sdhci-pci holds a runtime-PM reference unless the fixes set `allow_runtime_pm`, which the
+> GL9767 entry doesn't, so the reader and its PCIe root port stay in D0 for the whole boot
+> whether or not a card is present. On an ASUS ROG Zephyrus G16 GA605KM that keeps the root port
+> out of D3 at idle.
+>
+> The patch sets `allow_runtime_pm` with GL9767 `runtime_suspend`/`runtime_resume`. It suspends
+> only with the slot empty, the host powered off, card detect stable and `pci_dev_run_wake()`
+> true, and arms card-insert wakeup. Resume re-applies the vendor config-space settings and
+> rescans only when the wakeup found a card. A run of wakes with no card turns runtime suspend
+> off until the next card change, so a noisy card-detect line can't make it cycle.
 
 <a id="kernel-0481-amdgpu-display-power"></a>
 ### amdgpu display power backports (0481)
@@ -379,6 +421,48 @@ assistants ask for.
 > hibernates in a row. The cost is one firmware `_QD4` call per hibernation resume, which wakes the
 > NVIDIA dGPU for about 20 s.
 > Mainline 7.3 has no such restore.
+
+<a id="kernel-0809-amd-pmf-hwmon"></a>
+### amd_pmf exposes APU, dGPU and socket power through hwmon (0809)
+
+- **Component:** `linux-omarchy`, `0809-platform-x86-amd-pmf-hwmon-apu-dgpu-socket-power.patch`.
+  RC only (7.2.8-9.113; test builds 9.104).
+- **Fixes:** nothing could read the RTX's power without waking it: NVML and nvidia-smi resume it
+  from D3cold to answer (#216, #171). The patch adds a read-only hwmon device `amd_pmf` with
+  `power1_input` (APU), `power2_input` (dGPU) and `power3_input` (socket), in microwatts, from
+  PMFW's metrics table (on Rembrandt and Phoenix the v1 table's `current_socketpower`; socket is
+  never APU + dGPU). Registered only on SoCs whose table layout the driver knows (the G16's Krackan
+  Point is family 1Ah model 60h), and not when Smart PC, Auto Mode or CnQF poll the table. Nothing
+  is sent to PMFW until something reads it, then at most one table fetch a second.
+  `amd_pmf.hwmon_support=0` turns it off.
+- **Test:** the kit's `0809` check (`g16-test/test`): all three channels read as numbers; reading
+  leaves a runtime-suspended RTX asleep (`runtime_status` and `runtime_active_time` unchanged) and
+  dGPU reads under 0.5 W then; with the RTX awake (nvidia-smi) the dGPU figure is within 25% of
+  NVML's `power.draw`. Read only `power*_input` under `amd_pmf`, never `sensors`, which reads the
+  RTX's own hwmon and wakes it. `tests/channel/linux-omarchy-amd-pmf-hwmon.sh` checks the wiring
+  and compiles the module with `W=1`.
+- **Upstream: not submitted** (target platform-driver-x86). Mainline (checked 2026-10-29) has no
+  hwmon in amd/pmf; its `metrics.c` still sums APU + dGPU as socket power for Auto Mode and CnQF.
+- **Drop when:** upstream amd_pmf exposes these through hwmon. Issue: #238.
+
+#### Upstream report draft
+
+platform-driver-x86 (amd_pmf maintainers), as a patch with 0809's commit message; the cover text
+below. Not sent until the G16 shows the GA605KM's PMFW fills `dgpu_power`; a human decides. Add
+the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
+
+> **Subject:** platform/x86/amd/pmf: expose APU, dGPU and socket power through hwmon
+>
+> On hybrid laptops the only way to read the discrete GPU's power is its own driver, and NVIDIA's
+> resumes the GPU from D3cold to answer, so a power monitor costs the power it measures. PMFW
+> already reports APU, dGPU and socket power in the metrics table amd_pmf reads for Auto Mode and
+> CnQF.
+>
+> The patch registers a read-only hwmon device with those three as `power1..3_input`, labelled,
+> on SoCs whose table layout the driver knows, and only when no in-driver policy polls the table.
+> A read fetches a fresh table at most once a second. `hwmon_support=0` disables it.
+>
+> Tested on an ASUS ROG Zephyrus G16 GA605KM (Krackan Point, RTX 5070 Ti laptop).
 
 <a id="kernel-0810-panel-power-savings"></a>
 ### panel_power_savings applies when written (0810)
@@ -2137,8 +2221,6 @@ filed; a human decides.
 
 Work still in issues, not in any recipe on `main` today:
 
-- Kernel stack in PR #288 (RC 7.2.8-9.105, on 9.104): 0809 amd_pmf hwmon power (#238) and 0570
-  the GL9767 SD reader's runtime PM (#226). It merges after its G16 test.
 - G16 idle power candidates: #249 (SoC floor), #227 (Wi-Fi power save) and #228 (Num Lock LED),
   #230 (display IPS); #225, #232 and #234 showed no effect beyond noise in two runs. #227 and #228
   are unconfirmed: their earlier savings came from single runs that partly leaned on the amdgpu
