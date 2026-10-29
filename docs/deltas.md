@@ -1943,9 +1943,11 @@ Work still in issues, not in any recipe on `main` today:
 
 - Kernel stack in PR #288 (RC 7.2.8-9.105, on 9.104): 0809 amd_pmf hwmon power (#238) and 0570
   the GL9767 SD reader's runtime PM (#226). It merges after its G16 test.
-- G16 idle power candidates: #249 (SoC floor), #227 (Wi-Fi power save, about 0.27 W in the screen
-  test), #228 (Num Lock LED, about 0.20 W), #230 (display IPS); #225, #232 and #234 showed no effect
-  beyond noise in two runs.
+- G16 idle power candidates: #249 (SoC floor), #227 (Wi-Fi power save) and #228 (Num Lock LED),
+  #230 (display IPS); #225, #232 and #234 showed no effect beyond noise in two runs. #227 and #228
+  are unconfirmed: their earlier savings came from single runs that partly leaned on the amdgpu
+  gpu_metrics reading, which over-reads by about 2 W at idle, so their saving in battery watts is
+  still to be measured (Wi-Fi power save is in the next G16 batch).
 - G16 idle: Chrome profile writes keep the SSD busy (#326).
 - G16 Control: hold charging while a weak charger can't carry the load (#165, in the omarchy-asus
   plugin).
