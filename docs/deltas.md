@@ -418,7 +418,7 @@ kernel's rules on AI assistants ask for.
 ### EXPERIMENTAL DCN 3.5 S0i2-ready display idle (9901)
 
 - **Component:** `linux-omarchy`,
-  `9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch`, applied last. RC only
+  `9901-EXPERIMENTAL-drm-amd-display-dcn35-s0i2-rdy-default-off.patch`, first of the 99xx series. RC only
   (since 9.106).
 - **What:** a new `amdgpu.dcn35_s0i2` parameter (bool, writable at runtime, default 0). When it is 1,
   the DCN 3.5 clock manager sends `SetDisplayIdleOptimizations` with `df_request_disabled`,

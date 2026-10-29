@@ -41,7 +41,7 @@ Compared with upstream, only:
    back after hibernation; see "0808" below).
 9. New patch `0810-drm-amd-display-panel-power-savings-apply-now.patch` after
    `0808-...` (a `panel_power_savings` write takes effect at once; see "0810" below).
-10. `9901-EXPERIMENTAL-...` last, after all upstream patches (see "EXPERIMENTAL: 9901" below).
+10. `9901-EXPERIMENTAL-...` after all upstream patches, first of the 99xx series (see "EXPERIMENTAL: 9901" below).
 11. `9902-EXPERIMENTAL-...` and `9903-EXPERIMENTAL-...` after 9901 (see "EXPERIMENTAL: 9902" and
     "EXPERIMENTAL: 9903" below).
 12. `9904-EXPERIMENTAL-...` after 9903 (see "EXPERIMENTAL: 9904" below).
