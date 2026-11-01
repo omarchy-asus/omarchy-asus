@@ -1,0 +1,5 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -4 +4 @@
+-pkgdesc='Flexible toolkit for making desktop shells with QtQuick'
++pkgdesc='Flexible toolkit for making desktop shells with QtQuick (omarchy-asus build)'

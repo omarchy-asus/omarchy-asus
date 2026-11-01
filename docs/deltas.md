@@ -25,7 +25,7 @@ means only `rc-x86_64` does. Versions below are what each release serves, as of 
 
 **What the daily check watches.** `bin/check-upstream` reads `recipes/*/UPSTREAM_PRS` (one
 `owner/repo#N` per line) and reports each pull request's state; a merged one needs action. Today
-only `recipes/nvidia-open-dkms/UPSTREAM_PRS` exists, so the upstream states of every other entry
+only `recipes/nvidia-open-dkms/UPSTREAM_PRS` and `recipes/quickshell/UPSTREAM_PRS` exist, so the upstream states of every other entry
 are kept by hand, here and in the recipe's `NOTES.md`. `recipes/hyprland/DELTA`'s
 `fixed-upstream` line flags the first Hyprland release with a given commit. To have a GitHub pull
 request watched, add it to its recipe's `UPSTREAM_PRS`.
@@ -86,7 +86,8 @@ An upstream state that changes is updated here, with the date it was checked.
 | [app library rescans only on real changes](#omarchy-general-0004-app-library) | omarchy | general-0004 | RC only | open |
 | [omarchy pins omarchy-settings to its release](#omarchy-pkgbuild-pin-settings) | omarchy | `pkgbuild-pin-settings-release.diff` | both | ours-only |
 | [omarchy-settings ships the charger-swap monitor unit](#omarchy-pkgbuild-source-monitor-unit) | omarchy-settings | `pkgbuild-source-monitor-unit.diff` | both | open |
-| [the "(omarchy-asus build)" label](#pkgbuild-pkgdesc-label) | omarchy, omarchy-settings, hyprland, hyprpm | `pkgbuild-pkgdesc-label.diff` | both | ours-only |
+| [the "(omarchy-asus build)" label](#pkgbuild-pkgdesc-label) | omarchy, omarchy-settings, hyprland, hyprpm, quickshell | `pkgbuild-pkgdesc-label.diff` | both | ours-only |
+| [the clock survives the DST fall-back hour](#quickshell-clock-dst-fall-back) | quickshell | `clock-dst-fall-back.patch` | RC only | open |
 | [touchpad wake (ASUF1209)](#g16-touchpad-wake) | omarchy-asus-g16 | udev rule | both | not submitted |
 | [HibernateMode=shutdown](#g16-hibernate-mode) | omarchy-asus-g16 | sleep.conf.d drop-in | both | not submitted |
 | [nvidia-powerd start limit](#g16-nvidia-powerd-start-limit) | omarchy-asus-g16 | unit drop-in | both | not submitted |
@@ -1850,14 +1851,56 @@ omacom/omarchy#13782 offering it as an alternative. Not opened; a human decides.
 <a id="pkgbuild-pkgdesc-label"></a>
 ### The "(omarchy-asus build)" label
 
-- **Component:** `pkgbuild-pkgdesc-label.diff` in `recipes/omarchy`, `recipes/omarchy-settings`
-  and `recipes/hyprland` (a `pkgbuild-patch` line in each `DELTA`). Both channels.
+- **Component:** `pkgbuild-pkgdesc-label.diff` in `recipes/omarchy`, `recipes/omarchy-settings`,
+  `recipes/hyprland` and `recipes/quickshell` (a `pkgbuild-patch` line in each `DELTA`). Both
+  channels (quickshell: RC only).
 - **What:** appends `(omarchy-asus build)` to `pkgdesc` (in hyprland, for both `hyprland` and
   `hyprpm`), so `pacman -Qi` shows at once that a package is our patched build and not stock's.
-- **Test:** `pacman -Qi omarchy omarchy-settings hyprland hyprpm | grep Description`: every line
+- **Test:** `pacman -Qi omarchy omarchy-settings hyprland hyprpm quickshell | grep Description`: every line
   ends with `(omarchy-asus build)`.
 - **Upstream: ours-only.**
 - **Drop when:** each recipe is dropped (the label goes with it).
+
+## Quickshell: quickshell
+
+0.3.2.r7.g2b4501a: RC 1.101 (Omarchy's PKGBUILD, `pkgbuilds/quickshell` in omacom/omarchy-pkgs,
+plus one patch; `recipes/quickshell/NOTES.md`). Once the patch is gone, `bin/unpublish
+quickshell` and delete the recipe.
+
+<a id="quickshell-clock-dst-fall-back"></a>
+### The clock survives the DST fall-back hour
+
+- **Component:** `quickshell`, `clock-dst-fall-back.patch` (`src/core/clock.cpp`,
+  `SystemClock::setTime` and `SystemClock::schedule`, plus upstream's QTest
+  `src/core/test/clock.cpp`, which the package doesn't build). RC only (0.3.2.r7.g2b4501a-1.101).
+- **Fixes:** when local time steps back an hour (2026-11-01 02:00 EDT -> 01:00 EST,
+  2026-10-25 03:00 CEST -> 02:00 CET), `SystemClock` rounds the current time with
+  `QDateTime::setTime()`, which resolves the repeated hour to its first occurrence. The clock
+  then shows the summer-time hour, and the next tick lands an hour in the past: Qt clamps the
+  negative delay to 1 ms, the tick reschedules itself, and for the whole hour the shell logs
+  `QTimer::start: negative intervals aren't allowed` about a thousand times a second, burning a
+  core and writing 1-2 GB to its log under `$XDG_RUNTIME_DIR`, which fills that tmpfs and
+  breaks app launches through uwsm for days after (omacom/omarchy#16677). Omarchy's bar and
+  clock panel (`shell/plugins/panels/clock`) use minute-precision `SystemClock`s, so every
+  Omarchy machine in a zone with DST hits it once a year. The patch rounds with elapsed-time
+  arithmetic, which keeps the current occurrence, and falls back to `setTime()` only where that
+  would cross a partial-hour transition. Upstream's commit, taken as is, less its
+  `changelog/next.md` line (that file differs at 2b4501a).
+- **Test:** `QS=<qs> bash tests/channel/quickshell-dst-fall-back.sh` runs `qs` headless with only
+  its wall clock moved into the New York and Berlin repeated hours and across the New York fold:
+  no negative-interval warning, about a tick a second, the winter-time offset. With the stock
+  build, `QS=/usr/bin/qs QS_EXPECT=storm` shows the storm (2026-11-01: 7450, 6308 and 7901
+  warnings in 4-5 s, the clock at GMT-0400 and GMT+0200 in the second hour). Once our build is
+  installed the test finds it without `QS`. Upstream's QTest (`-D BUILD_TESTING=ON`, `ctest -R
+  clock`) passes its 39 checks.
+- **Upstream: open.** quickshell-mirror/quickshell#1385 "core/clock: preserve DST occurrence when
+  rounding ticks" (another contributor's draft, commit `7894689c`; checked 2026-11-01), for
+  quickshell-mirror/quickshell#329 and #1383. Omarchy carries nothing for it yet
+  (omacom/omarchy#16677 is open). The log that never rotates, which makes the storm fill the
+  tmpfs, is quickshell-mirror/quickshell#1161; nothing here changes that.
+- **Drop when:** a quickshell Omarchy builds from contains #1385 (or another fix for #329), or
+  Omarchy's own quickshell package carries it (then `bin/rebase-recipe` reports the patch no
+  longer applies).
 
 ## G16 system files: omarchy-asus-g16
 

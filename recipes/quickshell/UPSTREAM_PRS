@@ -1,0 +1,2 @@
+# PRs whose changes our patches carry; bin/check-upstream reports their state.
+quickshell-mirror/quickshell#1385  clock-dst-fall-back.patch: SystemClock storm and wrong hour in the DST fall-back hour
