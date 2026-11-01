@@ -11,6 +11,8 @@ channel yet; the daily rebase onto upstream picks up the next one it serves. Oma
 `clock-dst-fall-back.patch` added to `source`/`sha256sums` and applied at the end of `prepare()`
 (after Omarchy's patch). Not on the release path yet (`build/release-path.conf`): it builds in the
 build host's chroot like any new recipe until `bin/compare-build-paths` has passed for it.
+`NO_DISTCC` keeps its compiles off distcc: its precompiled headers (the `qs-pchset-*` targets)
+fail under distcc with conflicting redefinitions in every file that includes one.
 
 **Patch:** `clock-dst-fall-back.patch` (`src/core/clock.cpp`, `SystemClock::setTime` and
 `SystemClock::schedule`; plus upstream's QTest `src/core/test/clock.cpp`/`clock.hpp`, built only

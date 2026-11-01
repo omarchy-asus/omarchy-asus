@@ -3,7 +3,7 @@
 # prepare() cds into the source, so the patch line needs no directory.
 upstream omarchy-pkgs pkgbuilds/quickshell
 mode overlay
-keep NOTES.md UPSTREAM_PRS
+keep NOTES.md UPSTREAM_PRS NO_DISTCC
 pkgbuild-patch pkgbuild-pkgdesc-label.diff
 # quickshell-mirror/quickshell#1385 (draft, checked 2026-11-01), its commit as is, less its
 # changelog/next.md line; drop it once a quickshell release we build from has the fix

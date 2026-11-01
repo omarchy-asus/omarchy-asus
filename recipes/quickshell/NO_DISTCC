@@ -1,0 +1,3 @@
+Quickshell builds with precompiled headers (its qs-pchset-* targets), which distcc can't share with the helper: under distcc every file that includes one fails with conflicting redefinitions.
+bin/build-pkg leaves the distcc key out of this recipe's builds, so every compile runs on
+the build host (ccache still applies).
