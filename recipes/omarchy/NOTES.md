@@ -68,7 +68,7 @@ SHAs are the commits of omacom/omarchy#12428, reachable there.
 | 0026 | the RTX stays asleep while apps start on a hybrid whose iGPU drives the display, and games still get it: every command Hyprland runs exports `VK_LOADER_DRIVERS_DISABLE=*nvidia*` and Mesa's EGL vendor alone (`__EGL_VENDOR_LIBRARY_FILENAMES`) for the desktop (the shell, launcher, key bindings and the apps they start), Turing and newer only; Hyprland itself never gets them (`desktop-gpu-pins.lua`), so a monitor on the RTX's ports still works (#372). Games get both back however they start: autostart takes them out of the systemd user environment (login autostart), an interactive bash drops them (anything run from a terminal), the launcher starts game entries without them (Game category, `PrefersNonDefaultGPU`, `X-KDE-RunOnDiscreteGpu`, or a known game runner in `Exec`; nested desktop IDs included), and the new `omarchy-launch-all-gpus` runs anything else with every GPU; `OMARCHY_DESKTOP_GPU_PINS` names them; migration `1792823623` asks for a reboot while the session predates them, `1793053364` while Hyprland itself still carries them. Fork commits c02f91e3 + 8769c24c + 02c9d61f + 6ef8e273 + e71057d9 + f1a38066, squashed | #218, #372 | not submitted |
 
 **General fixes (`general-` series):** fixes to Omarchy's own software that don't help the
-hardware, carried with the maintainer's approval and kept apart from the ASUS patches above.
+hardware, carried without a separate approval and kept apart from the ASUS patches above.
 They apply after them, are numbered on their own (`general-0001`, ...), and come from the same
 fork branch, `asus/v4-5-0-rc2`.
 

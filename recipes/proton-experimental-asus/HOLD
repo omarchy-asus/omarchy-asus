@@ -1,2 +1,2 @@
-general (non-ASUS) Proton fix: waits for the maintainer's approval to carry it and for its G16 test (#266)
-# Remove in its own PR once both are in; until then CI builds it, nothing publishes it.
+General (non-ASUS) Proton fix: held until its G16 test (#266); lifting the hold is the maintainer's call
+# Remove in its own PR once the test passes; until then CI builds it, nothing publishes it.
