@@ -177,7 +177,7 @@ A recipe with a `NO_DISTCC` file (its first line is the reason) never gets the
 key mounted, so all of its compiles run on the build host; ccache still
 applies. Use it for builds that distcc can't help or that break under it, such
 as precompiled headers: distcc compiles each file on its own and can't use a
-`.gch` made on the build host. hyprland has one. List the file in the recipe's
+`.gch` made on the build host. hyprland and quickshell have one. List the file in the recipe's
 `DELTA` `keep` line so `bin/rebase-recipe` carries it over.
 
 ## Persistent ccache (optional)
