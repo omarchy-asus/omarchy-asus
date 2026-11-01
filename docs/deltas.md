@@ -903,7 +903,7 @@ fixes that live in user config or `/etc` on `omarchy update`, and leave fixes ma
 The patch table, the migrations and the rebase steps are in `recipes/omarchy/NOTES.md`; each fix's
 topic branch is on [omarchy-asus/omarchy](https://github.com/omarchy-asus/omarchy). ASUS patches
 are numbered `0001...`; fixes to Omarchy's own software that don't help the hardware are the
-`general-` series, carried with the maintainer's approval.
+`general-` series, carried without a separate approval and kept apart from the ASUS series.
 
 <a id="omarchy-0001-asusd-hand-off"></a>
 ### asusd profile/EPP hand-off (0001)
@@ -2217,8 +2217,8 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
 
 - **Component:** `proton-experimental-asus` 11.0.20261014-101, patch
   `general-0001-winex11-Only-expect-a-ConfigureNotify-for-_NET_WM_FU.patch` (fork
-  `asus/experimental_11.0` on omarchy-asus/wine). **Held**: a general (non-ASUS) fix that waits for
-  the maintainer's approval to carry it and for its G16 test (#266).
+  `asus/experimental_11.0` on omarchy-asus/wine). **Held**: a general (non-ASUS) fix, held until its G16
+  test (#266); lifting the hold is the maintainer's call, as for every hold.
 - **Fixes:** in exclusive fullscreen on a monitor other than the game's chosen one, winex11 waits
   for a ConfigureNotify answering `_NET_WM_FULLSCREEN_MONITORS`, which Hyprland never sends, so
   pointer positions map through the wrong monitor (clicks about 80 px off on the G16). The fix waits

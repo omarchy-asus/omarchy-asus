@@ -34,7 +34,11 @@ start a timer, service or cron job that builds or publishes.
    chroot (`bin/build-pkg`).
 3. **Fix or check:** an agent fixes what didn't rebase or build, or checks what did.
 4. **Review, PR, CI, merge:** a second model reviews the change; the pull request goes into the
-   channel's branch and merges once CI passes.
+   channel's branch. The run goes through without pauses, and once CI passes Steward's arbiter
+   (a model that judges the merge) merges it, sends it back for a fix, or asks the maintainer
+   only for what is theirs to decide (a hold, signing, checksums or the publish scripts, a new
+   download host, shadowing a stock Omarchy file, AGENTS.md's rules or the channel mapping, a
+   new G16 behaviour default, rewriting fork history).
 5. **Publish:** `bin/publish` signs what was built and `bin/sync-release` puts it on the channel's
    release, through every safeguard below, and updates the release's train issue (below); the
    run ends when the release serves it.
