@@ -1,0 +1,17 @@
+# ASUS ROG Zephyrus G16 GA605KM: the FocalTech ASUF1209 touchpad (I2C
+# 2808:0219). Its HID-BPF fixup (0010-FocalTech__ASUF1209.bpf.o) publishes
+# each contact's signal strength, 0-255, as ABS_MT_TOUCH_MAJOR. Captured on
+# the G16: a fingertip reads at most about 62 (resting, moving or clicking)
+# and a deliberately flattened finger up to 73, while resting palm heels
+# climb past that within a few frames and often saturate at 255. Replayed
+# through hid-multitouch and libinput, every palm-made scroll in the capture
+# stopped at any threshold from 74 to 100 (130 let one back); 80 keeps
+# flattened fingers working and lets the least palm motion through. A touch
+# above the threshold is a palm until it lifts. Without the fixup the axis
+# is absent and this has no effect.
+[ASUS ROG Zephyrus G16 GA605KM ASUF1209 touchpad]
+MatchBus=i2c
+MatchVendor=0x2808
+MatchProduct=0x0219
+MatchUdevType=touchpad
+AttrPalmSizeThreshold=80

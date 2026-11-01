@@ -1,0 +1,8 @@
+# ASUS ROG Zephyrus G16 GA605KM: udev-hid-bpf attaches the touchpad's
+# per-contact size fixup to the FocalTech ASUF1209 (I2C 2808:0219). The
+# program's probe checks the report descriptor and declines any other.
+# The property name is our own, so it never collides with the numbered
+# HID_BPF_NNN entries udev-hid-bpf's hwdb sets for its bundled programs.
+hid-bpf:hid:b0018g*v00002808p00000219
+  HID_BPF_OMARCHY_ASUS_G16=0010-FocalTech__ASUF1209.bpf.o
+  .HID_BPF=1

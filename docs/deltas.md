@@ -94,6 +94,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [rcu_nocbs=all](#g16-rcu-nocbs) | omarchy-asus-g16 | limine-entry-tool drop-in | RC only | ours-only |
 | [Wi-Fi back after a wake (mt7925)](#g16-mt7925-auth-retries) | omarchy-asus-g16 | NetworkManager drop-in | RC only | not submitted |
 | [EXPERIMENTAL built-in keyboard autosuspend](#g16-keyboard-autosuspend) | omarchy-asus-g16 | udev rule | RC only | ours-only |
+| [EXPERIMENTAL resting palms aren't fingers (ASUF1209)](#g16-touchpad-palm-size) | omarchy-asus-g16 | HID-BPF fixup, hwdb, libinput quirk | RC only | not submitted |
 | [Win-lock helper](#pkg-asus-rog-nkey-winlock) | asus-rog-nkey-winlock | package | both | ours-only |
 | [keyring and setup script](#pkg-omarchy-asus-keyring) | omarchy-asus-keyring, `bin/omarchy-asus-setup` | package | both | ours-only |
 | [G16 fix applier](#pkg-omarchy-asus-g16-apply) | omarchy-asus-g16-apply | package | both | ours-only |
@@ -2108,6 +2109,56 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   key press (#249).
 - **Upstream: ours-only** (a power setting for one laptop's keyboard).
 - **Drop when:** the G16 test shows no gain, or the kernel autosuspends this keyboard by default.
+
+<a id="g16-touchpad-palm-size"></a>
+### EXPERIMENTAL resting palms aren't fingers (ASUF1209)
+
+- **Component:** `omarchy-asus-g16`: `0010-FocalTech__ASUF1209.bpf.c` (built into
+  `/usr/lib/firmware/hid/bpf/0010-FocalTech__ASUF1209.bpf.o`),
+  `/usr/lib/udev/hwdb.d/81-hid-bpf-omarchy-asus-g16.hwdb` and
+  `/usr/share/libinput/50-omarchy-asus-g16-touchpad.quirks`; the package now depends on
+  `udev-hid-bpf`. RC only (since 1.0.0-105). Ours: neither udev-hid-bpf, the kernel nor libinput
+  has anything for this pad.
+- **Fixes:** palm heels resting on the G16's touchpad (FocalTech ASUF1209, I2C 2808:0219) while
+  typing are read as fingers: two palms, or a palm and a finger, make a two-finger scroll that
+  Chrome and Electron apps take as back navigation, and a press with a palm resting can count two
+  fingers (#390). The pad reports no contact size or pressure, and its Confidence bit comes late
+  (up to 584 ms) or never for palms at the side edges. Its report 4 does carry, per contact, a
+  16-bit vendor value (page 0xFF01, usages 0x02-0x06) marked Constant: low byte signal strength,
+  high byte two 4-bit cell extents (settled from a raw capture: the high byte only takes nibble
+  pairs, 0x33, 0x43, 0x44, 0x54, ...). The HID-BPF program moves each strength byte into a new
+  per-finger Width field (report size unchanged), so hid-multitouch publishes
+  `ABS_MT_TOUCH_MAJOR`; the quirk sets `AttrPalmSizeThreshold=80`.
+- **Test:** `tests/channel/g16-touchpad-palm-size.sh` checks the descriptor rewrite and the
+  report repack against the pad's descriptor offline. A 53 s raw capture from the G16, replayed
+  through a uhid copy of the pad with the program attached by udev-hid-bpf 2.3.0 on a 7.2.8
+  kernel and libinput 1.32: stock gave three palm-made scrolls and a pinch; with the quirk none,
+  while the two deliberate two-finger scrolls (89 and 78 scroll events), the clicks and fingertip
+  pointer motion were unchanged. Fingertips read at most 62, a deliberately flattened finger 73;
+  thresholds 74-100 all removed the palm scrolls, 130 let one back. On the G16: rest both palms
+  and type for two minutes in Chrome, no back navigation and no scroll in `libinput
+  debug-events`; two-finger scrolls, pointer motion and clicks still work.
+- **Upstream: not submitted.** Checked 2026-11-01: no udev-hid-bpf program, kernel HID quirk or
+  libinput quirk for 2808:0219. The same pad (ASUF1209) is in the Zenbook S16 UM5606, where a
+  community uinput filter works around the same symptom.
+- **Drop when:** udev-hid-bpf (or the kernel's HID-BPF fixups) loads a fixup for this pad and
+  libinput carries a threshold for it; or the G16 test shows fingers taken for palms at every
+  workable threshold.
+- **Upstream report draft** (udev-hid-bpf merge request for `src/bpf/testing/`, then a libinput
+  merge request for `quirks/50-system-asus.quirks`; a human decides):
+
+  > **FocalTech ASUF1209 (I2C 2808:0219): expose per-contact size for palm detection**
+  >
+  > This touchpad (ASUS ROG Zephyrus G16 GA605KM, also the Zenbook S16 UM5606) gives each
+  > contact only Confidence, Tip, Contact ID, X and Y, so libinput can't detect palms by size or
+  > pressure, and the Confidence bit arrives late or never for palms at the side edges. Report 4
+  > ends with vendor page 0xFF01 usages 0x02-0x06, five 16-bit Constant fields, one per contact
+  > slot: bits 0-7 are the contact's signal strength (fingertips up to about 62, palms well
+  > above, often 255), bits 8-15 two 4-bit extents in sensor cells (which grow with motion, so
+  > they don't separate palms). The attached program gives each finger collection an 8-bit
+  > Width carrying the strength and keeps the report length, so hid-multitouch exports
+  > ABS_MT_TOUCH_MAJOR. With `AttrPalmSizeThreshold=80`, a replay of a capture of typing with
+  > resting palms loses every palm-made two-finger scroll and keeps the deliberate ones.
 
 ## Our packages
 
