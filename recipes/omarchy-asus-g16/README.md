@@ -281,8 +281,10 @@ driver reads it the same way: the low byte is the contact's signal strength, the
 width and height in sensor cells (4 bits each). The program exposes all three; libinput's palm
 check uses the strength. The cell counts grow with motion (a fast swipe finger reads 9 x 7, as
 large as a palm), but the strength doesn't: in a capture on the G16 a fingertip read at most 62
-(resting, moving or clicking) and a deliberately flattened finger 73, while palm heels climbed
-past that within a few frames and often saturated at 255.
+(resting, moving or clicking), while every palm that stayed down more than a few reports went
+past 70, most within a few frames and many up to 255. The lightest palms, resting just inside
+the right edge without the pad's palm flag, peaked at 71-77; a deliberately flattened finger
+reached 73, so it counts as a palm too.
 
 - `0010-FocalTech__ASUF1209.bpf.o`, built from `0010-FocalTech__ASUF1209.bpf.c` with
   udev-hid-bpf's headers, is a HID-BPF program. It gives each finger collection of the report
@@ -292,7 +294,7 @@ past that within a few frames and often saturated at 255.
   accepts only this pad's 764-byte descriptor.
 - `81-hid-bpf-omarchy-asus-g16.hwdb` tells udev-hid-bpf (a dependency) to load it for I2C
   2808:0219.
-- `50-omarchy-asus-g16-touchpad.quirks` sets, for the same pad, `AttrPalmPressureThreshold=80`
+- `50-omarchy-asus-g16-touchpad.quirks` sets, for the same pad, `AttrPalmPressureThreshold=70`
   (a touch above it is a palm until it lifts: no pointer motion, no scroll, no gesture, not
   counted for a clickfinger click) and `AttrPressureRange=none`, so libinput keeps telling
   touch-down by contact as before rather than by strength (a light fingertip reads about 20).
@@ -302,8 +304,13 @@ past that within a few frames and often saturated at 255.
 flattened finger, clicks and two deliberate two-finger scrolls) replayed through a uhid copy of
 the pad, with the program attached by udev-hid-bpf, hid-multitouch and libinput 1.32. Stock:
 three palm-made scrolls and a pinch. With the quirk: none, and the two real scrolls, the clicks
-and fingertip pointer motion are unchanged. Palm pressure thresholds 74 to 100 gave the same
-result; 130 let a palm scroll back. The cell counts as a palm size threshold instead: 6 dropped
+and fingertip pointer motion are unchanged. Palm pressure thresholds 70 to 100 gave the same
+result, 130 let a palm scroll back, and 70 let the least palm pointer motion through.
+`tests/channel/g16-touchpad-palm.sh` checks the threshold against every contact of that capture
+(`tests/channel/fixtures/asuf1209-touchpad-contacts.tsv`): all fingertips at or under it, all
+palms over it or flagged by the pad, except two unflagged palm brushes of 7 and 14 reports that
+peak at 68 and 59, inside the fingertips' range; libinput's disable-while-typing covers those
+while you type. The cell counts as a palm size threshold instead: 6 dropped
 a real two-finger scroll and 7 or more let palm scrolls through. Without the quirk, libinput's
 pressure defaults lost some light fingertip motion and still let a palm pinch through.
 
@@ -312,11 +319,12 @@ reads libinput's quirks when it starts, so the change takes effect at the next b
 
 **Check:** `sudo udev-hid-bpf list-loaded` lists `0010-FocalTech__ASUF1209.bpf.o` on the
 touchpad, and `sudo libinput quirks list` on the touchpad's event node (`sudo libinput
-list-devices` names it) prints `AttrPalmPressureThreshold=80`. `sudo libinput debug-events
+list-devices` names it) prints `AttrPalmPressureThreshold=70`. `sudo libinput debug-events
 --verbose` logs `palm detected (pressure)` for a resting palm.
 
 **Tuning:** a finger that stops moving the pointer is being taken for a palm; a palm that
-still scrolls is under the threshold. Override it in `/etc/libinput/local-overrides.quirks`
+still scrolls is under the threshold. Raising it to 74 gives the flattened finger back and
+lets the lightest resting palms through. Override it in `/etc/libinput/local-overrides.quirks`
 with the same match lines and another `AttrPalmPressureThreshold`, then log out and back in.
 
 **This one isn't a fork mirror:** the fork has no equivalent.

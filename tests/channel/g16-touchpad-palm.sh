@@ -12,7 +12,11 @@
 #      bits 12-15, and every other field keeps its value;
 #   4. package() installs the object where udev-hid-bpf looks, the hwdb names that object for
 #      I2C 2808:0219 only, and the libinput quirk matches the same device, turns pressure-based
-#      touch detection off and sets a palm pressure threshold.
+#      touch detection off and sets a palm pressure threshold;
+#   5. that threshold, against every contact of a capture from the G16
+#      (tests/channel/fixtures/asuf1209-touchpad-contacts.tsv): every fingertip stays at or under
+#      it, and every palm goes over it or carries the pad's palm flag in every report, except the
+#      palm brushes of a few reports that strength can't tell from a fingertip.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 R=$W/recipes/omarchy-asus-g16
@@ -208,5 +212,41 @@ hw=$(grep -v '^[[:space:]]*\(#\|$\)' "$HWDB" | paste -sd'|')
 q=$(grep -v '^[[:space:]]*\(#\|$\)' "$QUIRK" | grep -v '^\[' | paste -sd'|')
 [[ $q =~ ^MatchBus=i2c\|MatchVendor=0x2808\|MatchProduct=0x0219\|MatchUdevType=touchpad\|AttrPressureRange=none\|AttrPalmPressureThreshold=[0-9]+$ ]] &&
   ok "quirk: the same touchpad, no pressure touch detection, a palm pressure threshold" || bad "quirk: $q"
+
+# 5. the threshold against the capture's contacts
+T=$(sed -n 's/^AttrPalmPressureThreshold=\([0-9]*\)$/\1/p' "$QUIRK")
+python3 -I - "$W/tests/channel/fixtures/asuf1209-touchpad-contacts.tsv" "${T:-0}" <<'EOF' || fails=$((fails + 1))
+import sys
+
+rows = [l.rstrip("\n").split("\t") for l in open(sys.argv[1]) if not l.startswith("#")]
+t = int(sys.argv[2])
+fails = 0
+
+
+def check(cond, msg, detail):
+    global fails
+    if cond:
+        print("ok:", msg)
+    else:
+        print("FAIL:", msg, detail)
+        fails += 1
+
+
+def of(label):
+    """(start s, reports, flagged reports, peak strength) of each contact with that label."""
+    return [(float(r[0]), int(r[3]), int(r[4]), int(r[5])) for r in rows if r[6] == label]
+
+
+tips, palms, brief, flat = of("fingertip"), of("palm"), of("palm-brief"), of("flattened")
+check(t > 0, "threshold read from the quirk: %d" % t, "")
+over = [c for c in tips if c[3] > t]
+check(not over, "all %d fingertips stay at or under %d (peak %d)" % (len(tips), t, max(c[3] for c in tips)), over)
+missed = [c for c in palms if c[3] <= t and c[2] < c[1]]
+check(not missed, "all %d palms go over %d or are flagged throughout" % (len(palms), t), missed)
+long_brief = [c for c in brief if c[1] > 15 or c[2]]
+check(not long_brief, "the %d palm brushes left under it are unflagged and at most 15 reports" % len(brief), long_brief)
+print("note: flattened-finger contacts over %d (taken for palms): %d of %d" % (t, sum(c[3] > t for c in flat), len(flat)))
+sys.exit(1 if fails else 0)
+EOF
 
 ((fails == 0)) && echo "all g16-touchpad-palm checks passed" || { echo "$fails check(s) failed"; exit 1; }
