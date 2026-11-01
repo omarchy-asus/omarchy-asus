@@ -2117,7 +2117,10 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   `/usr/lib/firmware/hid/bpf/0010-FocalTech__ASUF1209.bpf.o`),
   `/usr/lib/udev/hwdb.d/81-hid-bpf-omarchy-asus-g16.hwdb` and
   `/usr/share/libinput/50-omarchy-asus-g16-touchpad.quirks`; the package now depends on
-  `udev-hid-bpf`. RC only (since 1.0.0-105). Ours: neither udev-hid-bpf, the kernel nor libinput
+  `udev-hid-bpf`, and its build downloads udev-hid-bpf's source tarball for the HID-BPF headers
+  from gitlab.freedesktop.org (udev-hid-bpf's official repository; host approved 2026-11-01;
+  pinned to 2.3.0-20260703 by sha256, the same tarball and sum as Arch's package). RC only (since
+  1.0.0-105). Ours: neither udev-hid-bpf, the kernel nor libinput
   has anything for this pad.
 - **Fixes:** palm heels resting on the G16's touchpad (FocalTech ASUF1209, I2C 2808:0219) while
   typing are read as fingers: two palms, or a palm and a finger, make a two-finger scroll that

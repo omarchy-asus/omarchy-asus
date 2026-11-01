@@ -21,7 +21,9 @@ url='https://github.com/omarchy-asus/omarchy-asus'
 license=('MIT' 'GPL-2.0-only')  # GPL-2.0-only: the HID-BPF program (the kernel's HID-BPF interface is GPL-only)
 options=('!debug' '!strip' '!distcc')
 makedepends=('clang' 'libbpf')
-# udev-hid-bpf's HID-BPF headers and vmlinux.h, the release Arch packages.
+# udev-hid-bpf's HID-BPF headers and vmlinux.h, the release Arch packages. Its download host,
+# gitlab.freedesktop.org (udev-hid-bpf's official repository), was approved for this recipe on
+# 2026-11-01; the tarball is pinned by version and sha256 (the same sum as Arch's PKGBUILD).
 _uhbver=2.3.0-20260703
 source=("https://gitlab.freedesktop.org/libevdev/udev-hid-bpf/-/archive/$_uhbver/udev-hid-bpf-$_uhbver.tar.gz"
         '0010-FocalTech__ASUF1209.bpf.c'
