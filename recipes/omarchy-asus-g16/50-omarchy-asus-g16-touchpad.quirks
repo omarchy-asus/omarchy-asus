@@ -1,0 +1,31 @@
+# ASUS ROG Zephyrus G16 GA605KM: the FocalTech ASUF1209 touchpad (I2C
+# 2808:0219). Its HID-BPF fixup (0010-FocalTech__ASUF1209.bpf.o) publishes
+# each contact's width and height in sensor cells (0-15) as
+# ABS_MT_TOUCH_MAJOR/MINOR and its signal strength (0-255) as ABS_MT_PRESSURE.
+#
+# Palms are told by strength. Captured on the G16, a fingertip reads at most
+# 62 (resting, moving or clicking). Every palm that stays down more than a few
+# reports goes past 70, most within a few frames and many up to 255; the
+# lightest, resting just inside the right edge without the pad's palm flag,
+# peak at 71-77. A deliberately flattened finger reaches 73, so at 70 it
+# counts as a palm: the price of catching those light palms. Replayed through
+# hid-multitouch and libinput, every palm-made scroll in the capture stopped
+# at any threshold from 70 to 100 (130 let one back), and 70 let the least
+# palm pointer motion through. A touch above it is a palm until it lifts.
+# tests/channel/g16-touchpad-palm.sh checks this threshold against every
+# contact of that capture (tests/channel/fixtures/asuf1209-touchpad-contacts.tsv).
+#
+# Size is no palm signal on this pad: the cell counts grow with motion (a
+# fast swipe finger reads 9 x 7), and in the same replay a size threshold of
+# 6 cells dropped a deliberate two-finger scroll while 7 and up let palm
+# scrolls through. So no AttrPalmSizeThreshold.
+#
+# The strength is no touch-down signal either (a light fingertip reads about
+# 20): pressure-based touch detection stays off, as it is without the fixup.
+[ASUS ROG Zephyrus G16 GA605KM ASUF1209 touchpad]
+MatchBus=i2c
+MatchVendor=0x2808
+MatchProduct=0x0219
+MatchUdevType=touchpad
+AttrPressureRange=none
+AttrPalmPressureThreshold=70

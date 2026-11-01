@@ -1,0 +1,79 @@
+# Every contact in a 53 s raw capture of the G16's touchpad (report 4, 9364 reports): typing
+# with palms resting, single fingertips, a deliberately flattened finger, clicks and two
+# two-finger scrolls. One line per contact, in touch-down order: seconds from the first report,
+# start position in mm from the left and top edges, reports it was down for, reports with
+# Confidence clear (the pad's palm flag), peak signal strength (bits 0-7 of its vendor
+# 0xFF01:0x02+slot value) and what it was: fingertip, flattened (the deliberately flattened
+# finger), palm, or palm-brief (an unflagged palm brush of a few reports whose strength stays
+# within the fingertips' range; left to libinput's disable-while-typing).
+# start_s	x_mm	y_mm	reports	flagged	peak	label
+0.000	29	71	643	0	40	fingertip
+4.524	62	28	1717	0	51	fingertip
+12.803	141	54	1401	1367	255	palm
+19.250	3	53	545	538	255	palm
+21.270	142	53	58	0	119	palm
+21.593	139	56	663	663	255	palm
+21.755	61	3	73	0	31	fingertip
+21.755	18	50	74	0	156	palm
+22.406	53	0	12	0	20	fingertip
+22.406	12	52	17	0	96	palm
+22.523	11	51	29	0	76	palm
+23.033	9	48	183	140	255	palm
+23.871	7	48	173	173	255	palm
+24.597	7	47	1	1	44	palm
+24.605	7	48	1	1	46	palm
+24.617	7	48	1	1	42	palm
+24.701	9	49	68	68	247	palm
+24.767	134	61	163	134	192	palm
+25.709	6	45	26	26	223	palm
+25.742	136	62	74	0	121	palm
+25.937	5	45	19	19	118	palm
+27.224	31	33	132	0	46	fingertip
+27.236	33	50	141	0	51	fingertip
+28.858	74	53	99	0	44	fingertip
+28.866	74	29	96	0	43	fingertip
+30.168	51	53	175	0	40	fingertip
+31.064	50	48	222	0	37	fingertip
+34.246	51	49	196	0	42	fingertip
+36.386	51	30	245	0	60	fingertip
+38.276	132	56	583	564	255	palm
+39.445	7	67	275	273	255	palm
+41.013	127	57	337	301	255	palm
+41.059	54	2	4	0	39	fingertip
+41.059	9	51	111	107	164	palm
+41.233	90	9	17	0	46	fingertip
+41.652	58	25	25	0	73	flattened
+41.652	11	70	48	0	150	palm
+41.972	23	75	53	50	255	palm
+42.466	20	63	32	32	226	palm
+42.532	67	20	15	0	47	flattened
+42.873	77	47	24	0	51	fingertip
+43.259	138	63	253	234	223	palm
+43.811	95	11	17	0	55	flattened
+44.346	29	80	85	85	167	palm
+44.375	71	36	171	0	62	fingertip
+44.885	145	55	201	104	175	palm
+45.470	55	44	96	0	39	fingertip
+45.781	134	57	163	0	77	palm
+46.541	134	54	33	0	71	palm
+46.591	12	42	39	0	85	palm
+46.707	137	55	73	0	85	palm
+47.566	140	50	35	0	87	palm
+47.914	140	48	12	0	73	palm
+48.308	130	59	46	0	155	palm
+48.599	132	58	105	0	125	palm
+48.632	6	46	311	280	255	palm
+49.088	132	60	7	0	68	palm-brief
+49.386	129	60	17	17	255	palm
+49.531	130	61	98	32	130	palm
+49.963	10	48	76	23	104	palm
+50.017	130	63	59	0	147	palm
+50.361	8	45	65	0	160	palm
+50.423	132	60	14	0	59	palm-brief
+50.531	132	60	73	0	162	palm
+50.916	8	48	222	218	255	palm
+50.979	130	60	222	81	226	palm
+52.022	5	46	43	24	116	palm
+52.212	131	60	120	0	83	palm
+52.237	6	48	213	131	255	palm
+52.864	132	64	65	65	241	palm

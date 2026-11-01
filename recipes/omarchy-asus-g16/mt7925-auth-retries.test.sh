@@ -20,6 +20,7 @@ bad() { echo "FAIL: $1"; fails=$((fails + 1)); }
 # 1. package() into a scratch pkgdir
 mkdir -p "$T/src" "$T/pkg"
 cp -r "$R"/. "$T/src/"
+: >"$T/src/0010-FocalTech__ASUF1209.bpf.o" # build()'s product; this test doesn't run clang
 (
   cd "$T/src" || exit 1
   # shellcheck disable=SC1091

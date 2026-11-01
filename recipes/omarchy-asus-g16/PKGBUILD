@@ -6,19 +6,30 @@
 # write; only the path differs: vendor directories under /usr/lib instead of
 # /etc, with basenames no omarchy package or migration uses, so pacman never
 # meets a file it does not own. The rcu_nocbs drop-in (#229) and the keyboard
-# autosuspend rule (#249, EXPERIMENTAL) are ours alone.
+# autosuspend rule (#249, EXPERIMENTAL) are ours alone, as is the touchpad's
+# palm detection (#390): a HID-BPF fixup built here, its udev-hid-bpf hwdb
+# match and a libinput quirk.
 # See README.md for what each file fixes and when to remove it.
 
 pkgbase=omarchy-asus-g16
 pkgname=omarchy-asus-g16
 pkgver=1.0.0
-pkgrel=104
+pkgrel=105
 pkgdesc='System fixes for the ASUS ROG Zephyrus G16 GA605KM on Omarchy (EXPERIMENTAL)'
 arch=('x86_64')
 url='https://github.com/omarchy-asus/omarchy-asus'
-license=('MIT')
-options=('!debug' '!strip')
-source=('99-omarchy-asus-g16-touchpad-wake.rules'
+license=('MIT' 'GPL-2.0-only')  # GPL-2.0-only: the HID-BPF program (the kernel's HID-BPF interface is GPL-only)
+options=('!debug' '!strip' '!distcc')
+makedepends=('clang' 'libbpf')
+# udev-hid-bpf's HID-BPF headers and vmlinux.h, the release Arch packages. Its download host,
+# gitlab.freedesktop.org (udev-hid-bpf's official repository), was approved for this recipe on
+# 2026-11-01; the tarball is pinned by version and sha256 (the same sum as Arch's PKGBUILD).
+_uhbver=2.3.0-20260703
+source=("https://gitlab.freedesktop.org/libevdev/udev-hid-bpf/-/archive/$_uhbver/udev-hid-bpf-$_uhbver.tar.gz"
+        '0010-FocalTech__ASUF1209.bpf.c'
+        '81-hid-bpf-omarchy-asus-g16.hwdb'
+        '50-omarchy-asus-g16-touchpad.quirks'
+        '99-omarchy-asus-g16-touchpad-wake.rules'
         'omarchy-asus-g16-hibernate-mode.conf'
         'nvidia-powerd-20-omarchy-asus.conf'
         'omarchy-asus-g16-rcu-nocbs.conf'
@@ -28,7 +39,11 @@ source=('99-omarchy-asus-g16-touchpad-wake.rules'
         'omarchy-asus-g16.install'
         'README.md'
         'LICENSE')
-sha256sums=('48c521b2ebdc5840f21d6e90931c7fc5b302d14837de5e2039852e308ba7579f'
+sha256sums=('ad71da0c37a832ae9084e7beb843b90d0718f13cbc5a21efb7a858eedb290eac'
+            '9e64475b646dc68a9ccfbfce360d096e0e283b9fa7637b3cc4f1e3d4d6a59afe'
+            '8db7fdf89f7014ac71f03f3fa99ab47885aa094720b8b3e486a2e38e1a96561a'
+            '2340fe523feb7df697be63c67e208a760f2b72df3b01a7d35cdcc9cf16327aae'
+            '48c521b2ebdc5840f21d6e90931c7fc5b302d14837de5e2039852e308ba7579f'
             'b8c50997a4d90145dd403fc5fdeae6cf8e98b71eee80cfbe1b716d6e1fc3e3f6'
             '10bc994e5e8e9eec01fc5ebb4270fba13af672c6d5d0e3b1a63ab6f812517a91'
             '96e5ed436514c68642dc8064f4b7bda61adae2062da04d7bd8003eb94d01fbe9'
@@ -36,12 +51,21 @@ sha256sums=('48c521b2ebdc5840f21d6e90931c7fc5b302d14837de5e2039852e308ba7579f'
             '1a425601f082673b4145af86b4848878d44d8eb249584994bac947703767b664'
             '7032e5e4462333109f517bf9a6ef4fe314d1761f3b0afb00b45ed5ac47e27aa5'
             '8b128d53a94087daae5a0c3d52dc4f6c8048675c037598f88943a2811209c408'
-            '4d10faa9bc1e36739126a7a9cced0ed4631c728419b6264d99b1ae1aee91a16b'
+            'ca0e73c84a97c2d3cd0bcf23869ecdb2b85cdc1d2b774a5832686fea22e3af48'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
+build() {
+  # The flags udev-hid-bpf's own meson build gives clang for its programs.
+  clang -std=gnu11 -fno-stack-protector -O2 -target bpf -g -c \
+    -fms-extensions -Wno-microsoft-anon-tag -D__x86_64__ \
+    -ffile-prefix-map="$srcdir"=. \
+    -I"udev-hid-bpf-$_uhbver/src/bpf" -idirafter /usr/include \
+    0010-FocalTech__ASUF1209.bpf.c -o 0010-FocalTech__ASUF1209.bpf.o
+}
+
 package() {
-  pkgdesc='Touchpad wake, hibernate mode, nvidia-powerd start-limit, rcu_nocbs, Wi-Fi reconnect and keyboard autosuspend fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
-  depends=('systemd')
+  pkgdesc='Touchpad wake, touchpad palm detection, hibernate mode, nvidia-powerd start-limit, rcu_nocbs, Wi-Fi reconnect and keyboard autosuspend fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
+  depends=('systemd' 'udev-hid-bpf')
   optdepends=('limine-mkinitcpio-hook: limine-update, which puts rcu_nocbs=all on the boot entries'
               'nvidia-utils: provides nvidia-powerd.service'
               'asusctl: asusd starts nvidia-powerd on charger plug-in'
@@ -68,6 +92,13 @@ package() {
   # #249 (EXPERIMENTAL): the built-in keyboard runtime-suspends between key presses.
   install -Dm644 99-omarchy-asus-g16-keyboard-autosuspend.rules \
     "$pkgdir/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules"
+  # #390: the touchpad reports each contact's size and strength; libinput treats strong ones as palms.
+  install -Dm644 0010-FocalTech__ASUF1209.bpf.o \
+    "$pkgdir/usr/lib/firmware/hid/bpf/0010-FocalTech__ASUF1209.bpf.o"
+  install -Dm644 81-hid-bpf-omarchy-asus-g16.hwdb \
+    "$pkgdir/usr/lib/udev/hwdb.d/81-hid-bpf-omarchy-asus-g16.hwdb"
+  install -Dm644 50-omarchy-asus-g16-touchpad.quirks \
+    "$pkgdir/usr/share/libinput/50-omarchy-asus-g16-touchpad.quirks"
 
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

@@ -33,6 +33,7 @@ the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 | `omarchy-asus-g16` | `/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf`, `/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook` | [`rcu_nocbs=all`](#rcu_nocbsall) |
 | `omarchy-asus-g16` | `/usr/lib/NetworkManager/conf.d/omarchy-asus-g16-mt7925-auth-retries.conf` | [Wi-Fi back after a wake](#wi-fi-stays-down-after-a-wake) |
 | `omarchy-asus-g16` | `/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules` | [built-in keyboard autosuspend](#built-in-keyboard-autosuspend) (EXPERIMENTAL) |
+| `omarchy-asus-g16` | `/usr/lib/firmware/hid/bpf/0010-FocalTech__ASUF1209.bpf.o`, `/usr/lib/udev/hwdb.d/81-hid-bpf-omarchy-asus-g16.hwdb`, `/usr/share/libinput/50-omarchy-asus-g16-touchpad.quirks` | [resting palms aren't fingers](#resting-palms-arent-fingers) (EXPERIMENTAL) |
 
 ## Touchpad doesn't wake the laptop
 
@@ -261,6 +262,80 @@ the HID tree once the G16 test passes.
 **When to remove:** if the G16 test shows no gain, or when the kernel autosuspends this
 keyboard by default.
 
+## Resting palms aren't fingers
+
+> [!WARNING]
+> EXPERIMENTAL (#390): replay-tested against a capture from the G16, waits on its G16 test.
+
+**Fixes:** palm heels resting on the touchpad (FocalTech ASUF1209, I2C 2808:0219) while you
+type are read as fingers. A palm on each side, or a palm and a finger, becomes a two-finger
+scroll, which Chrome and Electron apps turn into back navigation; a press with a palm resting
+can count as a two-finger click. The pad's only palm signal, its Confidence bit, comes late or
+never for palms at the side edges, and libinput drops it as soon as it clears. The pad sends no
+contact size or pressure, so libinput's size and pressure checks can't run.
+
+**How:** the pad does measure each contact: report 4 ends with five 16-bit vendor fields (page
+0xFF01, usages 0x02-0x06, one per contact slot) that its descriptor marks Constant, so the
+kernel ignores them. Each is laid out like elan_i2c's contact data, and ASUS's Windows filter
+driver reads it the same way: the low byte is the contact's signal strength, the high byte its
+width and height in sensor cells (4 bits each). The program exposes all three; libinput's palm
+check uses the strength. The cell counts grow with motion (a fast swipe finger reads 9 x 7, as
+large as a palm), but the strength doesn't: in a capture on the G16 a fingertip read at most 62
+(resting, moving or clicking), while every palm that stayed down more than a few reports went
+past 70, most within a few frames and many up to 255. The lightest palms, resting just inside
+the right edge without the pad's palm flag, peaked at 71-77; a deliberately flattened finger
+reached 73, so it counts as a palm too.
+
+- `0010-FocalTech__ASUF1209.bpf.o`, built from `0010-FocalTech__ASUF1209.bpf.c` with
+  udev-hid-bpf's headers, is a HID-BPF program. It gives each finger collection of the report
+  descriptor a Tip Pressure (the strength) and a Width and Height (the cell counts), drops the
+  vendor fields and repacks each report to match; the report keeps its size. hid-multitouch
+  then publishes `ABS_MT_PRESSURE`, `ABS_MT_TOUCH_MAJOR` and `ABS_MT_TOUCH_MINOR`. Its probe
+  accepts only this pad's 764-byte descriptor.
+- `81-hid-bpf-omarchy-asus-g16.hwdb` tells udev-hid-bpf (a dependency) to load it for I2C
+  2808:0219.
+- `50-omarchy-asus-g16-touchpad.quirks` sets, for the same pad, `AttrPalmPressureThreshold=70`
+  (a touch above it is a palm until it lifts: no pointer motion, no scroll, no gesture, not
+  counted for a clickfinger click) and `AttrPressureRange=none`, so libinput keeps telling
+  touch-down by contact as before rather than by strength (a light fingertip reads about 20).
+  Without this quirk libinput would apply its pressure defaults to the new axis.
+
+**Tested (offline):** the capture (53 s of typing with palms resting, single fingertips, a
+flattened finger, clicks and two deliberate two-finger scrolls) replayed through a uhid copy of
+the pad, with the program attached by udev-hid-bpf, hid-multitouch and libinput 1.32. Stock:
+three palm-made scrolls and a pinch. With the quirk: none, and the two real scrolls, the clicks
+and fingertip pointer motion are unchanged. Palm pressure thresholds 70 to 100 gave the same
+result, 130 let a palm scroll back, and 70 let the least palm pointer motion through.
+`tests/channel/g16-touchpad-palm.sh` checks the threshold against every contact of that capture
+(`tests/channel/fixtures/asuf1209-touchpad-contacts.tsv`): all fingertips at or under it, all
+palms over it or flagged by the pad, except two unflagged palm brushes of 7 and 14 reports that
+peak at 68 and 59, inside the fingertips' range; libinput's disable-while-typing covers those
+while you type. The cell counts as a palm size threshold instead: 6 dropped
+a real two-finger scroll and 7 or more let palm scrolls through. Without the quirk, libinput's
+pressure defaults lost some light fingertip motion and still let a palm pinch through.
+
+**Timing:** udev-hid-bpf attaches the program when the touchpad appears, and the compositor
+reads libinput's quirks when it starts, so the change takes effect at the next boot.
+
+**Check:** `sudo udev-hid-bpf list-loaded` lists `0010-FocalTech__ASUF1209.bpf.o` on the
+touchpad, and `sudo libinput quirks list` on the touchpad's event node (`sudo libinput
+list-devices` names it) prints `AttrPalmPressureThreshold=70`. `sudo libinput debug-events
+--verbose` logs `palm detected (pressure)` for a resting palm.
+
+**Tuning:** a finger that stops moving the pointer is being taken for a palm; a palm that
+still scrolls is under the threshold. Raising it to 74 gives the flattened finger back and
+lets the lightest resting palms through. Override it in `/etc/libinput/local-overrides.quirks`
+with the same match lines and another `AttrPalmPressureThreshold`, then log out and back in.
+
+**This one isn't a fork mirror:** the fork has no equivalent.
+
+**Upstream:** not submitted. The program fits udev-hid-bpf's `testing` directory and later the
+kernel's HID-BPF fixups; the threshold fits libinput's quirks. A human decides (draft in
+`docs/deltas.md`).
+
+**When to remove:** when udev-hid-bpf or the kernel carries a fixup for this pad and libinput a
+quirk for it, or if the G16 test shows fingers lost as palms at any workable threshold.
+
 ## Not packaged
 
 Not packaged, so stock behaviour stays unchanged. These fixes live in the fork
@@ -292,5 +367,5 @@ sudo pacman -Rns omarchy-asus-g16
 
 Removal deletes the files and rebuilds the Limine entries without
 `rcu_nocbs=all`, which stays in effect until the next boot. The touchpad stays
-disarmed, and the keyboard on autosuspend, until the next boot. A
+disarmed, its palm fixup attached, and the keyboard on autosuspend, until the next boot. A
 copy the fork's migration wrote to `/etc` isn't owned by this package and stays.

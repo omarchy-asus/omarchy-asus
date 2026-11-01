@@ -94,6 +94,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [rcu_nocbs=all](#g16-rcu-nocbs) | omarchy-asus-g16 | limine-entry-tool drop-in | RC only | ours-only |
 | [Wi-Fi back after a wake (mt7925)](#g16-mt7925-auth-retries) | omarchy-asus-g16 | NetworkManager drop-in | RC only | not submitted |
 | [EXPERIMENTAL built-in keyboard autosuspend](#g16-keyboard-autosuspend) | omarchy-asus-g16 | udev rule | RC only | ours-only |
+| [EXPERIMENTAL resting palms aren't fingers (ASUF1209)](#g16-touchpad-palm) | omarchy-asus-g16 | HID-BPF fixup, hwdb, libinput quirk | RC only | not submitted |
 | [Win-lock helper](#pkg-asus-rog-nkey-winlock) | asus-rog-nkey-winlock | package | both | ours-only |
 | [keyring and setup script](#pkg-omarchy-asus-keyring) | omarchy-asus-keyring, `bin/omarchy-asus-setup` | package | both | ours-only |
 | [G16 fix applier](#pkg-omarchy-asus-g16-apply) | omarchy-asus-g16-apply | package | both | ours-only |
@@ -2108,6 +2109,75 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   key press (#249).
 - **Upstream: ours-only** (a power setting for one laptop's keyboard).
 - **Drop when:** the G16 test shows no gain, or the kernel autosuspends this keyboard by default.
+
+<a id="g16-touchpad-palm"></a>
+### EXPERIMENTAL resting palms aren't fingers (ASUF1209)
+
+- **Component:** `omarchy-asus-g16`: `0010-FocalTech__ASUF1209.bpf.c` (built into
+  `/usr/lib/firmware/hid/bpf/0010-FocalTech__ASUF1209.bpf.o`),
+  `/usr/lib/udev/hwdb.d/81-hid-bpf-omarchy-asus-g16.hwdb` and
+  `/usr/share/libinput/50-omarchy-asus-g16-touchpad.quirks`; the package now depends on
+  `udev-hid-bpf`, and its build downloads udev-hid-bpf's source tarball for the HID-BPF headers
+  from gitlab.freedesktop.org (udev-hid-bpf's official repository; host approved 2026-11-01;
+  pinned to 2.3.0-20260703 by sha256, the same tarball and sum as Arch's package). RC only (since
+  1.0.0-105). Ours: neither udev-hid-bpf, the kernel nor libinput
+  has anything for this pad.
+- **Fixes:** palm heels resting on the G16's touchpad (FocalTech ASUF1209, I2C 2808:0219) while
+  typing are read as fingers: two palms, or a palm and a finger, make a two-finger scroll that
+  Chrome and Electron apps take as back navigation, and a press with a palm resting can count two
+  fingers (#390). The pad reports no contact size or pressure, and its Confidence bit comes late
+  (up to 584 ms) or never for palms at the side edges. Its report 4 does carry, per contact, a
+  16-bit vendor value (page 0xFF01, usages 0x02-0x06) marked Constant, laid out like elan_i2c's:
+  low byte signal strength, high byte width and height in sensor cells (4 bits each; the high
+  byte only takes nibble pairs, and ASUS's Windows filter driver splits it the same way). The
+  HID-BPF program moves them into per-finger Tip Pressure, Width and Height fields (report size
+  unchanged), so hid-multitouch publishes `ABS_MT_PRESSURE` and `ABS_MT_TOUCH_MAJOR`/`MINOR`;
+  the quirk sets `AttrPalmPressureThreshold=70` and `AttrPressureRange=none` (touch-down stays
+  contact-based, as without the fixup).
+- **Test:** `tests/channel/g16-touchpad-palm.sh` checks the descriptor rewrite and the report
+  repack against the pad's descriptor offline (the rewrite matches the kernel's byte for byte).
+  A 53 s raw capture from the G16, replayed through a uhid copy of the pad with the program
+  attached by udev-hid-bpf 2.3.0 on a 7.2.8 kernel and libinput 1.32: stock gave three
+  palm-made scrolls and a pinch; with the quirk none, while the two deliberate two-finger scrolls
+  (89 and 78 scroll events), the clicks and fingertip pointer motion were unchanged. Fingertips
+  read at most 62; every palm down for more than a few reports went past 70 (the lightest,
+  unflagged just inside the right edge, peaked at 71-77), and a deliberately flattened finger
+  reached 73, so at 70 it counts as a palm. Thresholds 70-100 all removed the palm scrolls, 130
+  let one back, 70 let the least palm motion through. The same test checks the threshold against
+  every contact of the capture (`tests/channel/fixtures/asuf1209-touchpad-contacts.tsv`): it
+  fails at 80 on those light palms and at 60 on a fast-swipe fingertip. Two unflagged palm
+  brushes of 7 and 14 reports peak at 68 and 59, inside the fingertips' range; strength can't
+  catch them, and disable-while-typing covers them while typing. The cell counts don't separate palms: as a palm
+  size threshold, 6 cells dropped a real two-finger scroll and 7 or more let palm scrolls
+  through (they grow with motion; a fast swipe finger reads 9 x 7). On the G16: rest both palms
+  and type for two minutes in Chrome, no back navigation and no scroll in `libinput
+  debug-events`; two-finger scrolls, pointer motion and clicks still work.
+- **Windows:** ASUS's filter driver doesn't use these values on FocalTech pads; it marks palms by
+  position and travel (bottom strip, side/keyboard-side edge pairs, side taps, still contacts
+  far from the others) and clears Confidence. Those rules are left out here; they are the next
+  step if strength alone leaves gaps.
+- **Upstream: not submitted.** Checked 2026-11-01: no udev-hid-bpf program, kernel HID quirk or
+  libinput quirk for 2808:0219. The same pad (ASUF1209) is in the Zenbook S16 UM5606, where a
+  community uinput filter works around the same symptom.
+- **Drop when:** udev-hid-bpf (or the kernel's HID-BPF fixups) loads a fixup for this pad and
+  libinput carries a threshold for it; or the G16 test shows fingers taken for palms at every
+  workable threshold.
+- **Upstream report draft** (udev-hid-bpf merge request for `src/bpf/testing/`, then a libinput
+  merge request for `quirks/50-system-asus.quirks`; a human decides):
+
+  > **FocalTech ASUF1209 (I2C 2808:0219): expose per-contact size for palm detection**
+  >
+  > This touchpad (ASUS ROG Zephyrus G16 GA605KM, also the Zenbook S16 UM5606) gives each
+  > contact only Confidence, Tip, Contact ID, X and Y, so libinput can't detect palms by size or
+  > pressure, and the Confidence bit arrives late or never for palms at the side edges. Report 4
+  > ends with vendor page 0xFF01 usages 0x02-0x06, five 16-bit Constant fields, one per contact
+  > slot, laid out like elan_i2c's: bits 0-7 the contact's signal strength (fingertips up to
+  > about 62, palms well above, often 255), bits 8-11 and 12-15 its width and height in sensor
+  > cells (which grow with motion, so they don't separate palms). The attached program moves
+  > them into per-finger Tip Pressure, Width and Height and keeps the report length, so
+  > hid-multitouch exports ABS_MT_PRESSURE and ABS_MT_TOUCH_MAJOR/MINOR. With
+  > `AttrPalmPressureThreshold=70` and `AttrPressureRange=none`, a replay of a capture of typing
+  > with resting palms loses every palm-made two-finger scroll and keeps the deliberate ones.
 
 ## Our packages
 
