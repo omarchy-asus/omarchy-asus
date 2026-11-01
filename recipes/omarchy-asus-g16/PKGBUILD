@@ -38,9 +38,9 @@ source=("https://gitlab.freedesktop.org/libevdev/udev-hid-bpf/-/archive/$_uhbver
         'README.md'
         'LICENSE')
 sha256sums=('ad71da0c37a832ae9084e7beb843b90d0718f13cbc5a21efb7a858eedb290eac'
-            '157345c8b9c62dd637d402f2efe2b707d9203431dd789c1d3dd62c276905dd47'
+            '9e64475b646dc68a9ccfbfce360d096e0e283b9fa7637b3cc4f1e3d4d6a59afe'
             '8db7fdf89f7014ac71f03f3fa99ab47885aa094720b8b3e486a2e38e1a96561a'
-            'f5d0baa760cf6def1b3b67c11941ca53f2f56e644af82269e4b748d470886805'
+            'e99bb241cc2228869948f25240c0daf21b7d6f01cf323b76e3e5349e99e8e80d'
             '48c521b2ebdc5840f21d6e90931c7fc5b302d14837de5e2039852e308ba7579f'
             'b8c50997a4d90145dd403fc5fdeae6cf8e98b71eee80cfbe1b716d6e1fc3e3f6'
             '10bc994e5e8e9eec01fc5ebb4270fba13af672c6d5d0e3b1a63ab6f812517a91'
@@ -49,7 +49,7 @@ sha256sums=('ad71da0c37a832ae9084e7beb843b90d0718f13cbc5a21efb7a858eedb290eac'
             '1a425601f082673b4145af86b4848878d44d8eb249584994bac947703767b664'
             '7032e5e4462333109f517bf9a6ef4fe314d1761f3b0afb00b45ed5ac47e27aa5'
             '8b128d53a94087daae5a0c3d52dc4f6c8048675c037598f88943a2811209c408'
-            '4d10faa9bc1e36739126a7a9cced0ed4631c728419b6264d99b1ae1aee91a16b'
+            '1f051b10e3370bca218aac5114cd50433416d6981c5faa2a73e226368d89392b'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 build() {
@@ -90,7 +90,7 @@ package() {
   # #249 (EXPERIMENTAL): the built-in keyboard runtime-suspends between key presses.
   install -Dm644 99-omarchy-asus-g16-keyboard-autosuspend.rules \
     "$pkgdir/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules"
-  # #390: the touchpad reports each contact's size, and libinput treats large ones as palms.
+  # #390: the touchpad reports each contact's size and strength; libinput treats strong ones as palms.
   install -Dm644 0010-FocalTech__ASUF1209.bpf.o \
     "$pkgdir/usr/lib/firmware/hid/bpf/0010-FocalTech__ASUF1209.bpf.o"
   install -Dm644 81-hid-bpf-omarchy-asus-g16.hwdb \

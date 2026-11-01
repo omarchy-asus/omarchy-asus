@@ -276,41 +276,48 @@ contact size or pressure, so libinput's size and pressure checks can't run.
 
 **How:** the pad does measure each contact: report 4 ends with five 16-bit vendor fields (page
 0xFF01, usages 0x02-0x06, one per contact slot) that its descriptor marks Constant, so the
-kernel ignores them. Their low byte is the contact's signal strength, the high byte two 4-bit
-extents in sensor cells. The extents smear with motion (a fast swipe finger reads as large as a
-palm), so the strength is what tells palms from fingers: in a capture on the G16 a fingertip
-read at most 62 (resting, moving or clicking) and a deliberately flattened finger 73, while
-palm heels climbed past that within a few frames and often saturated at 255.
+kernel ignores them. Each is laid out like elan_i2c's contact data, and ASUS's Windows filter
+driver reads it the same way: the low byte is the contact's signal strength, the high byte its
+width and height in sensor cells (4 bits each). The program exposes all three; libinput's palm
+check uses the strength. The cell counts grow with motion (a fast swipe finger reads 9 x 7, as
+large as a palm), but the strength doesn't: in a capture on the G16 a fingertip read at most 62
+(resting, moving or clicking) and a deliberately flattened finger 73, while palm heels climbed
+past that within a few frames and often saturated at 255.
 
 - `0010-FocalTech__ASUF1209.bpf.o`, built from `0010-FocalTech__ASUF1209.bpf.c` with
   udev-hid-bpf's headers, is a HID-BPF program. It gives each finger collection of the report
-  descriptor an 8-bit Width and moves each slot's strength byte into it; the report keeps its
-  size, and the extents stay in the vendor fields. hid-multitouch then publishes
-  `ABS_MT_TOUCH_MAJOR`. Its probe accepts only this pad's 764-byte descriptor.
+  descriptor a Tip Pressure (the strength) and a Width and Height (the cell counts), drops the
+  vendor fields and repacks each report to match; the report keeps its size. hid-multitouch
+  then publishes `ABS_MT_PRESSURE`, `ABS_MT_TOUCH_MAJOR` and `ABS_MT_TOUCH_MINOR`. Its probe
+  accepts only this pad's 764-byte descriptor.
 - `81-hid-bpf-omarchy-asus-g16.hwdb` tells udev-hid-bpf (a dependency) to load it for I2C
   2808:0219.
-- `50-omarchy-asus-g16-touchpad.quirks` sets libinput's `AttrPalmSizeThreshold=80` for the
-  same pad. A touch above it is a palm until it lifts: no pointer motion, no scroll, no gesture,
-  not counted for a clickfinger click.
+- `50-omarchy-asus-g16-touchpad.quirks` sets, for the same pad, `AttrPalmPressureThreshold=80`
+  (a touch above it is a palm until it lifts: no pointer motion, no scroll, no gesture, not
+  counted for a clickfinger click) and `AttrPressureRange=none`, so libinput keeps telling
+  touch-down by contact as before rather than by strength (a light fingertip reads about 20).
+  Without this quirk libinput would apply its pressure defaults to the new axis.
 
 **Tested (offline):** the capture (53 s of typing with palms resting, single fingertips, a
 flattened finger, clicks and two deliberate two-finger scrolls) replayed through a uhid copy of
-the pad, with the program attached by udev-hid-bpf, hid-multitouch and libinput 1.32. Stock and
-with the program alone: three palm-made scrolls and a pinch. With the quirk: none, and the two
-real scrolls, the clicks and fingertip pointer motion are unchanged. Thresholds 74 to 100 gave
-the same result; 130 let a palm scroll back.
+the pad, with the program attached by udev-hid-bpf, hid-multitouch and libinput 1.32. Stock:
+three palm-made scrolls and a pinch. With the quirk: none, and the two real scrolls, the clicks
+and fingertip pointer motion are unchanged. Palm pressure thresholds 74 to 100 gave the same
+result; 130 let a palm scroll back. The cell counts as a palm size threshold instead: 6 dropped
+a real two-finger scroll and 7 or more let palm scrolls through. Without the quirk, libinput's
+pressure defaults lost some light fingertip motion and still let a palm pinch through.
 
 **Timing:** udev-hid-bpf attaches the program when the touchpad appears, and the compositor
 reads libinput's quirks when it starts, so the change takes effect at the next boot.
 
 **Check:** `sudo udev-hid-bpf list-loaded` lists `0010-FocalTech__ASUF1209.bpf.o` on the
 touchpad, and `sudo libinput quirks list` on the touchpad's event node (`sudo libinput
-list-devices` names it) prints `AttrPalmSizeThreshold=80`. `sudo libinput debug-events
---verbose` logs `palm detected (touch size)` for a resting palm.
+list-devices` names it) prints `AttrPalmPressureThreshold=80`. `sudo libinput debug-events
+--verbose` logs `palm detected (pressure)` for a resting palm.
 
 **Tuning:** a finger that stops moving the pointer is being taken for a palm; a palm that
 still scrolls is under the threshold. Override it in `/etc/libinput/local-overrides.quirks`
-with the same match lines and another `AttrPalmSizeThreshold`, then log out and back in.
+with the same match lines and another `AttrPalmPressureThreshold`, then log out and back in.
 
 **This one isn't a fork mirror:** the fork has no equivalent.
 

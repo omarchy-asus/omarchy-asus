@@ -3,14 +3,16 @@
 # report descriptor as the G16 reports it (tests/channel/fixtures/asuf1209-touchpad-rdesc.hex):
 #   1. the HID-BPF program's descriptor checks (size, Report ID 4, the five finger End
 #      Collections, the five 16-bit vendor fields) all hold on the fixture;
-#   2. its rewrite, replayed here, gives a descriptor whose report 4 keeps its 49-byte payload
-#      and in which every finger collection ends with an 8-bit Width (Digitizers 0x48, Data);
+#   2. its rewrite, replayed here, gives a descriptor whose report 4 keeps its 49-byte payload,
+#      has no vendor 0x02-0x06 fields left, and in which every finger collection ends with an
+#      8-bit Tip Pressure and 4-bit Width and Height (Digitizers 0x30, 0x48, 0x49, Data);
 #   3. its report repack, with the offsets read from the C source, puts every field of a report
-#      where the rewritten descriptor says it is: each finger's Width is that slot's strength
-#      byte (the low byte of vendor usage 0x02 + slot), each 8-bit vendor field its high byte,
-#      and every other field keeps its value;
+#      where the rewritten descriptor says it is: each finger's Tip Pressure is that slot's
+#      strength byte (bits 0-7 of vendor usage 0x02 + slot), its Width bits 8-11, its Height
+#      bits 12-15, and every other field keeps its value;
 #   4. package() installs the object where udev-hid-bpf looks, the hwdb names that object for
-#      I2C 2808:0219 only, and the libinput quirk matches the same device with a size threshold.
+#      I2C 2808:0219 only, and the libinput quirk matches the same device, turns pressure-based
+#      touch detection off and sets a palm pressure threshold.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 R=$W/recipes/omarchy-asus-g16
@@ -53,31 +55,34 @@ def macro(name):
 RDESC_SIZE, REPORT_ID, SLOTS = define("RDESC_SIZE"), define("REPORT_ID"), define("SLOTS")
 SLOT_IN, SLOT_OUT, REPACKED = define("SLOT_IN"), define("SLOT_OUT"), define("REPACKED")
 ID_OFFSET = define("REPORT4_ID_OFFSET")
-FINGER_END, VENDOR_SIZE = macro("FINGER_END"), macro("VENDOR_SIZE")
-body = re.search(r"#define WIDTH_FIELD \\\n(.*?)\n\n", src, re.S).group(1)
+FINGER_END, VENDOR_FIELD = macro("FINGER_END"), macro("VENDOR_FIELD")
+VENDOR_LEN = define("VENDOR_LEN")
+body = re.search(r"#define CONTACT_FIELDS \\\n(.*?)\n\n", src, re.S).group(1)
 body = re.sub(r"/\*.*?\*/", "", body)
-WIDTH = bytes(int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", body))
+FIELDS = bytes(int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", body))
+CUT_FROM, CUT_TO = VENDOR_FIELD(0), VENDOR_FIELD(SLOTS)
 
 # 1. the program's checks (is_asuf1209_rdesc) on the fixture
 checks = len(orig) == RDESC_SIZE and orig[ID_OFFSET:ID_OFFSET + 2] == bytes([0x85, REPORT_ID])
 for n in range(SLOTS):
-    e, v = FINGER_END(n), VENDOR_SIZE(n)
+    e, v = FINGER_END(n), VENDOR_FIELD(n)
     checks &= orig[e - 2:e + 1] == bytes([0x81, 0x02, 0xc0])
-    checks &= orig[v - 2:v + 6] == bytes([0x09, 0x02 + n, 0x75, 0x10, 0x95, 0x01, 0x81, 0x03])
+    checks &= orig[v:v + VENDOR_LEN] == bytes([0x09, 0x02 + n, 0x75, 0x10, 0x95, 0x01, 0x81, 0x03])
+checks &= orig[CUT_TO:CUT_TO + 4] == bytes([0x09, 0x20, 0x75, 0x20])
 ok("the fixture passes the program's descriptor checks") if checks else bad("the fixture fails the program's descriptor checks")
 
 # 2. the rewrite, as asuf1209_fix_rdesc does it
-fixed = bytearray(orig) + bytearray(SLOTS * len(WIDTH))
+want_size = RDESC_SIZE - (CUT_TO - CUT_FROM) + SLOTS * len(FIELDS)
+fixed = bytearray(orig) + bytearray(max(0, want_size - RDESC_SIZE))
 for i in range(RDESC_SIZE - 1, -1, -1):
-    shift = sum(len(WIDTH) for n in range(SLOTS) if i >= FINGER_END(n))
+    if CUT_FROM <= i < CUT_TO:
+        continue
+    shift = (-(CUT_TO - CUT_FROM) if i >= CUT_TO else 0) + sum(len(FIELDS) for n in range(SLOTS) if i >= FINGER_END(n))
     fixed[i + shift] = fixed[i]
 for n in range(SLOTS):
-    at = FINGER_END(n) + n * len(WIDTH)
-    fixed[at:at + len(WIDTH)] = WIDTH
-for n in range(SLOTS):
-    fixed[VENDOR_SIZE(n) + SLOTS * len(WIDTH) + 1] = 0x08
-fixed = bytes(fixed)
-want_size = RDESC_SIZE + SLOTS * len(WIDTH)
+    at = FINGER_END(n) + n * len(FIELDS)
+    fixed[at:at + len(FIELDS)] = FIELDS
+fixed = bytes(fixed[:want_size])
 
 
 def parse(rd):
@@ -118,19 +123,22 @@ old, old_bits = parse(orig)
 new, new_bits = parse(fixed)
 ok("rewritten descriptor is %d bytes" % len(fixed)) if len(fixed) == want_size else bad("size %d" % len(fixed))
 ok("report 4 keeps its %d-byte payload" % (new_bits // 8)) if old_bits == new_bits == 49 * 8 else bad("report 4 bits: %d -> %d" % (old_bits, new_bits))
-widths = [f for f in new if f[:2] == (0x0D, 0x48)]
-if len(widths) == SLOTS and all(f[3] == 8 and f[4] and f[5] == n for n, f in enumerate(widths)):
-    ok("each finger collection has an 8-bit Width (data) field")
-else:
-    bad("Width fields: %s" % widths)
+for usage, bits, name in ((0x30, 8, "Tip Pressure"), (0x48, 4, "Width"), (0x49, 4, "Height")):
+    got = [f for f in new if f[:2] == (0x0D, usage)]
+    if len(got) == SLOTS and all(f[3] == bits and f[4] and f[5] == n for n, f in enumerate(got)):
+        ok("each finger collection has a %d-bit %s (data) field" % (bits, name))
+    else:
+        bad("%s fields: %s" % (name, got))
+left = [f for f in new if f[0] == 0xFF01 and 0x02 <= f[1] <= 0x06]
+ok("the vendor 0x02-0x06 fields are gone") if not left else bad("vendor fields left: %s" % left)
 
 # 3. the repack, with the C source's offsets
 m = re.search(r"data\[1 \+ s \* SLOT_OUT \+ SLOT_IN\] = in\[(\d+) \+ 2 \* s\]", src)
 strength_at = int(m.group(1))
+m = re.search(r"data\[1 \+ s \* SLOT_OUT \+ SLOT_IN \+ 1\] = in\[(\d+) \+ 2 \* s\]", src)
+size_at = int(m.group(1))
 m = re.search(r"__builtin_memcpy\(data \+ (\d+), in \+ (\d+), (\d+)\);", src)
 mid_to, mid_from, mid_len = map(int, m.groups())
-m = re.search(r"data\[(\d+) \+ s\] = in\[(\d+) \+ 2 \* s\];", src)
-ext_to, ext_from = map(int, m.groups())
 
 
 def repack(rep):
@@ -138,9 +146,8 @@ def repack(rep):
     for s in range(SLOTS):
         out[1 + s * SLOT_OUT:1 + s * SLOT_OUT + SLOT_IN] = inp[1 + s * SLOT_IN:1 + (s + 1) * SLOT_IN]
         out[1 + s * SLOT_OUT + SLOT_IN] = inp[strength_at + 2 * s]
+        out[1 + s * SLOT_OUT + SLOT_IN + 1] = inp[size_at + 2 * s]
     out[mid_to:mid_to + mid_len] = inp[mid_from:mid_from + mid_len]
-    for s in range(SLOTS):
-        out[ext_to + s] = inp[ext_from + 2 * s]
     return bytes(out)
 
 
@@ -152,10 +159,9 @@ def get(rep, f):
 def source(f):
     """The field of the original layout that new field f must carry, and how."""
     page, usage, _, size, _, finger = f
-    if (page, usage) == (0x0D, 0x48):
-        return [o for o in old if o[:2] == (0xFF01, 0x02 + finger)][0], lambda v: v & 0xFF
-    if page == 0xFF01 and 0x02 <= usage <= 0x06 and size == 8:
-        return [o for o in old if o[:2] == (0xFF01, usage)][0], lambda v: v >> 8
+    split = {0x30: lambda v: v & 0xFF, 0x48: lambda v: (v >> 8) & 0xF, 0x49: lambda v: v >> 12}
+    if page == 0x0D and usage in split:
+        return [o for o in old if o[:2] == (0xFF01, 0x02 + finger)][0], split[usage]
     same = [o for o in old if o[:2] == (page, usage) and o[5] == finger and o[3] == size]
     nth = [n for n in new if n[:2] == (page, usage) and n[5] == finger and n[3] == size].index(f)
     return same[nth], lambda v: v
@@ -200,7 +206,7 @@ hw=$(grep -v '^[[:space:]]*\(#\|$\)' "$HWDB" | paste -sd'|')
 [[ $hw == 'hid-bpf:hid:b0018g*v00002808p00000219|  HID_BPF_OMARCHY_ASUS_G16=0010-FocalTech__ASUF1209.bpf.o|  .HID_BPF=1' ]] &&
   ok "hwdb: I2C 2808:0219 only, names the installed object" || bad "hwdb: $hw"
 q=$(grep -v '^[[:space:]]*\(#\|$\)' "$QUIRK" | grep -v '^\[' | paste -sd'|')
-[[ $q =~ ^MatchBus=i2c\|MatchVendor=0x2808\|MatchProduct=0x0219\|MatchUdevType=touchpad\|AttrPalmSizeThreshold=[0-9]+$ ]] &&
-  ok "quirk: the same touchpad, a palm size threshold" || bad "quirk: $q"
+[[ $q =~ ^MatchBus=i2c\|MatchVendor=0x2808\|MatchProduct=0x0219\|MatchUdevType=touchpad\|AttrPressureRange=none\|AttrPalmPressureThreshold=[0-9]+$ ]] &&
+  ok "quirk: the same touchpad, no pressure touch detection, a palm pressure threshold" || bad "quirk: $q"
 
-((fails == 0)) && echo "all g16-touchpad-palm-size checks passed" || { echo "$fails check(s) failed"; exit 1; }
+((fails == 0)) && echo "all g16-touchpad-palm checks passed" || { echo "$fails check(s) failed"; exit 1; }
