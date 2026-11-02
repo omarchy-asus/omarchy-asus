@@ -10,9 +10,9 @@
 #    provenance only (empty when cut from a bare commit). omarchy and
 #    omarchy-settings must always carry identical _tag/_commit/pkgver/sha256sums.
 pkgname='omarchy-settings'
-_tag='v4.5.0-rc2'
-_commit='5978d93ae7da0a325b7493501911e3f1266cadd3'
-pkgver=4.5.0rc2
+_tag='v4.5.0-rc3'
+_commit='8d19ad75ace59af8b6ded52f8b2bec1b15adda7c'
+pkgver=4.5.0rc3
 pkgrel=1.101
 pkgdesc='Omarchy user defaults, /etc/skel content, fonts, plymouth theme, and support helpers (omarchy-asus build)'
 # Arch-specific because the shipped /etc tree is not the same on every
@@ -164,7 +164,7 @@ else
         general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch
         general-0002-Keep-the-sleep-monitor-running-across-suspends.patch
         general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch)
-  sha256sums=('53485968f6057f66ad7ff11af6d7e0a96ab83974182c5dbedf2f288a1b1dd628'
+  sha256sums=('cd3957ac70e26fa4f38c5c1ce7d34e0d366f715bc0cfdfcdc9749e13922a48b2'
               'b86866617b28d01f3c59a963a2c8202802d3960d549a54c9d0cb926b60eb6433'
               'd88f78f5a59dbd031b3a42b5c4cf604e3f14f0b4d237ddae2bad579580f7949e'
               '42967248ba964cc7d21c4e99ca151ea18a9be4192ded150c2e17685063795914'
@@ -316,6 +316,11 @@ package() {
   install -Dm644 default/systemd/user/omarchy-tailscale-receive.service "$pkgdir/usr/lib/systemd/user/omarchy-tailscale-receive.service"
   install -Dm644 default/systemd/user/omarchy-fcitx5.service "$pkgdir/usr/lib/systemd/user/omarchy-fcitx5.service"
   install -Dm644 default/systemd/user/omarchy-crash-watch.service "$pkgdir/usr/lib/systemd/user/omarchy-crash-watch.service"
+  # Holds WirePlumber at login until the session can open the cameras, so
+  # libcamera finds them (omarchy-hw-wait-camera-access).
+  if [[ -f default/systemd/user/wireplumber.service.d/10-omarchy-camera-access.conf ]]; then
+    install -Dm644 default/systemd/user/wireplumber.service.d/10-omarchy-camera-access.conf "$pkgdir/usr/lib/systemd/user/wireplumber.service.d/10-omarchy-camera-access.conf"
+  fi
   # First-run enables this unit, so it ships wherever the source has it.
   if [[ -f default/systemd/user/omarchy-brightness-keyboard-auto.service ]]; then
     install -Dm644 default/systemd/user/omarchy-brightness-keyboard-auto.service "$pkgdir/usr/lib/systemd/user/omarchy-brightness-keyboard-auto.service"
