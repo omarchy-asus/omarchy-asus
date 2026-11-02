@@ -1412,8 +1412,9 @@ bullets.)
   /dev/video*` shows nothing while the menu opens, and the webcam entries still appear.
 - **Measurements (G16, at `6c7d7001`, 2026-10-18):** stock 125 ms per call with the camera awake
   about 2.6 s; patched about 5.5 ms per call, camera stays suspended, same answer.
-- **Upstream: open.** [omacom/omarchy#15910](https://github.com/omacom/omarchy/pull/15910) "Answer
-  the webcam menu guard from udev instead of opening cameras". It replaced our
+- **Upstream: merged, unreleased.** [omacom/omarchy#15910](https://github.com/omacom/omarchy/pull/15910)
+  "Answer the webcam menu guard from udev instead of opening cameras", merged on `quattro` on
+  2026-10-29 as `2afe8589`; not in any tag yet, so not in v4.5.0-rc3 (checked 2026-11-02). It replaced our
   omacom/omarchy#15670, closed unmerged on 2026-10-19 (maintainers can't push to an
   organization-owned fork), and carries our two commits unchanged plus one fix on top: udev keeps
   the role it recorded when a v4l2loopback node appeared, so an `exclusive_caps=1` loopback that
@@ -1423,8 +1424,7 @@ bullets.)
   none) and asks the device otherwise. Upstream checked it with ftrace in a VM (`quattro` opened the
   capture node twice per call, #15910 zero times, same answers); `screenrecording-test.sh`,
   `menu-test.sh`, `menu-guards-test.sh`, `menu-guard-budget-test.sh` and `./test/cli` pass. It
-  notes an interaction with omacom/omarchy#15616 (udev's record doesn't carry I/O MC). Omarchy's
-  review bot had two models disagree on bug fix versus enhancement; it waits on the maintainer.
+  notes an interaction with omacom/omarchy#15616 (udev's record doesn't carry I/O MC).
 - **Refreshed on RC (#330):** RC carries #15910's fixes, so the loopback bug above and the yes for
   a camera the user can't open are gone there. Quattro (frozen) still ships both until it moves to
   the 4.5 recipes.
