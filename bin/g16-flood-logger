@@ -1,0 +1,174 @@
+#!/bin/bash
+# g16-flood-logger: what the G16 was doing in the seconds before a data fabric sync
+# flood reset (#397). EXPERIMENTAL.
+#
+#   g16-flood-logger watch [--hours N] [--interval S]
+#                       append one line every S seconds (default 5, 1-60) for N hours
+#                       (default 48, at most 96) to a file per boot, flushed to disk
+#                       after each line, so the last line survives the reset
+#   g16-flood-logger report [--boot B]
+#                       the reset reason boot B+1 logged (default B=-1, the last boot),
+#                       and boot B's last 12 lines plus every line where the RTX's
+#                       power state, the PCIe error counters or the outputs changed
+#
+# A sync flood resets the SoC at once: the journal keeps nothing of the last
+# seconds, and the G16's firmware leaves no MCA, BERT or pstore record. The
+# 2026-11-03 reset came at an idle desktop with the RTX driving HDMI, so each
+# line holds what could tell the suspects apart: the RTX's runtime PM and PCI
+# power state and whether NVIDIA has its video memory on, PCIe AER error counts on every device, the outputs,
+# AC and battery power, Tctl, the iGPU's temperature and power, load and free
+# memory, and the suspend/hibernate count.
+#
+# Read-only, no root, wakes nothing: runtime_status, the AER counters, the
+# connector status and the hwmon files are sysfs reads of state the kernel
+# already holds (connector status is the driver's cached value, no re-probe);
+# NVIDIA's state comes from /proc/driver/nvidia, never nvidia-smi; the RTX's own
+# hwmon and its backlight node are never read (they wake it). No window, no sound.
+#
+# Files: ~/.local/state/omarchy-asus/flood/<boot id>.log
+# Exit status: 0 done, 1 a problem, 2 bad usage.
+set -uo pipefail
+
+SYS=${G16_FLOOD_SYS:-/sys}     # the overrides are for tests only
+PROC=${G16_FLOOD_PROC:-/proc}
+STATE=${G16_FLOOD_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-asus/flood}
+JOURNALCTL=${G16_FLOOD_JOURNALCTL:-journalctl}
+
+die() { echo "g16-flood-logger: $*" >&2; exit 1; }
+usage() { echo "g16-flood-logger: $* (see --help)" >&2; exit 2; }
+
+boot_id() { tr -d - <"$PROC/sys/kernel/random/boot_id"; }
+
+rtx_dev() {
+  local d
+  for d in "$SYS"/bus/pci/devices/*; do
+    [[ $(cat "$d/vendor" 2>/dev/null) == 0x10de && $(cat "$d/class" 2>/dev/null) == 0x03* ]] && { echo "$d"; return 0; }
+  done
+  return 1
+}
+
+hwmon() {  # name file -> value, or -
+  local h
+  for h in "$SYS"/class/hwmon/hwmon*; do
+    [[ $(cat "$h/name" 2>/dev/null) == "$1" ]] || continue
+    cat "$h/$2" 2>/dev/null && return 0
+  done
+  echo -
+}
+
+aer_total() {  # cor/nonfatal/fatal totals over every device
+  local kind f n sum out=""
+  for kind in correctable nonfatal fatal; do
+    sum=0
+    for f in "$SYS"/bus/pci/devices/*/aer_dev_"$kind"; do
+      [[ -r $f ]] || continue
+      n=$(awk '/^TOTAL_ERR/ {print $2}' "$f" 2>/dev/null)
+      sum=$((sum + ${n:-0}))
+    done
+    out+="${out:+/}$sum"
+  done
+  echo "$out"
+}
+
+outputs() {  # connected connectors, e.g. eDP-2,HDMI-A-1
+  local c out=""
+  for c in "$SYS"/class/drm/card*-*; do
+    [[ $(cat "$c/status" 2>/dev/null) == connected ]] && out+="${out:+,}${c##*/card[0-9]-}"
+  done
+  echo "${out:--}"
+}
+
+ac_online() {
+  local p
+  for p in "$SYS"/class/power_supply/*; do
+    [[ $(cat "$p/type" 2>/dev/null) == Mains ]] && { cat "$p/online" 2>/dev/null; return; }
+  done
+  echo -
+}
+
+bat_mw() {
+  local p i v
+  for p in "$SYS"/class/power_supply/BAT*; do
+    [[ -r $p/current_now && -r $p/voltage_now ]] || continue
+    i=$(cat "$p/current_now") v=$(cat "$p/voltage_now")
+    echo $((i * v / 1000000000)); return
+  done
+  echo -
+}
+
+line() {
+  local rtx rs="-" ps="-" nvp="-" g
+  if rtx=$(rtx_dev); then
+    rs=$(cat "$rtx/power/runtime_status" 2>/dev/null || echo -)
+    ps=$(cat "$rtx/power_state" 2>/dev/null || echo -)
+    g=$PROC/driver/nvidia/gpus/${rtx##*/}/power
+    [[ -r $g ]] && nvp=$(awk -F': *' '/^Video Memory:/ {print $2; exit}' "$g")
+  fi
+  local tctl edge ppt
+  tctl=$(hwmon k10temp temp1_input) edge=$(hwmon amdgpu temp1_input) ppt=$(hwmon amdgpu power1_average)
+  [[ $ppt == - ]] && ppt=$(hwmon amdgpu power1_input)
+  local load mem susp
+  load=$(cut -d' ' -f1 "$PROC/loadavg")
+  mem=$(awk '/^MemAvailable/ {print int($2 / 1024)}' "$PROC/meminfo")
+  susp=$(cat "$SYS/power/suspend_stats/success" 2>/dev/null || echo -)
+  printf '%s rtx=%s/%s vram=%s aer=%s out=%s ac=%s bat_mw=%s tctl=%s igpu_t=%s igpu_uw=%s load=%s mem_mb=%s sleeps=%s\n' \
+    "$(date +%FT%T)" "$rs" "$ps" "${nvp:--}" "$(aer_total)" "$(outputs)" "$(ac_online)" "$(bat_mw)" \
+    "$tctl" "$edge" "$ppt" "$load" "$mem" "$susp"
+}
+
+cmd_watch() {
+  local hours=48 interval=5
+  while (($#)); do
+    case $1 in
+      --hours) hours=${2:-}; shift 2 || usage "--hours needs a value" ;;
+      --interval) interval=${2:-}; shift 2 || usage "--interval needs a value" ;;
+      *) usage "unknown watch option $1" ;;
+    esac
+  done
+  [[ $hours =~ ^[0-9]+$ ]] && ((hours >= 1 && hours <= 96)) || usage "--hours must be 1-96"
+  [[ $interval =~ ^[0-9]+$ ]] && ((interval >= 1 && interval <= 60)) || usage "--interval must be 1-60"
+  mkdir -p "$STATE" || die "cannot create $STATE"
+  local f end
+  f=$STATE/$(boot_id).log
+  end=$(($(date +%s) + hours * 3600))
+  echo "# g16-flood-logger watch, every ${interval}s until $(date -d "@$end" +%FT%T)" >>"$f"
+  while (($(date +%s) < end)); do
+    line >>"$f"
+    sync "$f" 2>/dev/null   # fsync this file only
+    sleep "$interval"
+  done
+}
+
+cmd_report() {
+  local b=-1
+  while (($#)); do
+    case $1 in
+      --boot) b=${2:-}; shift 2 || usage "--boot needs a value" ;;
+      *) usage "unknown report option $1" ;;
+    esac
+  done
+  [[ $b =~ ^-[0-9]+$ ]] || usage "--boot must be negative, e.g. -1"
+  local id next reason f
+  id=$("$JOURNALCTL" --list-boots --no-pager -o json 2>/dev/null |
+    python3 -Ic 'import json,sys
+b=int(sys.argv[1])
+for e in json.load(sys.stdin):
+    if e["index"]==b: print(e["boot_id"])' "$b")
+  [[ -n $id ]] || die "no boot $b in the journal"
+  next=$((b + 1))
+  reason=$("$JOURNALCTL" -b "$next" -k --no-pager -o cat 2>/dev/null | grep -m1 'reset reason' | sed 's/.*reset reason //')
+  echo "boot $b ($id); the next boot's reset reason: ${reason:-none logged}"
+  f=$STATE/$id.log
+  [[ -r $f ]] || { echo "no log for that boot in $STATE"; return 0; }
+  echo "-- changes of rtx/vram/aer/out:"
+  awk '!/^#/ {k=$2" "$3" "$4" "$5; if (k != prev) print; prev=k}' "$f" | tail -20
+  echo "-- last 12 lines:"
+  grep -v '^#' "$f" | tail -12
+}
+
+case ${1:-} in
+  watch) shift; cmd_watch "$@" ;;
+  report) shift; cmd_report "$@" ;;
+  -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//' ;;
+  *) usage "say watch or report" ;;
+esac

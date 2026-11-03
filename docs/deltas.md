@@ -2095,29 +2095,34 @@ request once it is built and tested. Not filed; a human decides.
 - **Component:** `omarchy-asus-g16`, `/usr/share/limine-entry-tool.d/omarchy-asus-g16-pm-async.conf`
   (rebuilt into the Limine entries by the same `95-omarchy-asus-g16-limine.hook`). RC only (since
   1.0.0-106).
-- **Fixes:** on the G16's Krackan APU, restoring a hibernation image can stop the SoC on an
-  uncorrected data fabric error. The machine resets, the session is lost, and the next boot logs
-  `Previous system reset reason [0x08000800]: an uncorrected error caused a data fabric sync flood
-  event`. The G16 did this on 2026-10-19 (linux-omarchy 7.2.8-9.3) and 2026-10-22 (stock
-  7.2.8-9, no `rcu_nocbs`), each on the restore after `systemctl hibernate`: the old boot's
-  journal ends at `PM: hibernation: hibernation entry`, and the next boot starts 1.5-5 min later,
-  the time to write the image, power off, power on and start the restore. That is 2 of the 40
-  hibernations since 2026-10-17. A Framework 13 with the same APU (Framework community thread
-  83040, "Hibernate resume failures on Framework 13 AMD (Ryzen AI 300 / Krackan)") logs the same
-  reset reason on about one restore in seven, and none with `pm_async` off. `pm_async=off`
-  resumes devices one at a time; the boot kernel reads it from the command line and the restored
-  kernel inherits it from the image. Bug: #397.
+- **Fixes (aims to; unconfirmed):** the G16 reset itself twice around a hibernate restore. The next
+  boot logged `Previous system reset reason [0x08000800]: an uncorrected error caused a data fabric
+  sync flood event`. That names the mechanism (the data fabric met an error it couldn't contain and
+  reset the SoC), not the component that raised the error. It happened on 2026-10-19
+  (linux-omarchy 7.2.8-9.3) and 2026-10-22 (stock 7.2.8-9, no `rcu_nocbs`). Each old boot's journal
+  ends at `PM: hibernation: hibernation entry` (userspace is frozen from there on, so nothing later
+  can be logged), and the next boot starts 1 min 41 s and 5 min later. A clean cycle that evening
+  took 71 s from entry to exit, and the 2026-11-03 immediate reset rebooted 45 s after its last log
+  line. So the timing fits a reset during the restore and doesn't fit one at entry, but it doesn't
+  prove the image finished writing. That is 2 of the 40 hibernations since 2026-10-17. A Framework
+  13 with the same APU (Framework community thread 83040, "Hibernate resume failures on Framework
+  13 AMD (Ryzen AI 300 / Krackan)") logs the same reset reason on about one restore in seven, and
+  none in about a dozen with `pm_async` off. `pm_async=off` resumes devices one at a time: the boot
+  kernel reads it from the command line, and the restored kernel inherits it from the image. Bug:
+  #397.
 - **Test:** `cat /sys/power/pm_async` prints `0`; a `systemctl hibernate` restores into the
   session; over normal use, no boot logs the sync-flood reset reason after a restore
   (`journalctl -k -b | grep "reset reason"`).
 - **Upstream: not submitted.** No fix upstream. omacom/omarchy#14058 (open) collects Krackan
   hibernate-restore failures on other laptops; Omarchy's triage there leaves a workaround to the
   maintainer until one is shown to work. Omarchy already sets `pm_async=off` for T2 MacBooks
-  (`install/hardware/apple/fix-t2.sh`). The fault itself is below the kernel (AMD firmware).
-- **Drop when:** an AMD firmware or kernel release stops the restore sync flood with `pm_async`
+  (`install/hardware/apple/fix-t2.sh`). Which component raises the uncorrected error (firmware, a
+  device, the memory controller, a driver's DMA) isn't known; nothing on the G16 records it.
+- **Drop when:** a firmware or kernel release stops the restore sync flood with `pm_async`
   on, or sync floods come back with it off (then it does nothing and goes).
 - **Not covered:** the 2026-11-03 sync flood came at an idle desktop with no hibernate in
-  progress (one restore three hours earlier); #397 tracks whether it recurs.
+  progress (one restore three hours earlier), with the RTX awake and driving HDMI. Its cause is
+  open on #397; `bin/g16-flood-logger` records the state before the next one.
 
 #### Upstream report draft
 

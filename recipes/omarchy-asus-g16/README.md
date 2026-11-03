@@ -177,17 +177,19 @@ or if the A/B shows no saving.
 
 **EXPERIMENTAL.** Waits on a G16 test and on weeks of normal hibernates.
 
-**Fixes:** restoring a hibernation image can reset the whole machine. The
-G16's Krackan APU (Ryzen AI 7 350) stops on an uncorrected data fabric error
-("sync flood"), the session is lost, and the next boot logs
-`Previous system reset reason [0x08000800]: an uncorrected error caused a data
-fabric sync flood event`. It happened on 2026-10-19 and 2026-10-22, both times
-on the restore after `systemctl hibernate`, once on stock `linux-omarchy
-7.2.8-9` without any of our kernel patches or `rcu_nocbs=all`. 2 of the 40
-hibernations since 2026-10-17 ended this way. A Framework 13 with the same APU
-reports the same reset reason on about one restore in seven, and none in a
-dozen restores with `pm_async` off; turning it back on reset the machine on the
-first restore.
+**Fixes (aims to; unconfirmed):** restoring a hibernation image can reset the
+whole machine. The session is lost, and the next boot logs `Previous system
+reset reason [0x08000800]: an uncorrected error caused a data fabric sync flood
+event`: the data fabric met an error it couldn't contain. The reason names that
+mechanism, not which component raised the error. It happened on 2026-10-19 and
+2026-10-22, once on stock `linux-omarchy 7.2.8-9` without any of our kernel
+patches or `rcu_nocbs=all`. Both times the journal ends at hibernation entry and
+the next boot comes 1.5-5 minutes later. That timing fits a reset during the
+restore, not at entry, but it doesn't prove the image finished writing. 2 of the
+40 hibernations since 2026-10-17 ended this way. A Framework 13 with the same
+APU (Ryzen AI 7 350) reports the same reset reason on about one restore in
+seven, and none in about a dozen restores with `pm_async` off; turning it back
+on reset the machine on the first restore.
 
 `pm_async=off` makes the kernel suspend and resume devices one at a time
 instead of in parallel. The kernel that boots to load the image reads it from
@@ -208,10 +210,10 @@ hibernate, `journalctl -k -b | grep "reset reason"` shows no sync flood.
 because devices no longer resume in parallel.
 
 **Upstream:** no fix. omacom/omarchy#14058 collects Krackan hibernate-restore
-failures and leaves a workaround to the maintainer until one is shown to work;
-the AMD fault itself sits below the kernel (firmware/AGESA).
+failures and leaves a workaround to the maintainer until one is shown to work.
+Which component raises the error isn't known; nothing on the G16 records it.
 
-**When to remove:** when an AMD firmware or kernel release stops the restore
+**When to remove:** when a firmware or kernel release stops the restore
 sync flood with `pm_async` on, or if sync floods come back with it off.
 
 ## Wi-Fi stays down after a wake
