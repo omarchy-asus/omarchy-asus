@@ -1,38 +1,34 @@
 drm/amd/display: display power backports for the GA605 OLED eDP (dev build)
 
-Three backports, combined (default behaviour unchanged unless noted):
-  1. disable self-refresh on tearing flips (upstream 2e54a92e0136; also in
-     7.2.11 stable, drop once the base is >= 7.2.11)
-  2. tear down a dangling pipe on boot to fix s0i3 (mainline 98e08a815ef6)
-  3. CACP for OLED eDP, hand-ported from 7b0cc3085216: adds
+Two backports, combined (default behaviour unchanged unless noted):
+  1. tear down a dangling pipe on boot to fix s0i3 (mainline 98e08a815ef6)
+  2. CACP for OLED eDP, hand-ported from 7b0cc3085216: adds
      card*-eDP-1/amdgpu/panel_power_savings (0-4), boots at 0 (off). Nothing in
      this package changes that level.
 
-Compile-tested only (amdgpu objects, 0 warnings); not booted yet. Not for
-upstream submission.
+The third backport this patch used to carry (disable self-refresh on tearing
+flips, upstream 2e54a92e0136) is in 7.2.11 stable (04ee82fec489) and so in
+the 7.2.15 base; it was dropped when the recipe moved to 7.2.15.
+
+Not for upstream submission.
 
 ---
-amdgpu display power backports from 7.3 / amd-staging-drm-next for linux-omarchy 7.2.8
+amdgpu display power backports from 7.3 for linux-omarchy 7.2.15
 
-Applies with `patch -Np1 --fuzz=0` after 0480 (or anywhere after the amd
-display patches 0450-0480). Contents, in order:
+Applies with `patch -Np1 --fuzz=0` after the amd display patches (0450-0481).
+Contents, in order:
 
-1. drm/amd/display: disable self-refresh on tearing flips
-   stable 7.2.11 04ee82fec489 (upstream 2e54a92e0136, staging 667ef5fff9)
-2. drm/amd/display: Tear down dangling pipe on boot to fix s0i3
+1. drm/amd/display: Tear down dangling pipe on boot to fix s0i3
    upstream 98e08a815ef6 (v7.3-rc1; staging 73fcabe89f86), context-only backport
-3. drm/amd/display: Enable CACP on Linux
+2. drm/amd/display: Enable CACP on Linux
    upstream 7b0cc3085216 (v7.3-rc1), hunks for amdgpu_dm_backlight.c and
    amdgpu_dm_connector.c ported to amdgpu_dm.c; dmub_flush_buffer_mem() kept
 
-Individual git-format patches with full commit messages are next to this file.
-Compile-tested (amdgpu objects, gcc 16.2.1, running 7.2.8-9-omarchy config).
-
 diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
-index cc779e3e01..b1a7903196 100644
+index 3a58a8f4fa..0b228b6003 100644
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 +++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
-@@ -2272,6 +2272,14 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
+@@ -2275,6 +2275,14 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
  
  	dc_hardware_init(adev->dm.dc);
  
@@ -47,7 +43,7 @@ index cc779e3e01..b1a7903196 100644
  	adev->dm.hpd_rx_offload_wq = hpd_rx_irq_create_workqueue(adev);
  	if (!adev->dm.hpd_rx_offload_wq) {
  		drm_err(adev_to_drm(adev), "failed to create hpd rx offload workqueue.\n");
-@@ -4086,26 +4094,25 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
+@@ -4094,26 +4102,25 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
  	struct drm_display_info *display_info = &connector->display_info;
  	struct dc_link *link = aconnector->dc_link;
  	struct amdgpu_device *adev;
@@ -80,7 +76,7 @@ index cc779e3e01..b1a7903196 100644
  	}
  
  	/*
-@@ -4114,7 +4121,7 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
+@@ -4122,7 +4129,7 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
  	 * support in DC and EDID parser to be able to use it here.
  	 */
  
@@ -89,7 +85,7 @@ index cc779e3e01..b1a7903196 100644
  		struct drm_amd_vsdb_info *vsdb = &display_info->amd_vsdb;
  		u32 lum1_max = vsdb->luminance_range1.max_luminance;
  		u32 lum2_max = vsdb->luminance_range2.max_luminance;
-@@ -4123,9 +4130,14 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
+@@ -4131,9 +4138,14 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
  		    link->local_sink->edid_caps.manufacturer_id ==
  		    DDC_MANUFACTURERNAME_SAMSUNG &&
  		    lum1_max >= ((lum2_max * 3) / 2))
@@ -105,7 +101,7 @@ index cc779e3e01..b1a7903196 100644
  	if (link->panel_type == PANEL_TYPE_OLED)
  		drm_object_property_set_value(&connector->base,
  		    adev_to_drm(adev)->mode_config.panel_type_property,
-@@ -4138,6 +4150,32 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
+@@ -4146,6 +4158,32 @@ static void dm_set_panel_type(struct amdgpu_dm_connector *aconnector)
  	drm_dbg_kms(aconnector->base.dev, "Panel type: %d\n", link->panel_type);
  }
  
@@ -138,7 +134,7 @@ index cc779e3e01..b1a7903196 100644
  static void update_connector_ext_caps(struct amdgpu_dm_connector *aconnector)
  {
  	const struct drm_panel_backlight_quirk *panel_backlight_quirk;
-@@ -4340,6 +4378,7 @@ void amdgpu_dm_update_connector_after_detect(
+@@ -4348,6 +4386,7 @@ void amdgpu_dm_update_connector_after_detect(
  		amdgpu_dm_update_freesync_caps(connector, aconnector->drm_edid, true);
  		update_connector_ext_caps(aconnector);
  		dm_set_panel_type(aconnector);
@@ -146,7 +142,7 @@ index cc779e3e01..b1a7903196 100644
  	} else {
  		hdmi_cec_unset_edid(aconnector);
  		drm_dp_cec_unset_edid(&aconnector->dm_dp_aux.aux);
-@@ -5687,7 +5726,6 @@ static int initialize_plane(struct amdgpu_display_manager *dm,
+@@ -5760,7 +5799,6 @@ static int initialize_plane(struct amdgpu_display_manager *dm,
  static void setup_backlight_device(struct amdgpu_display_manager *dm,
  				   struct amdgpu_dm_connector *aconnector)
  {
@@ -154,7 +150,7 @@ index cc779e3e01..b1a7903196 100644
  	struct dc_link *link = aconnector->dc_link;
  	int bl_idx = dm->num_of_edps;
  
-@@ -5707,10 +5745,12 @@ static void setup_backlight_device(struct amdgpu_display_manager *dm,
+@@ -5780,10 +5818,12 @@ static void setup_backlight_device(struct amdgpu_display_manager *dm,
  	dm->num_of_edps++;
  
  	update_connector_ext_caps(aconnector);
@@ -170,7 +166,7 @@ index cc779e3e01..b1a7903196 100644
  		drm_object_attach_property(&aconnector->base.base,
  					   dm->adev->mode_info.abm_level_property,
  					   ABM_SYSFS_CONTROL);
-@@ -8170,22 +8210,16 @@ static const struct attribute_group amdgpu_group = {
+@@ -8248,22 +8288,16 @@ static const struct attribute_group amdgpu_group = {
  static bool
  amdgpu_dm_should_create_sysfs(struct amdgpu_dm_connector *amdgpu_dm_connector)
  {
@@ -197,39 +193,6 @@ index cc779e3e01..b1a7903196 100644
  
  	return true;
  }
-@@ -10382,6 +10416,13 @@ static void amdgpu_dm_enable_self_refresh(struct amdgpu_display_manager *dm,
- 	struct amdgpu_dm_connector *aconn =
- 		(struct amdgpu_dm_connector *)acrtc_state->stream->dm_stream_context;
- 
-+	if (!acrtc_state->base.async_flip) {
-+		amdgpu_dm_psr_set_event(dm, acrtc_state->stream, false,
-+			psr_event_immediate_flip, false);
-+		amdgpu_dm_replay_set_event(dm, acrtc_state->stream, false,
-+			replay_event_immediate_flip, false);
-+	}
-+
- 	/* Decrement skip count when SR is enabled and we're doing fast updates. */
- 	if (acrtc_state->update_type == UPDATE_TYPE_FAST &&
- 	    (psr->psr_feature_enabled || pr->replay_feature_enabled)) {
-@@ -10798,6 +10839,18 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
- 			spin_unlock_irqrestore(&pcrtc->dev->event_lock, flags);
- 		}
- 		mutex_lock(&dm->dc_lock);
-+		/*
-+		 * Tearing (immediate) flips cannot work with panel self-refresh
-+		 * features. The event is cleared by
-+		 * amdgpu_dm_enable_self_refresh() once async flips stop.
-+		 */
-+		if (immediate_flip) {
-+			dc_exit_ips_for_hw_access(dm->dc);
-+			amdgpu_dm_psr_set_event(dm, acrtc_state->stream, true,
-+				psr_event_immediate_flip, true);
-+			amdgpu_dm_replay_set_event(dm, acrtc_state->stream, true,
-+				replay_event_immediate_flip, true);
-+		}
- 		update_planes_and_stream_adapter(dm->dc,
- 					 acrtc_state->update_type,
- 					 planes_count,
 diff --git a/drivers/gpu/drm/amd/display/dc/core/dc.c b/drivers/gpu/drm/amd/display/dc/core/dc.c
 index ebfed18e78..0f4663db2f 100644
 --- a/drivers/gpu/drm/amd/display/dc/core/dc.c
@@ -351,7 +314,7 @@ index ebfed18e78..0f4663db2f 100644
  {
  	if (dc->ctx->dce_environment != DCE_ENV_VIRTUAL_HW &&
 diff --git a/drivers/gpu/drm/amd/display/dc/dc.h b/drivers/gpu/drm/amd/display/dc/dc.h
-index 1dc85f6b66..8b544775dd 100644
+index 79184384cd..6708e080c2 100644
 --- a/drivers/gpu/drm/amd/display/dc/dc.h
 +++ b/drivers/gpu/drm/amd/display/dc/dc.h
 @@ -633,6 +633,7 @@ enum visual_confirm {
@@ -362,7 +325,7 @@ index 1dc85f6b66..8b544775dd 100644
  	VISUAL_CONFIRM_MCLK_SWITCH = 16,
  	VISUAL_CONFIRM_FAMS2 = 19,
  	VISUAL_CONFIRM_HW_CURSOR = 20,
-@@ -2898,6 +2899,8 @@ void dc_resume(struct dc *dc);
+@@ -2899,6 +2900,8 @@ void dc_resume(struct dc *dc);
  
  void dc_power_down_on_boot(struct dc *dc);
  
