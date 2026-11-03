@@ -8,7 +8,7 @@
 # prepare() doesn't cd into the source, hence the "omarchy" directory argument.
 upstream omarchy-pkgs pkgbuilds/omarchy
 mode overlay
-keep NOTES.md
+keep NOTES.md UPSTREAM_PRS
 # Pin omarchy-settings to pkgver-pkgrel, so stock's omarchy-settings of the same pkgver can't
 # satisfy the patched omarchy (#83).
 pkgbuild-patch pkgbuild-pin-settings-release.diff

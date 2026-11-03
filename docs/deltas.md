@@ -25,7 +25,7 @@ means only `rc-x86_64` does. Versions below are what each release serves, as of 
 
 **What the daily check watches.** `bin/check-upstream` reads `recipes/*/UPSTREAM_PRS` (one
 `owner/repo#N` per line) and reports each pull request's state; a merged one needs action. Today
-only `recipes/nvidia-open-dkms/UPSTREAM_PRS` and `recipes/quickshell/UPSTREAM_PRS` exist, so the upstream states of every other entry
+only `recipes/nvidia-open-dkms/UPSTREAM_PRS`, `recipes/quickshell/UPSTREAM_PRS` and `recipes/omarchy{,-settings}/UPSTREAM_PRS` (0028 only) exist, so the upstream states of every other entry
 are kept by hand, here and in the recipe's `NOTES.md`. `recipes/hyprland/DELTA`'s
 `fixed-upstream` line flags the first Hyprland release with a given commit. To have a GitHub pull
 request watched, add it to its recipe's `UPSTREAM_PRS`.
@@ -1752,9 +1752,9 @@ omacom/omarchy, PR against `quattro` from patch 0026. Not opened; a human decide
   lock, close the lid to suspend, open it, type without clicking. Typing works both times.
 - **Upstream: merged-unreleased.** [omacom/omarchy#17277](https://github.com/omacom/omarchy/pull/17277),
   merged into `quattro` on 2026-11-01, 34 minutes before v4.5.0-rc3 was tagged, but not on the
-  4.5 line: not in v4.5.0-rc3, the `rc` branch or `v4-5-0` (checked 2026-11-03). Not in
-  `UPSTREAM_PRS`: it is already merged, and the daily check would flag it every day; the rebase
-  onto a release that contains it fails to apply the patch, which is the signal.
+  4.5 line: not in v4.5.0-rc3, the `rc` branch or `v4-5-0` (checked 2026-11-03). Listed in both
+  recipes' `UPSTREAM_PRS`, so the daily check reports it as merged (needing action) until the
+  patch drops.
 - **Drop when:** an Omarchy 4.5 release we build from contains #17277.
 
 <a id="omarchy-general-0001-floating-redraw"></a>

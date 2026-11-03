@@ -8,7 +8,7 @@
 # prepare() doesn't cd into the source, hence the "omarchy" directory argument.
 upstream omarchy-pkgs pkgbuilds/omarchy-settings
 mode overlay
-keep NOTES.md
+keep NOTES.md UPSTREAM_PRS
 # Ship the fork's charger-swap monitor user unit (0002) in /usr/lib/systemd/user; omarchy-settings
 # installs user units from an explicit list. Upstream: omacom/omarchy-pkgs#1629 (open).
 pkgbuild-patch pkgbuild-source-monitor-unit.diff
