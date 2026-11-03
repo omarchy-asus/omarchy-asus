@@ -5,8 +5,8 @@
 # byte-identical to what the omarchy-asus fork's install leaf and migration
 # write; only the path differs: vendor directories under /usr/lib instead of
 # /etc, with basenames no omarchy package or migration uses, so pacman never
-# meets a file it does not own. The rcu_nocbs drop-in (#229) and the keyboard
-# autosuspend rule (#249, EXPERIMENTAL) are ours alone, as is the touchpad's
+# meets a file it does not own. The rcu_nocbs drop-in (#229), the pm_async=off
+# drop-in (#397) and the keyboard autosuspend rule (#249, EXPERIMENTAL) are ours alone, as is the touchpad's
 # palm detection (#390): a HID-BPF fixup built here, its udev-hid-bpf hwdb
 # match and a libinput quirk.
 # See README.md for what each file fixes and when to remove it.
@@ -14,7 +14,7 @@
 pkgbase=omarchy-asus-g16
 pkgname=omarchy-asus-g16
 pkgver=1.0.0
-pkgrel=105
+pkgrel=106
 pkgdesc='System fixes for the ASUS ROG Zephyrus G16 GA605KM on Omarchy (EXPERIMENTAL)'
 arch=('x86_64')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -33,6 +33,7 @@ source=("https://gitlab.freedesktop.org/libevdev/udev-hid-bpf/-/archive/$_uhbver
         'omarchy-asus-g16-hibernate-mode.conf'
         'nvidia-powerd-20-omarchy-asus.conf'
         'omarchy-asus-g16-rcu-nocbs.conf'
+        'omarchy-asus-g16-pm-async.conf'
         'omarchy-asus-g16-limine.hook'
         'omarchy-asus-g16-mt7925-auth-retries.conf'
         '99-omarchy-asus-g16-keyboard-autosuspend.rules'
@@ -47,11 +48,12 @@ sha256sums=('ad71da0c37a832ae9084e7beb843b90d0718f13cbc5a21efb7a858eedb290eac'
             'b8c50997a4d90145dd403fc5fdeae6cf8e98b71eee80cfbe1b716d6e1fc3e3f6'
             '10bc994e5e8e9eec01fc5ebb4270fba13af672c6d5d0e3b1a63ab6f812517a91'
             '96e5ed436514c68642dc8064f4b7bda61adae2062da04d7bd8003eb94d01fbe9'
+            '649624e937045033c082b7954be4ac87efe38e381c1207643828e22e04a4c1e8'
             'ce84fc6c73c8323a06a9394e1dbc8b82662e55fe2987fff9319f0e12a3279acd'
             '1a425601f082673b4145af86b4848878d44d8eb249584994bac947703767b664'
             '7032e5e4462333109f517bf9a6ef4fe314d1761f3b0afb00b45ed5ac47e27aa5'
-            '8b128d53a94087daae5a0c3d52dc4f6c8048675c037598f88943a2811209c408'
-            'ca0e73c84a97c2d3cd0bcf23869ecdb2b85cdc1d2b774a5832686fea22e3af48'
+            'ad0746aa400b889617739c852501adc59f925e84c9de2cbccbb7d3adf96b9dec'
+            'e7011462cb17c5d64fae4b8156a942a80645213efb2a46786a83578d849b7da5'
             '717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2')
 
 build() {
@@ -64,9 +66,9 @@ build() {
 }
 
 package() {
-  pkgdesc='Touchpad wake, touchpad palm detection, hibernate mode, nvidia-powerd start-limit, rcu_nocbs, Wi-Fi reconnect and keyboard autosuspend fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
+  pkgdesc='Touchpad wake, touchpad palm detection, hibernate mode, nvidia-powerd start-limit, rcu_nocbs, serial device resume (pm_async=off), Wi-Fi reconnect and keyboard autosuspend fixes for the ASUS ROG Zephyrus G16 GA605KM (EXPERIMENTAL)'
   depends=('systemd' 'udev-hid-bpf')
-  optdepends=('limine-mkinitcpio-hook: limine-update, which puts rcu_nocbs=all on the boot entries'
+  optdepends=('limine-mkinitcpio-hook: limine-update, which puts rcu_nocbs=all and pm_async=off on the boot entries'
               'nvidia-utils: provides nvidia-powerd.service'
               'asusctl: asusd starts nvidia-powerd on charger plug-in'
               'networkmanager: reads the mt7925 auth-retries drop-in')
@@ -84,6 +86,9 @@ package() {
   # #229: rcu_nocbs=all on the kernel command line, so lazy RCU takes effect.
   install -Dm644 omarchy-asus-g16-rcu-nocbs.conf \
     "$pkgdir/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf"
+  # #397: pm_async=off, so a hibernation restore resumes devices one at a time.
+  install -Dm644 omarchy-asus-g16-pm-async.conf \
+    "$pkgdir/usr/share/limine-entry-tool.d/omarchy-asus-g16-pm-async.conf"
   install -Dm644 omarchy-asus-g16-limine.hook \
     "$pkgdir/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook"
   # #196: more 4-way handshake tries for the mt7925 before NetworkManager gives up.

@@ -31,6 +31,7 @@ the same check as the fork's gate: `omarchy-hw-asus-rog` plus
 | `omarchy-asus-g16` | `/usr/lib/systemd/sleep.conf.d/omarchy-asus-g16-hibernate-mode.conf` | [hibernate mode](#hibernatemodeshutdown) |
 | `omarchy-asus-g16` | `/usr/lib/systemd/system/nvidia-powerd.service.d/20-omarchy-asus.conf` | [nvidia-powerd start limit](#nvidia-powerd-start-limit) |
 | `omarchy-asus-g16` | `/usr/share/limine-entry-tool.d/omarchy-asus-g16-rcu-nocbs.conf`, `/usr/share/libalpm/hooks/95-omarchy-asus-g16-limine.hook` | [`rcu_nocbs=all`](#rcu_nocbsall) |
+| `omarchy-asus-g16` | `/usr/share/limine-entry-tool.d/omarchy-asus-g16-pm-async.conf` (same alpm hook) | [`pm_async=off`](#pm_asyncoff) (EXPERIMENTAL) |
 | `omarchy-asus-g16` | `/usr/lib/NetworkManager/conf.d/omarchy-asus-g16-mt7925-auth-retries.conf` | [Wi-Fi back after a wake](#wi-fi-stays-down-after-a-wake) |
 | `omarchy-asus-g16` | `/usr/lib/udev/rules.d/99-omarchy-asus-g16-keyboard-autosuspend.rules` | [built-in keyboard autosuspend](#built-in-keyboard-autosuspend) (EXPERIMENTAL) |
 | `omarchy-asus-g16` | `/usr/lib/firmware/hid/bpf/0010-FocalTech__ASUF1209.bpf.o`, `/usr/lib/udev/hwdb.d/81-hid-bpf-omarchy-asus-g16.hwdb`, `/usr/share/libinput/50-omarchy-asus-g16-touchpad.quirks` | [resting palms aren't fingers](#resting-palms-arent-fingers) (EXPERIMENTAL) |
@@ -171,6 +172,49 @@ are in.
 
 **When to remove:** if linux-omarchy turns on `CONFIG_RCU_NOCB_CPU_DEFAULT_ALL`,
 or if the A/B shows no saving.
+
+## `pm_async=off`
+
+**EXPERIMENTAL.** Waits on a G16 test and on weeks of normal hibernates.
+
+**Fixes (aims to; unconfirmed):** restoring a hibernation image can reset the
+whole machine. The session is lost, and the next boot logs `Previous system
+reset reason [0x08000800]: an uncorrected error caused a data fabric sync flood
+event`: the data fabric met an error it couldn't contain. The reason names that
+mechanism, not which component raised the error. It happened on 2026-10-19 and
+2026-10-22, once on stock `linux-omarchy 7.2.8-9` without any of our kernel
+patches or `rcu_nocbs=all`. Both times the journal ends at hibernation entry and
+the next boot comes 1.5-5 minutes later. That timing fits a reset during the
+restore, not at entry, but it doesn't prove the image finished writing. 2 of the
+40 hibernations since 2026-10-17 ended this way. A Framework 13 with the same
+APU (Ryzen AI 7 350) reports the same reset reason on about one restore in
+seven, and none in about a dozen restores with `pm_async` off; turning it back
+on reset the machine on the first restore.
+
+`pm_async=off` makes the kernel suspend and resume devices one at a time
+instead of in parallel. The kernel that boots to load the image reads it from
+the command line, and the image keeps the running kernel's setting, so the
+restored kernel resumes its devices serially too. A runtime
+`/sys/power/pm_async` switch (a tmpfiles rule) would miss the first of those.
+
+The file is a limine-entry-tool drop-in like `rcu_nocbs=all`'s, and the same
+alpm hook and `post_remove` rebuild the Limine entries. It takes effect at the
+next boot. Omarchy sets the same parameter for T2 MacBooks
+(`install/hardware/apple/fix-t2.sh`).
+
+**Check:** `cat /sys/power/pm_async` prints `0`, and
+`grep -o 'pm_async=[^ ]*' /proc/cmdline` prints `pm_async=off`. After each
+hibernate, `journalctl -k -b | grep "reset reason"` shows no sync flood.
+
+**Cost:** suspend, resume, hibernate and restore each take somewhat longer,
+because devices no longer resume in parallel.
+
+**Upstream:** no fix. omacom/omarchy#14058 collects Krackan hibernate-restore
+failures and leaves a workaround to the maintainer until one is shown to work.
+Which component raises the error isn't known; nothing on the G16 records it.
+
+**When to remove:** when a firmware or kernel release stops the restore
+sync flood with `pm_async` on, or if sync floods come back with it off.
 
 ## Wi-Fi stays down after a wake
 
