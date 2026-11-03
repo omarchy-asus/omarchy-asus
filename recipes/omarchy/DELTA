@@ -8,7 +8,7 @@
 # prepare() doesn't cd into the source, hence the "omarchy" directory argument.
 upstream omarchy-pkgs pkgbuilds/omarchy
 mode overlay
-keep NOTES.md
+keep NOTES.md UPSTREAM_PRS
 # Pin omarchy-settings to pkgver-pkgrel, so stock's omarchy-settings of the same pkgver can't
 # satisfy the patched omarchy (#83).
 pkgbuild-patch pkgbuild-pin-settings-release.diff
@@ -39,6 +39,7 @@ patch 0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch prepare om
 patch 0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch prepare omarchy
 patch 0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch prepare omarchy
 patch 0027-Count-only-lockers-under-this-Hyprland-as-holding-it.patch prepare omarchy
+patch 0028-Keep-the-lock-usable-after-an-NVIDIA-suspend-s-VT-sw.patch prepare omarchy
 # General fixes: Omarchy software fixes that don't help the hardware, carried without a
 # separate approval and kept apart from the ASUS patches above (NOTES.md).
 patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy

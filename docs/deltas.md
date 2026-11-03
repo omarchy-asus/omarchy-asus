@@ -25,7 +25,7 @@ means only `rc-x86_64` does. Versions below are what each release serves, as of 
 
 **What the daily check watches.** `bin/check-upstream` reads `recipes/*/UPSTREAM_PRS` (one
 `owner/repo#N` per line) and reports each pull request's state; a merged one needs action. Today
-only `recipes/nvidia-open-dkms/UPSTREAM_PRS` and `recipes/quickshell/UPSTREAM_PRS` exist, so the upstream states of every other entry
+only `recipes/nvidia-open-dkms/UPSTREAM_PRS`, `recipes/quickshell/UPSTREAM_PRS` and `recipes/omarchy{,-settings}/UPSTREAM_PRS` (0028 only) exist, so the upstream states of every other entry
 are kept by hand, here and in the recipe's `NOTES.md`. `recipes/hyprland/DELTA`'s
 `fixed-upstream` line flags the first Hyprland release with a given commit. To have a GitHub pull
 request watched, add it to its recipe's `UPSTREAM_PRS`.
@@ -81,6 +81,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [stranded lock recovered while voxtype runs](#omarchy-0024-stranded-lock) | omarchy | 0024, 0027 | both (0027 RC only) | open |
 | [G16 Control widget's dead link swapped for the plugin](#omarchy-0025-widget-link) | omarchy | 0025 | RC only | ours-only |
 | [the RTX stays asleep while apps start](#omarchy-0026-rtx-asleep-at-app-start) | omarchy | 0026 | RC only | not submitted |
+| [the lock takes typing after an NVIDIA VT switch](#omarchy-0028-lock-focus-after-vt-switch) | omarchy | 0028 | RC only | merged-unreleased |
 | [floating mode waits for the app's redraw](#omarchy-general-0001-floating-redraw) | omarchy | general-0001 | RC only | not submitted |
 | [the sleep lock's monitor survives suspends](#omarchy-general-0002-sleep-monitor) | omarchy | general-0002 | RC only | not submitted |
 | [app library rescans only on real changes](#omarchy-general-0004-app-library) | omarchy | general-0004 | RC only | open |
@@ -847,7 +848,11 @@ Once neither patch is left, `bin/unpublish hyprland hyprpm` and delete the recip
   dropped, because `m_pressed` isn't cleared when keyboards are destroyed) is a different bug in
   the same path.
 - **Drop when:** a Hyprland release sends leave before dropping a capability, and lock, suspend,
-  resume, type works without the patch.
+  resume, type works without the patch. Omarchy's own lock focus fix
+  ([0028](#omarchy-0028-lock-focus-after-vt-switch), omacom/omarchy#17277) doesn't retire it: that
+  fixes only the lock screen, and this patch also re-activates other Qt windows (#393). On
+  2026-11-03 this patch alone did not cover a locked resume from hibernate (a VT switch); 0028
+  does.
 
 #### Upstream report draft
 
@@ -897,7 +902,7 @@ For a human to post as a hyprwm/Hyprland Discussion.
 
 ## Omarchy: omarchy and omarchy-settings
 
-RC 4.5.0rc2-1.101 (`main`, from fork branch `asus/v4-5-0-rc2`), Quattro 4.0.6-1.3 (from
+RC 4.5.0rc3-1.102 (`main`, from fork branch `asus/v4-5-0-rc2`), Quattro 4.0.6-1.3 (from
 `asus/v4-0-5`). Both packages build from the same source tree and carry the **same** patch list
 (their `DELTA` files stay in lockstep, and they publish as one cohort). Their migrations apply the
 fixes that live in user config or `/etc` on `omarchy update`, and leave fixes made by hand alone.
@@ -1719,6 +1724,38 @@ omacom/omarchy, PR against `quattro` from patch 0026. Not opened; a human decide
 > and `app-search-test.sh` are extended.
 >
 > This pull request was written with Claude Code.
+
+<a id="omarchy-0028-lock-focus-after-vt-switch"></a>
+### The lock takes typing after an NVIDIA VT switch (0028)
+
+- **Component:** `omarchy`/`omarchy-settings`, patch 0028 (`shell/plugins/lock/LockView.qml`,
+  `shell/plugins/lock/Service.qml`). RC only (since 4.5.0rc3-1.102). Upstream's squash merge
+  `1843592f21` "Keep the lock usable after an NVIDIA suspend's VT switch" on omacom's `quattro`,
+  taken as is with its author and message: fork commit `ad050862` on `asus/v4-5-0-rc2`.
+- **Fixes:** the NVIDIA driver forces a VT switch around every suspend and resume
+  (`pm_vt_switch_required` in nvidia-drm), so Hyprland drops the seat and every input device goes
+  away and comes back. Qt clears the lock window's focus item when the keyboard goes, and nothing
+  set it back, so typing went nowhere until the password field was clicked. `LockView.qml` now
+  gives the field its focus back whenever the window's focus item changes while the field should
+  take keys (not while a password is being checked). `Service.qml` makes the first blank
+  countdown after a resume 15 s instead of 5 s, so the lock doesn't go dark just as the panel
+  lights after the modeset.
+- **Why with the Hyprland patch:** [the seat-leave patch](#hyprland-seat-leave) fixes the
+  suspend path at the compositor and every Qt window, but on 2026-11-03 the G16 (omarchy
+  4.5.0rc3-1.101, hyprland 0.56.2-4.103) still had the lock ignore typing until clicked after a
+  locked suspend-then-hibernate that resumed from disk. Hyprland's log showed it had lost DRM
+  master (`atomic drm request: failed to commit: Permission denied`), the VT-switch path this
+  fix is for. Both are carried: this one for the lock, the Hyprland patch for other windows
+  (trade-offs in #393).
+- **Test:** headless, a VT round trip while locked, then type the password without the mouse.
+  On the G16: lock, hibernate (resume from disk), type the password without clicking; then
+  lock, close the lid to suspend, open it, type without clicking. Typing works both times.
+- **Upstream: merged-unreleased.** [omacom/omarchy#17277](https://github.com/omacom/omarchy/pull/17277),
+  merged into `quattro` on 2026-11-01, 34 minutes before v4.5.0-rc3 was tagged, but not on the
+  4.5 line: not in v4.5.0-rc3, the `rc` branch or `v4-5-0` (checked 2026-11-03). Listed in both
+  recipes' `UPSTREAM_PRS`, so the daily check reports it as merged (needing action) until the
+  patch drops.
+- **Drop when:** an Omarchy 4.5 release we build from contains #17277.
 
 <a id="omarchy-general-0001-floating-redraw"></a>
 ### Floating mode waits for the app's redraw (general-0001)
