@@ -93,6 +93,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [HibernateMode=shutdown](#g16-hibernate-mode) | omarchy-asus-g16 | sleep.conf.d drop-in | both | not submitted |
 | [nvidia-powerd start limit](#g16-nvidia-powerd-start-limit) | omarchy-asus-g16 | unit drop-in | both | not submitted |
 | [rcu_nocbs=all](#g16-rcu-nocbs) | omarchy-asus-g16 | limine-entry-tool drop-in | RC only | ours-only |
+| [EXPERIMENTAL pm_async=off for the hibernate-restore sync flood](#g16-pm-async) | omarchy-asus-g16 | limine-entry-tool drop-in | RC only | not submitted |
 | [Wi-Fi back after a wake (mt7925)](#g16-mt7925-auth-retries) | omarchy-asus-g16 | NetworkManager drop-in | RC only | not submitted |
 | [EXPERIMENTAL built-in keyboard autosuspend](#g16-keyboard-autosuspend) | omarchy-asus-g16 | udev rule | RC only | ours-only |
 | [EXPERIMENTAL resting palms aren't fingers (ASUF1209)](#g16-touchpad-palm) | omarchy-asus-g16 | HID-BPF fixup, hwdb, libinput quirk | RC only | not submitted |
@@ -2087,6 +2088,47 @@ request once it is built and tested. Not filed; a human decides.
   `CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=y` instead; not proposed until the G16 numbers are in.
 - **Drop when:** linux-omarchy turns on `CONFIG_RCU_NOCB_CPU_DEFAULT_ALL`, or the A/B shows no
   saving.
+
+<a id="g16-pm-async"></a>
+### EXPERIMENTAL pm_async=off for the hibernate-restore sync flood
+
+- **Component:** `omarchy-asus-g16`, `/usr/share/limine-entry-tool.d/omarchy-asus-g16-pm-async.conf`
+  (rebuilt into the Limine entries by the same `95-omarchy-asus-g16-limine.hook`). RC only (since
+  1.0.0-106).
+- **Fixes:** on the G16's Krackan APU, restoring a hibernation image can stop the SoC on an
+  uncorrected data fabric error. The machine resets, the session is lost, and the next boot logs
+  `Previous system reset reason [0x08000800]: an uncorrected error caused a data fabric sync flood
+  event`. The G16 did this on 2026-10-19 (linux-omarchy 7.2.8-9.3) and 2026-10-22 (stock
+  7.2.8-9, no `rcu_nocbs`), each on the restore after `systemctl hibernate`: the old boot's
+  journal ends at `PM: hibernation: hibernation entry`, and the next boot starts 1.5-5 min later,
+  the time to write the image, power off, power on and start the restore. That is 2 of the 40
+  hibernations since 2026-10-17. A Framework 13 with the same APU (Framework community thread
+  83040, "Hibernate resume failures on Framework 13 AMD (Ryzen AI 300 / Krackan)") logs the same
+  reset reason on about one restore in seven, and none with `pm_async` off. `pm_async=off`
+  resumes devices one at a time; the boot kernel reads it from the command line and the restored
+  kernel inherits it from the image. Bug: #397.
+- **Test:** `cat /sys/power/pm_async` prints `0`; a `systemctl hibernate` restores into the
+  session; over normal use, no boot logs the sync-flood reset reason after a restore
+  (`journalctl -k -b | grep "reset reason"`).
+- **Upstream: not submitted.** No fix upstream. omacom/omarchy#14058 (open) collects Krackan
+  hibernate-restore failures on other laptops; Omarchy's triage there leaves a workaround to the
+  maintainer until one is shown to work. Omarchy already sets `pm_async=off` for T2 MacBooks
+  (`install/hardware/apple/fix-t2.sh`). The fault itself is below the kernel (AMD firmware).
+- **Drop when:** an AMD firmware or kernel release stops the restore sync flood with `pm_async`
+  on, or sync floods come back with it off (then it does nothing and goes).
+- **Not covered:** the 2026-11-03 sync flood came at an idle desktop with no hibernate in
+  progress (one restore three hours earlier); #397 tracks whether it recurs.
+
+#### Upstream report draft
+
+A comment for omacom/omarchy#14058, once the G16 has run long enough with the setting; a human
+decides whether to post it.
+
+> Another Krackan machine with the sync-flood variant: ASUS ROG Zephyrus G16 GA605KM (Ryzen AI 7
+> 350, Radeon 860M, RTX 5060), `HibernateMode=shutdown`, LUKS swapfile. Two restores in 40 reset
+> with `0x08000800` (data fabric sync flood), one of them on stock `linux-omarchy 7.2.8-9`. With
+> `pm_async=off` on the kernel command line: <N> restores, <M> resets. If it holds, a per-CPU
+> quirk like the T2 one (`fix-t2.sh`) for Krackan hibernation would cover these machines.
 
 <a id="g16-mt7925-auth-retries"></a>
 ### Wi-Fi back after a wake (mt7925)
