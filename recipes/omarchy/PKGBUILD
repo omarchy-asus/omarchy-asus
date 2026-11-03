@@ -13,7 +13,7 @@ pkgname='omarchy'
 _tag='v4.5.0-rc3'
 _commit='8d19ad75ace59af8b6ded52f8b2bec1b15adda7c'
 pkgver=4.5.0rc3
-pkgrel=1.101
+pkgrel=1.102
 pkgdesc='Beautiful, modern, and opinionated Arch Linux by DHH (omarchy-asus build)'
 # The payload is architecture-independent, but the dependency set is not: the
 # boot stack differs per architecture (see depends_x86_64 / depends_aarch64),
@@ -123,6 +123,7 @@ else
         0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch
         0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch
         0027-Count-only-lockers-under-this-Hyprland-as-holding-it.patch
+        0028-Keep-the-lock-usable-after-an-NVIDIA-suspend-s-VT-sw.patch
         general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch
         general-0002-Keep-the-sleep-monitor-running-across-suspends.patch
         general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch)
@@ -153,6 +154,7 @@ else
               '21b75af7231909ce026cf2e4c35333a11cf7af50b9ef91c345c6ef06d0f82b1c'
               '2acb18f575ad44556aa907fc64fdfe421c1cb2adab258b72a600300db9a277e6'
               'cfac1fa948909274c90e1ed7b3f7b08e2eb0dfa1e664e6a852e9262b01122c00'
+              'ff3ee402ff933f66fa81e4006e216987ac8e50b9dbb70375d252578b7a6c48f9'
               '4ebb0e7fc6a36374c7c4f79677b275e5ca0c5be8e19f865ce6f2233a03078b1f'
               '517940a31b8549c5e8fd454a52b74f1b2817b1865bc3b5e978743653b43b1c44'
               '87329ded30f1239736f4428263db391d0f84e0c9a17d99824a10ff0a9aac0e1b')
@@ -190,6 +192,7 @@ prepare() {
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0027-Count-only-lockers-under-this-Hyprland-as-holding-it.patch"
+  patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/0028-Keep-the-lock-usable-after-an-NVIDIA-suspend-s-VT-sw.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0002-Keep-the-sleep-monitor-running-across-suspends.patch"
   patch -d "$srcdir/omarchy" -Np1 -i "$srcdir/general-0004-Rescan-the-app-library-only-when-the-app-list-change.patch"
