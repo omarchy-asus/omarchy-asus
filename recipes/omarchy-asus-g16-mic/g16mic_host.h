@@ -28,10 +28,42 @@ typedef struct {
 	char refuse_reason[32];        /* g16mic_match_result_name(), "wrong-link" or "stream-error"; "" when none */
 	char unavailable_reason[32];   /* why a requested spatial mode fell back (g16mic_cal_status_name); "" when none */
 	uint64_t telemetry_dropped;    /* status records the real-time thread could not queue */
-	uint64_t ring_overflow;        /* samples dropped between capture and the output nodes */
-	uint64_t ring_underflow;       /* samples the output nodes had to zero-fill */
+	uint64_t ring_overflow;        /* every sample lost between capture and the output nodes: queue
+	                                * bound exceeded, oversize cycles, width changes, a stale tail
+	                                * dropped at reconnect, and the drain and source-loss tail losses */
+	uint64_t ring_underflow;       /* samples the output nodes delivered as zeros for want of audio */
+	uint64_t eos_pad;              /* zero samples that completed the last quantum at an end of stream (not a loss) */
 	uint64_t reconnects;           /* times the named source went away while captured */
 	uint64_t wrong_links;          /* times something other than the named source was linked into the capture */
+	int rt_requested;              /* 1 if g16-mic asked PipeWire's module-rt for real-time scheduling */
+	char rt_status[16];            /* "realtime", "not-realtime", "unknown" (no data cycle seen yet) */
+	char rt_policy[16];            /* observed policy of the data thread: fifo, rr, other, batch, idle, unknown */
+	int rt_priority;               /* observed sched_priority */
+	char rt_reason[64];            /* why not real-time; "" when real-time */
+	uint64_t queue_capacity_cycles;  /* per output: the hard bound on queue depth */
+	double queue_bound_ms;         /* max added latency the queue allows */
+	uint64_t queue_max_depth_cycles; /* observed */
+	uint64_t queue_added_frames;   /* added latency now, frames (the larger output's) */
+	double queue_added_ms;         /* the same in ms */
+	uint64_t queue_max_added_frames; /* observed max added latency, frames */
+	double queue_max_added_ms;     /* the same in ms */
+	uint64_t latency_trimmed_frames; /* quiet samples the latency trim withheld to bring added latency back
+	                                  * to the target, both outputs (frames x channels, like ring_overflow);
+	                                  * not a loss, not in ring_overflow; never reset */
+	uint64_t latency_trimmed_cycles; /* the trims: capture cycles withheld (each from both outputs) */
+	uint64_t late_runs;            /* output runs that found more than one cycle queued */
+	uint64_t trigger_refused;      /* output triggers PipeWire refused while a consumer was linked */
+	int trigger_errno;             /* errno of the last refusal, 0 if none */
+	uint64_t graph_missed_processed_frames; /* graph cycles the output's node missed (a graph xrun: */
+	uint64_t graph_missed_raw_frames;       /* the data thread ran late), frames: consumers got
+	                                         * PipeWire's silence for them, the audio stayed queued */
+	uint64_t capture_gap;          /* input frames that never reached the capture (its graph clock jumped);
+	                                * input never seen, not output loss */
+	uint64_t stale_dropped;        /* samples of a previous source dropped at reconnect, never delivered */
+	uint64_t late_link_discarded;  /* backlog discarded when a consumer linked late */
+	uint64_t drain_lost;           /* samples not delivered by the stop drain timeout */
+	uint64_t source_lost_tail;     /* tail samples not delivered after a source loss */
+	uint64_t tail_flushed;         /* engine tail frames flushed into the outputs */
 	long pid;
 } g16mic_status;
 
@@ -42,7 +74,14 @@ const char *g16mic_src_state_name(g16mic_src_state s);  /* "waiting","connected"
  * spatial_reason, omni (calibrated|uncalibrated), degraded (0|1), confidence,
  * doa_az_deg, steer_az_deg, vad, frames_in, frames_out, blocks, fallbacks,
  * mode_switches, refused_switches, nonfinite_samples, limiter_blocks,
- * telemetry_dropped, ring_overflow, ring_underflow, reconnects, wrong_links.
+ * telemetry_dropped, ring_overflow, ring_underflow, reconnects, wrong_links,
+ * rt_requested (0|1), rt_status, rt_policy, rt_priority, rt_reason,
+ * queue_capacity_cycles, queue_bound_ms, queue_max_depth_cycles,
+ * queue_added_frames, queue_added_ms, queue_max_added_frames,
+ * queue_max_added_ms, latency_trimmed_frames, latency_trimmed_cycles, late_runs,
+ * trigger_refused, trigger_errno, graph_missed_processed_frames,
+ * graph_missed_raw_frames, capture_gap, stale_dropped,
+ * late_link_discarded, drain_lost, source_lost_tail, tail_flushed, eos_pad.
  * An empty string value is written as "none". Returns the length written
  * (without the NUL), or -1 if buf is too small (buf then holds a truncated,
  * NUL-terminated prefix when len > 0). */
@@ -70,13 +109,14 @@ typedef struct {
 	const char *calib_path;   /* may be NULL: spatial modes then report "missing" */
 	g16mic_mode mode;
 	float steer_az_deg;
-	double run_seconds;       /* > 0: stop (with the tail flush) after this long */
+	double run_seconds;       /* > 0: stop (with the graceful drain) after this long */
 	const char *status_dir;   /* NULL: g16mic_status_dir() */
 } g16mic_host_config;
 
-/* Runs the daemon until SIGINT/SIGTERM or run_seconds. Returns the process
- * exit code: 0 after a clean stop, 1 on a PipeWire or setup failure, 3 if
- * another g16-mic is already running with the same status dir. */
+/* Runs the daemon until SIGINT/SIGTERM or run_seconds, then drains (bounded)
+ * before tearing down. Returns the process exit code: 0 after a clean stop,
+ * 1 on a PipeWire or setup failure, 3 if another g16-mic is already running
+ * with the same status dir. */
 int g16mic_host_run(const g16mic_host_config *cfg);
 
 #endif /* G16MIC_HOST_H */

@@ -18,10 +18,12 @@ cc = meson.get_compiler('c')
 m = cc.find_library('m')
 threads = dependency('threads')
 fftw = dependency('fftw3f')
-pw = dependency('libpipewire-0.3', version: '>=1.0')
+# >= 1.1: host.c runs its fallback output triggers on the stream's own data
+# loop (pw_stream_get_data_loop, new in 1.1).
+pw = dependency('libpipewire-0.3', version: '>=1.1')
 
 lib = static_library('g16mic',
-  ['rt.c', 'calib.c', 'match.c', 'dsp.c', 'track.c', 'engine.c', 'status.c'],
+  ['rt.c', 'calib.c', 'match.c', 'dsp.c', 'track.c', 'engine.c', 'status.c', 'handoff.c'],
   dependencies: [fftw, m, threads],
 )
 libdep = declare_dependency(link_with: lib, dependencies: [fftw, m, threads])
@@ -45,7 +47,7 @@ test_env = [
   'G16MIC_AEC_NS_CONF=' + (meson.current_source_dir() / 'g16-mic-aec-ns-high.conf'),
 ]
 
-foreach t : ['test_rt', 'test_calib', 'test_match', 'test_beam', 'test_track', 'test_engine', 'test_status']
+foreach t : ['test_rt', 'test_calib', 'test_match', 'test_beam', 'test_track', 'test_engine', 'test_status', 'test_handoff']
   exe = executable(t, t + '.c', dependencies: libdep)
   test(t, exe, timeout: 120, env: test_env)
 endforeach
@@ -56,14 +58,16 @@ endforeach
 # checkdepends=('wireplumber') puts both into the clean chroot, so it runs
 # there, and tests/channel/g16-mic.sh fails if it skipped on a host that has
 # them. The timeout leaves headroom for the steps' setup plus the steady-state
-# step with a source on its own driver (about 25 s of its own).
+# step with a source on its own driver (about 25 s of its own) and steps
+# 10-13 (stop drain, source loss and reconnect, 15 s of contention, overload
+# and recovery: about 70 s together with their fresh g16-mic runs).
 pw_helper_exe = executable('test_pw_helper', 'test_pw_helper.c',
   dependencies: [libdep, pw],
   install: false,
 )
 test('test_pw_live', find_program('bash'),
   args: [files('test_pw_live.sh'), g16mic_exe, pw_helper_exe],
-  timeout: 240,
+  timeout: 420,
   is_parallel: false,
   env: test_env,
 )

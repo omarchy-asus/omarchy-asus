@@ -54,10 +54,11 @@ static const char *or_none(const char *s)
 	return (s && *s) ? s : "none";
 }
 
-/* A non-finite float in the status would read as "nan"; write 0 instead. */
-static double finite_or_zero(float x)
+/* A non-finite value in the status would read as "nan"; write 0 instead.
+ * Takes a double so float and double fields both pass through it. */
+static double finite_or_zero(double x)
 {
-	return isfinite(x) ? (double)x : 0.0;
+	return isfinite(x) ? x : 0.0;
 }
 
 int g16mic_status_format(const g16mic_status *s, char *buf, size_t len)
@@ -97,6 +98,33 @@ int g16mic_status_format(const g16mic_status *s, char *buf, size_t len)
 	bad |= put(buf, len, &off, "ring_underflow=%llu\n", (unsigned long long)s->ring_underflow);
 	bad |= put(buf, len, &off, "reconnects=%llu\n", (unsigned long long)s->reconnects);
 	bad |= put(buf, len, &off, "wrong_links=%llu\n", (unsigned long long)s->wrong_links);
+	bad |= put(buf, len, &off, "rt_requested=%d\n", s->rt_requested ? 1 : 0);
+	bad |= put(buf, len, &off, "rt_status=%s\n", or_none(s->rt_status));
+	bad |= put(buf, len, &off, "rt_policy=%s\n", or_none(s->rt_policy));
+	bad |= put(buf, len, &off, "rt_priority=%d\n", s->rt_priority);
+	bad |= put(buf, len, &off, "rt_reason=%s\n", or_none(s->rt_reason));
+	bad |= put(buf, len, &off, "queue_capacity_cycles=%llu\n", (unsigned long long)s->queue_capacity_cycles);
+	bad |= put(buf, len, &off, "queue_bound_ms=%.1f\n", finite_or_zero(s->queue_bound_ms));
+	bad |= put(buf, len, &off, "queue_max_depth_cycles=%llu\n", (unsigned long long)s->queue_max_depth_cycles);
+	bad |= put(buf, len, &off, "queue_added_frames=%llu\n", (unsigned long long)s->queue_added_frames);
+	bad |= put(buf, len, &off, "queue_added_ms=%.1f\n", finite_or_zero(s->queue_added_ms));
+	bad |= put(buf, len, &off, "queue_max_added_frames=%llu\n", (unsigned long long)s->queue_max_added_frames);
+	bad |= put(buf, len, &off, "queue_max_added_ms=%.1f\n", finite_or_zero(s->queue_max_added_ms));
+	bad |= put(buf, len, &off, "latency_trimmed_frames=%llu\n", (unsigned long long)s->latency_trimmed_frames);
+	bad |= put(buf, len, &off, "latency_trimmed_cycles=%llu\n", (unsigned long long)s->latency_trimmed_cycles);
+	bad |= put(buf, len, &off, "late_runs=%llu\n", (unsigned long long)s->late_runs);
+	bad |= put(buf, len, &off, "trigger_refused=%llu\n", (unsigned long long)s->trigger_refused);
+	bad |= put(buf, len, &off, "trigger_errno=%d\n", s->trigger_errno);
+	bad |= put(buf, len, &off, "graph_missed_processed_frames=%llu\n",
+		   (unsigned long long)s->graph_missed_processed_frames);
+	bad |= put(buf, len, &off, "graph_missed_raw_frames=%llu\n", (unsigned long long)s->graph_missed_raw_frames);
+	bad |= put(buf, len, &off, "capture_gap=%llu\n", (unsigned long long)s->capture_gap);
+	bad |= put(buf, len, &off, "stale_dropped=%llu\n", (unsigned long long)s->stale_dropped);
+	bad |= put(buf, len, &off, "late_link_discarded=%llu\n", (unsigned long long)s->late_link_discarded);
+	bad |= put(buf, len, &off, "drain_lost=%llu\n", (unsigned long long)s->drain_lost);
+	bad |= put(buf, len, &off, "source_lost_tail=%llu\n", (unsigned long long)s->source_lost_tail);
+	bad |= put(buf, len, &off, "tail_flushed=%llu\n", (unsigned long long)s->tail_flushed);
+	bad |= put(buf, len, &off, "eos_pad=%llu\n", (unsigned long long)s->eos_pad);
 	if (bad)
 		return -1;
 	return off > INT_MAX ? -1 : (int)off;

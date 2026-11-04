@@ -4,7 +4,7 @@
  * PIPEWIRE_RUNTIME_DIR name; test_pw_live.sh points them at its private one.
  *
  *   source --name N --channels C [--class Audio/Source] [--props k=v,...]
- *          [--start K] [--driver [--ppm P]] --log FILE
+ *          [--start K] [--driver [--ppm P]] [--quiet] --log FILE
  *       An output stream that looks like a microphone: media.class
  *       Audio/Source (or --class), node.name N, F32 48 kHz, C channels (1:
  *       MONO, 2: FL FR, more: AUX0..), no autoconnect. Frame k carries
@@ -13,6 +13,12 @@
  *       so omni stays linear). k starts at --start (default 0). Every buffer
  *       adds a line "<graph position> <first k> <frames>" to FILE. Runs until
  *       SIGTERM or SIGINT; exits 0.
+ *       --quiet scales the signal by 2^-5 (30 dB down: about -50 dBFS peak),
+ *       the level of quiet speech trailing off, and above g16-mic's
+ *       quiet-only latency trim threshold (G16MIC_HF_TRIM_QUIET_DBFS, -60
+ *       dBFS), so a cycle of it is never trimmed; a power of two keeps every
+ *       value exact and unique, so compare --quiet still matches bit for bit.
+ *       FILE's first line then ends in " quiet=1".
  *       --driver makes it a source on its own clock, like a sound card: the
  *       stream is a driver (PW_STREAM_FLAG_DRIVER, priority.driver 30000,
  *       above the test daemon's dummy driver, and a node.group of its own),
@@ -35,7 +41,9 @@
  *       One line per core, node, port, link, device and metadata object (see
  *       cmd_graph for the format), for the script to assert on without jq.
  *   compare --input-log SRC.log --raw RAW [--processed PROC] --channels C
- *       --latency L [--strict]
+ *       --latency L [--strict] [--quiet] [--last-pos P --last-frames F]
+ *       [--report-gaps] [--expect-gap N [--expect-zero-fill Z]]
+ *       [--old-log OLD.log] [--allow-delays]
  *       Checks tap files against the source's log: RAW must be the input bit
  *       for bit (gaps reported), its end-to-end latency must be exactly L
  *       (host.c processes and delivers each capture cycle in the same graph
@@ -47,6 +55,59 @@
  *       --latency is optional; without it the latency and PROC checks are
  *       skipped (and say so). PASS/FAIL lines; exit 0 if all pass, 1
  *       otherwise.
+ *       --quiet: the source ran with --quiet (the input is sig(k, c) * 2^-5).
+ *       --allow-delays: a graph xrun (a node of the chain ran late, without
+ *       RT under load) may delay the stream, never cut it: PipeWire gives
+ *       the tap a quantum of silence for a cycle g16-mic's output missed, or
+ *       the tap's own node misses a cycle (its graph position jumps), and
+ *       the audio waits in g16-mic's queue. Zero frames between input
+ *       frames and the tap's position jumps are then delays: --strict
+ *       allows those zero frames (and no others), --report-gaps expects
+ *       them unless --expect-zero-fill says otherwise, and a rise of the
+ *       latency above L is accepted only as far as those delays before
+ *       the frame cover it, so every frame must still be the next input
+ *       frame at exactly L plus at most the delays the tap shows. A forward gap where the tap's own position
+ *       jumped by at least as much (and by at most 4096 frames) is the
+ *       tap's own loss, not g16-mic's: its node missed those cycles and
+ *       PipeWire moved on; it is reported apart and not in the gap counts.
+ *       Prints "delay_zero_frames=<n>", "delay_skip_frames=<n>" and
+ *       "consumer_lost_frames=<n>". Without it, all of them count against
+ *       the checks. "latency_first=<n>" and "latency_last=<n>" (measured, at
+ *       the first and the last timed frame) are printed either way, with
+ *       or without --latency.
+ *       --last-pos P --last-frames F (needs --latency): every input frame at
+ *       graph positions P..P+F-1 (g16-mic's last accepted cycle, from its
+ *       stop log) must be in RAW at graph position + L, bit for bit, and (with
+ *       --processed) PROC there must equal an offline omni engine fed the
+ *       same input and then flushed with g16mic_engine_flush(), the tail a
+ *       graceful stop delivers (with --allow-delays at graph position + L
+ *       plus the delay accepted by then: it came before the window). Prints
+ *       "last_missing=<n>", the positions
+ *       whose raw or processed frame is missing or wrong; passes only if 0.
+ *       --report-gaps (--latency optional): prints, for RAW,
+ *       "gap_frames_total=<n>" (input frames skipped by forward jumps),
+ *       "repeat_frames=<n>" (raw frames at or behind the furthest input
+ *       frame already seen), "zero_fill_frames=<n>" (zero frames between the
+ *       first and the last input frame), "not_input_frames=<n>" and
+ *       "last_frame=<k>" (the furthest input frame, -1 if none).
+ *       With --report-gaps it also prints "gap_count=<n>" (forward jumps),
+ *       "trailing_zero_frames=<n>" (zero frames after the last input frame),
+ *       "eos_zero_frames=<n>" (the zeros completing the tap buffer that
+ *       holds the last input frame: a zero-padded last quantum) and
+ *       "after_eos_frames=<n>" (frames in later tap buffers; not judged) and
+ *       "src_clock_skip_frames=<n>" (graph frames the source's clock moved on
+ *       without the source producing, between the tap's first and furthest
+ *       input frame: a driver that skipped a cycle).
+ *       --expect-gap N (implies --report-gaps) passes only when
+ *       gap_frames_total == N exactly and there is no repeat, zero fill or
+ *       non-input frame: the loss is exactly the counted amount.
+ *       --expect-zero-fill Z (with --expect-gap) expects exactly Z zero
+ *       frames between input frames instead of none (counted underflow).
+ *       --old-log OLD.log: the previous stream's source log (an earlier
+ *       source of the same name). A raw frame of that stream is stale:
+ *       prints "stale_frames=<n>" and "stale_lead_frames=<n>" (before the
+ *       first new input frame) and passes only if there are none. Stale
+ *       frames also count as not input.
  *
  * "Graph position" is the driver's clock position for the cycle (its
  * spa_io_position, in 48 kHz samples), the same for every node of one
@@ -82,7 +143,9 @@
 #define EXIT_USAGE 64
 #define SIG_SEED 0x6731366d69630001ull
 #define SIG_SCALE (0.1f / 8388608.0f)
+#define SIG_QUIET_GAIN (1.0f / 32.0f)  /* --quiet: 2^-5, exact; above the -60 dBFS trim threshold */
 #define POS_UNKNOWN UINT64_MAX
+#define CONSUMER_XRUN_MAX 4096u      /* --allow-delays: the longest own miss of a tap's node taken as its xrun */
 #define SRC_RECS (1u << 18)          /* source buffers logged: over an hour at 1024 frames */
 #define TAP_RECS (1u << 16)
 #define TICK_MS 100
@@ -116,14 +179,19 @@ static uint64_t splitmix64(uint64_t x)
 	return x ^ (x >> 31);
 }
 
+/* 1, or SIG_QUIET_GAIN with --quiet (source and compare); set once in main
+ * before any stream or check runs. */
+static float sig_gain = 1.0f;
+
 /* Integer hashing and one exact int-to-float conversion and multiply, so the
- * source and compare produce the same bits. */
+ * source and compare produce the same bits. The gain is a power of two, so
+ * the second multiply is exact (1: the same bits as without it). */
 static float sig(int64_t k, int c)
 {
 	uint64_t h = splitmix64(SIG_SEED ^ ((uint64_t)k * 8u + (uint64_t)c));
 	int32_t v = (int32_t)(h >> 40) - 8388608;  /* 24 bits -> [-2^23, 2^23) */
 
-	return (float)v * SIG_SCALE;
+	return (float)v * SIG_SCALE * sig_gain;
 }
 
 static uint32_t fbits(float x)
@@ -138,10 +206,12 @@ static uint32_t fbits(float x)
 
 struct opts {
 	const char *name, *cls, *props, *log, *target, *out, *positions;
-	const char *input_log, *raw, *processed;
+	const char *input_log, *raw, *processed, *old_log;
 	long channels, start, latency, ppm;
+	long last_pos, last_frames, expect_gap, expect_zero_fill;  /* -1, 0, -1, -1: not given */
+	int allow_delays;                                          /* --allow-delays */
 	double seconds;
-	int driver, strict;          /* flags: --driver, --strict (no value) */
+	int driver, strict, quiet, report_gaps;  /* flags: --driver, --strict, --quiet, --report-gaps (no value) */
 };
 
 static int parse_long(const char *s, long lo, long hi, long *out)
@@ -178,6 +248,9 @@ static int parse_opts(int argc, char **argv, struct opts *o)
 {
 	memset(o, 0, sizeof *o);
 	o->latency = -1;
+	o->last_pos = -1;
+	o->expect_gap = -1;
+	o->expect_zero_fill = -1;
 	for (int i = 0; i < argc; i++) {
 		const char *k = argv[i], *v;
 
@@ -187,6 +260,18 @@ static int parse_opts(int argc, char **argv, struct opts *o)
 		}
 		if (strcmp(k, "--strict") == 0) {
 			o->strict = 1;
+			continue;
+		}
+		if (strcmp(k, "--allow-delays") == 0) {
+			o->allow_delays = 1;
+			continue;
+		}
+		if (strcmp(k, "--quiet") == 0) {
+			o->quiet = 1;
+			continue;
+		}
+		if (strcmp(k, "--report-gaps") == 0) {
+			o->report_gaps = 1;
 			continue;
 		}
 		v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -215,6 +300,8 @@ static int parse_opts(int argc, char **argv, struct opts *o)
 			o->raw = v;
 		else if (strcmp(k, "--processed") == 0)
 			o->processed = v;
+		else if (strcmp(k, "--old-log") == 0)
+			o->old_log = v;
 		else if (strcmp(k, "--channels") == 0) {
 			if (parse_long(v, 1, G16MIC_MAX_CH, &o->channels) != 0)
 				return bad_opt(k, v);
@@ -230,6 +317,20 @@ static int parse_opts(int argc, char **argv, struct opts *o)
 		} else if (strcmp(k, "--seconds") == 0) {
 			if (parse_double(v, 0.01, 600.0, &o->seconds) != 0)
 				return bad_opt(k, v);
+		} else if (strcmp(k, "--last-pos") == 0) {
+			if (parse_long(v, 0, (long)1 << 62, &o->last_pos) != 0)
+				return bad_opt(k, v);
+		} else if (strcmp(k, "--last-frames") == 0) {
+			if (parse_long(v, 1, 1 << 16, &o->last_frames) != 0)
+				return bad_opt(k, v);
+		} else if (strcmp(k, "--expect-gap") == 0) {
+			if (parse_long(v, 0, (long)1 << 30, &o->expect_gap) != 0)
+				return bad_opt(k, v);
+			o->report_gaps = 1;
+		} else if (strcmp(k, "--expect-zero-fill") == 0) {
+			if (parse_long(v, 0, (long)1 << 30, &o->expect_zero_fill) != 0)
+				return bad_opt(k, v);
+			o->report_gaps = 1;
 		} else {
 			fprintf(stderr, "test_pw_helper: unknown option '%s'\n", k);
 			return -1;
@@ -640,7 +741,7 @@ static int cmd_source(const struct opts *o)
 
 	if (!o->name || !o->log || o->channels < 1) {
 		fputs("usage: test_pw_helper source --name N --channels C --log FILE [--start K] [--class C] [--props k=v,...]"
-		      " [--driver [--ppm P]]\n", stderr);
+		      " [--driver [--ppm P]] [--quiet]\n", stderr);
 		return EXIT_USAGE;
 	}
 	if (o->ppm != 0 && !o->driver) {
@@ -654,8 +755,8 @@ static int cmd_source(const struct opts *o)
 		fprintf(stderr, "test_pw_helper: %s: %s\n", o->log, strerror(errno));
 		return 1;
 	}
-	fprintf(log, "# test_pw_helper source name=%s channels=%d start=%ld driver=%d ppm=%ld\n", o->name, ch, o->start,
-		o->driver, o->ppm);
+	fprintf(log, "# test_pw_helper source name=%s channels=%d start=%ld driver=%d ppm=%ld%s\n", o->name, ch, o->start,
+		o->driver, o->ppm, o->quiet ? " quiet=1" : "");
 	fflush(log);
 
 	struct src *s = calloc(1, sizeof *s);
@@ -1350,7 +1451,9 @@ static long srclog_find(const struct srclog *s, int64_t k)
 	return (long)lo;
 }
 
-struct tapdata { float *x; size_t frames; uint64_t *gp; uint32_t qmax; };
+/* One tap file: x interleaved, gp the graph position of every frame, bstart
+ * 1 on the first frame of every tap buffer (one output buffer each). */
+struct tapdata { float *x; size_t frames; uint64_t *gp; uint8_t *bstart; uint32_t qmax; };
 
 static int read_tap(const char *path, int ch, struct tapdata *t)
 {
@@ -1374,7 +1477,8 @@ static int read_tap(const char *path, int ch, struct tapdata *t)
 	t->frames = (size_t)sz / stride;
 	t->x = malloc((size_t)sz + stride);
 	t->gp = malloc((t->frames + 1) * sizeof *t->gp);
-	if (!t->x || !t->gp || fread(t->x, stride, t->frames, f) != t->frames) {
+	t->bstart = calloc(t->frames + 1, 1);
+	if (!t->x || !t->gp || !t->bstart || fread(t->x, stride, t->frames, f) != t->frames) {
 		fprintf(stderr, "test_pw_helper: %s: cannot read\n", path);
 		fclose(f);
 		return -1;
@@ -1395,6 +1499,8 @@ static int read_tap(const char *path, int ch, struct tapdata *t)
 			continue;
 		if (n > t->qmax)
 			t->qmax = (uint32_t)n;
+		if (n > 0 && i < t->frames)
+			t->bstart[i] = 1;
 		for (unsigned long j = 0; j < n && i < t->frames; j++, i++)
 			t->gp[i] = (uint64_t)pos == POS_UNKNOWN ? POS_UNKNOWN : (uint64_t)pos + j;
 	}
@@ -1560,20 +1666,173 @@ static void diagnose_lag(const struct tapdata *raw, const struct procmap *pm, si
 		printf("  processed does not fit the offline omni at any lag within %d frames\n", LAG_SEARCH);
 }
 
+/* Input frame index at graph position gp from the source log, or -1. */
+static int64_t srclog_k_at_pos(const struct srclog *s, uint64_t gp)
+{
+	for (size_t r = 0; r < s->len; r++)
+		if (s->pos[r] != POS_UNKNOWN && gp >= s->pos[r] && gp < s->pos[r] + s->n[r])
+			return s->k[r] + (int64_t)(gp - s->pos[r]);
+	return -1;
+}
+
+/* --last-pos/--last-frames: g16-mic's last accepted cycle (input at graph
+ * positions P..P+F-1) must come out whole: in RAW at position + L bit for
+ * bit and, with PROC, as the offline omni engine's output for the same input
+ * followed by g16mic_engine_flush() (the frames of the last cycle leave the
+ * engine only through that flush). The offline engine starts SETTLE_FRAMES
+ * of contiguous input before the cycle, as cmd_compare's processed check. */
+static void check_last(const struct opts *o, const struct srclog *src, const struct tapdata *raw,
+		       const struct tapdata *proc, int ch, size_t L)
+{
+	const uint64_t P = (uint64_t)o->last_pos;
+	const size_t F = (size_t)o->last_frames;
+	size_t *ridx = malloc(F * sizeof *ridx), *pidx = malloc(F * sizeof *pidx);
+	int64_t *kat = malloc(F * sizeof *kat);
+	size_t no_input = 0, raw_missing = 0, raw_wrong = 0, proc_missing = 0, proc_wrong = 0, missing = 0;
+	double max_err = 0.0;
+	float *mono = NULL, *rawo = NULL, *in = NULL;
+	g16mic_engine *eng = NULL;
+
+	if (!ridx || !pidx || !kat) {
+		verdict(0, "out of memory");
+		goto out;
+	}
+	for (size_t j = 0; j < F; j++) {
+		ridx[j] = SIZE_MAX;
+		pidx[j] = SIZE_MAX;
+		kat[j] = srclog_k_at_pos(src, P + j);
+	}
+	for (size_t i = 0; i < raw->frames; i++) {
+		uint64_t gp = raw->gp[i];
+		if (gp != POS_UNKNOWN && gp >= P + L && gp < P + L + F)
+			ridx[gp - P - L] = i;
+	}
+	if (proc)
+		for (size_t i = 0; i < proc->frames; i++) {
+			uint64_t gp = proc->gp[i];
+			if (gp != POS_UNKNOWN && gp >= P + L && gp < P + L + F)
+				pidx[gp - P - L] = i;
+		}
+
+	/* the offline engine: input from k_first - SETTLE_FRAMES (or the log's
+	 * first frame) to the cycle's last frame, then the flush */
+	int64_t k_first = kat[0], k_last = kat[F - 1];
+	int contiguous = k_first >= 0 && k_last == k_first + (int64_t)F - 1;
+	int64_t k0 = 0;
+	size_t len = 0;
+	if (proc && contiguous) {
+		g16mic_params prm;
+		g16mic_params_default(&prm);
+		prm.mode = G16MIC_MODE_OMNI;
+		eng = g16mic_engine_create(ch, G16MIC_RATE, NULL, G16MIC_CAL_MISSING, &prm);
+		k0 = SPA_MAX(src->k[0], k_first - (int64_t)SETTLE_FRAMES);
+		len = (size_t)(k_last + 1 - k0);
+		mono = malloc((len + L) * sizeof(float));
+		rawo = malloc((size_t)FEED_CHUNK * (size_t)ch * sizeof(float));
+		in = malloc((size_t)FEED_CHUNK * (size_t)ch * sizeof(float));
+		if (!eng || !mono || !rawo || !in || g16mic_engine_latency(eng) != L) {
+			verdict(0, "cannot run the offline omni engine at latency %zu", L);
+			goto out;
+		}
+		for (size_t done = 0; done < len;) {
+			size_t n = SPA_MIN((size_t)FEED_CHUNK, len - done);
+			for (size_t j = 0; j < n; j++)
+				for (int c = 0; c < ch; c++)
+					in[j * (size_t)ch + (size_t)c] = sig(k0 + (int64_t)(done + j), c);
+			g16mic_engine_process(eng, in, n, rawo, mono + done);
+			done += n;
+		}
+		for (size_t done = len; done < len + L;) {
+			size_t n = g16mic_engine_flush(eng, rawo, mono + done, SPA_MIN((size_t)FEED_CHUNK, len + L - done));
+			if (n == 0)
+				break;
+			done += n;
+		}
+		if (k_first - k0 < (int64_t)SETTLE_FRAMES)
+			printf("  last cycle: only %" PRId64 " frames of input before it to settle the offline engine\n",
+			       k_first - k0);
+	} else if (proc) {
+		printf("  last cycle: the source log has no contiguous input at graph positions %" PRIu64 "..%" PRIu64
+		       "; processed not checked\n", P, P + F - 1);
+	}
+
+	for (size_t j = 0; j < F; j++) {
+		int miss = 0;
+		int64_t k = kat[j];
+		if (k < 0) {
+			no_input++;
+			missing++;
+			continue;
+		}
+		if (ridx[j] == SIZE_MAX) {
+			raw_missing++;
+			miss = 1;
+		} else {
+			const float *f = raw->x + ridx[j] * (size_t)ch;
+			int same = 1;
+			for (int c = 0; c < ch; c++)
+				if (fbits(f[c]) != fbits(sig(k, c)))
+					same = 0;
+			if (!same) {
+				raw_wrong++;
+				miss = 1;
+			}
+		}
+		if (proc) {
+			if (pidx[j] == SIZE_MAX || !mono) {
+				proc_missing++;
+				miss = 1;
+			} else {
+				double err = fabs((double)proc->x[pidx[j]] - (double)mono[(size_t)(k - k0) + L]);
+				if (err > max_err)
+					max_err = err;
+				if (err > TOL) {
+					proc_wrong++;
+					miss = 1;
+				}
+			}
+		}
+		missing += (size_t)miss;
+	}
+	printf("  last cycle: graph positions %" PRIu64 "..%" PRIu64 " (%zu frames), output at +%zu: %zu without input"
+	       " in the source log, raw %zu missing and %zu wrong, processed %zu missing and %zu over tolerance"
+	       " (max error %.3g)%s\n",
+	       P, P + F - 1, F, L, no_input, raw_missing, raw_wrong, proc_missing, proc_wrong, max_err,
+	       proc ? "" : " (no processed tap)");
+	printf("last_missing=%zu\n", missing);
+	verdict(missing == 0,
+		"every frame of the last accepted cycle arrived at the engine latency (%zu frames, %zu missing;"
+		" raw bit for bit%s)",
+		F, missing, proc ? ", processed = offline omni with its tail flushed" : "");
+out:
+	g16mic_engine_destroy(eng);
+	free(mono);
+	free(rawo);
+	free(in);
+	free(ridx);
+	free(pidx);
+	free(kat);
+}
+
 static int cmd_compare(const struct opts *o)
 {
-	struct srclog src;
+	struct srclog src, osrc;
 	struct tapdata raw, proc;
-	struct ktab tab;
+	struct ktab tab, otab;
 	int ch = (int)o->channels;
 
 	memset(&src, 0, sizeof src);
+	memset(&osrc, 0, sizeof osrc);
 	memset(&tab, 0, sizeof tab);
+	memset(&otab, 0, sizeof otab);
 	memset(&proc, 0, sizeof proc);
-	if (!o->input_log || !o->raw || ch < 1 || (o->latency < 0 && !o->strict) ||
-	    (o->latency < 0 && o->processed)) {
+	if (!o->input_log || !o->raw || ch < 1 || (o->latency < 0 && !o->strict && !o->report_gaps) ||
+	    (o->latency < 0 && (o->processed || o->last_pos >= 0)) || ((o->last_pos >= 0) != (o->last_frames > 0)) ||
+	    (o->expect_zero_fill >= 0 && o->expect_gap < 0)) {
 		fputs("usage: test_pw_helper compare --input-log SRC.log --raw RAW [--processed PROC] --channels C"
-		      " --latency L [--strict] (--latency is optional with --strict and no --processed)\n", stderr);
+		      " --latency L [--strict] [--quiet] [--last-pos P --last-frames F] [--report-gaps] [--expect-gap N"
+		      " [--expect-zero-fill Z]] [--old-log OLD.log] [--allow-delays]"
+		      " (--latency is optional with --strict or --report-gaps and no --processed or --last-pos)\n", stderr);
 		return EXIT_USAGE;
 	}
 	const int timed = o->latency >= 0;
@@ -1598,23 +1857,66 @@ static int cmd_compare(const struct opts *o)
 		verdict(0, "out of memory");
 		return 1;
 	}
+	/* --old-log: the previous stream's frames, to tell a stale frame of the
+	 * old source from any other frame that is not input */
+	int64_t okmin = 0, okmax = 0;
+	if (o->old_log) {
+		if (read_srclog(o->old_log, &osrc) != 0) {
+			verdict(0, "cannot read the previous stream's source log %s", o->old_log);
+			return 1;
+		}
+		okmin = osrc.k[0];
+		okmax = osrc.k[osrc.len - 1] + (int64_t)osrc.n[osrc.len - 1] + 2 * G16MIC_RATE;
+		if (okmax - okmin > (int64_t)1 << 24) {
+			verdict(0, "the previous source log covers %" PRId64 " frames; this checker stops at 2^24", okmax - okmin);
+			return 1;
+		}
+		if (ktab_build(&otab, okmin, okmax, ch) != 0) {
+			verdict(0, "out of memory");
+			return 1;
+		}
+	}
 
 	/* raw: every non-zero frame is one input frame, bit for bit, in order */
 	const size_t R = raw.frames;
 	int64_t *kmap = malloc((R + 1) * sizeof *kmap);
-	if (!kmap) {
+	/* delays before frame i (--allow-delays): zero frames between input
+	 * frames, and the tap's own graph position jumps */
+	uint64_t *zbefore = malloc((R + 1) * sizeof *zbefore);
+	uint64_t *sbefore = malloc((R + 1) * sizeof *sbefore);
+	if (!kmap || !zbefore || !sbefore) {
+		free(zbefore);
+		free(sbefore);
 		verdict(0, "out of memory");
 		return 1;
 	}
 	size_t matched = 0, zeros = 0, zeros_lead = 0, bad = 0, fwd_gaps = 0, back = 0;
+	size_t stale = 0, stale_lead = 0, stale_after = 0;  /* --old-log: frames of the previous stream (part of bad) */
+	size_t last_i = SIZE_MAX;                       /* the tap frame holding the last input frame */
 	int64_t last = -1;
+	/* --report-gaps: measured against the furthest input frame seen, so a
+	 * repeat followed by a jump forward is counted once each */
+	int64_t furthest = -1, first_k = -1;
+	uint64_t gap_total = 0, repeat_frames = 0, zero_fill_mid = 0, zeros_pending = 0;
+	/* --allow-delays: the tap's own graph position jumps since the last
+	 * input frame (pend_skip); a forward gap there, no larger than the
+	 * jump and the jump no longer than CONSUMER_XRUN_MAX, is the tap's own
+	 * loss (its node missed those cycles and PipeWire moved on:
+	 * consumer_lost_frames, not g16-mic's), the rest of the jump a delay */
+	uint64_t skip_total = 0, pend_skip = 0, consumer_lost = 0;
 	for (size_t i = 0; i < R; i++) {
 		const float *f = raw.x + i * (size_t)ch;
 		kmap[i] = -1;
+		if (i > 0 && raw.gp[i] != POS_UNKNOWN && raw.gp[i - 1] != POS_UNKNOWN && raw.gp[i] > raw.gp[i - 1] + 1)
+			pend_skip += raw.gp[i] - raw.gp[i - 1] - 1;
+		zbefore[i] = zero_fill_mid;
+		sbefore[i] = skip_total;
 		if (frame_is_zero(f, ch)) {
 			zeros++;
 			if (matched == 0)
 				zeros_lead++;
+			else
+				zeros_pending++;
 			continue;
 		}
 		int64_t k = -1;
@@ -1627,12 +1929,37 @@ static int cmd_compare(const struct opts *o)
 				k = -1;
 		}
 		if (k < 0) {
-			if (bad < 5)
+			int64_t ko = -1;
+			if (o->old_log && (ch >= 2 || i + 1 < R)) {
+				uint64_t key = ch >= 2 ? pair_key(f[0], f[1]) : pair_key(f[0], raw.x[(i + 1) * (size_t)ch]);
+				ko = ktab_find(&otab, key);
+				if (ko >= 0 && !frame_matches(f, ch, ko, okmin, okmax))
+					ko = -1;
+			}
+			if (ko >= 0) {
+				if (stale < 5)
+					printf("  raw frame %zu (graph position %" PRIu64 ") is frame %" PRId64
+					       " of the previous stream\n", i, raw.gp[i], ko);
+				stale++;
+				if (matched == 0)
+					stale_lead++;
+				else
+					stale_after++;
+			} else if (bad - stale < 5) {
 				printf("  raw frame %zu (graph position %" PRIu64 ") is not an input frame\n", i, raw.gp[i]);
+			}
 			bad++;
 			continue;
 		}
-		if (last >= 0 && k != last + 1) {
+		int consumer_gap = 0;
+		if (o->allow_delays && last >= 0 && k > last + 1 && furthest == last &&
+		    (uint64_t)(k - last - 1) <= pend_skip && pend_skip <= CONSUMER_XRUN_MAX) {
+			consumer_gap = 1;
+			consumer_lost += (uint64_t)(k - last - 1);
+			pend_skip -= (uint64_t)(k - last - 1);
+			printf("  raw tap: input frame %" PRId64 " follows %" PRId64 " at tap frame %zu (the tap's own"
+			       " missed cycle: consumer loss)\n", k, last, i);
+		} else if (last >= 0 && k != last + 1) {
 			if (k <= last)
 				back++;
 			else
@@ -1640,10 +1967,29 @@ static int cmd_compare(const struct opts *o)
 			printf("  raw tap: input frame %" PRId64 " follows %" PRId64 " at tap frame %zu (%s)\n", k, last, i,
 			       k <= last ? "backwards" : "trimmed gap");
 		}
+		skip_total += pend_skip;
+		pend_skip = 0;
+		sbefore[i] = skip_total;
 		kmap[i] = k;
+		if (first_k < 0)
+			first_k = k;
 		last = k;
+		last_i = i;
 		matched++;
+		zero_fill_mid += zeros_pending;  /* zeros between two input frames */
+		zeros_pending = 0;
+		zbefore[i] = zero_fill_mid;
+		if (furthest >= 0 && k <= furthest) {
+			repeat_frames++;
+		} else {
+			if (furthest >= 0 && !consumer_gap)
+				gap_total += (uint64_t)(k - furthest - 1);
+			furthest = k;
+		}
 	}
+	if (o->allow_delays)
+		printf("delay_zero_frames=%" PRIu64 "\ndelay_skip_frames=%" PRIu64 "\nconsumer_lost_frames=%" PRIu64 "\n",
+		       zero_fill_mid, skip_total, consumer_lost);
 	printf("  raw tap: %zu frames: %zu input frames bit for bit, %zu zero-filled (%zu before the first),"
 	       " %zu forward gaps, %zu backwards, %zu not input\n",
 	       R, matched, zeros, zeros_lead, fwd_gaps, back, bad);
@@ -1654,19 +2000,70 @@ static int cmd_compare(const struct opts *o)
 		 * is the next input frame (a zero fill is an underrun, a forward gap
 		 * dropped audio, a backward step repeated it) */
 		size_t zero_fills = zeros - zeros_lead;
-		verdict(zero_fills == 0 && fwd_gaps == 0 && back == 0 && bad == 0 && matched > 0 && 10 * matched >= 9 * R,
-			"raw is one contiguous run of input frames: no gaps, repeats or zero fills after the first"
+		size_t allowed = o->allow_delays ? (size_t)zero_fill_mid : 0;
+		verdict(zero_fills == allowed && fwd_gaps == 0 && back == 0 && bad == 0 && matched > 0 && 10 * matched >= 9 * R,
+			"raw is one contiguous run of input frames: no gaps, repeats or zero fills after the first%s"
 			" (%zu of %zu frames matched, %zu leading zeros, %zu zero fills after the first, %zu forward gaps,"
 			" %zu backwards, %zu not input)",
+			o->allow_delays ? " but delays (zeros between input frames, judged in the latency below)" : "",
 			matched, R, zeros_lead, zero_fills, fwd_gaps, back, bad);
 	}
-	if (!timed) {
-		printf("  no --latency: the end-to-end latency and processed checks were skipped\n");
-		goto done;
+	if (o->old_log) {
+		printf("stale_frames=%zu\n", stale);
+		printf("stale_lead_frames=%zu\n", stale_lead);
+		verdict(stale == 0,
+			"no frame of the previous stream (%s): %zu stale frames, %zu before the first new frame and %zu after it",
+			o->old_log, stale, stale_lead, stale_after);
 	}
-
-	/* end-to-end latency, from the source's graph position to the raw tap's */
-	int64_t lat_min = INT64_MAX, lat_max = INT64_MIN;
+	if (o->report_gaps) {
+		/* After the last input frame: the zeros that complete its own tap
+		 * buffer (a zero-padded last quantum, eos_pad), and the frames of
+		 * any later buffers (silence after the stream ended; not judged). */
+		size_t eos_zero = 0, after_eos = 0;
+		if (last_i != SIZE_MAX) {
+			size_t i = last_i + 1;
+			for (; i < R && !raw.bstart[i] && frame_is_zero(raw.x + i * (size_t)ch, ch); i++)
+				eos_zero++;
+			while (i < R && !raw.bstart[i])
+				i++;
+			after_eos = R - i;
+		}
+		long want_zero = o->expect_zero_fill >= 0 ? o->expect_zero_fill : o->allow_delays ? (long)zero_fill_mid : 0;
+		printf("gap_frames_total=%" PRIu64 "\n", gap_total);
+		printf("gap_count=%zu\n", fwd_gaps);
+		printf("repeat_frames=%" PRIu64 "\n", repeat_frames);
+		printf("zero_fill_frames=%" PRIu64 "\n", zero_fill_mid);
+		printf("trailing_zero_frames=%" PRIu64 "\n", matched ? zeros_pending : 0);
+		printf("eos_zero_frames=%zu\n", eos_zero);
+		printf("after_eos_frames=%zu\n", after_eos);
+		printf("not_input_frames=%zu\n", bad);
+		printf("last_frame=%" PRId64 "\n", furthest);
+		/* graph frames the source's own clock moved on without it
+		 * producing a buffer (its driver skipped a cycle), between the
+		 * tap's first and furthest input frame: a capture counts those in
+		 * capture_gap (graph frames), though they never were input */
+		uint64_t clock_skip = 0;
+		for (size_t r = 1; first_k >= 0 && r < src.len; r++) {
+			if (src.k[r] <= first_k || src.k[r] > furthest || src.pos[r] == POS_UNKNOWN ||
+			    src.pos[r - 1] == POS_UNKNOWN)
+				continue;
+			uint64_t want = src.pos[r - 1] + src.n[r - 1];
+			if (src.pos[r] > want)
+				clock_skip += src.pos[r] - want;
+		}
+		printf("src_clock_skip_frames=%" PRIu64 "\n", clock_skip);
+		if (o->expect_gap >= 0)
+			verdict(matched > 0 && gap_total == (uint64_t)o->expect_gap && repeat_frames == 0 &&
+					zero_fill_mid == (uint64_t)want_zero && bad == 0,
+				"raw lost exactly the counted %ld frames and has exactly the counted %ld zero-filled frames"
+				" (gap_frames_total %" PRIu64 ", repeat_frames %" PRIu64 ", zero_fill_frames %" PRIu64
+				", not_input_frames %zu)",
+				o->expect_gap, want_zero, gap_total, repeat_frames, zero_fill_mid, bad);
+	}
+	/* end-to-end latency, from the source's graph position to the raw tap's;
+	 * measured (latency_first/latency_last: at the first and the last timed
+	 * frame) with or without --latency, judged only with it */
+	int64_t lat_min = INT64_MAX, lat_max = INT64_MIN, lat_first = 0, lat_last = 0, delay_acc = 0;
 	size_t lat_n = 0;
 	/* timed at the first frame of every run of input frames and of every
 	 * tap buffer: within one of those the latency cannot change */
@@ -1680,9 +2077,30 @@ static int cmd_compare(const struct opts *o)
 		if (r < 0 || src.pos[r] == POS_UNKNOWN)
 			continue;
 		int64_t lat = (int64_t)raw.gp[i] - ((int64_t)src.pos[r] + (kmap[i] - src.k[r]));
+		if (lat_n == 0)
+			lat_first = lat;
+		lat_last = lat;
+		lat_n++;
+		/* judged: less the delay accepted so far. A rise above L is
+		 * accepted only as far as the delays the tap shows before this
+		 * frame (zero frames between input frames, its own position
+		 * jumps) cover it; a zero or a jump need not raise it (the
+		 * source's own clock skip moves both sides alike) */
+		if (o->allow_delays && timed) {
+			int64_t budget = (int64_t)(zbefore[i] + sbefore[i]);
+			int64_t want = lat - (int64_t)L;
+			if (want > delay_acc && want <= budget)
+				delay_acc = want;
+			lat -= delay_acc;
+		}
 		lat_min = SPA_MIN(lat_min, lat);
 		lat_max = SPA_MAX(lat_max, lat);
-		lat_n++;
+	}
+	if (lat_n > 0)
+		printf("latency_first=%" PRId64 "\nlatency_last=%" PRId64 "\n", lat_first, lat_last);
+	if (!timed) {
+		printf("  no --latency: the end-to-end latency and processed checks were skipped\n");
+		goto done;
 	}
 	/* the capture and both outputs run in the same graph cycle: a frame
 	 * leaves exactly the engine latency after it arrived */
@@ -1782,17 +2200,37 @@ static int cmd_compare(const struct opts *o)
 		free(pm.v);
 	}
 
+	if (o->last_pos >= 0) {
+		if (o->processed && !proc.x && read_tap(o->processed, 1, &proc) != 0) {
+			verdict(0, "cannot read the processed tap %s", o->processed);
+			goto done;
+		}
+		/* the window is the last 100 ms before a stop: counted xruns (if
+		 * any) came before it, so it arrives that much later */
+		check_last(o, &src, &raw, o->processed ? &proc : NULL, ch,
+			   L + (o->allow_delays ? (size_t)delay_acc : 0));
+	}
+
 done:
 	free(kmap);
+	free(zbefore);
+	free(sbefore);
 	free(tab.key);
 	free(tab.val);
 	free(raw.x);
 	free(raw.gp);
+	free(raw.bstart);
 	free(proc.x);
 	free(proc.gp);
+	free(proc.bstart);
+	free(otab.key);
+	free(otab.val);
 	free(src.pos);
 	free(src.k);
 	free(src.n);
+	free(osrc.pos);
+	free(osrc.k);
+	free(osrc.n);
 	return n_fail ? 1 : 0;
 }
 
@@ -1815,6 +2253,8 @@ int main(int argc, char **argv)
 		return cmd_graph();
 	if (parse_opts(argc - 2, argv + 2, &o) != 0)
 		return usage();
+	if (o.quiet)
+		sig_gain = SIG_QUIET_GAIN;
 	if (strcmp(cmd, "source") == 0)
 		return cmd_source(&o);
 	if (strcmp(cmd, "tap") == 0)

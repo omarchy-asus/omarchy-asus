@@ -4,7 +4,9 @@
  * status dir lookup, pid parsing and the liveness check. */
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,12 @@ static const char *const keys[] = {
 	"steer_az_deg", "vad", "frames_in", "frames_out", "blocks", "fallbacks",
 	"mode_switches", "refused_switches", "nonfinite_samples", "limiter_blocks",
 	"telemetry_dropped", "ring_overflow", "ring_underflow", "reconnects", "wrong_links",
+	"rt_requested", "rt_status", "rt_policy", "rt_priority", "rt_reason",
+	"queue_capacity_cycles", "queue_bound_ms", "queue_max_depth_cycles",
+	"queue_added_frames", "queue_added_ms", "queue_max_added_frames", "queue_max_added_ms",
+	"latency_trimmed_frames", "latency_trimmed_cycles", "late_runs",
+	"trigger_refused", "trigger_errno", "graph_missed_processed_frames", "graph_missed_raw_frames", "capture_gap", "stale_dropped", "late_link_discarded",
+	"drain_lost", "source_lost_tail", "tail_flushed", "eos_pad",
 };
 #define NKEYS (sizeof keys / sizeof keys[0])
 
@@ -49,6 +57,66 @@ static void sample_status(g16mic_status *s)
 	s->ring_underflow = 13;
 	s->reconnects = 2;
 	s->wrong_links = 1;
+	s->rt_requested = 1;
+	snprintf(s->rt_status, sizeof s->rt_status, "%s", "not-realtime");
+	snprintf(s->rt_policy, sizeof s->rt_policy, "%s", "other");
+	s->rt_priority = 0;
+	s->rt_reason[0] = 0;
+	s->queue_capacity_cycles = 8;
+	s->queue_bound_ms = 170.6667;
+	s->queue_max_depth_cycles = 3;
+	s->queue_added_frames = 1024;
+	s->queue_added_ms = 21.33;
+	s->queue_max_added_frames = 2048;
+	s->queue_max_added_ms = 42.66;
+	s->latency_trimmed_frames = 3072;
+	s->latency_trimmed_cycles = 1;
+	s->late_runs = 17;
+	s->trigger_refused = 19;
+	s->trigger_errno = 11;
+	s->graph_missed_processed_frames = 1024;
+	s->graph_missed_raw_frames = 2048;
+	s->capture_gap = 23;
+	s->stale_dropped = 29;
+	s->late_link_discarded = 31;
+	s->drain_lost = 37;
+	s->source_lost_tail = 41;
+	s->tail_flushed = 272;
+	s->eos_pad = 752;
+}
+
+/* Every field at its widest: the largest status the daemon can write. */
+static void worst_status(g16mic_status *s)
+{
+	memset(s, 0, sizeof *s);
+	s->pid = 2147483647L;
+	memset(s->source_name, 'x', sizeof s->source_name - 1);
+	memset(s->refuse_reason, 'x', sizeof s->refuse_reason - 1);
+	memset(s->unavailable_reason, 'x', sizeof s->unavailable_reason - 1);
+	memset(s->rt_status, 'x', sizeof s->rt_status - 1);
+	memset(s->rt_policy, 'x', sizeof s->rt_policy - 1);
+	memset(s->rt_reason, 'x', sizeof s->rt_reason - 1);
+	s->eng.confidence = -1e30f;
+	s->eng.doa_az_deg = -1e30f;
+	s->eng.steer_az_deg = -1e30f;
+	s->eng.frames_in = s->eng.frames_out = s->eng.blocks = UINT64_MAX;
+	s->eng.fallbacks = s->eng.mode_switches = s->eng.refused_switches = UINT64_MAX;
+	s->eng.nonfinite_samples = s->eng.limiter_blocks = UINT64_MAX;
+	s->telemetry_dropped = s->ring_overflow = s->ring_underflow = UINT64_MAX;
+	s->reconnects = s->wrong_links = UINT64_MAX;
+	s->rt_requested = 1;
+	s->rt_priority = -2147483647 - 1;
+	s->trigger_errno = -2147483647 - 1;
+	s->queue_bound_ms = -1e300;
+	s->queue_added_ms = -1e300;
+	s->queue_max_added_ms = -1e300;
+	s->latency_trimmed_frames = s->latency_trimmed_cycles = UINT64_MAX;
+	s->queue_capacity_cycles = s->queue_max_depth_cycles = UINT64_MAX;
+	s->queue_added_frames = s->queue_max_added_frames = UINT64_MAX;
+	s->late_runs = s->trigger_refused = s->capture_gap = s->stale_dropped = UINT64_MAX;
+	s->graph_missed_processed_frames = s->graph_missed_raw_frames = UINT64_MAX;
+	s->late_link_discarded = s->drain_lost = s->source_lost_tail = s->tail_flushed = UINT64_MAX;
+	s->eos_pad = UINT64_MAX;
 }
 
 /* Value of `key` in the formatted text, copied into out; 0 if found. */
@@ -94,7 +162,7 @@ static void test_format(void)
 			break;
 		p = nl + 1;
 	}
-	CHECK(*p == 0, "no lines after wrong_links: \"%s\"", p);
+	CHECK(*p == 0, "no lines after eos_pad: \"%s\"", p);
 
 	CHECK(value_of(buf, "pid", v, sizeof v) == 0 && strcmp(v, "4242") == 0, "pid=%s", v);
 	CHECK(value_of(buf, "source", v, sizeof v) == 0 && strcmp(v, "alsa_input.test-source") == 0, "source=%s", v);
@@ -113,6 +181,39 @@ static void test_format(void)
 	CHECK(strstr(buf, "\nring_underflow=13\n") != NULL, "ring underflow counted");
 	CHECK(strstr(buf, "\nreconnects=2\n") != NULL, "reconnects counted");
 	CHECK(strstr(buf, "\nwrong_links=1\n") != NULL, "wrong links counted");
+	CHECK(strstr(buf, "\nrt_requested=1\n") != NULL, "rt requested shown");
+	CHECK(strstr(buf, "\nrt_status=not-realtime\n") != NULL, "rt status shown");
+	CHECK(strstr(buf, "\nrt_policy=other\n") != NULL, "rt policy shown");
+	CHECK(strstr(buf, "\nrt_priority=0\n") != NULL, "rt priority shown");
+	CHECK(strstr(buf, "\nrt_reason=none\n") != NULL, "an empty rt reason reads none");
+	CHECK(strstr(buf, "\nqueue_capacity_cycles=8\n") != NULL, "queue capacity shown");
+	CHECK(strstr(buf, "\nqueue_target_cycles=") == NULL, "no catch-up target any more");
+	CHECK(strstr(buf, "\nqueue_bound_ms=170.7\n") != NULL, "queue bound shown, one decimal");
+	CHECK(strstr(buf, "\nqueue_max_depth_cycles=3\n") != NULL, "observed queue depth shown");
+	CHECK(strstr(buf, "\nqueue_added_frames=1024\n") != NULL, "added latency now shown, frames");
+	CHECK(strstr(buf, "\nqueue_max_added_frames=2048\n") != NULL, "observed max added latency shown, frames");
+	CHECK(strstr(buf, "\nqueue_max_added_ms=42.7\n") != NULL, "observed added latency shown");
+	CHECK(strstr(buf, "\nqueue_added_ms=21.3\n") != NULL, "added latency now shown, ms");
+	CHECK(strstr(buf, "\nlatency_trimmed_frames=3072\n") != NULL, "latency trim counted, samples");
+	CHECK(strstr(buf, "\nlatency_trimmed_cycles=1\n") != NULL, "latency trim counted, cycles");
+	CHECK(value_of(buf, "latency_trimmed_frames", v, sizeof v) == 0 && strcmp(v, "3072") == 0,
+	      "latency_trimmed_frames=%s", v);
+	CHECK(strstr(buf, "\nlate_runs=17\n") != NULL, "late runs counted");
+	CHECK(strstr(buf, "\ntrigger_refused=19\n") != NULL, "refused triggers counted");
+	CHECK(strstr(buf, "\ntrigger_errno=11\n") != NULL, "trigger errno shown");
+	CHECK(strstr(buf, "\ngraph_missed_processed_frames=1024\n") != NULL, "processed graph misses counted");
+	CHECK(strstr(buf, "\ngraph_missed_raw_frames=2048\n") != NULL, "raw graph misses counted");
+	CHECK(strstr(buf, "\ncapture_gap=23\n") != NULL, "capture gap counted");
+	CHECK(strstr(buf, "\nstale_dropped=29\n") != NULL, "stale tail drops counted");
+	CHECK(strstr(buf, "\nlate_link_discarded=31\n") != NULL, "late-link discards counted");
+	CHECK(strstr(buf, "\ndrain_lost=37\n") != NULL, "drain losses counted");
+	CHECK(strstr(buf, "\nsource_lost_tail=41\n") != NULL, "source-loss tail counted");
+	CHECK(strstr(buf, "\ntail_flushed=272\n") != NULL, "flushed tail counted");
+	CHECK(strstr(buf, "\neos_pad=752\n") != NULL, "end-of-stream padding counted");
+	CHECK(value_of(buf, "queue_added_frames", v, sizeof v) == 0 && strcmp(v, "1024") == 0, "queue_added_frames=%s", v);
+	CHECK(value_of(buf, "queue_max_added_frames", v, sizeof v) == 0 && strcmp(v, "2048") == 0,
+	      "queue_max_added_frames=%s", v);
+	CHECK(value_of(buf, "eos_pad", v, sizeof v) == 0 && strcmp(v, "752") == 0, "eos_pad=%s", v);
 
 	/* the healthy case reads the other way round */
 	s.eng.spatial_available = 1;
@@ -133,6 +234,50 @@ static void test_format(void)
 	s.source_state = G16MIC_SRC_WAITING;
 	n = g16mic_status_format(&s, buf, sizeof buf);
 	CHECK(n > 0 && strstr(buf, "\nsource_state=waiting\n") != NULL, "source_state=waiting");
+
+	/* real time obtained, and a reason when it is not */
+	s.rt_requested = 0;
+	snprintf(s.rt_status, sizeof s.rt_status, "%s", "realtime");
+	snprintf(s.rt_policy, sizeof s.rt_policy, "%s", "fifo");
+	s.rt_priority = 88;
+	n = g16mic_status_format(&s, buf, sizeof buf);
+	CHECK(n > 0, "format failed");
+	CHECK(strstr(buf, "\nrt_requested=0\n") != NULL, "rt_requested=0");
+	CHECK(strstr(buf, "\nrt_status=realtime\n") != NULL, "rt_status=realtime");
+	CHECK(strstr(buf, "\nrt_policy=fifo\n") != NULL, "rt_policy=fifo");
+	CHECK(strstr(buf, "\nrt_priority=88\n") != NULL, "rt_priority=88");
+	s.rt_status[0] = 0;
+	snprintf(s.rt_reason, sizeof s.rt_reason, "%s", "module-rt-unavailable");
+	n = g16mic_status_format(&s, buf, sizeof buf);
+	CHECK(n > 0, "format failed");
+	CHECK(strstr(buf, "\nrt_status=none\n") != NULL, "an empty rt status reads none");
+	CHECK(strstr(buf, "\nrt_reason=module-rt-unavailable\n") != NULL, "rt reason shown");
+
+	/* a non-finite latency reads 0, never nan */
+	s.queue_bound_ms = NAN;
+	s.queue_added_ms = -INFINITY;
+	s.queue_max_added_ms = INFINITY;
+	n = g16mic_status_format(&s, buf, sizeof buf);
+	CHECK(n > 0, "format failed");
+	CHECK(strstr(buf, "\nqueue_added_ms=0.0\n") != NULL, "-inf added latency now reads 0.0");
+	CHECK(strstr(buf, "\nqueue_bound_ms=0.0\n") != NULL, "nan bound reads 0.0");
+	CHECK(strstr(buf, "\nqueue_max_added_ms=0.0\n") != NULL, "inf added latency reads 0.0");
+}
+
+/* main.c reads the status file into an 8 KiB buffer and status.c formats it
+ * into 4 KiB: the widest possible status fits both. */
+static void test_worst_case_size(void)
+{
+	g16mic_status s;
+	char buf[8192];
+
+	worst_status(&s);
+	int n = g16mic_status_format(&s, buf, sizeof buf);
+	CHECK(n > 0, "the widest status formats into 8192 bytes");
+	CHECK(n > 0 && n < 4096, "the widest status (%d bytes) fits the 4096-byte write buffer", n);
+	CHECK(strstr(buf, "\neos_pad=18446744073709551615\n") != NULL, "last key still written");
+	CHECK(strstr(buf, "\nqueue_max_added_frames=18446744073709551615\n") != NULL, "widest added latency written");
+	CHECK(strstr(buf, "\nlatency_trimmed_frames=18446744073709551615\n") != NULL, "widest trim count written");
 }
 
 static void test_truncation(void)
@@ -145,6 +290,16 @@ static void test_truncation(void)
 	CHECK(n > 0, "format failed");
 	CHECK_EQ_INT(g16mic_status_format(&s, small, sizeof small), -1, "too small a buffer is -1");
 	CHECK(memchr(small, 0, sizeof small) != NULL, "truncated output is still NUL-terminated");
+	/* room for everything up to wrong_links (the old status) but not the new keys */
+	const char *cut = strstr(full, "\nrt_requested=");
+	CHECK(cut != NULL, "rt_requested present");
+	if (cut) {
+		char mid[4096];
+		size_t old_len = (size_t)(cut - full) + 1;
+		CHECK_EQ_INT(g16mic_status_format(&s, mid, old_len + 1), -1,
+		             "a buffer that only fits the keys up to wrong_links is -1");
+		CHECK(memchr(mid, 0, old_len + 1) != NULL, "that truncation is NUL-terminated");
+	}
 	CHECK_EQ_INT(g16mic_status_format(&s, full, (size_t)n), -1, "no room for the NUL is -1");
 	CHECK_EQ_INT(g16mic_status_format(&s, full, (size_t)n + 1), n, "exact fit works");
 	CHECK_EQ_INT(g16mic_status_format(&s, NULL, 0), -1, "NULL buffer is -1");
@@ -188,6 +343,13 @@ static void test_write_atomic(void)
 	CHECK(read_file(status, text, sizeof text) > 0, "status readable");
 	CHECK(strstr(text, "pid=4242\n") == text, "file starts with pid=4242");
 	CHECK(strstr(text, "\nreconnects=2\n") != NULL, "first content");
+	CHECK(strstr(text, "\ntail_flushed=272\n") != NULL, "the new keys reach the file");
+	CHECK(strstr(text, "\nqueue_added_frames=1024\n") != NULL, "added latency now reaches the file");
+	CHECK(strstr(text, "\nqueue_max_added_frames=2048\n") != NULL, "max added latency reaches the file");
+	CHECK(strstr(text, "\neos_pad=752\n") != NULL, "eos padding reaches the file");
+	CHECK(strstr(text, "\nlatency_trimmed_frames=3072\n") != NULL, "the latency trim reaches the file");
+	CHECK(strstr(text, "\nlatency_trimmed_cycles=1\n") != NULL, "the trim cycles reach the file");
+	CHECK(strstr(text, "\nqueue_added_ms=21.3\n") != NULL, "added latency now (ms) reaches the file");
 
 	long pid = 0;
 	CHECK_EQ_INT(g16mic_status_read_pid(status, &pid), 0, "read_pid on the written file");
@@ -324,6 +486,7 @@ int main(void)
 {
 	test_format();
 	test_truncation();
+	test_worst_case_size();
 	test_write_atomic();
 	test_status_dir();
 	test_read_pid();

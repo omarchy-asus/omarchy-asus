@@ -2370,7 +2370,7 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
 <a id="pkg-omarchy-asus-g16-mic"></a>
 ### G16 microphone processing host (omarchy-asus-g16-mic, held)
 
-- **Component:** `omarchy-asus-g16-mic` 0.1.0-103 (`recipes/omarchy-asus-g16-mic/`, C11 and
+- **Component:** `omarchy-asus-g16-mic` 0.1.0-104 (`recipes/omarchy-asus-g16-mic/`, C11 and
   meson, MIT). **Held** (`recipes/omarchy-asus-g16-mic/HOLD`): CI builds it, nothing publishes it,
   until the maintainer's G16 tests (#400; #401).
 - **What:** `g16-mic`, an opt-in microphone processor run by hand. `g16-mic run --source
@@ -2393,8 +2393,45 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   PipeWire's noise suppressor at its fixed high level (own node names, adds `g16_mic_clean_ns`);
   it is labelled a word-loss risk to check on the G16 before use. Nothing starts at install, nothing goes into `/etc`,
   `pipewire.conf.d` or systemd, and the default source never changes. Each capture cycle is
-  processed and delivered on both outputs inside the same PipeWire graph cycle (the outputs are
+  processed and handed to both outputs inside the same PipeWire graph cycle (the outputs are
   trigger-driven by the capture), so the outputs follow the source's own clock with no steady-state loss.
+  Since 0.1.0-104 (the fix round for a one-cycle loss seen under build-load contention without
+  real time): every output buffer carries exactly one quantum (the requested size, else the
+  capture's cycle), never more, so nothing is parked in PipeWire's output adapter, which keeps
+  what does not fit the quantum out of sight and uncounted. All buffering is g16-mic's own
+  bounded, preallocated, lock-free queue per output (capacity 8 capture cycles, the hard bound
+  on depth and added latency: 170.7 ms at a 1024-frame quantum; in steady state the latency
+  stays the engine's 272 frames for uncalibrated omni). A late or refused output cycle keeps its
+  audio in the queue: the added latency grows by it, never beyond the bound
+  (`queue_added_frames` now, `queue_max_added_frames`/`queue_max_added_ms` observed); latency
+  is never won back by sending extra audio. It is won back only by a quiet-only, counted
+  recovery: when every consuming output's queue holds at least a whole cycle more than its
+  target fill (0 extra cycles) for longer than a 1 s hold-off (`G16MIC_HF_TRIM_HOLDOFF_MS`), the
+  newest capture cycle is withheld from both outputs only when it is quiet on all channels
+  (every sample below -60 dBFS, `G16MIC_HF_TRIM_QUIET_DBFS`), never inside speech or a marker,
+  at most one cycle per 4 (`G16MIC_HF_TRIM_EVERY_CYCLES`), the same cycle from both outputs so
+  processed and raw stay aligned; counted in its own never-reset counters
+  `latency_trimmed_frames` (samples, like the others) and `latency_trimmed_cycles`, separate
+  from `ring_overflow`. Residual risks: nothing is trimmed during continuous speech, and an
+  output behind while the other is on time is not trimmed; either way the latency stays, still
+  within the bound. Overflow past the bound drops the OLDEST queued audio, counted exactly
+  (`ring_overflow`); underflow zero-fills, counted (`ring_underflow`). Real time is requested
+  through PipeWire's `libpipewire-module-rt` (rlimits, RTKit or the realtime portal; no root),
+  and the audio thread's observed policy and priority are reported (`rt_*` status keys).
+  SIGINT/SIGTERM drain gracefully: input stops at the stop instant, the capture keeps
+  triggering the outputs (feeding the engine nothing new) until the engine tail and every queued
+  cycle have passed through the graph quantum by quantum, so the last accepted cycle arrives;
+  the final buffer is zero-padded to a whole quantum (`eos_pad`, not a loss); the drain takes
+  at most 500 ms and the remainder is counted exactly (`drain_lost`); exit 0. On a source loss
+  the tail is flushed and, while the outputs still run, delivered within 50 ms; the engine tail
+  plus everything still queued that is not delivered is counted exactly per output
+  (`source_lost_tail`). A reconnect starts with empty queues and never emits stale data
+  (anything old is dropped and counted, `stale_dropped`), and a late-linking listener starts at
+  current audio at exactly the engine latency (`late_link_discarded`), also when PipeWire runs
+  the output before the capture's cycle (that schedule used to leave a raw listener one cycle
+  behind, 1296 frames, for its whole run). Other status keys count refused triggers with their
+  errno, late output runs, the observed queue depth, and `capture_gap`: input that never reached
+  g16-mic (its clock jumped), not output loss. Needs libpipewire 1.1 or newer.
 - **Test:** offline, the meson tests run in the PKGBUILD's `check()` (so in the PR's Build
   check) and in `tests/channel/g16-mic.sh` where the toolchain is present; that script also checks
   the recipe statically (HOLD, sources and sums, pkgrel, both fragments' keys and distinct node
@@ -2405,8 +2442,16 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   aperture, duplicate positions, channel mismatch); an unverified or stale layout gives
   UNAVAILABLE; bounded queues under overload with their drop counters; the source matcher never
   picks a monitor or an unrelated mic (fake node lists); crossfade alignment and the engine's tail
-  flush (the live host does not flush: when the source goes away or g16-mic stops, the last engine
-  latency of audio, 272 frames for uncalibrated omni, is counted as lost in `ring_overflow`); and the WebRTC echo canceller (the library PipeWire's module links) with the default
+  flush; `test_handoff`, the capture-to-outputs hand-off on a simulated schedule, each scenario
+  run through a model of the old two-slot hand-off (RED, loses audio) and the queue (GREEN):
+  quiet bursts and markers before a stop all arrive, the drain with a stalled consumer counts
+  its loss exactly in bounded time, a late listener starts at current audio at exactly the engine
+  latency (also when the output runs before the capture), the quiet-only trim drops only quiet
+  cycles (never a marker or a -40 dBFS burst), keeps both outputs aligned, returns to the target
+  and counts `latency_trimmed_frames` exactly, a reconnect carries
+  no old tail, refused or late triggers keep their audio with zero loss and bounded added
+  latency, every output buffer holds exactly one quantum, and an overload beyond the bound stays
+  bounded, drops the oldest audio, counts it exactly and is contiguous afterwards; and the WebRTC echo canceller (the library PipeWire's module links) with the default
   fragment's settings: a delayed reference, slow clock drift and double talk (near-end speech
   retained, measured by energy and correlation); the noise-suppression-high settings are run
   separately and their near-end retention reported next to the default's. `test_pw_live` runs
@@ -2416,7 +2461,22 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   equal to an offline omni at the documented latency, the decoy source and the sink monitor never
   taken, remove and re-add reconnecting to the same name only, a source on its own driver read on
   both outputs for 20 s, partly under CPU load, with zero `ring_overflow`/`ring_underflow` growth
-  and raw bit-exact (no gaps or repeats), and a clean SIGTERM exit. The
+  and raw bit-exact (no gaps or repeats), a reconnect back at the 272-frame latency (step 6), and
+  a clean SIGTERM exit; steps 10-14: a marker burst in the last 100 ms before SIGTERM and the last
+  accepted cycle arrive on both outputs with zero `drain_lost`, a source removed mid-stream has
+  its tail delivered or counted exactly as `source_lost_tail` and the reconnected stream starts
+  at the engine latency with no old samples, controlled contention (`nproc` busy loops at nice 0,
+  g16-mic without real time, load and RT status recorded) with zero overflow/underflow, zero
+  `latency_trimmed_frames` and contiguous raw with no zero fills (if other work already holds the
+  1-minute load above `nproc`/2 it prints `SKIP-LOAD 12` and the test exits 77, unless
+  `G16MIC_LIVE_STRICT=1`, which waits up to 10 minutes for the load to drop, then fails), a separate overload (SIGSTOP of g16-mic longer than the queue bound) with
+  bounded queue and latency and the raw tap's loss equal to `capture_gap` plus the counted queue
+  drops, then contiguous raw, and a consumer-only stall (SIGSTOP of the raw tap longer than the
+  queue bound): g16-mic stays within the bound, and a back-pressured output drops its oldest
+  audio counted exactly (the tap misses `capture_gap` + `ring_overflow` / 2 frames), else the
+  loss is the consumer's own with clean counters; the output records the RT status and load. Run: `meson test` in the
+  recipe's build directory (`test_handoff`, `test_pw_live` steps 1-14 and the rest), and
+  `tests/channel/g16-mic.sh`. The
   PKGBUILD's `checkdepends` (wireplumber) makes it run in the clean chroot; it skips only where
   the binaries are missing. On the G16: later Steward test cards, once the laptop is available.
   Not exercised yet: real ALSA hardware and the G16's microphones, the user's WirePlumber policy,
