@@ -31,6 +31,7 @@ to silence. Every fallback is counted (`fallbacks`, `degraded` in the status).
 - `g16_mic_processed`: mono, the current mode's output.
 - `g16_mic_raw`: every captured channel, untouched.
 - `g16_mic_clean`: mono, only with the echo-cancel fragment linked in (below).
+- `g16_mic_clean_ns`: mono, only with the opt-in noise-suppression fragment linked in (below).
 
 All of them have `priority.session = 0`, so the session manager never makes them the default
 source; you pick them per application, or with `wpctl set-default` yourself.
@@ -113,10 +114,11 @@ uncalibrated), `degraded`, `confidence`, `doa_az_deg`, `steer_az_deg`, `vad`, `f
 2. `g16-mic run --source alsa_input.pci-0000_65_00.6.analog-stereo --mode omni`
 3. In the application, pick **G16 mic (processed)** (`g16_mic_processed`) as its microphone.
 
-### Echo cancellation and noise suppression (optional)
+### Echo cancellation (optional)
 
-g16-mic has no suppressor or gain control of its own. For those, link the shipped fragment, which
-loads PipeWire's own `libpipewire-module-echo-cancel` with its WebRTC backend:
+g16-mic has no echo canceller, suppressor or gain control of its own. For echo cancellation, link
+the shipped default fragment, which loads PipeWire's own `libpipewire-module-echo-cancel` with its
+WebRTC backend:
 
 ```
 mkdir -p ~/.config/pipewire/pipewire.conf.d
@@ -126,33 +128,87 @@ systemctl --user restart pipewire pipewire-pulse wireplumber
 
 The chain is then: the G16 mics -> g16-mic (calibration, then omni, beam or track) ->
 `g16_mic_processed` -> WebRTC echo canceller, with the playback (default) sink's monitor as its
-reference -> one noise suppressor (its level is fixed by PipeWire's WebRTC backend; there is no
-second one) -> no gain control -> `g16_mic_clean`. Pick `g16_mic_clean` in the application
-instead of `g16_mic_processed`.
+reference -> no noise suppression -> no gain control -> `g16_mic_clean`. Pick `g16_mic_clean` in
+the application instead of `g16_mic_processed`.
+
+Noise suppression is off on purpose: keep every word. When it is on, PipeWire's WebRTC backend
+fixes its level at high and reads no setting to lower it, and suppression that strong can take
+quiet or trailing words away with the noise. This fragment removes only the echo of what the
+machine plays; background noise stays in the signal.
+
+#### Noise suppression, high (opt-in, word-loss risk)
+
+If the noise is the problem, the second fragment `g16-mic-aec-ns-high.conf` is the same echo
+canceller plus PipeWire's noise suppressor at its fixed high level (gain control still off). It
+has its own node names and adds `g16_mic_clean_ns` instead of `g16_mic_clean`. Link one of the two
+fragments, not both: both would capture `g16_mic_processed` and run two echo cancellers.
+
+**Check it on the G16 before relying on it: speak quietly, let sentences trail off, and talk over
+playback, then listen for missing or clipped words. If words go missing, use the default fragment
+instead.**
+
+```
+mkdir -p ~/.config/pipewire/pipewire.conf.d
+ln -s /usr/share/omarchy-asus-g16-mic/pipewire/g16-mic-aec-ns-high.conf ~/.config/pipewire/pipewire.conf.d/
+systemctl --user restart pipewire pipewire-pulse wireplumber
+```
+
+Pick `g16_mic_clean_ns` in the application.
 
 ## Undo, exactly
 
 1. Stop g16-mic: Ctrl-C in its terminal, or `pkill -INT -x g16-mic`. Endings are flushed before it
    exits.
-2. If you linked the echo-cancel fragment:
+2. If you linked the echo-cancel fragment (`g16_mic_clean`):
    `rm ~/.config/pipewire/pipewire.conf.d/g16-mic-aec.conf`, then
    `systemctl --user restart pipewire pipewire-pulse wireplumber`.
-3. If you made a calibration file: `rm -r ~/.config/g16-mic`.
-4. `sudo pacman -R omarchy-asus-g16-mic`.
+3. If you linked the noise-suppression fragment (`g16_mic_clean_ns`):
+   `rm ~/.config/pipewire/pipewire.conf.d/g16-mic-aec-ns-high.conf`, then
+   `systemctl --user restart pipewire pipewire-pulse wireplumber`.
+4. If you made a calibration file: `rm -r ~/.config/g16-mic`.
+5. `sudo pacman -R omarchy-asus-g16-mic`.
 
 ## Tests
 
 `meson test` runs in the PKGBUILD's `check()` and in `tests/channel/g16-mic.sh` (which also checks
-the recipe statically). All signals are synthetic, generated in the tests; no recorded audio.
+the recipe statically, both fragments included). All signals are synthetic, generated in the
+tests; no recorded audio.
 Covered: arbitrary callback sizes with exact sample continuity; impulse delay; beam sign, unity
 gain on target, headroom and chunk continuity; two talkers with the interferer louder (the target
 is retained); quiet onsets and endings kept; pauses held; tracking hysteresis and bounded slew;
 invalid geometry, NaN and zero aperture; an unverified or stale layout gives UNAVAILABLE; bounded
 queues under overload with their drop counters; the source matcher never picks a monitor or an
-unrelated mic (fake node lists); crossfade alignment and the tail flush; and the WebRTC echo
-canceller (the library PipeWire's module uses, in a test-only binary) with a delayed reference,
-slow clock drift and double talk, where the near-end speech must survive (retained energy and
-correlation, not only echo reduction).
+unrelated mic (fake node lists); crossfade alignment and the tail flush.
+
+`test_aec` runs the WebRTC echo canceller (the library PipeWire's module uses, in a test-only
+binary) with each fragment's settings, checked against the fragment files. With the default
+(echo cancellation only): a delayed reference, a delay the library must find, slow clock drift,
+and double talk, where the near-end speech must survive (retained energy and correlation, not
+only echo reduction). With the opt-in noise-suppression-high settings, separately: double talk,
+a near-end-only control and the echo reduction again; it prints how much near-end speech they
+keep next to the default (the difference in dB) and asserts only the absolute floors for keeping
+words.
+
+`test_pw_live` runs g16-mic against a live PipeWire, isolated from the desktop. It starts a
+private PipeWire daemon and a private WirePlumber (policy only, every device monitor and D-Bus
+off), both under one temporary directory with their own `HOME`, `XDG_RUNTIME_DIR`,
+`PIPEWIRE_RUNTIME_DIR` and socket name; before any client runs it checks that the daemon on that
+socket is the one it started. The daemon's only devices are a dummy driver and a null sink; no
+ALSA, Bluetooth, Pulse or JACK module is loaded, so no real microphone or speaker is touched and
+nothing is audible. Two synthetic 2-channel sources (`test_g16_mic` and a decoy, `decoy_usb_mic`)
+feed generated signals. It checks: `g16_mic_processed` (1 channel, MONO, F32) and `g16_mic_raw`
+(the source's channels and positions, F32) appear and the status says connected; only the named
+source is linked into the capture, never the decoy or the null sink's monitor; 3 s of each output,
+tapped on the private socket, match the input (raw bit for bit, processed equal to an offline omni
+of the same frames, both at the documented latency: 272 frames for uncalibrated omni plus one
+graph quantum, exactly, because the outputs carry what the capture got one cycle earlier); when the source is removed g16-mic waits and captures nothing, and when a
+source of the same name comes back it reconnects to that one only and raw is again the input bit
+for bit; `g16-mic run` on the sink's monitor is refused (exit 2); SIGTERM exits 0 within 3 s with
+the nodes and status file gone and no process left; the decoy never streamed. Every process it
+starts is stopped on every exit path and its temporary directory is removed. It skips (exit 77)
+only where the `pipewire` or `wireplumber` binary is missing; the PKGBUILD's `checkdepends` makes
+it run in the clean chroot, and `tests/channel/g16-mic.sh` fails if it skipped on a host that has
+both.
 
 ## Limitations
 
@@ -161,10 +217,12 @@ correlation, not only echo reduction).
 - Today's capture is 2 channels from one converter, and whether its channels are independent
   microphones is unproven.
 - More than 2 channels need the experimental, default-off kernel capture (#403).
-- The PipeWire host's live path (registry matching, linking, reconnect, the virtual sources) is
-  compiled but not exercised against a running PipeWire in CI; it waits for the G16 tests. The
-  decisions it makes (which node to capture, whether a spatial mode may run, the processing, the
-  status) are the tested functions above.
+- The live PipeWire path runs only against the private test graph (`test_pw_live`). Untested so
+  far: real ALSA capture hardware, the G16's own microphones, the user's WirePlumber policy and
+  configuration, and PipeWire's echo-cancel module in a live graph (the live test does not load
+  either fragment; `test_aec` checks the library they use, offline).
+- The noise-suppression-high fragment's effect on real speech is unmeasured on the G16; its word
+  loss there is the open question.
 - The echo reference is the default sink's monitor only: sound played through another device (a
   TV, a second sink an application chose) is not cancelled.
 - ODAS is not integrated in this release.

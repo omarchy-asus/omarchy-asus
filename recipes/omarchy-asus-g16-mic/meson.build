@@ -26,12 +26,15 @@ lib = static_library('g16mic',
 )
 libdep = declare_dependency(link_with: lib, dependencies: [fftw, m, threads])
 
-executable('g16-mic', ['main.c', 'host.c'],
+g16mic_exe = executable('g16-mic', ['main.c', 'host.c'],
   dependencies: [libdep, pw],
   install: true,
 )
 
-install_data('g16-mic-aec.conf',
+# Opt-in PipeWire fragments: echo cancellation only (the default), and the
+# same with noise suppression at PipeWire's high level (a word-loss risk; see
+# README.md). Neither is installed into a directory PipeWire reads.
+install_data('g16-mic-aec.conf', 'g16-mic-aec-ns-high.conf',
   install_dir: get_option('datadir') / 'omarchy-asus-g16-mic' / 'pipewire')
 install_data('calibration.example.conf',
   install_dir: get_option('datadir') / 'omarchy-asus-g16-mic')
@@ -39,12 +42,28 @@ install_data('calibration.example.conf',
 test_env = [
   'G16MIC_EXAMPLE_CALIB=' + (meson.current_source_dir() / 'calibration.example.conf'),
   'G16MIC_AEC_CONF=' + (meson.current_source_dir() / 'g16-mic-aec.conf'),
+  'G16MIC_AEC_NS_CONF=' + (meson.current_source_dir() / 'g16-mic-aec-ns-high.conf'),
 ]
 
 foreach t : ['test_rt', 'test_calib', 'test_match', 'test_beam', 'test_track', 'test_engine', 'test_status']
   exe = executable(t, t + '.c', dependencies: libdep)
   test(t, exe, timeout: 120, env: test_env)
 endforeach
+
+# The live test: g16-mic against a private PipeWire daemon and WirePlumber
+# with null/dummy drivers only (test_pw_live.sh). It skips (exit 77) only
+# where the pipewire or wireplumber binaries are missing; the PKGBUILD's
+# checkdepends puts both into the clean chroot, so it runs there.
+pw_helper_exe = executable('test_pw_helper', 'test_pw_helper.c',
+  dependencies: [libdep, pw],
+  install: false,
+)
+test('test_pw_live', find_program('bash'),
+  args: [files('test_pw_live.sh'), g16mic_exe, pw_helper_exe],
+  timeout: 180,
+  is_parallel: false,
+  env: test_env,
+)
 
 # The echo-cancellation test links the WebRTC audio-processing library that
 # PipeWire's module-echo-cancel uses, and checks it on synthetic signals.

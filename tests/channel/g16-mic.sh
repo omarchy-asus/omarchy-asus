@@ -1,10 +1,12 @@
 #!/bin/bash
 # omarchy-asus-g16-mic (#401, #400), offline: static checks of the recipe (HOLD, LOCAL_ONLY,
-# every source listed with its real sha256, the RC pkgrel, the echo-cancel fragment's keys,
-# nothing installed under /etc, pipewire.conf.d or systemd), then, where the toolchain and the
-# PipeWire, FFTW and WebRTC dev files are present, the meson build, its tests (synthetic signals
-# only) and the exact list of installed files. Where they are missing the build is skipped: the
-# PR's Build check runs the same tests in the PKGBUILD's check() in the clean chroot.
+# every source listed with its real sha256, the RC pkgrel, both echo-cancel fragments' keys and
+# distinct node names, nothing installed under /etc, pipewire.conf.d or systemd), then, where the
+# toolchain and the PipeWire, FFTW and WebRTC dev files are present, the meson build, its tests
+# (synthetic signals, and test_pw_live against a private PipeWire, which must not skip where the
+# pipewire and wireplumber binaries are present) and the exact list of installed files. Where they
+# are missing the build is skipped: the PR's Build check runs the same tests in the PKGBUILD's
+# check() in the clean chroot.
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 R=$W/recipes/omarchy-asus-g16-mic
@@ -50,18 +52,40 @@ else
 fi
 if out=$("$W/ci/check-pkgrel" rc "$pkgrel" 2>&1); then ok "pkgrel $pkgrel is in the RC range"; else fail "pkgrel: $out"; fi
 
-# --- the echo-cancel fragment ----------------------------------------------------------------
+# --- the echo-cancel fragments ---------------------------------------------------------------
+# g16-mic-aec.conf, the default: echo cancellation only (noise suppression and gain control off).
+# g16-mic-aec-ns-high.conf, opt-in: the same plus noise suppression at PipeWire's high level.
 C=$R/g16-mic-aec.conf
-for want in 'libpipewire-module-echo-cancel' 'aec/libspa-aec-webrtc' 'webrtc.gain_control = false' \
-  'webrtc.noise_suppression = true' 'monitor.mode = true' 'target.object = "g16_mic_processed"'; do
-  if grep -qF -- "$want" "$C"; then ok "g16-mic-aec.conf: $want"; else fail "g16-mic-aec.conf lacks: $want"; fi
-done
+CNS=$R/g16-mic-aec-ns-high.conf
+frag_has() { # FILE WANT...
+  local f=$1 n want
+  n=$(basename "$f")
+  shift
+  if [[ ! -f $f ]]; then fail "$n is missing"; return; fi
+  for want in "$@"; do
+    if grep -qF -- "$want" "$f"; then ok "$n: $want"; else fail "$n lacks: $want"; fi
+  done
+}
+frag_has "$C" 'libpipewire-module-echo-cancel' 'aec/libspa-aec-webrtc' 'webrtc.noise_suppression = false' \
+  'webrtc.gain_control = false' 'monitor.mode = true' 'target.object = "g16_mic_processed"' \
+  'node.name = "g16_mic_clean"'
+frag_has "$CNS" 'libpipewire-module-echo-cancel' 'aec/libspa-aec-webrtc' 'webrtc.noise_suppression = true' \
+  'webrtc.gain_control = false' 'monitor.mode = true' 'target.object = "g16_mic_processed"' \
+  'node.name = "g16_mic_clean_ns"'
+node_names() { sed -n 's/^[[:space:]]*node\.name[[:space:]]*=[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}.*/\1/p' "$1" | sort -u; }
+if [[ -f $C && -f $CNS ]]; then
+  shared=$(comm -12 <(node_names "$C") <(node_names "$CNS") | paste -sd' ')
+  if [[ -z $shared ]]; then ok "the two fragments share no node.name"; else fail "the two fragments share node.name: $shared"; fi
+fi
 if command -v spa-json-dump >/dev/null 2>&1; then
-  if spa-json-dump "$C" >"$T/json" 2>&1; then ok "g16-mic-aec.conf parses (spa-json-dump)"; else
-    fail "g16-mic-aec.conf does not parse:"; tail -n 20 "$T/json"
-  fi
+  for f in "$C" "$CNS"; do
+    [[ -f $f ]] || continue
+    if spa-json-dump "$f" >"$T/json" 2>&1; then ok "$(basename "$f") parses (spa-json-dump)"; else
+      fail "$(basename "$f") does not parse:"; tail -n 20 "$T/json"
+    fi
+  done
 else
-  echo "skip: spa-json-dump not here, the fragment's syntax is not parsed"
+  echo "skip: spa-json-dump not here, the fragments' syntax is not parsed"
 fi
 
 # --- nothing installed into active config or units -------------------------------------------
@@ -86,11 +110,22 @@ if ((have_build)); then
     fail "meson test:"; tail -n 80 "$T/test.log"
   else
     ok "meson test"; grep -E '^(Ok|Fail|Expected Fail|Unexpected Pass|Skipped|Timeout):' "$T/test.log"
+    # The live PipeWire test may skip only where its binaries are missing.
+    if command -v pipewire >/dev/null 2>&1 && command -v wireplumber >/dev/null 2>&1; then
+      live=$(grep -E '^ *[0-9]+/[0-9]+ +([^ ]+:)?test_pw_live +' "$T/test.log" | tail -n 1)
+      if [[ $live =~ [[:space:]]OK[[:space:]] ]]; then
+        ok "test_pw_live ran and passed (pipewire and wireplumber are here)"
+      else
+        fail "test_pw_live did not pass on a host with pipewire and wireplumber: ${live:-no result line}"
+      fi
+    else
+      echo "skip: no pipewire/wireplumber here, test_pw_live skipped"
+    fi
     if ! meson install -C "$T/build" --destdir "$T/pkg" >"$T/install.log" 2>&1; then
       fail "meson install:"; tail -n 20 "$T/install.log"
     else
-      got=$(cd "$T/pkg" && find . \( -type f -o -type l \) | sort | paste -sd' ')
-      want="./usr/bin/g16-mic ./usr/share/omarchy-asus-g16-mic/calibration.example.conf ./usr/share/omarchy-asus-g16-mic/pipewire/g16-mic-aec.conf"
+      got=$(cd "$T/pkg" && find . \( -type f -o -type l \) | LC_ALL=C sort | paste -sd' ')
+      want="./usr/bin/g16-mic ./usr/share/omarchy-asus-g16-mic/calibration.example.conf ./usr/share/omarchy-asus-g16-mic/pipewire/g16-mic-aec-ns-high.conf ./usr/share/omarchy-asus-g16-mic/pipewire/g16-mic-aec.conf"
       if [[ $got == "$want" ]]; then ok "meson install files"; else fail "installed files: $got"; fi
     fi
   fi

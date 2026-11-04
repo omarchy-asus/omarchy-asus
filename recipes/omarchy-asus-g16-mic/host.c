@@ -1,14 +1,21 @@
 /* SPDX-License-Identifier: MIT */
 /* host.c: the PipeWire side of the g16-mic daemon.
  *
- * NOT EXERCISED IN CI: this file needs a running PipeWire daemon, and the
- * clean build chroot has none, so `meson test` cannot run it. Every decision
- * it makes is delegated to pure functions that are tested there: which node
- * to capture (g16mic_match_source, match.c, test_match.c), whether the
- * spatial modes may run (g16mic_calib_check_spatial, calib.c), the
- * processing (engine.c) and the status file (status.c, test_status.c). What
- * is left here is wiring: the registry, the streams, the hand-off between
- * threads, and the stop sequence.
+ * Tested live by test_pw_live (test_pw_live.sh + test_pw_helper.c): it runs
+ * this file against a private PipeWire daemon and WirePlumber that load only
+ * null/dummy drivers (no ALSA, Bluetooth, Pulse or JACK; no sound), feeds it
+ * a synthetic named source beside a decoy source and a sink monitor, and
+ * checks the outputs bit for bit (raw) and against an offline omni engine
+ * (processed), the links, a remove/re-add of the source and the SIGTERM
+ * stop. It skips only where the pipewire or wireplumber binaries are
+ * missing (the PKGBUILD's checkdepends puts both in the clean chroot, so it
+ * runs there). Every decision is delegated to pure functions with their own
+ * unit tests: which node to capture (g16mic_match_source, match.c,
+ * test_match.c), whether the spatial modes may run
+ * (g16mic_calib_check_spatial, calib.c), the processing (engine.c) and the
+ * status file (status.c, test_status.c). What is left here is wiring: the
+ * registry, the streams, the hand-off between threads, and the stop
+ * sequence.
  *
  * Threads:
  *   - the PipeWire thread loop: registry and stream events, engine creation
@@ -42,6 +49,7 @@
 
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/param/audio/raw-types.h>
 #include <spa/param/format-utils.h>
 #include <spa/pod/builder.h>
 #include <spa/utils/defs.h>
@@ -71,6 +79,10 @@ struct node_ent {
 	char device_class[32];
 	int has_device_class;
 	int channels;  /* audio.channels if the node exposes it, else 0 */
+	/* audio.channel of its output ports (not monitors), by port.id; bit i
+	 * of port_seen says port i was announced */
+	uint32_t port_pos[G16MIC_MAX_CH];
+	uint32_t port_seen;
 };
 
 struct link_ent { uint32_t id, out_node, in_node; };
@@ -92,13 +104,34 @@ struct telem {
 
 struct host;
 
+/* Where a ring's samples sit on the graph clock: the sample at ring index
+ * head (in floats) was captured at clock position pos (48 kHz frames) of the
+ * driver clock_id. Written by the capture callback after each write that
+ * starts a contiguous run, read by the outputs; seq is a sequence lock (odd
+ * while being written). valid 0: no anchor (none yet, or the ring was
+ * emptied for a new channel count). */
+struct ring_anchor {
+	atomic_uint seq;
+	_Atomic int64_t pos;
+	atomic_size_t head;
+	atomic_uint clock_id;
+	atomic_int valid;
+};
+
 struct out_stream {
 	struct host *h;
 	struct pw_stream *stream;
 	struct spa_hook listener;
 	g16mic_ring *ring;
 	int channels;
+	uint32_t pos[G16MIC_MAX_CH];  /* channel positions offered */
 	float *scratch;  /* TRIM_CHUNK floats, for discarding stale samples */
+	/* active: the output is streaming (something consumes it), so the
+	 * capture callback feeds its ring. fresh: it has just started; its
+	 * first process call drops whatever the ring still holds. */
+	atomic_int active, fresh;
+	struct ring_anchor *anchor;
+	_Atomic(struct spa_io_position *) position;
 };
 
 /* What the worker needs from the thread-loop side; guarded by mu (neither
@@ -119,6 +152,9 @@ struct shared {
 
 struct host {
 	const g16mic_host_config *cfg;
+	/* node.group and node.link-group of all three streams (see
+	 * group_props) */
+	char group[48];
 	char status_dir[PATH_MAX];
 	int have_status_dir;
 
@@ -155,6 +191,8 @@ struct host {
 	atomic_int source_state;
 
 	g16mic_ring ring_mono, ring_raw;
+	struct ring_anchor anchor_mono, anchor_raw;
+	_Atomic(struct spa_io_position *) capture_position;
 	float *cap_raw, *cap_mono, *flush_raw, *flush_mono;
 	g16mic_spsc telem;
 
@@ -252,6 +290,7 @@ static void destroy_capture_stream(struct host *h)
 	spa_hook_remove(&h->capture_listener);
 	pw_stream_destroy(h->capture);
 	h->capture = NULL;
+	atomic_store(&h->capture_position, NULL);
 }
 
 /* ---- the status file (worker thread) -------------------------------------- */
@@ -315,6 +354,82 @@ static void *worker_main(void *arg)
 
 /* ---- real-time callbacks -------------------------------------------------- */
 
+/* RT-safe: the cycle's clock (position in 48 kHz frames, duration, driver
+ * id) from a stream's position area. 0 when there is none or the graph does
+ * not run at 48 kHz, so positions are not in the streams' frames. */
+static int cycle_clock(struct spa_io_position *p, int64_t *pos, uint64_t *duration, uint32_t *clock_id)
+{
+	if (!p || p->clock.rate.num != 1 || p->clock.rate.denom != G16MIC_RATE || p->clock.duration == 0)
+		return 0;
+	*pos = (int64_t)p->clock.position;
+	*duration = p->clock.duration;
+	*clock_id = p->clock.id;
+	return 1;
+}
+
+static void anchor_set(struct ring_anchor *a, int64_t pos, size_t head, uint32_t clock_id)
+{
+	unsigned s = atomic_load_explicit(&a->seq, memory_order_relaxed);
+
+	atomic_store_explicit(&a->seq, s + 1, memory_order_relaxed);
+	atomic_thread_fence(memory_order_release);
+	atomic_store_explicit(&a->pos, pos, memory_order_relaxed);
+	atomic_store_explicit(&a->head, head, memory_order_relaxed);
+	atomic_store_explicit(&a->clock_id, clock_id, memory_order_relaxed);
+	atomic_store_explicit(&a->valid, 1, memory_order_relaxed);
+	atomic_store_explicit(&a->seq, s + 2, memory_order_release);
+}
+
+static void anchor_clear(struct ring_anchor *a)
+{
+	unsigned s = atomic_load_explicit(&a->seq, memory_order_relaxed);
+
+	atomic_store_explicit(&a->seq, s + 1, memory_order_relaxed);
+	atomic_thread_fence(memory_order_release);
+	atomic_store_explicit(&a->valid, 0, memory_order_relaxed);
+	atomic_store_explicit(&a->seq, s + 2, memory_order_release);
+}
+
+/* 1 with a consistent anchor, 0 if there is none or it kept changing. */
+static int anchor_get(struct ring_anchor *a, int64_t *pos, size_t *head, uint32_t *clock_id)
+{
+	for (int tries = 0; tries < 4; tries++) {
+		unsigned s1 = atomic_load_explicit(&a->seq, memory_order_acquire);
+		if (s1 & 1u)
+			continue;
+		int valid = atomic_load_explicit(&a->valid, memory_order_relaxed);
+		*pos = atomic_load_explicit(&a->pos, memory_order_relaxed);
+		*head = atomic_load_explicit(&a->head, memory_order_relaxed);
+		*clock_id = atomic_load_explicit(&a->clock_id, memory_order_relaxed);
+		atomic_thread_fence(memory_order_acquire);
+		if (atomic_load_explicit(&a->seq, memory_order_relaxed) == s1)
+			return valid;
+	}
+	return 0;
+}
+
+/* RT-safe: ring_put, and on a write that does not continue the previous one
+ * (the first, or one after samples were refused) a new anchor at clock
+ * position pos. A write that continues it keeps the anchor: its samples
+ * follow on the clock as they follow in the ring. */
+static void ring_put_at(g16mic_ring *r, struct ring_anchor *a, int *contiguous, const float *src, size_t n,
+			int have_clock, int64_t pos, uint32_t clock_id)
+{
+	size_t head = atomic_load_explicit(&r->head, memory_order_relaxed);
+
+	if (r->cap - g16mic_ring_fill(r) < n) {
+		atomic_fetch_add(&r->overflow, (uint64_t)n);
+		*contiguous = 0;
+		return;
+	}
+	if (!have_clock)
+		anchor_clear(a);
+	else if (!*contiguous)
+		anchor_set(a, pos, head, clock_id);
+	g16mic_ring_write(r, src, n);
+	*contiguous = have_clock;
+}
+
 static void capture_process(void *data)
 {
 	struct host *h = data;
@@ -333,16 +448,33 @@ static void capture_process(void *data)
 		uint32_t size = SPA_MIN(d->chunk->size, d->maxsize - off);
 		const float *in = SPA_PTROFF(d->data, off, const float);
 		size_t frames = size / stride;
-		int raw_ok = atomic_load(&h->raw_channels) == ch;
+		int raw_ok = atomic_load(&h->raw_channels) == ch && atomic_load(&h->raw.active);
+		int mono_ok = atomic_load(&h->processed.active);
 
 		if (frames > atomic_load(&h->max_write_frames))
 			atomic_store(&h->max_write_frames, frames);
+		int64_t cpos = 0;
+		uint64_t cdur = 0;
+		uint32_t cid = 0;
+		int have_clock = cycle_clock(atomic_load_explicit(&h->capture_position, memory_order_relaxed), &cpos, &cdur,
+					     &cid);
+		/* each cycle re-anchors on its first write, so a skipped or
+		 * late cycle cannot shift the outputs' alignment */
+		int mono_run = 0, raw_run = 0;
 		for (size_t done = 0; done < frames; ) {
 			size_t n = SPA_MIN(frames - done, (size_t)SCRATCH_FRAMES);
 			g16mic_engine_process(L->e, in + done * (size_t)ch, n, h->cap_raw, h->cap_mono);
-			ring_put(&h->ring_mono, h->cap_mono, n);
+			/* Only outputs that something consumes are fed. A ring
+			 * nobody reads fills up and then refuses new samples
+			 * (ring_put), so it would keep audio from the moment it
+			 * filled and hand that stale audio to the next consumer
+			 * (test_pw_live: the raw tap's latency and bit check). */
+			if (mono_ok)
+				ring_put_at(&h->ring_mono, &h->anchor_mono, &mono_run, h->cap_mono, n, have_clock,
+					    cpos + (int64_t)done, cid);
 			if (raw_ok)
-				ring_put(&h->ring_raw, h->cap_raw, n * (size_t)ch);
+				ring_put_at(&h->ring_raw, &h->anchor_raw, &raw_run, h->cap_raw, n * (size_t)ch, have_clock,
+					    cpos + (int64_t)done, cid);
 			done += n;
 		}
 
@@ -358,9 +490,26 @@ static void capture_process(void *data)
 	pw_stream_queue_buffer(h->capture, b);
 }
 
+/* RT-safe: discards the oldest `drop` samples (whole frames) and counts them
+ * (ring_overflow in the status). */
+static void out_discard(struct out_stream *o, size_t drop)
+{
+	size_t ch = (size_t)o->channels;
+
+	drop -= drop % ch;
+	if (drop == 0)
+		return;
+	atomic_fetch_add(&o->h->trimmed, (uint64_t)drop);
+	size_t chunk = TRIM_CHUNK - TRIM_CHUNK % ch;
+	while (drop > 0) {
+		size_t n = SPA_MIN(drop, chunk);
+		g16mic_ring_read(o->ring, o->scratch, n);
+		drop -= n;
+	}
+}
+
 /* Drops the oldest samples when more are queued than the output can use
- * soon, so a consumer that links late (or a slower clock) does not build up
- * delay. Dropped samples are counted (ring_overflow in the status). */
+ * soon, so a slower clock does not build up delay. */
 static void out_trim(struct out_stream *o, size_t want)
 {
 	struct host *h = o->h;
@@ -369,17 +518,8 @@ static void out_trim(struct out_stream *o, size_t want)
 	size_t limit = (want / ch + slack) * ch;
 	size_t fill = g16mic_ring_fill(o->ring);
 
-	if (fill <= limit)
-		return;
-	size_t drop = fill - limit;
-	drop -= drop % ch;
-	atomic_fetch_add(&h->trimmed, (uint64_t)drop);
-	size_t chunk = TRIM_CHUNK - TRIM_CHUNK % ch;
-	while (drop > 0) {
-		size_t n = SPA_MIN(drop, chunk);
-		g16mic_ring_read(o->ring, o->scratch, n);
-		drop -= n;
-	}
+	if (fill > limit)
+		out_discard(o, fill - limit);
 }
 
 static void out_process(void *data)
@@ -399,9 +539,44 @@ static void out_process(void *data)
 	if (b->requested && b->requested < frames)
 		frames = b->requested;
 	size_t n = (size_t)frames * (size_t)o->channels;
+	float *dst = d->data;
 
-	out_trim(o, n);
-	g16mic_ring_read(o->ring, d->data, n);
+	/* A consumer that has just linked gets current audio: what the ring
+	 * kept from before (the tail of an earlier consumer's run) goes. */
+	if (atomic_exchange(&o->fresh, 0))
+		out_discard(o, g16mic_ring_fill(o->ring));
+
+	/* On the capture's clock: this cycle carries what the capture got one
+	 * cycle earlier, so both outputs are aligned with each other and with
+	 * the source at the engine latency plus one quantum, whichever order
+	 * the graph runs the streams in and whatever cycles an output missed.
+	 * Older samples are dropped, missing ones are zeros (both counted).
+	 * Before this the outputs read first-in first-out, and test_pw_live
+	 * found g16_mic_processed a quantum away from g16_mic_raw at the same
+	 * graph position once one of them had missed a cycle. */
+	int64_t opos, apos;
+	uint64_t odur;
+	uint32_t oid, aid;
+	size_t ahead;
+	if (cycle_clock(atomic_load_explicit(&o->position, memory_order_relaxed), &opos, &odur, &oid) &&
+	    anchor_get(o->anchor, &apos, &ahead, &aid) && aid == oid) {
+		size_t ch = (size_t)o->channels;
+		size_t tail = atomic_load_explicit(&o->ring->tail, memory_order_relaxed);
+		int64_t tail_pos = apos + ((int64_t)tail - (int64_t)ahead) / (int64_t)ch;
+		int64_t want = opos - (int64_t)odur;
+		if (tail_pos < want) {
+			out_discard(o, (size_t)SPA_MIN((uint64_t)(want - tail_pos) * ch, (uint64_t)g16mic_ring_fill(o->ring)));
+		} else if (tail_pos > want) {
+			size_t z = (size_t)SPA_MIN((uint64_t)(tail_pos - want), (uint64_t)frames) * ch;
+			memset(dst, 0, z * sizeof(float));
+			atomic_fetch_add(&o->ring->underflow, (uint64_t)z);
+			dst += z;
+			n -= z;
+		}
+	} else {
+		out_trim(o, n);
+	}
+	g16mic_ring_read(o->ring, dst, n);
 	d->chunk->offset = 0;
 	d->chunk->stride = (int32_t)stride;
 	d->chunk->size = (uint32_t)(frames * stride);
@@ -424,12 +599,14 @@ static void retire_engine(struct host *h, int flush)
 		sleep_us(50);
 
 	if (flush) {
-		int raw_ok = atomic_load(&h->raw_channels) == old->channels;
+		int raw_ok = atomic_load(&h->raw_channels) == old->channels && atomic_load(&h->raw.active);
+		int mono_ok = atomic_load(&h->processed.active);
 		for (int guard = 0; guard < 64; guard++) {
 			size_t n = g16mic_engine_flush(old->e, h->flush_raw, h->flush_mono, SCRATCH_FRAMES);
 			if (n == 0)
 				break;
-			ring_put(&h->ring_mono, h->flush_mono, n);
+			if (mono_ok)
+				ring_put(&h->ring_mono, h->flush_mono, n);
 			if (raw_ok)
 				ring_put(&h->ring_raw, h->flush_raw, n * (size_t)old->channels);
 			if (n < SCRATCH_FRAMES)
@@ -450,21 +627,67 @@ static void retire_engine(struct host *h, int flush)
 	free(old);
 }
 
+/* Thread-loop thread. fresh is raised before active, so samples the capture
+ * callback queues from now on are not mistaken for old ones for long: at most
+ * the first callback's worth is dropped with them (counted as an underflow). */
+static void out_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error)
+{
+	struct out_stream *o = data;
+
+	(void)old;
+	(void)error;
+	if (state == PW_STREAM_STATE_STREAMING) {
+		atomic_store(&o->fresh, 1);
+		atomic_store(&o->active, 1);
+	} else {
+		atomic_store(&o->active, 0);
+	}
+}
+
+static void out_io_changed(void *data, uint32_t id, void *area, uint32_t size)
+{
+	struct out_stream *o = data;
+
+	if (id == SPA_IO_Position)
+		atomic_store(&o->position, area && size >= sizeof(struct spa_io_position) ? area : NULL);
+}
+
 static const struct pw_stream_events out_events = {
 	PW_VERSION_STREAM_EVENTS,
+	.io_changed = out_io_changed,
+	.state_changed = out_state_changed,
 	.process = out_process,
 };
 
 static void destroy_output(struct out_stream *o)
 {
+	atomic_store(&o->active, 0);
 	if (o->stream) {
 		spa_hook_remove(&o->listener);
 		pw_stream_destroy(o->stream);
 		o->stream = NULL;
 	}
+	atomic_store(&o->position, NULL);
 }
 
-static int create_output(struct host *h, struct out_stream *o, const char *name, const char *desc, int ch, int is_raw)
+/* pos: the channel positions to offer (ch of them); NULL offers MONO for one
+ * channel and AUX0.. otherwise. */
+/* The capture and both outputs carry one node.group, so PipeWire schedules
+ * them with one driver, in the same cycles as the source: the outputs then
+ * run on the microphone's clock and the ring hand-off between them neither
+ * drifts nor fills. Without it each output followed whichever driver its
+ * consumer picked (test_pw_live: the taps ran on another driver's clock than
+ * the capture, so the raw tap's latency check failed). node.link-group
+ * marks them as one filter, so the session manager never links one of them
+ * into another. module-filter-chain and module-echo-cancel do the same. */
+static void group_props(struct host *h, struct pw_properties *props)
+{
+	pw_properties_set(props, PW_KEY_NODE_GROUP, h->group);
+	pw_properties_set(props, PW_KEY_NODE_LINK_GROUP, h->group);
+}
+
+static int create_output(struct host *h, struct out_stream *o, const char *name, const char *desc, int ch, int is_raw,
+			 const uint32_t *pos)
 {
 	uint8_t pod_buf[1024];
 	struct spa_pod_builder bld = SPA_POD_BUILDER_INIT(pod_buf, sizeof pod_buf);
@@ -486,10 +709,17 @@ static int create_output(struct host *h, struct out_stream *o, const char *name,
 		return -1;
 	if (is_raw)
 		pw_properties_set(props, "stream.dont-remix", "true");
+	group_props(h, props);
 
 	o->h = h;
 	o->channels = ch;
 	o->ring = is_raw ? &h->ring_raw : &h->ring_mono;
+	o->anchor = is_raw ? &h->anchor_raw : &h->anchor_mono;
+	atomic_store(&o->position, NULL);
+	atomic_store(&o->active, 0);
+	atomic_store(&o->fresh, 0);
+	for (int i = 0; i < ch && i < G16MIC_MAX_CH; i++)
+		o->pos[i] = pos ? pos[i] : ch == 1 ? SPA_AUDIO_CHANNEL_MONO : SPA_AUDIO_CHANNEL_AUX0 + (uint32_t)i;
 	o->stream = pw_stream_new(h->core, name, props);
 	if (!o->stream)
 		return -1;
@@ -501,7 +731,7 @@ static int create_output(struct host *h, struct out_stream *o, const char *name,
 	info.rate = G16MIC_RATE;
 	info.channels = (uint32_t)ch;
 	for (int i = 0; i < ch && i < G16MIC_MAX_CH; i++)
-		info.position[i] = is_raw ? SPA_AUDIO_CHANNEL_AUX0 + (uint32_t)i : SPA_AUDIO_CHANNEL_MONO;
+		info.position[i] = o->pos[i];
 	params[0] = spa_format_audio_raw_build(&bld, SPA_PARAM_EnumFormat, &info);
 
 	int res = pw_stream_connect(o->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
@@ -514,11 +744,41 @@ static int create_output(struct host *h, struct out_stream *o, const char *name,
 	return 0;
 }
 
-/* Makes the raw output carry `ch` channels. Only called while no engine is
- * live, so nothing writes the raw ring meanwhile. */
-static void ensure_raw_output(struct host *h, int ch)
+/* The raw output's channel positions: the captured source's own, so a
+ * consumer asking for the usual layout (FL FR for a stereo microphone) gets
+ * the channels as they are. They come from the negotiated format when it
+ * carries positions, else (a capture that asked for no layout negotiates an
+ * unpositioned format) from the audio.channel of the source's output ports,
+ * by port.id. Positions it cannot carry over (unknown, missing or a
+ * duplicate) become AUX0.. for every channel. Before this the raw output
+ * always said AUX0..; test_pw_live's raw tap asks for the source's FL FR
+ * and checks the samples bit for bit. */
+static void raw_positions(const struct spa_audio_info_raw *fmt, const struct node_ent *src, int ch, uint32_t *pos)
 {
-	if (h->raw.stream && h->raw.channels == ch) {
+	const uint32_t *from = NULL;
+
+	if (fmt && !(fmt->flags & SPA_AUDIO_FLAG_UNPOSITIONED))
+		from = fmt->position;
+	else if (src && ch <= G16MIC_MAX_CH && ch < 32 && (src->port_seen & ((1u << ch) - 1)) == (1u << ch) - 1)
+		from = src->port_pos;
+	int ok = from != NULL;
+	for (int i = 0; ok && i < ch; i++) {
+		uint32_t p = from[i];
+		if (p == SPA_AUDIO_CHANNEL_UNKNOWN || p == SPA_AUDIO_CHANNEL_NA)
+			ok = 0;
+		for (int j = 0; ok && j < i; j++)
+			if (from[j] == p)
+				ok = 0;
+	}
+	for (int i = 0; i < ch; i++)
+		pos[i] = ok ? from[i] : SPA_AUDIO_CHANNEL_AUX0 + (uint32_t)i;
+}
+
+/* Makes the raw output carry `ch` channels at positions `pos`. Only called
+ * while no engine is live, so nothing writes the raw ring meanwhile. */
+static void ensure_raw_output(struct host *h, int ch, const uint32_t *pos)
+{
+	if (h->raw.stream && h->raw.channels == ch && memcmp(h->raw.pos, pos, (size_t)ch * sizeof *pos) == 0) {
 		atomic_store(&h->raw_channels, ch);
 		return;
 	}
@@ -528,7 +788,8 @@ static void ensure_raw_output(struct host *h, int ch)
 	size_t fill;
 	while ((fill = g16mic_ring_fill(&h->ring_raw)) > 0)
 		g16mic_ring_read(&h->ring_raw, h->raw.scratch, SPA_MIN(fill, (size_t)TRIM_CHUNK));
-	if (create_output(h, &h->raw, "g16_mic_raw", "G16 mic (raw passthrough)", ch, 1) == 0)
+	anchor_clear(&h->anchor_raw);  /* its head counted frames of the old width */
+	if (create_output(h, &h->raw, "g16_mic_raw", "G16 mic (raw passthrough)", ch, 1, pos) == 0)
 		atomic_store(&h->raw_channels, ch);
 }
 
@@ -568,10 +829,10 @@ static void fill_idle(struct host *h, g16mic_stats *s, g16mic_mode active)
 
 /* Called once the capture's channel count is known. All allocation for the
  * real-time path happens here. */
-static int setup_engine(struct host *h, int ch)
+static int setup_engine(struct host *h, int ch, const uint32_t *raw_pos)
 {
 	retire_engine(h, 1);
-	ensure_raw_output(h, ch);
+	ensure_raw_output(h, ch, raw_pos);
 
 	g16mic_cal_status st = spatial_check(h, ch);
 	h->spatial_status = st;
@@ -690,12 +951,27 @@ static void capture_param_changed(void *data, uint32_t id, const struct spa_pod 
 		h->pending = TD_ERROR;
 		return;
 	}
-	if (setup_engine(h, (int)info.channels) != 0)
+	uint32_t pos[G16MIC_MAX_CH];
+	const struct node_ent *src = NULL;
+	for (size_t i = 0; i < h->n_nodes; i++)
+		if (h->nodes[i].id == h->capture_source_id)
+			src = &h->nodes[i];
+	raw_positions(&info, src, (int)info.channels, pos);
+	if (setup_engine(h, (int)info.channels, pos) != 0)
 		h->pending = TD_ERROR;
+}
+
+static void capture_io_changed(void *data, uint32_t id, void *area, uint32_t size)
+{
+	struct host *h = data;
+
+	if (id == SPA_IO_Position)
+		atomic_store(&h->capture_position, area && size >= sizeof(struct spa_io_position) ? area : NULL);
 }
 
 static const struct pw_stream_events capture_events = {
 	PW_VERSION_STREAM_EVENTS,
+	.io_changed = capture_io_changed,
 	.state_changed = capture_state_changed,
 	.param_changed = capture_param_changed,
 	.process = capture_process,
@@ -721,6 +997,7 @@ static int connect_capture(struct host *h, uint32_t source_id)
 		NULL);
 	if (!props)
 		return -1;
+	group_props(h, props);
 	h->capture = pw_stream_new(h->core, "g16-mic capture", props);
 	if (!h->capture)
 		return -1;
@@ -895,6 +1172,21 @@ static void registry_global(void *data, uint32_t id, uint32_t permissions, const
 		l->in_node = dict_u32(props, PW_KEY_LINK_INPUT_NODE);
 		check_links(h);
 		service(h);
+	} else if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+		uint32_t node = dict_u32(props, PW_KEY_NODE_ID), idx = dict_u32(props, PW_KEY_PORT_ID);
+		const char *dir = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+		const char *mon = spa_dict_lookup(props, PW_KEY_PORT_MONITOR);
+		const char *chan = spa_dict_lookup(props, PW_KEY_AUDIO_CHANNEL);
+		if (!dir || strcmp(dir, "out") != 0 || (mon && strcmp(mon, "true") == 0) || !chan || idx >= G16MIC_MAX_CH ||
+		    idx >= 32)
+			return;
+		for (size_t i = 0; i < h->n_nodes; i++) {
+			if (h->nodes[i].id == node) {
+				h->nodes[i].port_pos[idx] = spa_type_audio_channel_from_short_name(chan);
+				h->nodes[i].port_seen |= 1u << idx;
+				break;
+			}
+		}
 	}
 }
 
@@ -1067,6 +1359,7 @@ int g16mic_host_run(const g16mic_host_config *cfg)
 	if (!h)
 		return 1;
 	h->cfg = cfg;
+	snprintf(h->group, sizeof h->group, "g16-mic-%ld", (long)getpid());
 	h->capture_source_id = SPA_ID_INVALID;
 	h->capture_node_id = SPA_ID_INVALID;
 	h->blocked_id = SPA_ID_INVALID;
@@ -1137,7 +1430,7 @@ int g16mic_host_run(const g16mic_host_config *cfg)
 		goto out_stop;
 	}
 	pw_core_add_listener(h->core, &h->core_listener, &core_events, h);
-	if (create_output(h, &h->processed, "g16_mic_processed", "G16 mic (processed)", 1, 0) != 0) {
+	if (create_output(h, &h->processed, "g16_mic_processed", "G16 mic (processed)", 1, 0, NULL) != 0) {
 		pw_thread_loop_unlock(h->tl);
 		rc = 1;
 		goto out_stop;
@@ -1178,8 +1471,11 @@ int g16mic_host_run(const g16mic_host_config *cfg)
 	destroy_capture_stream(h);
 	pw_thread_loop_unlock(h->tl);
 	for (int waited = 0; waited < DRAIN_MS; waited += 10) {
-		int raw_live = atomic_load(&h->raw_channels) != 0;
-		if (g16mic_ring_fill(&h->ring_mono) == 0 && (!raw_live || g16mic_ring_fill(&h->ring_raw) == 0))
+		/* only outputs something still reads can drain */
+		int raw_live = atomic_load(&h->raw_channels) != 0 && atomic_load(&h->raw.active);
+		int mono_live = atomic_load(&h->processed.active);
+		if ((!mono_live || g16mic_ring_fill(&h->ring_mono) == 0) &&
+		    (!raw_live || g16mic_ring_fill(&h->ring_raw) == 0))
 			break;
 		sleep_us(10000);
 	}

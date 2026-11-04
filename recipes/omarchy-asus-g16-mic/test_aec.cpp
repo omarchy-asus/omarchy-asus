@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
-// test_aec: checks the echo cancellation g16-mic-aec.conf turns on, by
+// test_aec: checks the echo cancellation the two fragments turn on, by
 // running webrtc-audio-processing-1 (the library behind PipeWire's
 // aec/libspa-aec-webrtc) with the same settings on synthetic signals.
 //
-// No files other than the conf, no audio devices, deterministic signals.
-// Scenarios (48 kHz mono, 10 ms frames):
+//   g16-mic-aec.conf          the default: echo cancellation only, no noise
+//                             suppression, no gain control (keeps every word)
+//   g16-mic-aec-ns-high.conf  opt-in: the same plus noise suppression at
+//                             PipeWire's fixed high level (word-loss risk)
+//
+// No files other than the confs, no audio devices, deterministic signals.
+// Scenarios (48 kHz mono, 10 ms frames), a-d with the default settings:
 //   a) bulk delay 60 ms, hint 60 ms: echo return loss enhancement (ERLE)
 //   b) true delay 100 ms, hint 40 ms: the library must find the delay
 //   c) 100 ppm clock drift between reference and echo path, 20 s: ERLE and
@@ -13,6 +18,10 @@
 //   d) double talk: near-end speech must survive while the far end plays,
 //      plus a near-end-only control. These are the assertions that matter
 //      most: keeping words beats removing echo.
+//   e) the opt-in noise-suppression-high settings: double talk and the
+//      near-end-only control again, plus the ERLE of a. Its numbers are
+//      printed next to the default's (the near-end retention difference in
+//      dB) and only the absolute word floors are asserted.
 // Every scenario prints its numbers; exit 1 on any failure.
 
 #include <modules/audio_processing/include/audio_processing.h>
@@ -46,9 +55,10 @@ void check(bool ok, const char *what, double value, const char *cmp, double limi
         g_failures++;
 }
 
-// ---- settings shared by the fragment and the library run ------------------
+// ---- settings shared by the fragments and the library run -----------------
 //
-// These mirror aec.args in g16-mic-aec.conf. PipeWire 1.6 (aec-webrtc.cpp,
+// These mirror aec.args in g16-mic-aec.conf (default) and
+// g16-mic-aec-ns-high.conf (opt-in). PipeWire 1.6 (aec-webrtc.cpp,
 // webrtc-audio-processing 1.x path) maps them as:
 //   webrtc.gain_control          -> gain_controller1/2.enabled
 //   webrtc.noise_suppression     -> noise_suppression.enabled, level kHigh
@@ -56,14 +66,26 @@ void check(bool ok, const char *what, double value, const char *cmp, double limi
 //   webrtc.voice_detection       -> voice_detection.enabled
 //   webrtc.transient_suppression -> transient_suppression.enabled
 //   webrtc.mobile_mode           -> echo_canceller.mobile_mode
-// and always sets echo_canceller.enabled = true. The noise-suppression level
-// is fixed to kHigh in PipeWire's source, so the test uses kHigh too: the
-// test must run what PipeWire runs.
+// and always sets echo_canceller.enabled = true. The two fragments differ
+// only in webrtc.noise_suppression: false in the default, true in the
+// opt-in. When it is on, PipeWire fixes the level to kHigh in its source
+// (no key lowers it), so the test uses kHigh too: the test must run what
+// PipeWire runs.
 struct ConfKey {
     const char *key;
     bool value;
 };
-const ConfKey kExpected[] = {
+// Default, g16-mic-aec.conf: echo cancellation only.
+const ConfKey kExpectedDefault[] = {
+    {"webrtc.gain_control", false},
+    {"webrtc.noise_suppression", false},
+    {"webrtc.high_pass_filter", false},
+    {"webrtc.voice_detection", false},
+    {"webrtc.transient_suppression", false},
+    {"webrtc.mobile_mode", false},
+};
+// Opt-in, g16-mic-aec-ns-high.conf: plus noise suppression (high).
+const ConfKey kExpectedNsHigh[] = {
     {"webrtc.gain_control", false},
     {"webrtc.noise_suppression", true},
     {"webrtc.high_pass_filter", false},
@@ -71,13 +93,15 @@ const ConfKey kExpected[] = {
     {"webrtc.transient_suppression", false},
     {"webrtc.mobile_mode", false},
 };
+constexpr size_t kNumKeys = sizeof(kExpectedDefault) / sizeof(kExpectedDefault[0]);
+static_assert(kNumKeys == sizeof(kExpectedNsHigh) / sizeof(kExpectedNsHigh[0]), "tables differ in size");
 
-webrtc::AudioProcessing::Config apm_config()
+webrtc::AudioProcessing::Config apm_config(bool ns_high)
 {
     webrtc::AudioProcessing::Config c;
     c.echo_canceller.enabled = true;
     c.echo_canceller.mobile_mode = false;
-    c.noise_suppression.enabled = true;
+    c.noise_suppression.enabled = ns_high;
     c.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kHigh;
     c.gain_controller1.enabled = false;
     c.gain_controller2.enabled = false;
@@ -154,18 +178,42 @@ std::string find_key(const std::string &s, const std::string &key)
     return "";
 }
 
-void check_conf()
+// Every node.name value in the file, in order (find_key only returns the
+// first one).
+std::vector<std::string> all_node_names(const std::string &s)
 {
-    std::printf("conf: g16-mic-aec.conf matches the settings under test\n");
-    const char *path = std::getenv("G16MIC_AEC_CONF");
+    std::vector<std::string> names;
+    const std::string key = "node.name";
+    size_t pos = 0;
+    while ((pos = s.find(key, pos)) != std::string::npos) {
+        bool start_ok = pos == 0 || !is_key_char(s[pos - 1]);
+        size_t end = pos + key.size();
+        bool end_ok = end >= s.size() || !is_key_char(s[end]);
+        if (start_ok && end_ok) {
+            std::string v = read_value(s, end);
+            if (!v.empty())
+                names.push_back(v);
+        }
+        pos = end;
+    }
+    return names;
+}
+
+// Checks one fragment against its expected table. Returns its node.name
+// values (empty when skipped or unreadable).
+std::vector<std::string> check_conf(const char *path_env, const ConfKey *expected, const char *source_name,
+                                    const char *label)
+{
+    std::printf("conf: %s matches the settings under test\n", label);
+    const char *path = std::getenv(path_env);
     if (!path || !*path) {
-        std::printf("  SKIP G16MIC_AEC_CONF not set (meson test sets it)\n");
-        return;
+        std::printf("  SKIP %s not set (meson test sets it)\n", path_env);
+        return {};
     }
     std::ifstream f(path);
     if (!f) {
         check(false, "conf file readable", 0, "==", 1);
-        return;
+        return {};
     }
     std::stringstream ss;
     ss << f.rdbuf();
@@ -201,11 +249,21 @@ void check_conf()
     check(find_key(s, "target.object") == "g16_mic_processed",
           "capture target.object = g16_mic_processed", 0, "==", 0);
 
+    // The new source's node.name, read inside source.props.
+    std::string src_name;
+    size_t sp = s.find("source.props");
+    if (sp != std::string::npos)
+        src_name = find_key(s.substr(sp), "node.name");
+    if (src_name != source_name)
+        std::printf("  source node.name is '%s'\n", src_name.c_str());
+    std::string src_what = std::string("source node.name = ") + source_name;
+    check(src_name == source_name, src_what.c_str(), 0, "==", 0);
+
     // Every webrtc.* key must be one PipeWire 1.6 parses for library 1.x,
     // and each must carry the value this test runs.
     std::set<std::string> allowed;
-    for (const ConfKey &k : kExpected)
-        allowed.insert(k.key);
+    for (size_t i = 0; i < kNumKeys; i++)
+        allowed.insert(expected[i].key);
     int unknown = 0;
     size_t pos = 0;
     while ((pos = s.find("webrtc.", pos)) != std::string::npos) {
@@ -224,7 +282,8 @@ void check_conf()
         pos = end;
     }
     check(unknown == 0, "no webrtc.* keys PipeWire 1.6 ignores", unknown, "==", 0);
-    for (const ConfKey &k : kExpected) {
+    for (size_t i = 0; i < kNumKeys; i++) {
+        const ConfKey &k = expected[i];
         std::string v = find_key(s, k.key);
         bool ok = v == (k.value ? "true" : "false");
         std::string what = std::string(k.key) + " = " + (k.value ? "true" : "false");
@@ -232,6 +291,25 @@ void check_conf()
             std::printf("  %s is '%s'\n", k.key, v.c_str());
         check(ok, what.c_str(), 0, "==", 0);
     }
+    return all_node_names(s);
+}
+
+// Both fragments can be linked at once only if no node.name is shared.
+void check_disjoint(const std::vector<std::string> &a, const std::vector<std::string> &b)
+{
+    std::printf("conf: the two fragments share no node.name\n");
+    if (a.empty() || b.empty()) {
+        std::printf("  SKIP one of the fragments was not checked\n");
+        return;
+    }
+    std::set<std::string> sa(a.begin(), a.end());
+    int shared = 0;
+    for (const std::string &n : b)
+        if (sa.count(n)) {
+            std::printf("  node.name in both: %s\n", n.c_str());
+            shared++;
+        }
+    check(shared == 0, "node.name values disjoint", shared, "==", 0);
 }
 
 // ---- deterministic signals ------------------------------------------------
@@ -375,12 +453,12 @@ void add_floor(std::vector<float> &mic, uint32_t seed)
 
 // ---- the library ----------------------------------------------------------
 
-std::unique_ptr<webrtc::AudioProcessing> make_apm()
+std::unique_ptr<webrtc::AudioProcessing> make_apm(bool ns_high)
 {
     std::unique_ptr<webrtc::AudioProcessing> apm(webrtc::AudioProcessingBuilder().Create());
     if (!apm)
         return nullptr;
-    apm->ApplyConfig(apm_config());
+    apm->ApplyConfig(apm_config(ns_high));
     webrtc::ProcessingConfig pc;
     pc.input_stream() = webrtc::StreamConfig(kRate, 1, false);
     pc.output_stream() = webrtc::StreamConfig(kRate, 1, false);
@@ -457,6 +535,38 @@ double worst_gain_db(const std::vector<float> &mic, const std::vector<float> &ou
     return worst;
 }
 
+// Mean level of x over [a, b) in dBFS (RMS).
+double level_dbfs(const std::vector<float> &x, size_t a, size_t b)
+{
+    return 10.0 * std::log10(energy(x, a, b) / static_cast<double>(std::max<size_t>(b - a, 1)) + 1e-20);
+}
+
+// 100 ms stretches where the mic carries more than the -70 dBFS noise floor (echo or
+// speech) are "active"; the rest are near-silent.
+const double kActiveDbfs = -50.0;
+
+// Over 100 ms windows: the largest output-over-mic gain where the mic is
+// active, and the loudest output (dBFS) where it is near-silent. Without
+// noise suppression the echo canceller's output in a near-silent window can
+// sit above the -70 dBFS floor it was fed (its residual and comfort noise,
+// about -60 dBFS here), which a ratio alone would call amplification; the
+// absolute level says whether that is audible.
+void worst_windows(const std::vector<float> &mic, const std::vector<float> &out, double *active_gain_db,
+                   double *quiet_out_dbfs)
+{
+    const size_t w = kRate / 10;
+    *active_gain_db = -1e9;
+    *quiet_out_dbfs = -1e9;
+    for (size_t a = 0; a + w <= out.size(); a += w) {
+        if (level_dbfs(mic, a, a + w) >= kActiveDbfs) {
+            double g = 10.0 * std::log10((energy(out, a, a + w) + 1e-12) / (energy(mic, a, a + w) + 1e-12));
+            *active_gain_db = std::max(*active_gain_db, g);
+        } else {
+            *quiet_out_dbfs = std::max(*quiet_out_dbfs, level_dbfs(out, a, a + w));
+        }
+    }
+}
+
 struct Retention {
     double gain_db;  // least-squares gain of the clean near end in the output
     double corr;     // normalized correlation output vs clean near end
@@ -506,27 +616,34 @@ const double kFarLo = 120.0, kFarHi = 160.0;   // far-end talker
 const double kNearLo = 170.0, kNearHi = 220.0; // near-end talker
 const double kFarDbfs = -16.0;
 
-void scenario_delay()
+// Returns the ERLE; asserts it only for the default (AEC-only) settings,
+// the opt-in variant reports it.
+double scenario_delay(bool ns_high)
 {
-    std::printf("a) bulk delay 60 ms, hint 60 ms, 10 s far end only\n");
+    std::printf("a) bulk delay 60 ms, hint 60 ms, 10 s far end only%s\n",
+                ns_high ? " (noise suppression high)" : "");
     const size_t n = sec(10);
     auto far = make_speech(n, kFarLo, kFarHi, kFarSeed, kFarDbfs);
     auto room = make_room(kRoomSeed);
     auto mic = echo_path(far, room, sec(0.060), n);
     add_floor(mic, 11);
-    auto apm = make_apm();
+    auto apm = make_apm(ns_high);
     if (!apm) {
         check(false, "library created", 0, "==", 1);
-        return;
+        return 0.0;
     }
     auto out = run(*apm, far, mic, 60);
     if (out.empty()) {
         check(false, "library processed every frame", 0, "==", 1);
-        return;
+        return 0.0;
     }
     double erle = erle_db(mic, out, sec(6), sec(10));
-    check(erle >= 15.0, "ERLE, last 4 s (dB)", erle, ">=", 15.0);
+    if (ns_high)
+        std::printf("       ERLE, last 4 s: %.2f dB (reported)\n", erle);
+    else
+        check(erle >= 15.0, "ERLE, last 4 s (dB)", erle, ">=", 15.0);
     std::printf("       worst 100 ms output-over-mic: %.2f dB\n", worst_gain_db(mic, out));
+    return erle;
 }
 
 void scenario_delay_mismatch()
@@ -537,7 +654,7 @@ void scenario_delay_mismatch()
     auto room = make_room(kRoomSeed);
     auto mic = echo_path(far, room, sec(0.100), n);
     add_floor(mic, 12);
-    auto apm = make_apm();
+    auto apm = make_apm(false);
     if (!apm) {
         check(false, "library created", 0, "==", 1);
         return;
@@ -567,7 +684,7 @@ void scenario_drift()
     auto mic = echo_path(drifted, room, sec(0.060), n);
     add_floor(mic, 13);
     far.resize(n);
-    auto apm = make_apm();
+    auto apm = make_apm(false);
     if (!apm) {
         check(false, "library created", 0, "==", 1);
         return;
@@ -579,13 +696,35 @@ void scenario_drift()
     }
     double erle = erle_db(mic, out, sec(15), sec(20));
     check(erle >= 8.0, "ERLE, last 5 s (dB)", erle, ">=", 8.0);
-    double worst = worst_gain_db(mic, out);
-    check(worst <= 1.0, "worst 100 ms output over mic (dB)", worst, "<=", 1.0);
+    // The canceller must never amplify where there is signal, and what it
+    // leaves in near-silent windows must stay quiet (-55 dBFS is 35 dB
+    // under the -20 dBFS near-end speech these tests use).
+    double active_gain, quiet_out;
+    worst_windows(mic, out, &active_gain, &quiet_out);
+    check(active_gain <= 1.0, "worst 100 ms output over mic, mic active (dB)", active_gain, "<=", 1.0);
+    check(quiet_out <= -55.0, "loudest 100 ms output, mic near-silent (dBFS)", quiet_out, "<=", -55.0);
 }
 
-void scenario_double_talk()
+// Absolute word floors: no settings, default or opt-in, may go below these,
+// and no library update may loosen any threshold below them.
+const double kWordFloorDb = -10.0;
+const double kWordFloorCorr = 0.5;
+
+struct NearEnd {
+    bool ok = false;     // both runs completed
+    Retention talk{};    // during double talk
+    Retention alone{};   // near end only, no far end
+};
+
+// Runs double talk and the near-end-only control with the given settings.
+// The default (AEC-only) asserts its thresholds; the opt-in noise
+// suppression variant asserts only the absolute word floors and reports.
+NearEnd scenario_double_talk(bool ns_high)
 {
-    std::printf("d) double talk: 6 s far end only, then near end at -20 dBFS for 6 s\n");
+    const char *sfx = ns_high ? " (noise suppression high)" : "";
+    const char tag = ns_high ? 'e' : 'd';
+    NearEnd res;
+    std::printf("%c) double talk: 6 s far end only, then near end at -20 dBFS for 6 s%s\n", tag, sfx);
     const size_t n = sec(12);
     const size_t dt_a = sec(6), dt_b = sec(12);
     auto far = make_speech(n, kFarLo, kFarHi, kFarSeed, kFarDbfs);
@@ -597,44 +736,93 @@ void scenario_double_talk()
     std::copy(talk.begin(), talk.end(), clean.begin() + dt_a);
     for (size_t i = 0; i < n; i++)
         mic[i] += clean[i];
-    auto apm = make_apm();
+    auto apm = make_apm(ns_high);
     if (!apm) {
         check(false, "library created", 0, "==", 1);
-        return;
+        return res;
     }
     auto out = run(*apm, far, mic, 60);
     if (out.empty()) {
         check(false, "library processed every frame", 0, "==", 1);
-        return;
+        return res;
     }
     double erle = erle_db(mic, out, sec(4), sec(6));
     std::printf("       ERLE before the near end starts (4-6 s): %.2f dB\n", erle);
     Retention r = retention(clean, out, dt_a, dt_b);
-    std::printf("       alignment lag %ld samples\n", r.lag);
-    // Word retention is the point: these two must hold. Never loosen below
+    std::printf("       retention %.2f dB, correlation %.3f, alignment lag %ld samples\n", r.gain_db, r.corr,
+                r.lag);
+    // Word retention is the point: these must hold. Never loosen below
     // -10 dB / 0.5 even if a library update needs a threshold change.
-    check(r.gain_db >= -6.0, "near end retained during double talk (dB)", r.gain_db, ">=", -6.0);
-    check(r.corr >= 0.7, "near end correlation during double talk", r.corr, ">=", 0.7);
+    if (ns_high) {
+        check(r.gain_db >= kWordFloorDb, "near end retained during double talk (dB)", r.gain_db, ">=",
+              kWordFloorDb);
+        check(r.corr >= kWordFloorCorr, "near end correlation during double talk", r.corr, ">=", kWordFloorCorr);
+    } else {
+        check(r.gain_db >= -6.0, "near end retained during double talk (dB)", r.gain_db, ">=", -6.0);
+        check(r.corr >= 0.7, "near end correlation during double talk", r.corr, ">=", 0.7);
+    }
 
-    std::printf("d) control: near end only, no far end, 6 s\n");
+    std::printf("%c) control: near end only, no far end, 6 s%s\n", tag, sfx);
     const size_t n2 = sec(6);
     std::vector<float> silent(n2, 0.0f);
     auto near_only = make_speech(n2, kNearLo, kNearHi, kNearSeed, -20.0);
     std::vector<float> mic2 = near_only;
     add_floor(mic2, 15);
-    auto apm2 = make_apm();
+    auto apm2 = make_apm(ns_high);
     if (!apm2) {
         check(false, "library created", 0, "==", 1);
-        return;
+        return res;
     }
     auto out2 = run(*apm2, silent, mic2, 60);
     if (out2.empty()) {
         check(false, "library processed every frame", 0, "==", 1);
-        return;
+        return res;
     }
     Retention r2 = retention(near_only, out2, 0, n2);
-    std::printf("       alignment lag %ld samples, correlation %.3f\n", r2.lag, r2.corr);
-    check(r2.gain_db >= -3.0, "near end retained with no far end (dB)", r2.gain_db, ">=", -3.0);
+    std::printf("       retention %.2f dB, correlation %.3f, alignment lag %ld samples\n", r2.gain_db, r2.corr,
+                r2.lag);
+    if (ns_high) {
+        check(r2.gain_db >= kWordFloorDb, "near end retained with no far end (dB)", r2.gain_db, ">=",
+              kWordFloorDb);
+        check(r2.corr >= kWordFloorCorr, "near end correlation with no far end", r2.corr, ">=", kWordFloorCorr);
+    } else {
+        // With echo cancellation only and no far end, the near end keeps
+        // its energy. The waveform correlation measured here is about 0.87,
+        // not 1: the library's echo-canceller path (its band split and
+        // suppressor stages) changes the waveform even with no echo, as
+        // the same run with the canceller disabled shows (correlation
+        // 1.000, 0.00 dB). 0.8 holds that with a margin while still
+        // failing on a canceller that eats speech.
+        check(r2.gain_db >= -3.0, "near end retained with no far end (dB)", r2.gain_db, ">=", -3.0);
+        check(r2.corr >= 0.8, "near end correlation with no far end", r2.corr, ">=", 0.8);
+    }
+    res.ok = true;
+    res.talk = r;
+    res.alone = r2;
+    return res;
+}
+
+// e) the opt-in g16-mic-aec-ns-high.conf settings, reported next to the
+// default's so the cost in near-end speech is a number.
+void scenario_ns_high(const NearEnd &def, double def_erle)
+{
+    std::printf("e) opt-in noise suppression high (g16-mic-aec-ns-high.conf)\n");
+    double erle = scenario_delay(true);
+    NearEnd ns = scenario_double_talk(true);
+    if (!def.ok || !ns.ok) {
+        std::printf("  e) comparison not available (a run failed above)\n");
+        return;
+    }
+    std::printf("e) summary, ns-high minus default (negative = ns-high keeps less):\n");
+    std::printf("       ERLE scenario a: default %.2f dB, ns-high %.2f dB, difference %+.2f dB\n", def_erle, erle,
+                erle - def_erle);
+    std::printf("       near end during double talk: default %.2f dB / corr %.3f, ns-high %.2f dB / corr %.3f,"
+                " difference %+.2f dB\n",
+                def.talk.gain_db, def.talk.corr, ns.talk.gain_db, ns.talk.corr, ns.talk.gain_db - def.talk.gain_db);
+    std::printf("       near end with no far end:    default %.2f dB / corr %.3f, ns-high %.2f dB / corr %.3f,"
+                " difference %+.2f dB\n",
+                def.alone.gain_db, def.alone.corr, ns.alone.gain_db, ns.alone.corr,
+                ns.alone.gain_db - def.alone.gain_db);
 }
 
 }  // namespace
@@ -642,11 +830,14 @@ void scenario_double_talk()
 int main()
 {
     auto t0 = std::chrono::steady_clock::now();
-    check_conf();
-    scenario_delay();
+    auto names_default = check_conf("G16MIC_AEC_CONF", kExpectedDefault, "g16_mic_clean", "g16-mic-aec.conf");
+    auto names_ns = check_conf("G16MIC_AEC_NS_CONF", kExpectedNsHigh, "g16_mic_clean_ns", "g16-mic-aec-ns-high.conf");
+    check_disjoint(names_default, names_ns);
+    double def_erle = scenario_delay(false);
     scenario_delay_mismatch();
     scenario_drift();
-    scenario_double_talk();
+    NearEnd def = scenario_double_talk(false);
+    scenario_ns_high(def, def_erle);
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("test_aec: %d failure(s), %.1f s\n", g_failures, secs);
     return g_failures ? 1 : 0;
