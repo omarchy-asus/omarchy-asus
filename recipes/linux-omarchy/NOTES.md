@@ -6,7 +6,7 @@
 - Tracks linux-omarchy **7.2.8-9**, recipe last changed upstream in commit
   `cc664d884b8400accad0e02347c39d6b2cd6b688`
   ("Build linux-omarchy as the BORE kernel instead of a meta package").
-- Our version: **7.2.8-9.113**. Builds both split packages from one pkgbase:
+- Our version: **7.2.8-9.114**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -14,11 +14,11 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=9` -> `pkgrel=9.113` (kernel release string becomes `7.2.8-9.113-omarchy`).
+1. `pkgrel=9` -> `pkgrel=9.114` (kernel release string becomes `7.2.8-9.114-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
-   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910; 9.112 dropped 9900 (#10); 9.113 added 0809 and 0570 (#288).
+   9.106 added 9901 (9.104 and 9.105 are the test builds of the PR #288 stack); 9.107 added 9902 and 9903; 9.108 added 9904; 9.109 added 9905; 9.110 added 9906, 9907 and 9908; 9.111 added 9909 and 9910; 9.112 dropped 9900 (#10); 9.113 added 0809 and 0570 (#288); 9.114 added 9911 (#403).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after `0567-...` and with matching entries in
    `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` to hid-asus for the
@@ -55,6 +55,7 @@ Compared with upstream, only:
 18. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
 19. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
 20. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
+21. `9911-EXPERIMENTAL-...` after 9910 (see "EXPERIMENTAL: 9911" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -405,10 +406,10 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0570, 0773, 0807, 0808, 0809, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
+   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0570, 0773, 0807, 0808, 0809, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910, 9911).
 2. Add them back to `source=()`: 0481 after `0480`, 0482 after `0481`, 0568, 0569 and 0570 after the last `056x` patch,
    0807, 0808, 0809 and 0810 after the last `080x` patch (renumber if upstream took the numbers),
-   9901, then 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909 and 9910, last.
+   9901, then 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910 and 9911, last.
 3. Set `pkgrel=<upstream pkgrel>.1` and bump `.N` for later local changes.
 4. Regenerate the sums for our patches (`b2sum` / `sha256sum` on each patch)
    and insert them at the matching positions in both arrays (or run
@@ -833,6 +834,95 @@ proper send if AllowZstates turns out to be what gates runtime S0i2.
 `echo 9 | sudo tee /sys/kernel/debug/dri/<amdgpu minor>/amdgpu_smu_allow_zstates`, then
 `timein_s0i2` from 9907's `smu_metrics_runtime` and socket power; `echo 0` afterwards. The
 SMU's state after a resume is not known: send again after each resume.
+
+## EXPERIMENTAL: 9911 raw four-channel internal mic capture on the GA605K (default off, #403)
+
+`9911-EXPERIMENTAL-alsa-hda-realtek-ga605k-raw-mic-capture-default-off.patch` (ours, after 9910).
+It touches `sound/hda/codecs/realtek/alc269.c` only; all the logic is codec-local.
+
+**What.** A read-only parameter `snd_hda_codec_alc269.ga605k_raw_mic` (bool, 0444, default 0).
+When it is 1 on the GA605K's ALC285 (vendor 10ec0285, codec SSID 1043:1314), a new fixup,
+`ALC285_FIXUP_ASUS_GA605K_RAW_MIC`, chained between `ALC285_FIXUP_ASUS_GA605K_HEADSET_MIC` and
+`ALC285_FIXUP_SPEAKER2_TO_DAC1` (both entries unchanged; the speaker one is shared with other
+models), adds a separate capture PCM, `ALC285 Raw Mic`, with four channels:
+
+| channels | converter | route | name |
+|---|---|---|---|
+| raw0, raw1 | ADC 0x07, channels 0-1 | selector 0x24 from pin 0x12 | raw |
+| raw2, raw3 | ADC 0x09, channels 0-1 | mixer 0x22 from pin 0x13 | aux |
+
+Its prepare activates both input paths with the generic path helpers (connection select and amp
+unmute only; no vendor coefficient writes) and sets up both converters with the same stream tag
+and format, at channel offsets 0 and 2, so one DMA stream carries the four channels. Cleanup
+cleans both converters (0x09, then 0x07) and puts the previous path states, ADC 0x09's input amp
+and the capture source's route back. The PCM offers only the rates, formats and sample widths
+both converters report (`snd_hda_query_supported_pcm()`; on the G16's codec dump that is 48 kHz,
+16/20/24 bit). It is not created (one `codec_warn`, everything else as with the parameter off)
+when the widget connections or the two paths are not the expected ones, or when the converters
+have nothing in common. When it is created the kernel logs one line, `EXPERIMENTAL raw 4-channel
+mic PCM: ADC 0x07 (pin 0x12) + ADC 0x09 (pin 0x13), rates 0x... formats 0x...`.
+
+**Why.** The generic parser offers the two internal mic pins one at a time through `Capture
+Source` (`Internal Mic`, `Internal Mic 1`): its analog capture PCM sets up one converter, so
+raising `channels_max` alone would advertise channels nothing routes. Its `setup_pcm_stream()`
+copies only metadata (substreams, channels, rates, formats) from a codec's stream template, not
+its ops, so the four-channel prepare has to be set on the created PCM: alc269's `build_pcms` now
+calls `snd_hda_gen_build_pcms()` and then adds the raw PCM with its own ops.
+
+**Default behaviour.** None: with the parameter at 0 the fixup returns at once and the
+`build_pcms` wrapper only calls `snd_hda_gen_build_pcms()`: no new PCM, control, op or verb. The
+parameter is read-only, so it can't change under an open stream; set it on the kernel command
+line (or in a modprobe.d file before the module loads). Nothing in this repo sets it.
+
+**Conflicts and guards.**
+
+- The raw PCM and the normal capture PCMs (`ALC285 Analog` capture, and an Alt Analog capture if
+  the parser made one) exclude each other: opening one while the other is open returns `-EBUSY`,
+  since both use ADC 0x07.
+- While the raw PCM is open, `Capture Source` (or `Input Source`) returns `-EBUSY`, and a mic
+  auto-switch from a jack event is held and replayed when the raw PCM closes, so `mux_select()`
+  can't move selector 0x24. On the G16 no single ADC reaches all four capture inputs, so the
+  generic parser should be switching ADCs per input (`dyn_adc_switch`); the raw PCM still works
+  then, because that ADC swap only acts on a running normal capture stream, which can't be open
+  at the same time. A raw open while a capture source
+  change is in flight also returns `-EBUSY`.
+- While the raw routing is applied, ADC 0x09's input amp follows ADC 0x07's (`Capture Volume`,
+  `Capture Switch`), so all four channels share the gain and the capture mute. `Internal Mic
+  Boost` (pin 0x12) and `Internal Mic Boost`,1 (pin 0x13) stay separate controls.
+- Codec re-init (resume): `snd_hda_gen_init()` restores the capture source's route, then the
+  fixup's init step re-applies the raw routing while it is in use. Suspend cleans the converter
+  setups; the stream is prepared again after resume, and prepare sets up both converters again.
+- Every step unwinds: a prepare that finds a path missing restores the routing and fails;
+  cleanup and close restore it; the codec's remove (unbind, reconfig) releases the state.
+
+**Known limits.** Whether the extra channels are independent signals, and their order,
+polarity and geometry, is unknown until the G16 measures them: pin 0x13 may carry the same
+capsules as pin 0x12, a different pair, or nothing. The channels are named raw and aux only.
+`arecord` with `plughw` may hide a missing channel; test with `hw:`. Only one ALC285 1043:1314
+codec per system can use it (the state is module-wide; a second one logs `in use on another
+codec`).
+
+**Check.** `tests/channel/linux-omarchy-9911-raw-mic.sh` (recipe wiring; on the build host it
+applies the recipe's patches to the exact 7.2.8 tree and compiles `alc269.o` with `W=1`).
+Compile-tested only: hardware behaviour is verified only by the G16 test card.
+
+**Test on the G16** (Steward card #404, with the previous kernel as the fallback boot entry):
+boot with `snd_hda_codec_alc269.ga605k_raw_mic=1`, then
+
+```sh
+journalctl -k -b | grep 'EXPERIMENTAL raw 4-channel mic PCM'   # one line
+arecord -l                                    # an "ALC285 Raw Mic" capture device on the HDA card
+arecord -D hw:CARD=<id>,DEV=<n> --dump-hw-params -t raw -d 1 /dev/null
+                                              # CHANNELS 4, only the common rates/formats
+```
+
+Opening it while PipeWire holds the stereo capture gives `Device or resource busy`, and the
+other way round. With the parameter off (or removed): no Raw Mic device, and the stereo
+capture, headset mic and speakers behave as before. Undo: remove the parameter and reboot.
+
+**Upstream.** Not submitted: a model-scoped experiment. A submission only follows once the G16
+shows the extra channels are independent. **Remove** when the G16 shows the extra channels are
+not independent, or once an upstream equivalent exists.
 
 ## 0810: panel_power_savings applies when written (#172)
 
