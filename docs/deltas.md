@@ -108,7 +108,7 @@ we no longer carry.
 
 ## Kernel: linux-omarchy
 
-RC 7.2.8-9.107 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
+RC 7.2.15-1.101 (`main`), Quattro 7.2.8-9.4. The patch list is `recipes/linux-omarchy/DELTA`; the
 why, the risks and the long test scripts are in `recipes/linux-omarchy/NOTES.md`. Our patches have
 no `.sig` (upstream's patch signatures use the Omarchy kernel maintainer's key); their checksums
 pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for each patch.
@@ -121,7 +121,9 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 - **Fixes:** stock `hid-asus` drops the ROG N-Key keyboard's (USB `0b05:19b6`) Win-lock
   notifications (report `0x5d`, opcode `0xbf 0x01`) together with the AURA echo stream. Fn+Super
   then disables the Super key silently: nothing reaches hidraw, so no userspace helper can show a
-  toast or undo the lock. The patch adds `QUIRK_HID_WIN_LOCK` for `ROG_NKEY_KEYBOARD2`. Its
+  toast or undo the lock. The patch adds `QUIRK_HID_WIN_LOCK` for `ROG_NKEY_KEYBOARD2` (BIT(16) on
+  RC since 7.2.15-1.101: the HID update in Omarchy's 7.2.15 kernel took BIT(15) for
+  `QUIRK_FILTER_CAMERA_COMPANION`; Quattro's 7.2.8 build still uses BIT(15)). Its
   userspace consumer is [the Win-lock helper](#pkg-asus-rog-nkey-winlock).
 - **Test:** boot the kernel (`uname -r`). Stop the helper if it runs (Quattro:
   `systemctl --user stop g16-winlock.service`), run `g16-winlock watch --mode=toast` and press
@@ -208,10 +210,13 @@ sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assis
 <a id="kernel-0481-amdgpu-display-power"></a>
 ### amdgpu display power backports (0481)
 
-- **Component:** `linux-omarchy`, `0481-drm-amd-display-power-backports.patch`, right after
-  0480. Both channels, carried since 7.2.8-9.3 (#8, `62a3ea67`), booted on the G16 on 2026-10-20.
-- **Fixes:** three amdgpu display changes for the G16's Radeon 860M and OLED eDP:
-  - self-refresh (PSR/Replay) off on tearing (async) flips (`2e54a92e0136`);
+- **Component:** `linux-omarchy`, `0481-drm-amd-display-power-backports.patch`, after the last
+  upstream `04xx` patch (upstream's own `0481-amd-display-dcn31-compbuf-wait.patch` on 7.2.15). Both
+  channels, carried since 7.2.8-9.3 (#8, `62a3ea67`), booted on the G16 on 2026-10-20.
+- **Fixes:** amdgpu display changes for the G16's Radeon 860M and OLED eDP:
+  - self-refresh (PSR/Replay) off on tearing (async) flips (`2e54a92e0136`): carried up to RC
+    7.2.8-9.113; the 7.2.15 base has it from 7.2.11 stable (`04ee82fec489`), so RC 7.2.15-1.101
+    dropped this part (Quattro's 7.2.8 build still carries it);
   - an orphaned pipe left by firmware is torn down on boot, so it no longer blocks s0i3 on
     suspend (`98e08a815ef6`);
   - CACP for the OLED eDP, hand-ported from `7b0cc3085216`: adds
@@ -237,8 +242,8 @@ sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assis
 - **Upstream: merged-unreleased.** Checked 2026-10-25: all three are in mainline 7.3
   (`98e08a815ef6` and `7b0cc3085216` by 7.3-rc1, `2e54a92e0136` by rc7; `2e54a92e0136` is in 7.2.11
   stable too). Nothing to submit.
-- **Drop when:** linux-omarchy rebases onto a 7.3 Omarchy kernel (the self-refresh part alone
-  could go at 7.2.11).
+- **Drop when:** linux-omarchy rebases onto a 7.3 Omarchy kernel (the self-refresh part went at
+  7.2.15 on RC, as above).
 - **Notes:** formerly tracked in issue #46.
 
 <a id="kernel-0482-dmub-hpd-replay"></a>
@@ -636,7 +641,7 @@ kernel's rules on AI assistants ask for.
 ### EXPERIMENTAL the GA605KM keyboard declares only its Caps Lock LED (9909)
 
 - **Component:** `linux-omarchy`, `9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch`,
-  after 9908. RC only (since 9.111). Goes with
+  after 9908. RC only (since 9.111; its quirk is BIT(17) since 7.2.15-1.101). Goes with
   [the keyboard autosuspend rule](#g16-keyboard-autosuspend) in omarchy-asus-g16.
 - **What:** the G16's tenkeyless N-Key keyboard (USB 0b05:19b6) declares Num Lock, Caps Lock,
   Scroll Lock, Compose and Kana LEDs but has only a Caps Lock light. usbhid refuses autosuspend
@@ -2438,5 +2443,6 @@ Work still in issues, not in any recipe on `main` today:
 | 9900, EXPERIMENTAL Zen 5c-first soft park (five default-off scheduler knobs: amd_hfi ranking, soft wakeup preference, workload-class steering, SMT packing, NOHZ idle balancer) | linux-omarchy, both channels, ours-only | RC linux-omarchy 7.2.8-9.112; Quattro keeps its frozen build until it picks up the trunk | the battery A/B (#10, 2026-10-27, console only on the G16) found no win at idle: ranking efficiency or inverted, wake_preferred all and wake_pack each within 0.03 W of stock, all three together 0.14 W worse; RAPL package power is only 0.36-0.43 W at idle, so the cores have almost nothing left to save. The light-load half was not run; the CPU-setting A/B (#328) found nothing under light load either |
 | general-0003, the lock's password field lost the keyboard after a suspend (#295) | omarchy RC | RC 4.5.0rc1-1.110 (#306) | the Hyprland seat fix ([seat-leave](#hyprland-seat-leave)) sends `wl_keyboard.leave`, so Qt re-activates the lock window with stock `LockView.qml`; reverted on the fork by `b5af08c6` |
 | 0018, launcher icon index throttle | omarchy RC | RC 4.5.0rc1-1.109 (#299) | replaced by upstream's [#14992](#omarchy-general-0004-app-library); still on Quattro ([0018](#omarchy-0018-launcher-icon-index)) |
+| 0481's self-refresh-on-tearing-flips part (`2e54a92e0136`) | linux-omarchy, part of [0481](#kernel-0481-amdgpu-display-power) | RC linux-omarchy 7.2.15-1.101; Quattro keeps it until it picks up the trunk | in 7.2.11 stable (`04ee82fec489`), so in the 7.2.15 base; the rest of 0481 stays |
 | `asus-zephyrus-g16-control`, the G16 Control widget package | asus-rog-nkey-winlock | RC (0.1.0-103 replaces it) | the widget is the omarchy-asus plugin (#183); RC's `asus-rog-nkey-winlock` replaces the transitional package |
 | hid-asus Win-lock DKMS module (`recipes/hid-asus-winlock-dkms-reference/`) | out of tree | linux-omarchy 7.2.8-9.1 | the same patch is in the kernel as [0568](#kernel-0568-winlock); kept as a reference, not built |

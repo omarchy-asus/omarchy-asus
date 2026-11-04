@@ -1,18 +1,19 @@
 diff --git a/drivers/hid/hid-asus.c b/drivers/hid/hid-asus.c
 --- a/drivers/hid/hid-asus.c
 +++ b/drivers/hid/hid-asus.c
-@@ -99,6 +99,7 @@ MODULE_DESCRIPTION("Asus HID Keyboard an
- #define QUIRK_ROG_CLAYMORE_II_KEYBOARD	BIT(12)
+@@ -100,6 +100,7 @@ MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
  #define QUIRK_ROG_ALLY_XPAD		BIT(13)
  #define QUIRK_HID_FN_LOCK		BIT(14)
-+#define QUIRK_HID_WIN_LOCK		BIT(15)
+ #define QUIRK_FILTER_CAMERA_COMPANION	BIT(15)
++#define QUIRK_HID_WIN_LOCK		BIT(16)
  
  #define I2C_KEYBOARD_QUIRKS			(QUIRK_FIX_NOTEBOOK_REPORT | \
  						 QUIRK_NO_INIT_REPORTS | \
-@@ -505,6 +506,16 @@ static int asus_raw_event(struct hid_dev
+@@ -505,6 +506,16 @@ static int asus_raw_event(struct hid_device *hdev,
+ 	if (drvdata->quirks & QUIRK_MEDION_E1239T)
  		return asus_e1239t_event(drvdata, data, size);
  
- 	/*
++	/*
 +	 * Report 0x5d normally carries a continuous stream of AURA echoes.
 +	 * Win-key lock notifications use opcode 0xbf; pass those to hidraw.
 +	 */
@@ -22,11 +23,10 @@ diff --git a/drivers/hid/hid-asus.c b/drivers/hid/hid-asus.c
 +	    data[1] == 0xbf && data[2] == 0x01)
 +		return 0;
 +
-+	/*
+ 	/*
  	 * Skip these report ID, the device emits a continuous stream associated
  	 * with the AURA mode it is in which looks like an 'echo'.
- 	 */
-@@ -1675,7 +1686,8 @@ static const struct hid_device_id asus_d
+@@ -1715,7 +1726,8 @@ static const struct hid_device_id asus_devices[] = {
  	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD },
  	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
  	    USB_DEVICE_ID_ASUSTEK_ROG_NKEY_KEYBOARD2),

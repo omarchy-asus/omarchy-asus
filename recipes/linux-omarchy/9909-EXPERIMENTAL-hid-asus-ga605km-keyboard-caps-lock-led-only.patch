@@ -41,18 +41,18 @@ is left alone.
  1 file changed, 58 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/hid/hid-asus.c b/drivers/hid/hid-asus.c
-index 7fca53b92..c616f50c1 100644
+index bb0116e6aa..f9ac2b5544 100644
 --- a/drivers/hid/hid-asus.c
 +++ b/drivers/hid/hid-asus.c
-@@ -100,6 +100,7 @@ MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
- #define QUIRK_ROG_ALLY_XPAD		BIT(13)
+@@ -101,6 +101,7 @@ MODULE_DESCRIPTION("Asus HID Keyboard and TouchPad");
  #define QUIRK_HID_FN_LOCK		BIT(14)
- #define QUIRK_HID_WIN_LOCK		BIT(15)
-+#define QUIRK_ROG_NKEY_CAPS_LED_ONLY	BIT(16)
+ #define QUIRK_FILTER_CAMERA_COMPANION	BIT(15)
+ #define QUIRK_HID_WIN_LOCK		BIT(16)
++#define QUIRK_ROG_NKEY_CAPS_LED_ONLY	BIT(17)
  
  #define I2C_KEYBOARD_QUIRKS			(QUIRK_FIX_NOTEBOOK_REPORT | \
  						 QUIRK_NO_INIT_REPORTS | \
-@@ -1560,6 +1561,58 @@ static const __u8 asus_g752_fixed_rdesc[] = {
+@@ -1597,6 +1598,58 @@ static const __u8 asus_g752_fixed_rdesc[] = {
          0x2A, 0xFF, 0x00,		/*   Usage Maximum (0xFF)       */
  };
  
@@ -111,7 +111,7 @@ index 7fca53b92..c616f50c1 100644
  static const __u8 *asus_report_fixup(struct hid_device *hdev, __u8 *rdesc,
  		unsigned int *rsize)
  {
-@@ -1664,6 +1717,9 @@ static const __u8 *asus_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+@@ -1701,6 +1754,9 @@ static const __u8 *asus_report_fixup(struct hid_device *hdev, __u8 *rdesc,
  		}
  	}
  
@@ -121,7 +121,7 @@ index 7fca53b92..c616f50c1 100644
  	return rdesc;
  }
  
-@@ -1687,7 +1743,8 @@ static const struct hid_device_id asus_devices[] = {
+@@ -1727,7 +1783,8 @@ static const struct hid_device_id asus_devices[] = {
  	{ HID_USB_DEVICE(USB_VENDOR_ID_ASUSTEK,
  	    USB_DEVICE_ID_ASUSTEK_ROG_NKEY_KEYBOARD2),
  	  QUIRK_USE_KBD_BACKLIGHT | QUIRK_ROG_NKEY_KEYBOARD |
