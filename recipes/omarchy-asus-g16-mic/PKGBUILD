@@ -1,0 +1,98 @@
+# EXPERIMENTAL: ASUS ROG Zephyrus G16 GA605KM only.
+#
+# omarchy-asus-g16-mic (#401, part of #400): `g16-mic`, an opt-in processor for
+# the G16's internal microphones. `g16-mic run --source <node.name>` captures
+# exactly that PipeWire source and offers two virtual sources, g16_mic_processed
+# (raw, omni, fixed beam or direction tracking, mono) and g16_mic_raw (every
+# channel, untouched). Echo cancellation and noise suppression are PipeWire's own
+# module-echo-cancel, through a config fragment installed under
+# /usr/share/omarchy-asus-g16-mic/pipewire/ that a user links in to opt in.
+# Nothing is started or enabled at install time, nothing goes into /etc or
+# pipewire.conf.d, and the default source is unchanged. See README.md.
+#
+# A local package with no upstream build to track, so pkgrel does not use the
+# repo's "<upstream>.1" scheme.
+
+pkgname=omarchy-asus-g16-mic
+pkgver=0.1.0
+pkgrel=101
+pkgdesc='Opt-in G16 microphone processing host: raw, omni, fixed beam and direction tracking as PipeWire sources (EXPERIMENTAL)'
+arch=('x86_64')
+url='https://github.com/omarchy-asus/omarchy-asus'
+license=('MIT')
+depends=('pipewire' 'fftw' 'glibc')
+makedepends=('meson' 'webrtc-audio-processing-1')
+optdepends=('wireplumber: links the capture stream to the named source')
+options=('!debug')
+source=('meson.build'
+        'meson_options.txt'
+        'g16mic.h'
+        'g16mic_host.h'
+        'rt.c'
+        'calib.c'
+        'match.c'
+        'dsp.c'
+        'track.c'
+        'engine.c'
+        'status.c'
+        'host.c'
+        'main.c'
+        'test_util.h'
+        'test_signals.h'
+        'test_rt.c'
+        'test_calib.c'
+        'test_match.c'
+        'test_beam.c'
+        'test_track.c'
+        'test_engine.c'
+        'test_status.c'
+        'test_aec.cpp'
+        'g16-mic-aec.conf'
+        'calibration.example.conf'
+        'README.md'
+        'LICENSE')
+sha256sums=('957c799a0cae86aa1b5e69875dd15344669ea6f6053cda2f8cfdc2f11894035c'
+            '7988573a6a927f72476bad0935a9ddcac93dc6af066d79ae7d3e040a9f38156d'
+            '97b5780ded5d0e604303b17f69e37c3b4d91fc52de96274f6060c62beeff1a2f'
+            '337d920b41de0c05b5f8e51a3883b5723a19fd6dcbd3da8d872c97d86fae1983'
+            '8d50eec5f1d8a673718e9c6af546b5600ed1eb4fe0720c22f9a82ab93de9775e'
+            '1e342cf150fa6673d64e1366586897e4e1ccb2d3a74ec860c1ddd5557b5da99a'
+            'ba65379ce234be122f12e96ffcd57f2cb8de01084afb220ec411c9bdc2fdb172'
+            '0da609d7d0a538222e14a6e03f0b33d457bd6a3007fef2e717f351061e36e9c6'
+            'be446738a92073e3b680259af71455029e2059c4ebd70d0de9946ba513879841'
+            '590be55f4fe1059fb105ddb8eb8cd53cd0acf1d94cae3f87fd0df2bdcbf072a5'
+            '1c3fea89a18b68ffa19b8063bac5a4a7d4721ef4d4adaf0d834120854d4a2131'
+            '0b9b7ba7a2335644fbb920ed9179fa24499c2edf55f10cf150298ccbd1a03f65'
+            '8e3fddf8972ca74c024d951f62b1d8302e1da5016755d19e7ab2a65fc56afd6a'
+            '9e97fc9b31a9f3316782c867c80c3e4026d325d679d383124fe8dbab224e8b56'
+            'a728df2beb508e99a31d479587e258a7174cc89c479e96bfe1e9a06260963d8d'
+            '1ecc120e836991611a36118de67841da22e335e9741b980e5fca32bc167275d3'
+            'fddff7cad1d3dde347180219c7fdd243befb4248198a17e9f087c9fd1741332f'
+            '595e8ef6cd6aeb14253a6c0f5a93ae28442316010874fc3581571245018a40d7'
+            '3d1677788523f815a82bf791e3710b8ea1a6ddd737bfda4765fcf8189922e649'
+            '7b5fad65e454eeffe47606b4088b87e4cfa69cd35bccc9f268f17b430bd706b5'
+            '5b84dd7166d1bf73e8b104e5cffa88c70572fcb3c8f86e15a6bd9b57a5949c58'
+            '8969030c191223c987fa299c22cb484206d56c6c1d9a49e959dabad1417f8faa'
+            '81714b50fd42a617a182780a41f2552215c4acb549967b3d464687c7bcb72885'
+            '218d416a088e2811d283e79269e2e59114f27caed23c09a0bc1c55357841e16f'
+            'fa568c2bc882ecc19edd1df3ad6789c8199885eebc3a79f9e75c9dd169d784cf'
+            '91386f5042242068c42da1aa080ef44b0d0133a92a2fc7a9894378bd22c738ad'
+            '4be2cb6dc9833c8f66886e92c3d4b0b06f359917c986104c286f2a06288e0d2e')
+
+build() {
+  arch-meson . build -Daec_tests=enabled
+  meson compile -C build
+}
+
+check() {
+  # Synthetic signals only: the real-time core, calibration, source matching,
+  # beam, tracking, the engine's fallbacks and crossfades, the status file, and
+  # the WebRTC echo canceller PipeWire's module uses (delay, drift, double talk).
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

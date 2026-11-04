@@ -101,6 +101,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [keyring and setup script](#pkg-omarchy-asus-keyring) | omarchy-asus-keyring, `bin/omarchy-asus-setup` | package | both | ours-only |
 | [G16 fix applier](#pkg-omarchy-asus-g16-apply) | omarchy-asus-g16-apply | package | both | ours-only |
 | [G16 test-session helper (held)](#pkg-omarchy-asus-g16-testd) | omarchy-asus-g16-testd | package | held | ours-only |
+| [G16 microphone processing host (held)](#pkg-omarchy-asus-g16-mic) | omarchy-asus-g16-mic | package | held | ours-only |
 | [Proton Experimental fullscreen fix (held)](#pkg-proton-experimental-asus) | proton-experimental-asus | package | held | not submitted |
 
 [Not carried](#not-carried) lists the candidates still in issues; [Dropped](#dropped) lists what
@@ -2365,6 +2366,51 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
 - **Upstream: ours-only.**
 - **Drop when:** the G16 test kits no longer need root steps (or move to another mechanism); a
   test helper with no kit using it is removed with its recipe.
+
+<a id="pkg-omarchy-asus-g16-mic"></a>
+### G16 microphone processing host (omarchy-asus-g16-mic, held)
+
+- **Component:** `omarchy-asus-g16-mic` 0.1.0-101 (`recipes/omarchy-asus-g16-mic/`, C11 and
+  meson, MIT). **Held** (`recipes/omarchy-asus-g16-mic/HOLD`): CI builds it, nothing publishes it,
+  until the maintainer's G16 tests (#400; #401).
+- **What:** `g16-mic`, an opt-in microphone processor run by hand. `g16-mic run --source
+  <node.name>` captures exactly the PipeWire source with that `node.name` (never a monitor, never
+  another mic, and after a reconnect only the same name again) and offers two virtual sources:
+  `g16_mic_processed` (mono) and `g16_mic_raw` (every channel, untouched). Modes: `raw`
+  (bit-exact passthrough), `omni` (calibrated, delay-matched average), `beam` (fractional-delay
+  delay-and-sum toward a fixed direction, unity gain on target, a limiter only at the output) and
+  `track` (GCC-PHAT direction estimates with confidence, hysteresis, bounded slew and a hold
+  through pauses). `beam` and `track` need a verified calibration and geometry file for that exact
+  source, kernel and channel layout; without one they report UNAVAILABLE and refuse to start,
+  while `raw` and `omni` still work. Speech is never gated away: when tracking is unsure, or a mode
+  can't run, the output falls back to the time-aligned omni signal with a matched-delay crossfade,
+  and the fallback is counted in the status file (`$XDG_RUNTIME_DIR/g16-mic/status`, `g16-mic
+  status`). Echo cancellation and noise suppression are PipeWire's own `module-echo-cancel` with
+  its WebRTC backend, through a config fragment shipped under
+  `/usr/share/omarchy-asus-g16-mic/pipewire/` that a user links into `~/.config` to opt in (echo
+  canceller with the default sink's monitor as reference, one noise suppressor, gain control off;
+  it adds `g16_mic_clean`). Nothing starts at install, nothing goes into `/etc`,
+  `pipewire.conf.d` or systemd, and the default source never changes.
+- **Test:** offline, the meson tests run in the PKGBUILD's `check()` (so in the PR's Build
+  check) and in `tests/channel/g16-mic.sh` where the toolchain is present; that script also checks
+  the recipe statically (HOLD, sources and sums, pkgrel, the AEC fragment's keys, nothing
+  installed under `/etc` or systemd). All signals are synthetic. Covered: arbitrary callback sizes
+  with exact sample continuity; impulse delay; beam sign, unity gain on target, headroom and chunk
+  continuity; two talkers with the interferer louder (target retained); quiet onsets and endings
+  kept; pauses held; tracking hysteresis and bounded slew; invalid geometry (NaN/inf, zero
+  aperture, duplicate positions, channel mismatch); an unverified or stale layout gives
+  UNAVAILABLE; bounded queues under overload with their drop counters; the source matcher never
+  picks a monitor or an unrelated mic (fake node lists); crossfade alignment and the tail flush on
+  stop; and the WebRTC echo canceller (the library PipeWire's module links) with a delayed
+  reference, slow clock drift and double talk (near-end speech retained, measured by energy and
+  correlation). On the G16: later Steward test cards, once the laptop is available. Not exercised
+  yet: the PipeWire host's live path (registry matching, linking, reconnect, the virtual
+  sources), and there is no verified G16 microphone geometry, so `beam` and `track` stay
+  UNAVAILABLE there; more than two channels need the experimental kernel capture (#403).
+- **Upstream: ours-only** (new downstream code; it uses PipeWire's supported echo-cancel module
+  unmodified).
+- **Drop when:** a maintained upstream or distribution package covers it, or the G16 tests show it
+  is not needed.
 
 <a id="pkg-proton-experimental-asus"></a>
 ### Proton Experimental fullscreen fix (proton-experimental-asus, held)
