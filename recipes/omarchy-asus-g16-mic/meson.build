@@ -52,15 +52,18 @@ endforeach
 
 # The live test: g16-mic against a private PipeWire daemon and WirePlumber
 # with null/dummy drivers only (test_pw_live.sh). It skips (exit 77) only
-# where the pipewire or wireplumber binaries are missing; the PKGBUILD's
-# checkdepends puts both into the clean chroot, so it runs there.
+# where the pipewire or wireplumber binaries are missing. The PKGBUILD's
+# checkdepends=('wireplumber') puts both into the clean chroot, so it runs
+# there, and tests/channel/g16-mic.sh fails if it skipped on a host that has
+# them. The timeout leaves headroom for the steps' setup plus the steady-state
+# step with a source on its own driver (about 25 s of its own).
 pw_helper_exe = executable('test_pw_helper', 'test_pw_helper.c',
   dependencies: [libdep, pw],
   install: false,
 )
 test('test_pw_live', find_program('bash'),
   args: [files('test_pw_live.sh'), g16mic_exe, pw_helper_exe],
-  timeout: 180,
+  timeout: 240,
   is_parallel: false,
   env: test_env,
 )

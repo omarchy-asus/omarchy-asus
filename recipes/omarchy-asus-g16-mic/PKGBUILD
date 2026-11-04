@@ -18,7 +18,7 @@
 
 pkgname=omarchy-asus-g16-mic
 pkgver=0.1.0
-pkgrel=102
+pkgrel=103
 pkgdesc='Opt-in G16 microphone processing host: raw, omni, fixed beam and direction tracking as PipeWire sources (EXPERIMENTAL)'
 arch=('x86_64')
 url='https://github.com/omarchy-asus/omarchy-asus'
@@ -58,7 +58,7 @@ source=('meson.build'
         'calibration.example.conf'
         'README.md'
         'LICENSE')
-sha256sums=('15bb1ea0386362c50bc79703bb46742db762c4bc7d5bf020a91d91ed22a57a69'
+sha256sums=('8a351cc30a65610b5572bad487fb36d80a1cd428cb9e07bb29c50422589050d4'
             '7988573a6a927f72476bad0935a9ddcac93dc6af066d79ae7d3e040a9f38156d'
             '97b5780ded5d0e604303b17f69e37c3b4d91fc52de96274f6060c62beeff1a2f'
             '337d920b41de0c05b5f8e51a3883b5723a19fd6dcbd3da8d872c97d86fae1983'
@@ -69,7 +69,7 @@ sha256sums=('15bb1ea0386362c50bc79703bb46742db762c4bc7d5bf020a91d91ed22a57a69'
             'be446738a92073e3b680259af71455029e2059c4ebd70d0de9946ba513879841'
             '590be55f4fe1059fb105ddb8eb8cd53cd0acf1d94cae3f87fd0df2bdcbf072a5'
             '1c3fea89a18b68ffa19b8063bac5a4a7d4721ef4d4adaf0d834120854d4a2131'
-            '154ccf5fd84f0d763add0c99e24ac284d3109572eb8917616ba5b7765491a480'
+            '6e999522f63817da34cb345f4acfd8ccce08b654f77cf81b022590abd20eeb96'
             '8e3fddf8972ca74c024d951f62b1d8302e1da5016755d19e7ab2a65fc56afd6a'
             '9e97fc9b31a9f3316782c867c80c3e4026d325d679d383124fe8dbab224e8b56'
             'a728df2beb508e99a31d479587e258a7174cc89c479e96bfe1e9a06260963d8d'
@@ -81,12 +81,12 @@ sha256sums=('15bb1ea0386362c50bc79703bb46742db762c4bc7d5bf020a91d91ed22a57a69'
             '5b84dd7166d1bf73e8b104e5cffa88c70572fcb3c8f86e15a6bd9b57a5949c58'
             '8969030c191223c987fa299c22cb484206d56c6c1d9a49e959dabad1417f8faa'
             'bb7a1de8309ad7dbc104792764df5859fad1c49f0a57dbe13679b87654258cbb'
-            '80ebd004424545c36af0cd81b516e51460dad7c1d7ff44e571c8d4c212b46b02'
-            'd77ba5486c00161be660fc10adc42b35eefd97d28f1def8dfbcda8a0f566d0e3'
+            '81fceee39cbd902546195a20a814fd3d43392231d3e60c246ad87f20e0a6ceac'
+            '6fad2faed3894ae68d171cd5d4637c9a74e50428c1942e3582a103b45bdb7515'
             '04cc71b71a2773ac78bcc1fc6584b61c64d62da99f41f46e4d5763028f418887'
             '67c1c99dbaa95b384fc93c09f5a3dcdb6c6879771e00b5daeb0bb9f009fdfcb1'
             'fa568c2bc882ecc19edd1df3ad6789c8199885eebc3a79f9e75c9dd169d784cf'
-            '5f7b8a2a10c256fc4237dfcd2fad6f694225a579864b7fa00776a73b591a7418'
+            '7ce13ee8464d63f22a45398243f4caefdd36bf96e1bd4730efbbfd958ad6f2eb'
             '4be2cb6dc9833c8f66886e92c3d4b0b06f359917c986104c286f2a06288e0d2e')
 
 build() {

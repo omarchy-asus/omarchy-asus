@@ -19,8 +19,10 @@ maintainer's G16 tests pass.
 | `track` | GCC-PHAT direction estimates per block, a confidence from the peak ratio, hysteresis, a bounded slew rate, holding through pauses (an energy voice-activity detector), and omni whenever it is unsure; it never gates to silence | yes |
 
 Switching modes, and every fallback, crossfades between the old and new signal with their delays
-matched, so nothing jumps or repeats. Stopping flushes the tail, so the end of a sentence is never
-cut.
+matched, so nothing jumps or repeats. Each capture cycle is delivered on the outputs in that same
+graph cycle, so when the source goes away or g16-mic stops, the last engine latency of audio still
+inside the engine (272 frames, 5.7 ms, for uncalibrated omni) has no later cycle to go out in: it
+is not delivered and is counted in `ring_overflow`.
 
 **Preserve speech.** When tracking is unsure, or a spatial mode cannot run, the output falls back
 to the time-aligned calibrated omni signal (or raw, if omni cannot be built). It never suppresses
@@ -104,7 +106,10 @@ is rewritten about four times a second and removed on stop. One `key=value` a li
 uncalibrated), `degraded`, `confidence`, `doa_az_deg`, `steer_az_deg`, `vad`, `frames_in`,
 `frames_out`, `blocks`, `fallbacks`, `mode_switches`, `refused_switches`, `nonfinite_samples`,
 `limiter_blocks`, `telemetry_dropped`, `ring_overflow`, `ring_underflow`, `reconnects`,
-`wrong_links`.
+`wrong_links`. `ring_overflow` and `ring_underflow` count frames lost or zero-filled between the
+capture and the outputs; they stay 0 in steady state, and a source loss or stop counts at most the
+engine latency of tail per output. While no source is captured, both outputs are inactive: they
+carry nothing rather than stalling their consumer's graph.
 
 ## Opting in
 
@@ -157,8 +162,7 @@ Pick `g16_mic_clean_ns` in the application.
 
 ## Undo, exactly
 
-1. Stop g16-mic: Ctrl-C in its terminal, or `pkill -INT -x g16-mic`. Endings are flushed before it
-   exits.
+1. Stop g16-mic: Ctrl-C in its terminal, or `pkill -INT -x g16-mic`.
 2. If you linked the echo-cancel fragment (`g16_mic_clean`):
    `rm ~/.config/pipewire/pipewire.conf.d/g16-mic-aec.conf`, then
    `systemctl --user restart pipewire pipewire-pulse wireplumber`.
@@ -178,7 +182,8 @@ gain on target, headroom and chunk continuity; two talkers with the interferer l
 is retained); quiet onsets and endings kept; pauses held; tracking hysteresis and bounded slew;
 invalid geometry, NaN and zero aperture; an unverified or stale layout gives UNAVAILABLE; bounded
 queues under overload with their drop counters; the source matcher never picks a monitor or an
-unrelated mic (fake node lists); crossfade alignment and the tail flush.
+unrelated mic (fake node lists); crossfade alignment and the engine's tail flush (the live host
+counts that tail as lost instead, above).
 
 `test_aec` runs the WebRTC echo canceller (the library PipeWire's module uses, in a test-only
 binary) with each fragment's settings, checked against the fragment files. With the default
@@ -200,10 +205,14 @@ feed generated signals. It checks: `g16_mic_processed` (1 channel, MONO, F32) an
 (the source's channels and positions, F32) appear and the status says connected; only the named
 source is linked into the capture, never the decoy or the null sink's monitor; 3 s of each output,
 tapped on the private socket, match the input (raw bit for bit, processed equal to an offline omni
-of the same frames, both at the documented latency: 272 frames for uncalibrated omni plus one
-graph quantum, exactly, because the outputs carry what the capture got one cycle earlier); when the source is removed g16-mic waits and captures nothing, and when a
-source of the same name comes back it reconnects to that one only and raw is again the input bit
-for bit; `g16-mic run` on the sink's monitor is refused (exit 2); SIGTERM exits 0 within 3 s with
+of the same frames, both at the documented latency: exactly the engine latency, 272 frames for
+uncalibrated omni, because g16-mic processes each capture cycle and delivers it on both outputs
+inside the same PipeWire graph cycle (the outputs are trigger-driven by the capture, as
+`module-filter-chain` does); when the source is removed g16-mic waits and captures nothing, and
+when a source of the same name comes back it reconnects to that one only and raw is again the
+input bit for bit; a source on its own driver and clock, read on both outputs for 20 s, half of
+it under CPU load, shows no `ring_overflow` or `ring_underflow` growth and raw stays bit-exact
+with no gaps or repeats; `g16-mic run` on the sink's monitor is refused (exit 2); SIGTERM exits 0 within 3 s with
 the nodes and status file gone and no process left; the decoy never streamed. Every process it
 starts is stopped on every exit path and its temporary directory is removed. It skips (exit 77)
 only where the `pipewire` or `wireplumber` binary is missing; the PKGBUILD's `checkdepends` makes

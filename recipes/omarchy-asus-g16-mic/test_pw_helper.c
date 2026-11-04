@@ -4,7 +4,7 @@
  * PIPEWIRE_RUNTIME_DIR name; test_pw_live.sh points them at its private one.
  *
  *   source --name N --channels C [--class Audio/Source] [--props k=v,...]
- *          [--start K] --log FILE
+ *          [--start K] [--driver [--ppm P]] --log FILE
  *       An output stream that looks like a microphone: media.class
  *       Audio/Source (or --class), node.name N, F32 48 kHz, C channels (1:
  *       MONO, 2: FL FR, more: AUX0..), no autoconnect. Frame k carries
@@ -13,6 +13,17 @@
  *       so omni stays linear). k starts at --start (default 0). Every buffer
  *       adds a line "<graph position> <first k> <frames>" to FILE. Runs until
  *       SIGTERM or SIGINT; exits 0.
+ *       --driver makes it a source on its own clock, like a sound card: the
+ *       stream is a driver (PW_STREAM_FLAG_DRIVER, priority.driver 30000,
+ *       above the test daemon's dummy driver, and a node.group of its own),
+ *       so whatever links to it runs on its cycles. A timer on absolute
+ *       CLOCK_MONOTONIC deadlines starts a cycle every 1024 frames at 48 kHz
+ *       scaled by (1 + P * 1e-6) (--ppm, -2000..2000, default 0: P > 0 runs
+ *       slower than nominal), but only while the stream is driving; when
+ *       another driver won, the stream follows it as without --driver. FILE
+ *       gets "# source: driving" once it has driven a cycle, or
+ *       "# source: not driving" after about 1 s of streaming without ever
+ *       driving one, and a "# source: ..." tick count at exit.
  *   tap --target NODE_NAME --out FILE --channels C [--positions P,...]
  *       --seconds S
  *       An input stream with target.object NODE_NAME and node.dont-fallback,
@@ -24,12 +35,18 @@
  *       One line per core, node, port, link, device and metadata object (see
  *       cmd_graph for the format), for the script to assert on without jq.
  *   compare --input-log SRC.log --raw RAW [--processed PROC] --channels C
- *       --latency L
+ *       --latency L [--strict]
  *       Checks tap files against the source's log: RAW must be the input bit
  *       for bit (gaps reported), its end-to-end latency must be exactly L
- *       plus one graph quantum (host.c reads its outputs on the capture's
- *       clock, one cycle behind it), and PROC, at the same graph positions,
- *       must equal an offline omni engine fed the same frames. PASS/FAIL lines; exit 0 if all pass, 1 otherwise.
+ *       (host.c processes and delivers each capture cycle in the same graph
+ *       cycle), and PROC, at the same graph positions, must equal an offline
+ *       omni engine fed the same frames. --strict also requires RAW to be
+ *       one contiguous run of input frames: no zero-filled frame after the
+ *       first input frame, no forward gap, no repeat, nothing that is not
+ *       input, and at least 90% of its frames matched. With --strict,
+ *       --latency is optional; without it the latency and PROC checks are
+ *       skipped (and say so). PASS/FAIL lines; exit 0 if all pass, 1
+ *       otherwise.
  *
  * "Graph position" is the driver's clock position for the cycle (its
  * spa_io_position, in 48 kHz samples), the same for every node of one
@@ -71,6 +88,10 @@
 #define TICK_MS 100
 #define TAP_GRACE_S 15               /* a tap gives up this long after its S seconds */
 #define FEED_CHUNK 1024
+#define SRC_DRIVER_FRAMES 1024       /* source --driver: frames per cycle it drives */
+#define SRC_RESYNC_CYCLES 8          /* ... restarts its schedule after a stall this long */
+#define SRC_NOT_DRIVING_CYCLES 47    /* ... says "not driving" after about 1 s of cycles it did not drive */
+#define SRC_DRIVER_PRIORITY "30000"  /* above the test daemon's Dummy-Driver (20000) */
 
 /* compare: the processed output is checked against an offline engine that
  * starts from silence at the first frame of each contiguous raw segment,
@@ -118,8 +139,9 @@ static uint32_t fbits(float x)
 struct opts {
 	const char *name, *cls, *props, *log, *target, *out, *positions;
 	const char *input_log, *raw, *processed;
-	long channels, start, latency;
+	long channels, start, latency, ppm;
 	double seconds;
+	int driver, strict;          /* flags: --driver, --strict (no value) */
 };
 
 static int parse_long(const char *s, long lo, long hi, long *out)
@@ -156,9 +178,19 @@ static int parse_opts(int argc, char **argv, struct opts *o)
 {
 	memset(o, 0, sizeof *o);
 	o->latency = -1;
-	for (int i = 0; i < argc; i += 2) {
-		const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+	for (int i = 0; i < argc; i++) {
+		const char *k = argv[i], *v;
 
+		if (strcmp(k, "--driver") == 0) {
+			o->driver = 1;
+			continue;
+		}
+		if (strcmp(k, "--strict") == 0) {
+			o->strict = 1;
+			continue;
+		}
+		v = i + 1 < argc ? argv[i + 1] : NULL;
+		i++;
 		if (!v) {
 			fprintf(stderr, "test_pw_helper: %s needs a value\n", k);
 			return -1;
@@ -188,6 +220,9 @@ static int parse_opts(int argc, char **argv, struct opts *o)
 				return bad_opt(k, v);
 		} else if (strcmp(k, "--start") == 0) {
 			if (parse_long(v, 0, (long)1 << 40, &o->start) != 0)
+				return bad_opt(k, v);
+		} else if (strcmp(k, "--ppm") == 0) {
+			if (parse_long(v, -2000, 2000, &o->ppm) != 0)
 				return bad_opt(k, v);
 		} else if (strcmp(k, "--latency") == 0) {
 			if (parse_long(v, 0, 1 << 20, &o->latency) != 0)
@@ -408,13 +443,122 @@ struct src {
 	atomic_size_t n_recs;
 	_Atomic uint64_t lost;
 	_Atomic(struct spa_io_position *) position;
+	/* --driver: the cycle timer. Its fields are only touched on the thread
+	 * loop (state_changed and the timer callback); the main thread reads
+	 * the atomic counters. */
+	int driver;
+	struct spa_source *timer;
+	double period_ns;            /* one cycle: SRC_DRIVER_FRAMES at 48 kHz, scaled by (1 + ppm * 1e-6) */
+	uint64_t t0_ns, n_ticks;     /* deadline n is t0_ns + n * period_ns, on CLOCK_MONOTONIC */
+	int armed;
+	atomic_int driving_seen;
+	_Atomic uint64_t drive_ticks, follow_ticks, resyncs;
+	_Atomic uint64_t cycle_ns, next_ns;   /* the driven cycle's deadline and the next, for the clock */
 };
+
+static uint64_t mono_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* Thread loop: arms the timer at an absolute CLOCK_MONOTONIC time (the
+ * clock PipeWire's loop timers run on), or disarms it (at == 0). */
+static void src_timer_at(struct src *s, uint64_t at)
+{
+	struct timespec v = { .tv_sec = (time_t)(at / 1000000000ull), .tv_nsec = (long)(at % 1000000000ull) };
+	struct pw_loop *loop = pw_thread_loop_get_loop(s->pw.tl);
+
+	if (at == 0)
+		pw_loop_update_timer(loop, s->timer, NULL, NULL, false);
+	else
+		pw_loop_update_timer(loop, s->timer, &v, NULL, true);
+}
+
+static uint64_t src_deadline(const struct src *s)
+{
+	return s->t0_ns + (uint64_t)llround((double)s->n_ticks * s->period_ns);
+}
+
+/* Thread loop, at each deadline: one cycle if this stream is the driver.
+ * The next deadline is computed from t0, not from now, so wakeup latency
+ * never accumulates into the source's rate. After a stall of more than
+ * SRC_RESYNC_CYCLES the schedule restarts from now instead of bursting. */
+static void src_on_timer(void *data, uint64_t expirations)
+{
+	struct src *s = data;
+
+	(void)expirations;
+	if (!s->armed)
+		return;
+	uint64_t this_ns = src_deadline(s);
+	s->n_ticks++;
+	uint64_t now = mono_ns();
+	if (src_deadline(s) + (uint64_t)(SRC_RESYNC_CYCLES * s->period_ns) < now) {
+		atomic_fetch_add(&s->resyncs, 1);
+		s->t0_ns = now;
+		s->n_ticks = 1;
+	}
+	uint64_t next_ns = src_deadline(s);
+	src_timer_at(s, next_ns);
+	if (pw_stream_is_driving(s->stream)) {
+		atomic_store(&s->driving_seen, 1);
+		atomic_fetch_add(&s->drive_ticks, 1);
+		atomic_store(&s->cycle_ns, this_ns);
+		atomic_store(&s->next_ns, next_ns);
+		pw_stream_trigger_process(s->stream);
+	} else {
+		atomic_fetch_add(&s->follow_ticks, 1);
+	}
+}
+
+/* Data thread, at the start of a cycle this stream drives: advances the
+ * graph clock the way a driver must (nothing else does it for a stream),
+ * as module-pipe-tunnel's timer does: one quantum of SRC_DRIVER_FRAMES at
+ * 48 kHz per cycle, stamped with the timer's deadline. The followers run
+ * after this callback returns, so they see the new position. */
+static void src_advance_clock(struct src *s, struct spa_io_position *p)
+{
+	if (!p)
+		return;
+	p->clock.nsec = atomic_load_explicit(&s->cycle_ns, memory_order_relaxed);
+	p->clock.rate = SPA_FRACTION(1, G16MIC_RATE);
+	p->clock.position += p->clock.duration;
+	p->clock.duration = SRC_DRIVER_FRAMES;
+	p->clock.delay = 0;
+	p->clock.rate_diff = 1.0;
+	p->clock.next_nsec = atomic_load_explicit(&s->next_ns, memory_order_relaxed);
+}
+
+static void src_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error)
+{
+	struct src *s = data;
+
+	(void)old;
+	if (state == PW_STREAM_STATE_ERROR)
+		fprintf(stderr, "test_pw_helper: source stream error: %s\n", error ? error : "unknown");
+	if (!s->driver || !s->timer)
+		return;
+	if (state == PW_STREAM_STATE_STREAMING && !s->armed) {
+		s->t0_ns = mono_ns();
+		s->n_ticks = 1;
+		s->armed = 1;
+		src_timer_at(s, src_deadline(s));
+	} else if (state != PW_STREAM_STATE_STREAMING && s->armed) {
+		s->armed = 0;
+		src_timer_at(s, 0);
+	}
+}
 
 static void src_process(void *data)
 {
 	struct src *s = data;
-	struct pw_buffer *b = pw_stream_dequeue_buffer(s->stream);
 
+	if (s->driver && pw_stream_is_driving(s->stream))
+		src_advance_clock(s, atomic_load_explicit(&s->position, memory_order_relaxed));
+	struct pw_buffer *b = pw_stream_dequeue_buffer(s->stream);
 	if (!b)
 		return;
 	struct spa_data *d = b->buffer->n_datas > 0 ? &b->buffer->datas[0] : NULL;
@@ -454,9 +598,26 @@ static void src_io_changed(void *data, uint32_t id, void *area, uint32_t size)
 
 static const struct pw_stream_events src_events = {
 	PW_VERSION_STREAM_EVENTS,
+	.state_changed = src_state_changed,
 	.io_changed = src_io_changed,
 	.process = src_process,
 };
+
+/* Main thread: the --driver state lines, each written once. */
+static void src_note_driving(struct src *s, FILE *log, int *noted)
+{
+	if (!s->driver || *noted == 2)
+		return;
+	if (atomic_load(&s->driving_seen)) {
+		fputs("# source: driving\n", log);
+		fflush(log);
+		*noted = 2;
+	} else if (*noted == 0 && atomic_load(&s->follow_ticks) >= SRC_NOT_DRIVING_CYCLES) {
+		fputs("# source: not driving\n", log);
+		fflush(log);
+		*noted = 1;
+	}
+}
 
 static size_t src_flush(struct src *s, FILE *log, size_t from)
 {
@@ -478,7 +639,12 @@ static int cmd_source(const struct opts *o)
 	int rc = 0;
 
 	if (!o->name || !o->log || o->channels < 1) {
-		fputs("usage: test_pw_helper source --name N --channels C --log FILE [--start K] [--class C] [--props k=v,...]\n", stderr);
+		fputs("usage: test_pw_helper source --name N --channels C --log FILE [--start K] [--class C] [--props k=v,...]"
+		      " [--driver [--ppm P]]\n", stderr);
+		return EXIT_USAGE;
+	}
+	if (o->ppm != 0 && !o->driver) {
+		fputs("test_pw_helper: --ppm needs --driver\n", stderr);
 		return EXIT_USAGE;
 	}
 	int ch = (int)o->channels;
@@ -488,7 +654,8 @@ static int cmd_source(const struct opts *o)
 		fprintf(stderr, "test_pw_helper: %s: %s\n", o->log, strerror(errno));
 		return 1;
 	}
-	fprintf(log, "# test_pw_helper source name=%s channels=%d start=%ld\n", o->name, ch, o->start);
+	fprintf(log, "# test_pw_helper source name=%s channels=%d start=%ld driver=%d ppm=%ld\n", o->name, ch, o->start,
+		o->driver, o->ppm);
 	fflush(log);
 
 	struct src *s = calloc(1, sizeof *s);
@@ -500,6 +667,8 @@ static int cmd_source(const struct opts *o)
 	}
 	s->ch = ch;
 	s->next_k = (int64_t)o->start;
+	s->driver = o->driver;
+	s->period_ns = (double)SRC_DRIVER_FRAMES * 1e9 / (double)G16MIC_RATE * (1.0 + (double)o->ppm * 1e-6);
 
 	block_signals(&sigs);
 	pw_init(NULL, NULL);
@@ -515,6 +684,11 @@ static int cmd_source(const struct opts *o)
 		PW_KEY_NODE_LATENCY, "1024/48000",
 		"node.autoconnect", "false",
 		NULL);
+	if (props && o->driver) {
+		/* its own group, never g16-mic's, so linking to it brings its clock */
+		pw_properties_set(props, "priority.driver", SRC_DRIVER_PRIORITY);
+		pw_properties_setf(props, PW_KEY_NODE_GROUP, "test.src-driver.%ld", (long)getpid());
+	}
 	if (!props || apply_props(props, o->props) != 0) {
 		fputs("test_pw_helper: bad --props\n", stderr);
 		pw_properties_free(props);
@@ -522,13 +696,19 @@ static int cmd_source(const struct opts *o)
 		goto out;
 	}
 	pw_thread_loop_lock(s->pw.tl);
-	s->stream = pw_stream_new(s->pw.core, o->name, props);
 	int res = -ENOMEM;
+	uint32_t flags = PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS;
+	if (o->driver) {
+		s->timer = pw_loop_add_timer(pw_thread_loop_get_loop(s->pw.tl), src_on_timer, s);
+		flags |= PW_STREAM_FLAG_DRIVER;
+	}
+	s->stream = (!o->driver || s->timer) ? pw_stream_new(s->pw.core, o->name, props) : NULL;
+	if (!s->stream && o->driver && !s->timer)
+		pw_properties_free(props);
 	if (s->stream) {
 		pw_stream_add_listener(s->stream, &s->listener, &src_events, s);
 		params[0] = audio_format(&bld, ch, pos);
-		res = pw_stream_connect(s->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
-					PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS, params, 1);
+		res = pw_stream_connect(s->stream, PW_DIRECTION_OUTPUT, PW_ID_ANY, (enum pw_stream_flags)flags, params, 1);
 	}
 	pw_thread_loop_unlock(s->pw.tl);
 	if (res < 0) {
@@ -538,9 +718,11 @@ static int cmd_source(const struct opts *o)
 	}
 
 	size_t flushed = 0;
+	int noted = 0;
 	for (;;) {
 		int sig_no = wait_tick(&sigs);
 		flushed = src_flush(s, log, flushed);
+		src_note_driving(s, log, &noted);
 		if (sig_no == SIGINT || sig_no == SIGTERM)
 			break;
 		if (atomic_load(&s->pw.core_failed)) {
@@ -551,11 +733,26 @@ static int cmd_source(const struct opts *o)
 	}
 	stream_disconnect(&s->pw, s->stream);
 	src_flush(s, log, flushed);
+	src_note_driving(s, log, &noted);
+	if (s->driver) {
+		fprintf(log, "# source: %" PRIu64 " cycles driven, %" PRIu64 " timer ticks while another driver ran,"
+			" %" PRIu64 " schedule restarts after a stall\n",
+			(uint64_t)atomic_load(&s->drive_ticks), (uint64_t)atomic_load(&s->follow_ticks),
+			(uint64_t)atomic_load(&s->resyncs));
+		fflush(log);
+	}
 	if (atomic_load(&s->lost))
 		fprintf(stderr, "test_pw_helper: source %s: %" PRIu64 " buffers not logged (log full)\n",
 			o->name, (uint64_t)atomic_load(&s->lost));
 
 out:
+	if (s->timer) {
+		pw_thread_loop_lock(s->pw.tl);
+		s->armed = 0;
+		pw_loop_destroy_source(pw_thread_loop_get_loop(s->pw.tl), s->timer);
+		s->timer = NULL;
+		pw_thread_loop_unlock(s->pw.tl);
+	}
 	pwc_close(&s->pw, &s->stream, &s->listener);
 	pw_deinit();
 	fclose(log);
@@ -1373,11 +1570,14 @@ static int cmd_compare(const struct opts *o)
 	memset(&src, 0, sizeof src);
 	memset(&tab, 0, sizeof tab);
 	memset(&proc, 0, sizeof proc);
-	if (!o->input_log || !o->raw || ch < 1 || o->latency < 0) {
-		fputs("usage: test_pw_helper compare --input-log SRC.log --raw RAW [--processed PROC] --channels C --latency L\n", stderr);
+	if (!o->input_log || !o->raw || ch < 1 || (o->latency < 0 && !o->strict) ||
+	    (o->latency < 0 && o->processed)) {
+		fputs("usage: test_pw_helper compare --input-log SRC.log --raw RAW [--processed PROC] --channels C"
+		      " --latency L [--strict] (--latency is optional with --strict and no --processed)\n", stderr);
 		return EXIT_USAGE;
 	}
-	size_t L = (size_t)o->latency;
+	const int timed = o->latency >= 0;
+	size_t L = timed ? (size_t)o->latency : 0;
 	if (read_srclog(o->input_log, &src) != 0) {
 		verdict(0, "cannot read the source log %s", o->input_log);
 		return 1;
@@ -1449,9 +1649,23 @@ static int cmd_compare(const struct opts *o)
 	       R, matched, zeros, zeros_lead, fwd_gaps, back, bad);
 	verdict(bad == 0 && back == 0 && matched > 0 && 2 * matched >= R,
 		"raw output is the input bit for bit, in order (%zu of %zu frames)", matched, R);
+	if (o->strict) {
+		/* nothing lost or repeated: after the first input frame every frame
+		 * is the next input frame (a zero fill is an underrun, a forward gap
+		 * dropped audio, a backward step repeated it) */
+		size_t zero_fills = zeros - zeros_lead;
+		verdict(zero_fills == 0 && fwd_gaps == 0 && back == 0 && bad == 0 && matched > 0 && 10 * matched >= 9 * R,
+			"raw is one contiguous run of input frames: no gaps, repeats or zero fills after the first"
+			" (%zu of %zu frames matched, %zu leading zeros, %zu zero fills after the first, %zu forward gaps,"
+			" %zu backwards, %zu not input)",
+			matched, R, zeros_lead, zero_fills, fwd_gaps, back, bad);
+	}
+	if (!timed) {
+		printf("  no --latency: the end-to-end latency and processed checks were skipped\n");
+		goto done;
+	}
 
 	/* end-to-end latency, from the source's graph position to the raw tap's */
-	uint32_t q = raw.qmax ? raw.qmax : 1024;
 	int64_t lat_min = INT64_MAX, lat_max = INT64_MIN;
 	size_t lat_n = 0;
 	/* timed at the first frame of every run of input frames and of every
@@ -1470,14 +1684,16 @@ static int cmd_compare(const struct opts *o)
 		lat_max = SPA_MAX(lat_max, lat);
 		lat_n++;
 	}
-	int64_t lat_want = (int64_t)L + (int64_t)q;
+	/* the capture and both outputs run in the same graph cycle: a frame
+	 * leaves exactly the engine latency after it arrived */
+	int64_t lat_want = (int64_t)L;
 	if (lat_n == 0)
 		verdict(0, "no raw frame could be timed against the source log");
 	else
 		verdict(lat_min == lat_want && lat_max == lat_want,
 			"end-to-end latency %" PRId64 "..%" PRId64 " samples (want exactly %" PRId64
-			": engine %zu + one quantum of %u)",
-			lat_min, lat_max, lat_want, L, q);
+			": the engine latency, delivered in the capture's own graph cycle)",
+			lat_min, lat_max, lat_want);
 
 	/* processed: at the raw tap's graph positions, the offline omni of the
 	 * same frames, at the same engine latency (lag 0) */

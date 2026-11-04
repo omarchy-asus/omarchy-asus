@@ -2370,7 +2370,7 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
 <a id="pkg-omarchy-asus-g16-mic"></a>
 ### G16 microphone processing host (omarchy-asus-g16-mic, held)
 
-- **Component:** `omarchy-asus-g16-mic` 0.1.0-102 (`recipes/omarchy-asus-g16-mic/`, C11 and
+- **Component:** `omarchy-asus-g16-mic` 0.1.0-103 (`recipes/omarchy-asus-g16-mic/`, C11 and
   meson, MIT). **Held** (`recipes/omarchy-asus-g16-mic/HOLD`): CI builds it, nothing publishes it,
   until the maintainer's G16 tests (#400; #401).
 - **What:** `g16-mic`, an opt-in microphone processor run by hand. `g16-mic run --source
@@ -2392,7 +2392,9 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   is kept; it adds `g16_mic_clean`). A separate opt-in, `g16-mic-aec-ns-high.conf`, adds
   PipeWire's noise suppressor at its fixed high level (own node names, adds `g16_mic_clean_ns`);
   it is labelled a word-loss risk to check on the G16 before use. Nothing starts at install, nothing goes into `/etc`,
-  `pipewire.conf.d` or systemd, and the default source never changes.
+  `pipewire.conf.d` or systemd, and the default source never changes. Each capture cycle is
+  processed and delivered on both outputs inside the same PipeWire graph cycle (the outputs are
+  trigger-driven by the capture), so the outputs follow the source's own clock with no steady-state loss.
 - **Test:** offline, the meson tests run in the PKGBUILD's `check()` (so in the PR's Build
   check) and in `tests/channel/g16-mic.sh` where the toolchain is present; that script also checks
   the recipe statically (HOLD, sources and sums, pkgrel, both fragments' keys and distinct node
@@ -2402,8 +2404,9 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   kept; pauses held; tracking hysteresis and bounded slew; invalid geometry (NaN/inf, zero
   aperture, duplicate positions, channel mismatch); an unverified or stale layout gives
   UNAVAILABLE; bounded queues under overload with their drop counters; the source matcher never
-  picks a monitor or an unrelated mic (fake node lists); crossfade alignment and the tail flush on
-  stop; and the WebRTC echo canceller (the library PipeWire's module links) with the default
+  picks a monitor or an unrelated mic (fake node lists); crossfade alignment and the engine's tail
+  flush (the live host does not flush: when the source goes away or g16-mic stops, the last engine
+  latency of audio, 272 frames for uncalibrated omni, is counted as lost in `ring_overflow`); and the WebRTC echo canceller (the library PipeWire's module links) with the default
   fragment's settings: a delayed reference, slow clock drift and double talk (near-end speech
   retained, measured by energy and correlation); the noise-suppression-high settings are run
   separately and their near-end retention reported next to the default's. `test_pw_live` runs
@@ -2411,7 +2414,9 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   `HOME`, runtime directory and socket; only a dummy driver and a null sink, no ALSA, Bluetooth,
   Pulse or JACK, nothing audible): the outputs' channels and format, raw bit-exact and processed
   equal to an offline omni at the documented latency, the decoy source and the sink monitor never
-  taken, remove and re-add reconnecting to the same name only, and a clean SIGTERM exit. The
+  taken, remove and re-add reconnecting to the same name only, a source on its own driver read on
+  both outputs for 20 s, partly under CPU load, with zero `ring_overflow`/`ring_underflow` growth
+  and raw bit-exact (no gaps or repeats), and a clean SIGTERM exit. The
   PKGBUILD's `checkdepends` (wireplumber) makes it run in the clean chroot; it skips only where
   the binaries are missing. On the G16: later Steward test cards, once the laptop is available.
   Not exercised yet: real ALSA hardware and the G16's microphones, the user's WirePlumber policy,

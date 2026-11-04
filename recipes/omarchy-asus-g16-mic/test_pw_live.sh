@@ -25,14 +25,22 @@
 #      decoy, never the sink monitor;
 #   5. after 3 s with nobody reading the outputs, both are tapped for 3 s: raw
 #      must be the source's frames bit for bit, at exactly the engine latency
-#      plus one graph quantum (272 + 1024); processed, at the same graph
-#      positions, must equal an offline omni engine fed the same frames;
+#      (272): the capture and both outputs run in the same graph cycle;
+#      processed, at the same graph positions, must equal an offline omni
+#      engine fed the same frames;
 #   6. the source goes away: status waiting, reconnects=1, nothing linked into
 #      the capture and the decoy not taken; the source comes back under the
 #      same name: connected again, linked only from the new node, and (after
 #      another 3 s unread) raw is the new source's frames bit for bit;
 #   7. `g16-mic run --source test_null_sink.monitor` is refused (exit 2) and
 #      links nothing;
+#   9. (runs before 8) the source is replaced by one on its own driver and
+#      clock, like a sound card (test_pw_helper source --driver, 300 ppm
+#      slow): with readers on both outputs for 22 s, ring_overflow and
+#      ring_underflow in the status file must not grow over 20 s of steady
+#      state, the second 10 s of it under CPU load (min(nproc, 4) niced busy
+#      loops, the test's own children), and raw must be one contiguous run
+#      of the source's frames, bit for bit (compare --strict);
 #   8. SIGTERM: exit 0 within 3 s, the g16_mic_* nodes and the status file
 #      gone, no g16-mic process left.
 # The decoy must never have streamed a buffer.
@@ -43,7 +51,7 @@
 # is written outside its temporary directory, which it removes.
 #
 # RED -> GREEN. Before this test, the live path of host.c had never run. Run
-# against host.c as it was, it finds four host bugs (fixed in host.c, each
+# against host.c as it was, it finds five host bugs (fixed in host.c, each
 # fix commented there):
 #   - step 3: g16_mic_raw offered its channels as AUX0 AUX1 whatever the
 #     source carried, so it did not have the source's FL FR channels;
@@ -57,8 +65,15 @@
 #     the microphone's clock, and the end-to-end latency drifted;
 #   - step 5: the outputs read first-in first-out, so once one of them
 #     missed a graph cycle g16_mic_processed sat a quantum away from
-#     g16_mic_raw at the same graph position. They now read on the
-#     capture's clock, one cycle behind it.
+#     g16_mic_raw at the same graph position. They then read on the
+#     capture's clock, one cycle behind it;
+#   - step 9: the outputs read one graph cycle behind the capture by clock
+#     position, so a late or overlapping cycle (a busy host, a source on its
+#     own driver) made them zero-fill a cycle and then discard one:
+#     ring_underflow and ring_overflow grew in steady state and words were
+#     lost. host.c now processes each capture cycle and triggers both
+#     outputs inside that same cycle (and step 5's latency is exactly the
+#     engine's).
 # The integrator's first RED run output is recorded in the pull request.
 
 set -u
@@ -535,6 +550,89 @@ if ((r == 2)) && [[ -z $(links_from test_null_sink) && $(node_ids g16_mic_captur
 else
     bad "7. g16-mic with test_null_sink.monitor exited $r; links from the sink: $(links_from test_null_sink)"
     sed 's/^/    /' "$T/g16mic-monitor.log"
+fi
+
+# ---- 9. a source on its own driver, readers on both outputs, CPU load ---------
+#
+# The real microphone is an ALSA source that drives its own graph. Here the
+# helper source is a driver with its own clock (300 ppm slow against the
+# system clock), in a node.group of its own, so g16-mic's capture and outputs
+# run on its cycles. Nothing may be dropped or repeated in steady state.
+
+stop_pid "$P_SRC" 3
+r=$?
+((r == 0)) || bad "9. the second test_g16_mic source exited $r"
+src_waiting() { [[ $(status_val source_state) == waiting ]]; }
+poll 10 src_waiting || bad "9. after removing the source: source_state=$(status_val source_state)"
+start "$T/helper.log" "$HELPER" source --name test_g16_mic --channels 2 --driver --ppm 300 \
+    --start 5000000 --log "$T/src3.log"
+P_SRC=$LAST_PID
+step9=1
+if poll 15 reconnected; then
+    pass "9. a source on its own driver is connected and the only one linked into the capture (node $new_id)"
+else
+    bad "9. no connect to the driving test_g16_mic: state=$(status_val source_state) links: $(links_into g16_mic_capture | tr '\n' ';')"
+    step9=0
+fi
+src_driving() { grep -q '^# source: driving$' "$T/src3.log"; }
+if ((step9)); then
+    if poll 5 src_driving; then
+        pass "9. the source drives its own graph cycles"
+    else
+        if grep -q '^# source: not driving$' "$T/src3.log"; then
+            bad "9. source: not driving (another driver ran its cycles; the own-clock case was not tested)"
+        else
+            bad "9. the source never reported driving a cycle"
+        fi
+        step9=0
+    fi
+fi
+if ((step9)); then
+    start "$T/helper.log" "$HELPER" tap --target g16_mic_raw --out "$T/raw9.f32" --channels 2 --seconds 22
+    P_TAP9R=$LAST_PID
+    start "$T/helper.log" "$HELPER" tap --target g16_mic_processed --out "$T/proc9.f32" --channels 1 --seconds 22
+    P_TAP9P=$LAST_PID
+    sleep 2  # settle: both readers linked
+    ov0=$(status_val ring_overflow)
+    un0=$(status_val ring_underflow)
+    sleep 10  # steady state, idle
+    n_busy=$(nproc 2>/dev/null || echo 2)
+    ((n_busy > 4)) && n_busy=4
+    busy=()
+    for ((i = 0; i < n_busy; i++)); do
+        start /dev/null nice -n 19 bash -c 'while :; do :; done'
+        busy+=("$LAST_PID")
+    done
+    sleep 10  # steady state, under load
+    for p in "${busy[@]}"; do stop_pid "$p" 2; done
+    ov1=$(status_val ring_overflow)
+    un1=$(status_val ring_underflow)
+    if [[ $ov0 =~ ^[0-9]+$ && $ov1 =~ ^[0-9]+$ && $un0 =~ ^[0-9]+$ && $un1 =~ ^[0-9]+$ ]]; then
+        d_ov=$((ov1 - ov0))
+        d_un=$((un1 - un0))
+        if ((d_ov == 0 && d_un == 0)); then
+            pass "9. no ring overflow or underflow in 20 s with the source on its own driver, 10 s of it under CPU load (overflow +$d_ov, underflow +$d_un)"
+        else
+            bad "9. ring overflow or underflow in 20 s with the source on its own driver, 10 s of it under CPU load (overflow +$d_ov, underflow +$d_un)"
+        fi
+    else
+        bad "9. the status file has no ring counters: ring_overflow '$ov0' -> '$ov1', ring_underflow '$un0' -> '$un1'"
+    fi
+    wait "$P_TAP9R"
+    r1=$?
+    wait "$P_TAP9P"
+    r2=$?
+    if ((r1 == 0 && r2 == 0)); then
+        pass "9. tapped 22 s of g16_mic_raw and g16_mic_processed"
+    else
+        bad "9. taps exited $r1 (raw) and $r2 (processed)"
+    fi
+    sleep 0.3  # the source log is flushed every 100 ms
+    if [[ -s $T/raw9.f32 ]] && "$HELPER" compare --strict --input-log "$T/src3.log" --raw "$T/raw9.f32" --channels 2; then
+        pass "9. raw is the source's frames bit for bit with no gaps or repeats across the window"
+    else
+        bad "9. raw has gaps, repeats or zero fills with the source on its own driver (see the compare lines above)"
+    fi
 fi
 
 # ---- 8. SIGTERM ---------------------------------------------------------------
