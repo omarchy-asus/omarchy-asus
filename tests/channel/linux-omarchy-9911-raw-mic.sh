@@ -84,8 +84,8 @@ val() {
   local t=${1//[[:space:]]/} v
   if [[ $t =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]]; then printf '%d\n' "$t"; return; fi
   [[ $t =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return
-  v=$(grep -oE "#define[[:space:]]+$t[[:space:]]+\(?(0[xX][0-9a-fA-F]+|[0-9]+)" <<<"$added" | grep -oE '(0[xX][0-9a-fA-F]+|[0-9]+)$' | head -1)
-  [[ -n $v ]] || v=$(grep -oE "(^|[^A-Za-z0-9_])$t[[:space:]]*=[[:space:]]*(0[xX][0-9a-fA-F]+|[0-9]+)" <<<"$added" |
+  v=$(grep -oE "#define[[:space:]]+${t}[[:space:]]+\(?(0[xX][0-9a-fA-F]+|[0-9]+)" <<<"$added" | grep -oE '(0[xX][0-9a-fA-F]+|[0-9]+)$' | head -1)
+  [[ -n $v ]] || v=$(grep -oE "(^|[^A-Za-z0-9_])${t}[[:space:]]*=[[:space:]]*(0[xX][0-9a-fA-F]+|[0-9]+)" <<<"$added" |
     grep -oE '(0[xX][0-9a-fA-F]+|[0-9]+)$' | head -1)
   [[ -n $v ]] && printf '%d\n' "$v"
 }
@@ -119,7 +119,7 @@ c=$(nids_of 'snd_hda_codec_cleanup_stream\([^,]+,[^,)]+\)')
 
 grep -q -- '-EBUSY' <<<"$added" && ok "a conflicting open returns -EBUSY" || bad "no -EBUSY added"
 # channels_min/channels_max: a literal, or a constant this patch defines (val above).
-rhs() { grep -oE "$1[[:space:]]*=[[:space:]]*[A-Za-z0-9_]+" <<<"$added" | sed -E 's/.*=[[:space:]]*//' | head -1; }
+rhs() { grep -oE "${1}[[:space:]]*=[[:space:]]*[A-Za-z0-9_]+" <<<"$added" | sed -E 's/.*=[[:space:]]*//' | head -1; }
 cmin=$(val "$(rhs channels_min)")
 cmax=$(val "$(rhs channels_max)")
 [[ $cmin == 4 && $cmax == 4 ]] && ok "raw PCM is 4 channels (min and max)" ||
