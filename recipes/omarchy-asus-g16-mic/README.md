@@ -319,7 +319,9 @@ left, counted, in bounded time; a late listener starts at current audio at exact
 latency, also when the output runs before the capture's cycle (the schedule that left a raw
 listener one cycle behind); the quiet-only latency recovery trims only quiet cycles, never a
 marker or a -40 dBFS quiet speech burst, keeps both outputs aligned, brings the latency back to
-the target and counts `latency_trimmed_frames` exactly; a disconnect and
+the target and counts `latency_trimmed_frames` exactly; a burst at the live test's step-10 level
+(2^-5 of the test signal, about -50 dBFS, above the -60 dBFS threshold) is never trimmed, while
+a cycle below the threshold may be; a disconnect and
 reconnect never puts the old tail into the new stream (counted); refused or late output triggers
 keep their audio in the queue with zero loss, the added latency bounded and reported; every output
 buffer holds exactly one quantum; an overload beyond the bound keeps the queue and latency
@@ -353,12 +355,19 @@ source is removed g16-mic waits and captures nothing, and when a source of the s
 back it reconnects to that one only and raw is again the input bit for bit, at the same 272-frame
 latency (step 6: no cycle hidden in PipeWire's adapter, and a raw reader linking while g16-mic
 runs is not left one cycle behind, 1296 frames); a source on its own driver and clock, read on both outputs for 20 s, half of
-it under CPU load, shows no `ring_overflow` or `ring_underflow` growth and raw stays bit-exact
-with no gaps or repeats; `g16-mic run` on the sink's monitor is refused (exit 2); SIGTERM exits 0 within 3 s with
+it under CPU load (step 9), shows no `ring_overflow` or `ring_underflow` growth and raw stays
+bit-exact with no repeats, and its accounting is exact: every raw gap in its tap must equal what
+g16-mic counted over the window: `capture_gap` + `latency_trimmed_frames` / 3 + the raw share of
+`ring_overflow` + `late_link_discarded` (those are samples summed over both outputs, 2 raw + 1
+processed a frame, so the raw share must be exactly none, half or a third), and a gap no counter
+accounts for fails the step; `g16-mic run` on the sink's monitor is refused (exit 2); SIGTERM exits 0 within 3 s with
 the nodes and status file gone and no process left; the decoy never streamed. Steps 10 to 14
 start fresh g16-mic runs: (10) stop drain: a marker burst in the last 100 ms before SIGTERM, and
 the last accepted cycle, arrive on both outputs (raw bit-exact, processed matching an offline
-engine) with zero `drain_lost`; (11) source loss and reconnect: the source is removed mid-stream,
+engine) with zero `drain_lost`; its source is quiet speech, the test signal scaled by 2^-5
+(peak 0.003125, about -50 dBFS), about 10 dB above the -60 dBFS threshold of the quiet-only
+latency trim, so the trim cannot legitimately fire inside the burst the step needs intact, and
+the step asserts `latency_trimmed_frames` +0 through the drain; (11) source loss and reconnect: the source is removed mid-stream,
 its tail (engine tail plus queued audio) is delivered or counted exactly as `source_lost_tail`, and
 after it comes back the new stream starts at the engine latency and contains no samples of the
 old one; (12) controlled contention resembling the original failure (load about 18 on 16
@@ -377,14 +386,18 @@ queue depth and added latency never pass the bound, and if the stall back-pressu
 was the consumer's own and g16-mic's counters stay clean (the test logs which case ran). The
 test output records
 the RT status and the load conditions of each step. Every process it
-starts is stopped on every exit path and its temporary directory is removed. Step 12 must not
-pass on a host that is already busy: if other work holds the 1-minute load average above
-`nproc`/2 when it is about to start, it prints `SKIP-LOAD 12: host already at load X from other
-work` and the whole test exits 77 (skip), unless `G16MIC_LIVE_STRICT=1` is set; then it waits up
-to 10 minutes for the load to fall below `nproc`/2 and runs, and fails if it does not. Otherwise
-it skips (exit 77) only where the `pipewire` or `wireplumber` binary is missing; the PKGBUILD's `checkdepends` makes
-it run in the clean chroot, and `tests/channel/g16-mic.sh` fails if it skipped on a host that has
-both.
+starts is stopped on every exit path and its temporary directory is removed. Steps 9 and 12
+must not pass on a host that is already busy: if other work holds the 1-minute load average
+above `nproc`/2 when either is about to start, it prints `SKIP-LOAD 9: ...` or `SKIP-LOAD 12:
+host already at load X from other work` and the whole test exits 77 (skip), unless
+`G16MIC_LIVE_STRICT=1` is set; then it waits for the load to fall below `nproc`/2 and runs, and
+fails if it does not. The two waits share one 10-minute budget for the whole run, and meson's
+timeout for `test_pw_live` is 1020 s (the 600 s wait plus about 420 s of the test's own runtime),
+so a strict run waits rather than times out. `tests/channel/g16-mic.sh` fails a SKIP-LOAD skip
+(a skip does not pass) and its message names SKIP-LOAD and `G16MIC_LIVE_STRICT=1`. Otherwise
+the test skips (exit 77) only where the `pipewire` or `wireplumber` binary is missing; the
+PKGBUILD's `checkdepends` makes it run in the clean chroot, and `tests/channel/g16-mic.sh` fails
+if it skipped on a host that has both.
 
 ## Limitations
 

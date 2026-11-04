@@ -116,7 +116,13 @@ if ((have_build)); then
       if [[ $live =~ [[:space:]]OK[[:space:]] ]]; then
         ok "test_pw_live ran and passed (pipewire and wireplumber are here)"
       else
-        fail "test_pw_live did not pass on a host with pipewire and wireplumber: ${live:-no result line}"
+        # A load skip prints SKIP-LOAD; meson keeps every test's stdout in its own log.
+        skipload=$(grep -h -m1 '^SKIP-LOAD ' "$T/build/meson-logs/testlog.txt" "$T/test.log" 2>/dev/null | head -n 1)
+        if [[ -n $skipload ]]; then
+          fail "test_pw_live skipped: SKIP-LOAD (the host is already loaded by other work: $skipload); a skip does not pass: rerun on a quieter host or with G16MIC_LIVE_STRICT=1 to wait for the load to drop"
+        else
+          fail "test_pw_live did not pass on a host with pipewire and wireplumber: ${live:-no result line}"
+        fi
       fi
     else
       echo "skip: no pipewire/wireplumber here, test_pw_live skipped"

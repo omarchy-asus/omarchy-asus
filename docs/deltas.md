@@ -2448,7 +2448,8 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   its loss exactly in bounded time, a late listener starts at current audio at exactly the engine
   latency (also when the output runs before the capture), the quiet-only trim drops only quiet
   cycles (never a marker or a -40 dBFS burst), keeps both outputs aligned, returns to the target
-  and counts `latency_trimmed_frames` exactly, a reconnect carries
+  and counts `latency_trimmed_frames` exactly (a burst at step 10's -50 dBFS level is never
+  trimmed, a cycle below -60 dBFS may be), a reconnect carries
   no old tail, refused or late triggers keep their audio with zero loss and bounded added
   latency, every output buffer holds exactly one quantum, and an overload beyond the bound stays
   bounded, drops the oldest audio, counts it exactly and is contiguous afterwards; and the WebRTC echo canceller (the library PipeWire's module links) with the default
@@ -2460,16 +2461,23 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   Pulse or JACK, nothing audible): the outputs' channels and format, raw bit-exact and processed
   equal to an offline omni at the documented latency, the decoy source and the sink monitor never
   taken, remove and re-add reconnecting to the same name only, a source on its own driver read on
-  both outputs for 20 s, partly under CPU load, with zero `ring_overflow`/`ring_underflow` growth
-  and raw bit-exact (no gaps or repeats), a reconnect back at the 272-frame latency (step 6), and
+  both outputs for 20 s, partly under CPU load (step 9), with zero `ring_overflow`/`ring_underflow`
+  growth, raw bit-exact with no repeats and exact gap accounting (every raw gap must equal the
+  counted `capture_gap` + `latency_trimmed_frames` / 3 + the raw share (none, half or a third) of
+  `ring_overflow` + `late_link_discarded`; an uncounted gap fails), a reconnect back at the 272-frame latency (step 6), and
   a clean SIGTERM exit; steps 10-14: a marker burst in the last 100 ms before SIGTERM and the last
-  accepted cycle arrive on both outputs with zero `drain_lost`, a source removed mid-stream has
+  accepted cycle arrive on both outputs with zero `drain_lost` (the source at 2^-5 of the test
+  signal, peak 0.003125, about -50 dBFS, 10 dB above the -60 dBFS trim threshold, with
+  `latency_trimmed_frames` +0 through the drain), a source removed mid-stream has
   its tail delivered or counted exactly as `source_lost_tail` and the reconnected stream starts
   at the engine latency with no old samples, controlled contention (`nproc` busy loops at nice 0,
   g16-mic without real time, load and RT status recorded) with zero overflow/underflow, zero
-  `latency_trimmed_frames` and contiguous raw with no zero fills (if other work already holds the
-  1-minute load above `nproc`/2 it prints `SKIP-LOAD 12` and the test exits 77, unless
-  `G16MIC_LIVE_STRICT=1`, which waits up to 10 minutes for the load to drop, then fails), a separate overload (SIGSTOP of g16-mic longer than the queue bound) with
+  `latency_trimmed_frames` and contiguous raw with no zero fills (steps 9 and 12 are load-gated:
+  if other work already holds the 1-minute load above `nproc`/2 it prints `SKIP-LOAD 9` or
+  `SKIP-LOAD 12` and the test exits 77, which `tests/channel/g16-mic.sh` fails, naming SKIP-LOAD
+  and `G16MIC_LIVE_STRICT=1`; with `G16MIC_LIVE_STRICT=1` both waits share one 10-minute budget
+  for the run, then fail, and meson's 1020 s timeout for `test_pw_live`, the 600 s wait plus
+  about 420 s of runtime, lets a strict run wait rather than time out), a separate overload (SIGSTOP of g16-mic longer than the queue bound) with
   bounded queue and latency and the raw tap's loss equal to `capture_gap` plus the counted queue
   drops, then contiguous raw, and a consumer-only stall (SIGSTOP of the raw tap longer than the
   queue bound): g16-mic stays within the bound, and a back-pressured output drops its oldest

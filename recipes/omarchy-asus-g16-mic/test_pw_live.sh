@@ -48,11 +48,22 @@
 #      slow): with readers on both outputs for 22 s, ring_overflow and
 #      ring_underflow in the status file must not grow over 20 s of steady
 #      state, the second 10 s of it under CPU load (min(nproc, 4) niced busy
-#      loops, the test's own children), and raw must be one contiguous run
-#      of the source's frames, bit for bit (compare --strict);
+#      loops, the test's own children), and every frame missing from the
+#      raw tap is counted: the tap's gap_frames_total plus the source's
+#      clock skips must equal exactly capture_gap + latency_trimmed_frames
+#      / 3 + the raw share of ring_overflow + late_link_discarded (the
+#      counters are both outputs summed, 2 raw + 1 processed samples a
+#      frame), with no repeat, no frame that is not input and zero fills
+#      only as graph-xrun delays; when nothing is counted, raw must be one
+#      contiguous run of the source's frames, bit for bit (compare
+#      --strict). An uncounted gap FAILs. The step first checks the load
+#      from other work (see G16MIC_LIVE_STRICT below);
 #   8. SIGTERM: exit 0 within 3 s, the g16_mic_* nodes and the status file
 #      gone, no g16-mic process left;
-#  10. stop drain (a fresh g16-mic, a quiet source, readers on both outputs):
+#  10. stop drain (a fresh g16-mic, a quiet source, readers on both outputs;
+#      the source's --quiet signal is sig * 2^-5, peak 0.003125, about -50
+#      dBFS, about 10 dB above the -60 dBFS latency trim threshold, so
+#      latency_trimmed_frames must stay 0 before and across the stop):
 #      SIGTERM exits 0 with drain_lost 0 and the whole engine tail flushed;
 #      every frame of the last 100 ms before the stop up to and including
 #      the last accepted cycle arrives, raw bit for bit and processed as the
@@ -94,24 +105,31 @@
 # The decoy must never have streamed a buffer.
 #
 # Environment:
-#   G16MIC_LIVE_STRICT  Step 12 measures contention from its own busy loops,
-#       so before it starts them it reads the 1-minute load average from
-#       /proc/loadavg. If that is above nproc / 2 (load from other work, a
-#       build say), the step cannot tell its own contention from the host's:
-#       - unset or empty: it prints "SKIP-LOAD 12: host already at load X
-#         from other work" and the whole test exits 77 (meson's skip), or 1
-#         if an earlier step already failed (a skip never hides a FAIL);
+#   G16MIC_LIVE_STRICT  Steps 9 and 12 measure steady state and contention
+#       from their own busy loops, so before each starts its readers it reads
+#       the 1-minute load average from /proc/loadavg (load_gate). If that is
+#       above nproc / 2 (load from other work, a build say), the step cannot
+#       tell its own contention from the host's:
+#       - unset or empty: it prints "SKIP-LOAD <step>: host already at load X
+#         from other work (set G16MIC_LIVE_STRICT=1 to wait for it)" and the
+#         whole test exits 77 (meson's skip), or 1 if an earlier step already
+#         failed (a skip never hides a FAIL);
 #       - 1: it waits for the load to drop below nproc / 2, re-checking every
-#         5 s for at most 10 minutes, and then runs; if the load never drops
-#         step 12 FAILs (and steps 13 and 14, which run on its g16-mic, are
-#         not run).
+#         5 s, and then runs. The wait has ONE budget of 10 minutes
+#         (LOAD_WAIT_S, 600 s) for the whole run: steps 9 and 12 together
+#         never wait longer (meson.build's timeout for this test is sized as
+#         those 600 s plus the test's own runtime). If the load has not
+#         dropped when the budget is spent, that step FAILs and is not run
+#         (for step 12, steps 13 and 14, which run on its g16-mic, are not
+#         run either).
 #   The run's first lines print nproc, the load average, the RLIMIT_RTPRIO
 #   this shell grants and G16MIC_LIVE_STRICT; step 2 prints g16-mic's RT
 #   status.
 #
 # Exit: 0 all passed; 1 a step failed; 77 (meson's skip) when the pipewire or
 # wireplumber binary or the helper is missing, so the live path cannot run,
-# or when step 12 finds the host already loaded (G16MIC_LIVE_STRICT unset).
+# or when step 9 or 12 finds the host already loaded and nothing failed
+# before (G16MIC_LIVE_STRICT unset; the line starts "SKIP-LOAD ").
 # Every process it starts is stopped on every exit path (trap), and nothing
 # is written outside its temporary directory, which it removes.
 #
@@ -491,6 +509,48 @@ load_line() {
 }
 rt_known() { [[ $(status_val rt_status) == realtime || $(status_val rt_status) == not-realtime ]]; }
 
+# The load gate (steps 9 and 12; see G16MIC_LIVE_STRICT in the header). Both
+# steps judge steady state or contention from their own busy loops, which
+# says nothing about g16-mic on a host already above nproc / 2 from other
+# work (round 3: load 43 on 16 cores from unrelated builds).
+# load_above: the 1-minute load average is above nproc / 2 (or unreadable)
+load_above() { awk -v l="$(loadavg1)" -v n="$NPROC" 'BEGIN { exit !(l !~ /^[0-9.]+$/ || l + 0 > n / 2) }'; }
+# One strict wait budget for the whole run: each gate takes what it waited
+# off LOAD_WAIT_LEFT_S, so steps 9 and 12 together wait at most LOAD_WAIT_S
+# (meson.build's timeout is that plus the test's own runtime).
+LOAD_WAIT_S=600
+LOAD_WAIT_LEFT_S=$LOAD_WAIT_S
+# load_gate STEP NOT_RUN: returns 0 when STEP may run (the load from other
+# work is at most nproc / 2, or dropped there within what is left of the
+# wait budget with G16MIC_LIVE_STRICT=1); returns 1 when it must not run
+# (strict and the budget is spent: a FAIL naming STEP, then NOT_RUN, what is
+# therefore not run). Without G16MIC_LIVE_STRICT=1 a loaded host ends the
+# whole test here: "SKIP-LOAD STEP: ..." and exit 77, or 1 if a step already
+# failed (a skip never hides a FAIL).
+load_gate() {
+    local step=$1 not_run=$2 w
+    echo "  $step. $(load_line "before step $step, other work only" 0)"
+    load_above || return 0
+    if [[ $STRICT != 1 ]]; then
+        echo "SKIP-LOAD $step: host already at load $(loadavg1) from other work (set G16MIC_LIVE_STRICT=1 to wait for it)"
+        ((failed)) && exit 1
+        exit 77
+    fi
+    echo "  $step. G16MIC_LIVE_STRICT=1: host at load $(loadavg1) from other work, above nproc / 2 = $(awk -v n="$NPROC" 'BEGIN { print n / 2 }');" \
+        "waiting up to $LOAD_WAIT_LEFT_S s (what is left of the run's $((LOAD_WAIT_S / 60))-minute wait budget) for it to drop"
+    for ((w = 0; w < LOAD_WAIT_LEFT_S; w += 5)); do
+        load_above || break
+        sleep 5
+    done
+    LOAD_WAIT_LEFT_S=$((LOAD_WAIT_LEFT_S > w ? LOAD_WAIT_LEFT_S - w : 0))
+    if load_above; then
+        bad "$step. G16MIC_LIVE_STRICT=1: the host stayed above load nproc / 2 from other work for the rest of the run's $((LOAD_WAIT_S / 60))-minute wait budget (waited ${w} s here; now $(loadavg1) on $NPROC); $not_run"
+        return 1
+    fi
+    echo "  $step. the load dropped to $(loadavg1) after about ${w} s; running ($LOAD_WAIT_LEFT_S s of the wait budget left)"
+    return 0
+}
+
 # ---- start the private daemon and session manager ---------------------------
 
 start "$T/pw.log" env PIPEWIRE_CORE="$SOCK" "$PW_BIN" -c "$T/pipewire.conf"
@@ -806,12 +866,17 @@ if ((step9)); then
         step9=0
     fi
 fi
+# the load gate, before the readers and the busy loops (load_gate)
+((step9)) && { load_gate 9 "step 9 not run" || step9=0; }
 if ((step9)); then
     m9=$(gm0)
-    # for the log: the counters that explain a gap in the tap (capture_gap:
-    # input the capture never got; late_link_discarded: a start-window
-    # restart; latency_trimmed_frames: a quiet-cycle trim)
-    d9_keys=(capture_gap late_link_discarded latency_trimmed_frames ring_overflow)
+    # the counters that may explain a gap in the raw tap, over the tap's
+    # whole window (accounted after it): capture_gap (graph frames: input
+    # the capture never got), latency_trimmed_frames (samples: a quiet-cycle
+    # trim), ring_overflow (samples: the oldest queued audio dropped),
+    # late_link_discarded (samples: a start-window restart), and
+    # ring_underflow (samples: g16-mic's own zero fills)
+    d9_keys=(capture_gap late_link_discarded latency_trimmed_frames ring_overflow ring_underflow)
     d9_0=()
     for k in "${d9_keys[@]}"; do d9_0+=("$(status_val "$k")"); done
     start "$T/helper.log" "$HELPER" tap --target g16_mic_raw --out "$T/raw9.f32" --channels 2 --seconds 22
@@ -856,16 +921,99 @@ if ((step9)); then
     sleep 0.3  # the source log is flushed every 100 ms
     x9=$(xrun_since "$m9")
     d9=()
+    d9v=()
     for i in "${!d9_keys[@]}"; do
         v=$(status_val "${d9_keys[i]}")
-        if is_num "$v" && is_num "${d9_0[i]}"; then d9+=("${d9_keys[i]} +$((v - d9_0[i]))"); else d9+=("${d9_keys[i]} x"); fi
+        if is_num "$v" && is_num "${d9_0[i]}"; then
+            d9v+=("$((v - d9_0[i]))")
+            d9+=("${d9_keys[i]} +$((v - d9_0[i]))")
+        else
+            d9v+=(x)
+            d9+=("${d9_keys[i]} x")
+        fi
     done
     echo "  9. graph xruns of g16_mic_raw over the tap: $x9 frames; over the tap: ${d9[*]};" \
         "$(load_line "end of step 9" 0)"
-    if [[ -s $T/raw9.f32 ]] && "$HELPER" compare --strict --allow-delays --input-log "$T/src3.log" --raw "$T/raw9.f32" --channels 2; then
-        pass "9. raw is the source's frames bit for bit with no gaps or repeats across the window (zero fills only as graph-xrun delays; g16-mic counted $x9 frames of raw-output misses)"
+    # Exact gap accounting (as step 13's, for both outputs read). Under heavy
+    # outside load step 9 once saw a 1024-frame raw gap with ring_overflow
+    # and ring_underflow +0; every frame missing from the raw tap must now be
+    # a counted one. capture_gap is in graph frames: input g16-mic never got
+    # misses from both outputs alike, so it is raw frames as it is. The
+    # others are samples, frames x channels summed over both outputs, and
+    # here both outputs are read: a frame both outputs lose is 2 raw + 1
+    # processed = 3 samples (as steps 10 and 11 count). latency_trimmed_frames
+    # trims both outputs alike (handoff.c), so its raw frames are / 3 and it
+    # must be a multiple of 3. ring_overflow and late_link_discarded are per
+    # output (each output's queue drops, or restarts in its start window, on
+    # its own; host.c sums hs.out[i] of both), so the status cannot split
+    # them: their raw frames are exactly one of none (processed only, or
+    # before the tap's first frame), per / 2 (the raw output alone) or per /
+    # 3 (both outputs alike), and the tap must match one of those exactly.
+    # late_link_discarded is in each output's own samples (handoff.c
+    # take_once: frames x that output's channels), so it is in per.
+    # want_gap = capture_gap + latency_trimmed / 3 + that raw share; the tap's
+    # gap_frames_total plus the source's clock skips (src_clock_skip_frames:
+    # graph frames the source never produced) must equal it, with no repeat,
+    # no frame that is not input, and its zero fills only graph-xrun delays.
+    read -r g9_gap g9_ll g9_tr g9_ov g9_un <<<"${d9v[*]}"
+    if [[ ! -s $T/raw9.f32 ]]; then
+        bad "9. no raw tap data to account for"
+    elif ! is_num "$g9_gap" || ! is_num "$g9_ll" || ! is_num "$g9_tr" || ! is_num "$g9_ov" || ! is_num "$g9_un"; then
+        bad "9. cannot account for raw's gaps: the status file lacks a counter (${d9[*]})"
+    elif ((g9_tr % 3 != 0)); then
+        bad "9. latency_trimmed_frames +$g9_tr is not a multiple of 3 samples (2 raw + 1 processed channels): the trim did not take both outputs alike"
     else
-        bad "9. raw has gaps, repeats or zero fills with the source on its own driver (see the compare lines above)"
+        "$HELPER" compare --input-log "$T/src3.log" --raw "$T/raw9.f32" --channels 2 --allow-delays \
+            --report-gaps >"$T/cmp9.txt"
+        g_tot=$(compare_val "$T/cmp9.txt" gap_frames_total)
+        g_zero=$(compare_val "$T/cmp9.txt" zero_fill_frames)
+        g_dz=$(compare_val "$T/cmp9.txt" delay_zero_frames)
+        g_rep=$(compare_val "$T/cmp9.txt" repeat_frames)
+        g_bad=$(compare_val "$T/cmp9.txt" not_input_frames)
+        g_skip=$(compare_val "$T/cmp9.txt" src_clock_skip_frames)
+        g_cons=$(compare_val "$T/cmp9.txt" consumer_lost_frames)
+        sed 's/^/    /' "$T/cmp9.txt"
+        if is_num "$g_tot" && is_num "$g_zero" && is_num "$g_dz" && is_num "$g_rep" && is_num "$g_bad" &&
+            is_num "$g_skip" && is_num "$g_cons"; then
+            base9=$((g9_gap + g9_tr / 3))
+            per9=$((g9_ov + g9_ll))
+            seen9=$((g_tot + g_skip))
+            # the raw shares per9 can have: none, the raw output alone, both alike
+            cand9=("0 (none of it raw's)")
+            ((per9 % 2 == 0)) && cand9+=("$((per9 / 2)) (the raw output alone: $per9 / 2)")
+            ((per9 % 3 == 0)) && cand9+=("$((per9 / 3)) (both outputs alike: $per9 / 3)")
+            want_gap=
+            share9=
+            for c in "${cand9[@]}"; do
+                if ((base9 + ${c%% *} == seen9)); then
+                    want_gap=$seen9
+                    share9=$c
+                    break
+                fi
+            done
+            echo "  9. raw gap accounting: the raw tap misses $g_tot frames in $(compare_val "$T/cmp9.txt" gap_count) gaps" \
+                "(and $g_cons more at its own missed cycles, the consumer's loss), the source's clock skipped $g_skip;" \
+                "counted: capture_gap $g9_gap + latency_trimmed_frames $g9_tr / 3 = $((g9_tr / 3))" \
+                "+ the raw share of ring_overflow $g9_ov + late_link_discarded $g9_ll = $per9 samples" \
+                "(one of: ${cand9[*]}); ring_underflow +$g9_un; zero fills $g_zero, graph-xrun delays $g_dz"
+            if [[ -n $want_gap ]] && ((g_rep == 0 && g_bad == 0 && g_zero == g_dz)); then
+                if ((want_gap == 0)); then
+                    # nothing counted, nothing missing: raw must be one
+                    # contiguous run (the criterion before the accounting)
+                    if "$HELPER" compare --strict --allow-delays --input-log "$T/src3.log" --raw "$T/raw9.f32" --channels 2; then
+                        pass "9. raw is the source's frames bit for bit with no gaps or repeats across the window (zero fills only as graph-xrun delays; g16-mic counted $x9 frames of raw-output misses)"
+                    else
+                        bad "9. raw has gaps, repeats or zero fills with the source on its own driver (see the compare lines above)"
+                    fi
+                else
+                    pass "9. every frame missing from raw is counted: $g_tot missing + $g_skip never produced = want_gap $want_gap = capture_gap $g9_gap + trimmed $((g9_tr / 3)) + raw share ${share9}; no repeat, no frame not input, zero fills only graph-xrun delays ($g_zero)"
+                fi
+            else
+                bad "9. raw has an uncounted gap or a repeat: the tap misses $g_tot frames (+ $g_skip the source never produced = $seen9), counted capture_gap +$g9_gap, latency_trimmed_frames +$g9_tr (/ 3 = $((g9_tr / 3))), ring_overflow +$g9_ov, late_link_discarded +$g9_ll, ring_underflow +$g9_un: want_gap $base9 + one of ${cand9[*]}; repeat_frames $g_rep, not_input_frames $g_bad, zero_fill_frames $g_zero of which graph-xrun delays $g_dz"
+            fi
+        else
+            bad "9. the compare run printed no gap report (gap_frames_total '$g_tot', src_clock_skip_frames '$g_skip')"
+        fi
     fi
 fi
 
@@ -984,10 +1132,13 @@ RTCONF
 
 # ---- 10. stop drain -----------------------------------------------------------
 #
-# A quiet source (-50 dBFS peak: quiet speech, above the -60 dBFS latency
-# trim threshold, so no cycle of it may be trimmed), taps on both outputs running before and
-# after the stop: every frame of the last 100 ms before the stop, up to and
-# including the last cycle g16-mic accepted, must arrive, raw bit for bit
+# A quiet source (test_pw_helper source --quiet: the signal times 2^-5, peak
+# 0.1 * 2^-5 = 0.003125, about -50 dBFS: quiet speech trailing off, about 10
+# dB ABOVE the -60 dBFS (0.001) quiet-only latency trim threshold, so no
+# cycle of it may be trimmed, before the stop or across its drain), taps on
+# both outputs running before and after the stop: every frame of the last
+# 100 ms before the stop, up to and including the last cycle g16-mic
+# accepted, must arrive, raw bit for bit
 # and processed as the offline engine with its tail flushed, with no gap or
 # zero fill. The zeros completing the last buffer after the last frame must
 # be exactly the counted eos_pad (2 raw + 1 processed channels); buffers
@@ -1021,6 +1172,11 @@ if ((step10)); then
         bad "10. the status has no queue_added_frames ('$qa10')"
         qa10=0
     fi
+    # the last status before the SIGTERM: g16-mic removes the status file at
+    # exit and the stop log has no latency_trimmed_frames, so this is the
+    # last value the step can read of it (a trim inside the drain itself
+    # would also show as missing frames in the last-100-ms window below)
+    tr10s=$(status_val latency_trimmed_frames)
     stop_pid "$P_G16" 3
     r=$?
     if ((r == 0)); then
@@ -1046,13 +1202,29 @@ if ((step10)); then
     read -r drain_ms drain_tail drain_lost <<<"$drain_line"
     echo "  stop log: last accepted cycle at ${last_pos:-?} (${last_frames:-?} frames); drained in ${drain_ms:-?} ms," \
         "tail ${drain_tail:-?}, drain_lost ${drain_lost:-?}, eos_pad ${eos_pad:-?}; queue_added_frames before the stop $qa10," \
-        "latency_trimmed_frames before the stop '$tr10' (the quiet source is above the trim threshold: it must stay 0);" \
+        "latency_trimmed_frames before the stop '$tr10', at the SIGTERM '$tr10s' (the --quiet source, peak 0.003125 = 0.1 * 2^-5," \
+        "about -50 dBFS, is about 10 dB above the -60 dBFS trim threshold: it must stay 0);" \
         "graph xruns of g16_mic_raw over the taps $x10 frames"
     # a fresh g16-mic, a source above the trim threshold: nothing trimmed
     if is_num "$tr10" && ((tr10 == 0)); then
-        pass "10. latency_trimmed_frames 0 before the stop (no cycle of the -50 dBFS source is quiet)"
+        pass "10. latency_trimmed_frames 0 before the stop (no cycle of the --quiet source is quiet: peak 0.003125, about -50 dBFS, about 10 dB above the -60 dBFS trim threshold)"
     else
-        bad "10. latency_trimmed_frames '$tr10' before the stop (want 0: the -50 dBFS source has no quiet cycle)"
+        bad "10. latency_trimmed_frames '$tr10' before the stop (want 0: the --quiet source, peak 0.003125, about -50 dBFS, is about 10 dB above the -60 dBFS trim threshold, so no cycle of it is quiet)"
+    fi
+    # across the stop drain: the status file is gone after SIGTERM (checked
+    # below), so if it is, the value read just before the SIGTERM ($tr10s)
+    # is the last one there is; the drain itself is covered by the
+    # last-100-ms window check, where a trimmed cycle would be missing frames
+    tr10e=$tr10s
+    tr10_from="the last status before the SIGTERM (the status file is removed at exit)"
+    if [[ -e $STATUS ]]; then
+        tr10e=$(status_val latency_trimmed_frames)
+        tr10_from="the status file after the stop"
+    fi
+    if is_num "$tr10" && is_num "$tr10e" && ((tr10e - tr10 == 0)); then
+        pass "10. latency_trimmed_frames +0 across the stop drain ($tr10 -> $tr10e, from $tr10_from; the --quiet source, peak 0.003125, about -50 dBFS, is above the -60 dBFS trim threshold)"
+    else
+        bad "10. latency_trimmed_frames '$tr10' -> '$tr10e' across the stop drain (from $tr10_from; want +0: the --quiet source, peak 0.003125, about -50 dBFS, is about 10 dB above the -60 dBFS trim threshold)"
     fi
     if is_num "$drain_lost" && is_num "$drain_tail" && ((drain_lost == 0 && drain_tail == LAT10)); then
         pass "10. the stop drained with drain_lost 0 and the whole $LAT10-frame engine tail flushed ($drain_ms ms)"
@@ -1236,32 +1408,11 @@ alive "$P_G16" && stop_pid "$P_G16" 3
 # on top of unrelated builds, load 43 on 16 cores), the result says nothing
 # about g16-mic: without G16MIC_LIVE_STRICT the test stops here as a skip
 # (exit 77; 1 if a step already failed), with G16MIC_LIVE_STRICT=1 it waits
-# up to 10 minutes for the load to drop and FAILs step 12 if it does not.
+# for the load to drop, within what step 9's gate left of the run's one
+# 10-minute wait budget, and FAILs step 12 if it does not (load_gate).
 
-# load_above: the 1-minute load average is above nproc / 2 (or unreadable)
-load_above() { awk -v l="$(loadavg1)" -v n="$NPROC" 'BEGIN { exit !(l !~ /^[0-9.]+$/ || l + 0 > n / 2) }'; }
-LOAD_WAIT_S=600
 step12=1
-echo "  12. $(load_line "before step 12, other work only" 0)"
-if load_above; then
-    if [[ $STRICT != 1 ]]; then
-        echo "SKIP-LOAD 12: host already at load $(loadavg1) from other work"
-        ((failed)) && exit 1
-        exit 77
-    fi
-    echo "  12. G16MIC_LIVE_STRICT=1: host at load $(loadavg1) from other work, above nproc / 2 = $(awk -v n="$NPROC" 'BEGIN { print n / 2 }');" \
-        "waiting up to $((LOAD_WAIT_S / 60)) minutes for it to drop"
-    for ((w = 0; w < LOAD_WAIT_S; w += 5)); do
-        load_above || break
-        sleep 5
-    done
-    if load_above; then
-        bad "12. G16MIC_LIVE_STRICT=1: the host stayed above load nproc / 2 from other work for $((LOAD_WAIT_S / 60)) minutes (now $(loadavg1) on $NPROC); contention not measured (steps 13 and 14 not run)"
-        step12=0
-    else
-        echo "  12. the load dropped to $(loadavg1) after about ${w} s; running"
-    fi
-fi
+load_gate 12 "contention not measured (steps 13 and 14 not run)" || step12=0
 
 stop_pid "$P_SRC" 3
 if ((step12)); then

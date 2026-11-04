@@ -22,6 +22,11 @@
  *     ran before the capture stayed a cycle behind for good, and nothing
  *     ever brought added latency back (no latency trim, no
  *     latency_trimmed counter).
+ *   - (p) guards the round-4 threshold finding: quiet speech at the live
+ *     test's step-10 level (test_pw_helper --quiet, peak 0.1 * 2^-5 =
+ *     0.003125, about -50 dBFS) is never trimmed, even one sample of it in
+ *     an otherwise -80 dBFS cycle, while -66 dBFS noise is. It fails if the
+ *     quiet threshold is raised to that level (e.g. 0.004).
  *
  * Every output buffer must carry exactly the requested quantum: PipeWire's
  * output adapter keeps the rest of a larger buffer hidden, so audio the
@@ -1986,6 +1991,140 @@ static void test_trim_after_overflow(void)
 	free(in);
 }
 
+/* (7) The trim threshold against the live test's quiet speech. Step 10 of
+ * test_pw_live.sh streams test_pw_helper --quiet: uniform noise of peak
+ * STEP10_QUIET_PEAK, which it requires delivered intact. Round-4 finding: a
+ * quiet-speech burst at the live step-10 level must never be trimmed; with a
+ * threshold raised to that level (comparing against 0.004, say) phase A and
+ * the single-sample edge fail. */
+#define STEP10_QUIET_PEAK (0.1f / 32.0f)  /* test_pw_helper.c: 0.1 * SIG_QUIET_GAIN (2^-5), about -50 dBFS */
+#define BELOW_QUIET_PEAK 0.0005f          /* about -66 dBFS: below the 0.001 (-60 dBFS) threshold */
+_Static_assert(STEP10_QUIET_PEAK >= 2.0f * G16MIC_HF_TRIM_QUIET_PEAK, "the step-10 level must stay above the threshold");
+_Static_assert(BELOW_QUIET_PEAK < G16MIC_HF_TRIM_QUIET_PEAK, "the below level must stay below the threshold");
+
+/* Uniform noise in [-peak, peak) on both channels, deterministic. */
+static float *make_level(size_t cycles, uint32_t seed, float peak)
+{
+	size_t n = cycles * Q;
+	float *in = g16s_xcalloc(n * CH, sizeof(float));
+
+	g16s_noise(in, n * CH, seed, peak);
+	return in;
+}
+
+/* The one-cycle excess of test_trim_quiet on `in` (N cycles), then CPR to
+ * the end; at[] gets the capture cycle of each trim (at most 4). Returns
+ * the number of trims seen. */
+static size_t run_excess(sim_t *s, const float *in, size_t N, size_t *at)
+{
+	size_t cyc = 0, n_at = 0;
+	uint64_t prev = 0;
+	g16mic_hf_stats st;
+
+	sim_sched_n(s, "CPR", 2, in, &cyc);
+	sim_sched(s, "C", in, &cyc);  /* both runs missed: a cycle behind */
+	while (cyc < N) {
+		sim_sched(s, "CPR", in, &cyc);
+		g16mic_handoff_get_stats(s->hf, &st);
+		if (st.latency_trims != prev && n_at < 4)
+			at[n_at++] = cyc - 1;
+		prev = st.latency_trims;
+	}
+	return n_at;
+}
+
+static void test_trim_threshold_boundary(void)
+{
+	const size_t H = TRIM_HOLD_CYCLES, N = 3 + H + 20, K = 2 + H;  /* K: the first cycle a trim may take */
+	ref_t ref;
+	sim_t s;
+	g16mic_hf_stats st;
+	size_t at[4] = { 0 }, n_at, loud = 0;
+	int f0 = g16t_failures;
+
+	printf("(p) latency trim: the step-10 quiet level is never trimmed, below the threshold may be\n");
+
+	/* A: the step-10 level, every cycle, both channels: never trimmed */
+	float *in = make_level(N, 1601u, STEP10_QUIET_PEAK);
+	CHECK(peak_abs(in, N * Q * CH) <= STEP10_QUIET_PEAK, "A: the input peaks at the step-10 level");
+	ref_make(&ref, in, N);
+	for (size_t k = 0; k < N; k++)
+		loud += !ref_quiet(&ref, k, k + 1);
+	CHECK_EQ_INT(loud, N, "A: no cycle at the step-10 level is quiet");
+	sim_init_q(&s);
+	n_at = run_excess(&s, in, N, at);
+	uint64_t lost = new_lost(&s, &st);
+	CHECK_EQ_INT(n_at, 0, "A: no trim at any cycle");
+	CHECK_EQ_INT(st.latency_trims, 0, "A: no trim decision");
+	for (int o = 0; o < G16MIC_HF_NOUT; o++) {
+		CHECK_EQ_INT(st.out[o].latency_trimmed, 0, "A: output %d nothing trimmed", o);
+		CHECK_EQ_INT(st.out[o].latency_trimmed_cycles, 0, "A: output %d no trimmed cycle", o);
+		CHECK_EQ_INT(st.out[o].added_frames, Q, "A: output %d the one-cycle excess stays", o);
+		CHECK(matches(&s.got[o], 0, &ref, o, 0, s.got[o].n) && s.got[o].n == (N - 1) * Q,
+		      "A: output %d every cycle, bit-exact", o);
+	}
+	CHECK_EQ_INT(lost, 0, "A: ring_overflow unchanged");
+	sim_free(&s);
+	ref_free(&ref);
+	free(in);
+
+	/* B: -66 dBFS, below the threshold: exactly one cycle trimmed after the
+	 * hold-off, the same one on both outputs */
+	in = make_level(N, 1602u, BELOW_QUIET_PEAK);
+	ref_make(&ref, in, N);
+	CHECK(ref_quiet(&ref, 0, N), "B: the input is quiet on every channel, raw and processed");
+	sim_init_q(&s);
+	n_at = run_excess(&s, in, N, at);
+	lost = new_lost(&s, &st);
+	CHECK_EQ_INT(n_at, 1, "B: one trim");
+	CHECK(n_at == 1 && at[0] == K, "B: right after the hold-off (cycle %zu)", K);
+	CHECK_EQ_INT(st.latency_trims, 1, "B: one trim decision");
+	for (int o = 0; o < G16MIC_HF_NOUT; o++) {
+		uint64_t c = (uint64_t)och[o];
+		CHECK_EQ_INT(st.out[o].latency_trimmed, Q * c, "B: output %d one cycle x channels trimmed", o);
+		CHECK_EQ_INT(st.out[o].latency_trimmed_cycles, 1, "B: output %d one cycle", o);
+		CHECK_EQ_INT(st.out[o].added_frames, 0, "B: output %d back at the target", o);
+		CHECK(n_at == 1 && matches_without(&s.got[o], &ref, o, at[0]),
+		      "B: output %d bit-exact, only the trimmed cycle missing", o);
+		CHECK_EQ_INT(st.out[o].delivered + st.out[o].latency_trimmed, N * Q * c,
+			     "B: output %d delivered + trimmed = produced", o);
+	}
+	CHECK_EQ_INT(lost, 0, "B: a trim is not a loss");
+	sim_free(&s);
+	ref_free(&ref);
+	free(in);
+
+	/* edge: cycle K (the first a trim may take) is -80 dBFS except ONE
+	 * sample at the step-10 level, placed so the raw output carries it in
+	 * cycle K: K is kept whole and the trim takes the next quiet cycle */
+	in = make_quiet(N, 1603u, 0);
+	{
+		g16mic_engine *e = make_engine();
+		size_t L = g16mic_engine_latency(e);
+		g16mic_engine_destroy(e);
+		in[(K * Q + Q / 2 - L) * CH] = STEP10_QUIET_PEAK;  /* output frame K * Q + Q / 2 */
+	}
+	ref_make(&ref, in, N);
+	CHECK(!ref_quiet(&ref, K, K + 1), "edge: cycle %zu carries the sample", K);
+	CHECK(ref_quiet(&ref, 0, K) && ref_quiet(&ref, K + 1, N), "edge: every other cycle is quiet");
+	sim_init_q(&s);
+	n_at = run_excess(&s, in, N, at);
+	lost = new_lost(&s, &st);
+	CHECK_EQ_INT(n_at, 1, "edge: one trim");
+	CHECK(n_at == 1 && at[0] != K, "edge: cycle %zu with one step-10 sample not trimmed", K);
+	CHECK(n_at == 1 && at[0] == K + 1, "edge: the next quiet cycle (%zu) trimmed instead", K + 1);
+	for (int o = 0; o < G16MIC_HF_NOUT; o++)
+		CHECK(n_at == 1 && matches_without(&s.got[o], &ref, o, at[0]),
+		      "edge: output %d bit-exact, cycle %zu delivered whole", o, K);
+	CHECK_EQ_INT(lost, 0, "edge: no loss");
+	printf("  RED (threshold at the step-10 level): phase A and the edge cycle would be trimmed\n");
+	printf("  GREEN: step-10 level kept whole; -66 dBFS trimmed at cycle %zu\n", K);
+	verdict("(p) latency trim threshold vs the step-10 quiet level", f0);
+	sim_free(&s);
+	ref_free(&ref);
+	free(in);
+}
+
 /* ---- (9) API edges --------------------------------------------------------- */
 
 static void test_api_edges(void)
@@ -2105,6 +2244,7 @@ int main(void)
 	test_trim_aligned();
 	test_trim_rate();
 	test_trim_after_overflow();
+	test_trim_threshold_boundary();
 	test_api_edges();
 	G16T_RETURN();
 }

@@ -13,11 +13,15 @@
  *       so omni stays linear). k starts at --start (default 0). Every buffer
  *       adds a line "<graph position> <first k> <frames>" to FILE. Runs until
  *       SIGTERM or SIGINT; exits 0.
- *       --quiet scales the signal by 2^-5 (30 dB down: about -50 dBFS peak),
- *       the level of quiet speech trailing off, and above g16-mic's
- *       quiet-only latency trim threshold (G16MIC_HF_TRIM_QUIET_DBFS, -60
- *       dBFS), so a cycle of it is never trimmed; a power of two keeps every
- *       value exact and unique, so compare --quiet still matches bit for bit.
+ *       --quiet scales the signal by 2^-5 (30 dB down), the level of quiet
+ *       speech trailing off: peak 0.1 * 2^-5 = 0.003125, about -50 dBFS,
+ *       about 10 dB above g16-mic's quiet-only latency trim threshold
+ *       (G16MIC_HF_TRIM_QUIET_PEAK, 0.001, -60 dBFS). The signal is uniform
+ *       noise, so a 1024-frame cycle of it practically always has a sample
+ *       above 0.001 (each sample is, with probability 0.68), and a cycle of
+ *       it is never quiet, so never trimmed (test_handoff's (p) pins this);
+ *       a power of two keeps every value exact and unique, so compare
+ *       --quiet still matches bit for bit.
  *       FILE's first line then ends in " quiet=1".
  *       --driver makes it a source on its own clock, like a sound card: the
  *       stream is a driver (PW_STREAM_FLAG_DRIVER, priority.driver 30000,
@@ -139,11 +143,16 @@
 #include <spa/utils/result.h>
 
 #include "g16mic.h"
+#include "g16mic_handoff.h"
 
 #define EXIT_USAGE 64
 #define SIG_SEED 0x6731366d69630001ull
 #define SIG_SCALE (0.1f / 8388608.0f)
-#define SIG_QUIET_GAIN (1.0f / 32.0f)  /* --quiet: 2^-5, exact; above the -60 dBFS trim threshold */
+/* --quiet: 2^-5, exact: peak 0.1 * 2^-5 = 0.003125 (about -50 dBFS), about
+ * 10 dB above the -60 dBFS (0.001) latency trim threshold. */
+#define SIG_QUIET_GAIN (1.0f / 32.0f)
+_Static_assert(0.1f * SIG_QUIET_GAIN >= 2.0f * G16MIC_HF_TRIM_QUIET_PEAK,
+	       "--quiet must stay clearly above the latency trim threshold");
 #define POS_UNKNOWN UINT64_MAX
 #define CONSUMER_XRUN_MAX 4096u      /* --allow-delays: the longest own miss of a tap's node taken as its xrun */
 #define SRC_RECS (1u << 18)          /* source buffers logged: over an hour at 1024 frames */
