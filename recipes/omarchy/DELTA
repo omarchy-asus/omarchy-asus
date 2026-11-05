@@ -26,8 +26,6 @@ patch 0010-Install-rtkit-so-PipeWire-gets-realtime-priority.patch prepare omarch
 patch 0011-Install-rtkit-on-fresh-installs-and-restart-the-port.patch prepare omarchy
 patch 0012-Stop-early-loading-the-NVIDIA-driver-on-hybrid-GPU-m.patch prepare omarchy
 patch 0013-Restore-the-drop-in-when-the-initramfs-rebuild-fails.patch prepare omarchy
-patch 0014-Answer-the-webcam-menu-guard-from-udev-instead-of-op.patch prepare omarchy
-patch 0015-Read-every-udev-record-before-asking-the-webcams.patch prepare omarchy
 patch 0016-Follow-tailscaled-s-IPN-bus-instead-of-polling-Tails.patch prepare omarchy
 patch 0017-Reconcile-clamshell-state-on-logind-events-instead-o.patch prepare omarchy
 patch 0019-Give-a-connector-name-both-GPUs-expose-to-the-card-t.patch prepare omarchy
@@ -39,7 +37,6 @@ patch 0024-Recover-a-stranded-lock-while-voxtype-s-dictation-OS.patch prepare om
 patch 0025-Swap-the-G16-Control-widget-s-dead-link-for-the-omar.patch prepare omarchy
 patch 0026-Keep-the-NVIDIA-GPU-asleep-while-apps-start-on-hybri.patch prepare omarchy
 patch 0027-Count-only-lockers-under-this-Hyprland-as-holding-it.patch prepare omarchy
-patch 0028-Keep-the-lock-usable-after-an-NVIDIA-suspend-s-VT-sw.patch prepare omarchy
 # General fixes: Omarchy software fixes that don't help the hardware, carried without a
 # separate approval and kept apart from the ASUS patches above (NOTES.md).
 patch general-0001-Float-a-moved-window-once-its-app-has-caught-up-with.patch prepare omarchy
