@@ -25,7 +25,7 @@ means only `rc-x86_64` does. Versions below are what each release serves, as of 
 
 **What the daily check watches.** `bin/check-upstream` reads `recipes/*/UPSTREAM_PRS` (one
 `owner/repo#N` per line) and reports each pull request's state; a merged one needs action. Today
-only `recipes/nvidia-open-dkms/UPSTREAM_PRS`, `recipes/quickshell/UPSTREAM_PRS` and `recipes/omarchy{,-settings}/UPSTREAM_PRS` (0028 only) exist, so the upstream states of every other entry
+only `recipes/nvidia-open-dkms/UPSTREAM_PRS` and `recipes/quickshell/UPSTREAM_PRS` list pull requests (`recipes/omarchy{,-settings}/UPSTREAM_PRS` hold no entry since 0028 dropped), so the upstream states of every other entry
 are kept by hand, here and in the recipe's `NOTES.md`. `recipes/hyprland/DELTA`'s
 `fixed-upstream` line flags the first Hyprland release with a given commit. To have a GitHub pull
 request watched, add it to its recipe's `UPSTREAM_PRS`.
@@ -74,14 +74,13 @@ An upstream state that changes is updated here, with the date it was checked.
 | [ALC285 Master at 100%](#omarchy-0009-alc285-master) | omarchy | 0009 | both | not submitted |
 | [rtkit on x86_64](#omarchy-0010-rtkit) | omarchy | 0010-0011, 0022 | both | open |
 | [no NVIDIA early load in the initramfs](#omarchy-0012-initramfs) | omarchy | 0012-0013, 0021 | both | open |
-| [webcam guard from udev](#omarchy-0014-webcam-guard) | omarchy | 0014-0015 | both | open |
+| [webcam guard from udev](#omarchy-0014-webcam-guard) | omarchy | 0014-0015 | Quattro only | merged, released (v4.5.0) |
 | [Tailscale panel](#omarchy-0016-tailscale) | omarchy | 0016 | both | open / merged-unreleased |
 | [clamshell state from logind events](#omarchy-0017-monitor-watch-logind) | omarchy | 0017 | both | not submitted |
 | [launcher icon index throttle](#omarchy-0018-launcher-icon-index) | omarchy | 0018 | Quattro only | not submitted |
 | [stranded lock recovered while voxtype runs](#omarchy-0024-stranded-lock) | omarchy | 0024, 0027 | both (0027 RC only) | open |
 | [G16 Control widget's dead link swapped for the plugin](#omarchy-0025-widget-link) | omarchy | 0025 | RC only | ours-only |
 | [the RTX stays asleep while apps start](#omarchy-0026-rtx-asleep-at-app-start) | omarchy | 0026 | RC only | not submitted |
-| [the lock takes typing after an NVIDIA VT switch](#omarchy-0028-lock-focus-after-vt-switch) | omarchy | 0028 | RC only | merged-unreleased |
 | [floating mode waits for the app's redraw](#omarchy-general-0001-floating-redraw) | omarchy | general-0001 | RC only | not submitted |
 | [the sleep lock's monitor survives suspends](#omarchy-general-0002-sleep-monitor) | omarchy | general-0002 | RC only | not submitted |
 | [app library rescans only on real changes](#omarchy-general-0004-app-library) | omarchy | general-0004 | RC only | open |
@@ -855,9 +854,9 @@ Once neither patch is left, `bin/unpublish hyprland hyprpm` and delete the recip
   the same path.
 - **Drop when:** a Hyprland release sends leave before dropping a capability, and lock, suspend,
   resume, type works without the patch. Omarchy's own lock focus fix
-  ([0028](#omarchy-0028-lock-focus-after-vt-switch), omacom/omarchy#17277) doesn't retire it: that
+  (omacom/omarchy#17277, in v4.5.0; we carried it as 0028 until then) doesn't retire it: that
   fixes only the lock screen, and this patch also re-activates other Qt windows (#393). On
-  2026-11-03 this patch alone did not cover a locked resume from hibernate (a VT switch); 0028
+  2026-11-03 this patch alone did not cover a locked resume from hibernate (a VT switch); #17277
   does.
 
 #### Upstream report draft
@@ -1407,8 +1406,9 @@ bullets.)
 <a id="omarchy-0014-webcam-guard"></a>
 ### Webcam menu guard from udev (0014-0015)
 
-- **Component:** `omarchy`/`omarchy-settings`, patches 0014-0015 (`bin/omarchy-hw-webcam`). Both
-  channels, in different versions: RC's 0015 (since 4.5.0rc1-1.111, #330) is fork commits
+- **Component:** `omarchy`/`omarchy-settings`, patches 0014-0015 (`bin/omarchy-hw-webcam`). Quattro
+  only since RC's 4.5.0-3.101, which dropped them: omacom/omarchy v4.5.0 has #15910 ([Dropped](#dropped)).
+  Before that both channels, in different versions: RC's 0015 (since 4.5.0rc1-1.111, #330) is fork commits
   `1c396770` + `5ba289be` + `ccd0f93d` on `asus/v4-5-0-rc1`, squashed, the last two being #15910's
   fixes (its `b6080af8` and `e5437fda`) taken unchanged; Quattro's 0015 is `6c7d7001` alone. Fork
   branch `perf/webcam-guard-udev`.
@@ -1423,7 +1423,9 @@ bullets.)
   /dev/video*` shows nothing while the menu opens, and the webcam entries still appear.
 - **Measurements (G16, at `6c7d7001`, 2026-10-18):** stock 125 ms per call with the camera awake
   about 2.6 s; patched about 5.5 ms per call, camera stays suspended, same answer.
-- **Upstream: merged, unreleased.** [omacom/omarchy#15910](https://github.com/omacom/omarchy/pull/15910)
+- **Upstream: merged, released in v4.5.0** (`7388fe251` on `v4-5-0`, checked 2026-11-05; its
+  `bin/omarchy-hw-webcam` is byte for byte what RC's 0014-0015 made).
+  [omacom/omarchy#15910](https://github.com/omacom/omarchy/pull/15910)
   "Answer the webcam menu guard from udev instead of opening cameras", merged on `quattro` on
   2026-10-29 as `2afe8589`; not in any tag yet, so not in v4.5.0-rc3 (checked 2026-11-02). It replaced our
   omacom/omarchy#15670, closed unmerged on 2026-10-19 (maintainers can't push to an
@@ -1439,7 +1441,8 @@ bullets.)
 - **Refreshed on RC (#330):** RC carries #15910's fixes, so the loopback bug above and the yes for
   a camera the user can't open are gone there. Quattro (frozen) still ships both until it moves to
   the 4.5 recipes.
-- **Drop when:** #15910 (or an equivalent) is in an Omarchy release we build from.
+- **Drop when:** #15910 (or an equivalent) is in an Omarchy release we build from: dropped on RC at
+  4.5.0-3.101; Quattro drops it when it picks up the 4.5 recipes.
 - **Notes:** formerly tracked in issue #30.
 
 <a id="omarchy-0016-tailscale"></a>
@@ -1730,38 +1733,6 @@ omacom/omarchy, PR against `quattro` from patch 0026. Not opened; a human decide
 > and `app-search-test.sh` are extended.
 >
 > This pull request was written with Claude Code.
-
-<a id="omarchy-0028-lock-focus-after-vt-switch"></a>
-### The lock takes typing after an NVIDIA VT switch (0028)
-
-- **Component:** `omarchy`/`omarchy-settings`, patch 0028 (`shell/plugins/lock/LockView.qml`,
-  `shell/plugins/lock/Service.qml`). RC only (since 4.5.0rc3-1.102). Upstream's squash merge
-  `1843592f21` "Keep the lock usable after an NVIDIA suspend's VT switch" on omacom's `quattro`,
-  taken as is with its author and message: fork commit `ad050862` on `asus/v4-5-0-rc2`.
-- **Fixes:** the NVIDIA driver forces a VT switch around every suspend and resume
-  (`pm_vt_switch_required` in nvidia-drm), so Hyprland drops the seat and every input device goes
-  away and comes back. Qt clears the lock window's focus item when the keyboard goes, and nothing
-  set it back, so typing went nowhere until the password field was clicked. `LockView.qml` now
-  gives the field its focus back whenever the window's focus item changes while the field should
-  take keys (not while a password is being checked). `Service.qml` makes the first blank
-  countdown after a resume 15 s instead of 5 s, so the lock doesn't go dark just as the panel
-  lights after the modeset.
-- **Why with the Hyprland patch:** [the seat-leave patch](#hyprland-seat-leave) fixes the
-  suspend path at the compositor and every Qt window, but on 2026-11-03 the G16 (omarchy
-  4.5.0rc3-1.101, hyprland 0.56.2-4.103) still had the lock ignore typing until clicked after a
-  locked suspend-then-hibernate that resumed from disk. Hyprland's log showed it had lost DRM
-  master (`atomic drm request: failed to commit: Permission denied`), the VT-switch path this
-  fix is for. Both are carried: this one for the lock, the Hyprland patch for other windows
-  (trade-offs in #393).
-- **Test:** headless, a VT round trip while locked, then type the password without the mouse.
-  On the G16: lock, hibernate (resume from disk), type the password without clicking; then
-  lock, close the lid to suspend, open it, type without clicking. Typing works both times.
-- **Upstream: merged-unreleased.** [omacom/omarchy#17277](https://github.com/omacom/omarchy/pull/17277),
-  merged into `quattro` on 2026-11-01, 34 minutes before v4.5.0-rc3 was tagged, but not on the
-  4.5 line: not in v4.5.0-rc3, the `rc` branch or `v4-5-0` (checked 2026-11-03). Listed in both
-  recipes' `UPSTREAM_PRS`, so the daily check reports it as merged (needing action) until the
-  patch drops.
-- **Drop when:** an Omarchy 4.5 release we build from contains #17277.
 
 <a id="omarchy-general-0001-floating-redraw"></a>
 ### Floating mode waits for the app's redraw (general-0001)
@@ -2441,6 +2412,8 @@ Work still in issues, not in any recipe on `main` today:
 | change | was | dropped in | why |
 |---|---|---|---|
 | 9900, EXPERIMENTAL Zen 5c-first soft park (five default-off scheduler knobs: amd_hfi ranking, soft wakeup preference, workload-class steering, SMT packing, NOHZ idle balancer) | linux-omarchy, both channels, ours-only | RC linux-omarchy 7.2.8-9.112; Quattro keeps its frozen build until it picks up the trunk | the battery A/B (#10, 2026-10-27, console only on the G16) found no win at idle: ranking efficiency or inverted, wake_preferred all and wake_pack each within 0.03 W of stock, all three together 0.14 W worse; RAPL package power is only 0.36-0.43 W at idle, so the cores have almost nothing left to save. The light-load half was not run; the CPU-setting A/B (#328) found nothing under light load either |
+| 0028, the lock takes typing after an NVIDIA VT switch (#302, #393) | omarchy RC | RC 4.5.0-3.101 | upstream's omacom/omarchy#17277 (`00e4a1223` on `v4-5-0`) is in v4.5.0, the release this build is based on. It made `LockView.qml` give the password field its focus back after a VT switch and the first blank countdown after a resume 15 s; Hyprland's [seat-leave](#hyprland-seat-leave) patch stays for other Qt windows |
+| 0014-0015, webcam menu guard from udev (RC) | omarchy RC | RC 4.5.0-3.101; still on Quattro ([0014-0015](#omarchy-0014-webcam-guard)) | upstream's omacom/omarchy#15910 (`7388fe251` on `v4-5-0`) is in v4.5.0, with the same `bin/omarchy-hw-webcam` RC's patches made |
 | general-0003, the lock's password field lost the keyboard after a suspend (#295) | omarchy RC | RC 4.5.0rc1-1.110 (#306) | the Hyprland seat fix ([seat-leave](#hyprland-seat-leave)) sends `wl_keyboard.leave`, so Qt re-activates the lock window with stock `LockView.qml`; reverted on the fork by `b5af08c6` |
 | 0018, launcher icon index throttle | omarchy RC | RC 4.5.0rc1-1.109 (#299) | replaced by upstream's [#14992](#omarchy-general-0004-app-library); still on Quattro ([0018](#omarchy-0018-launcher-icon-index)) |
 | 0481's self-refresh-on-tearing-flips part (`2e54a92e0136`) | linux-omarchy, part of [0481](#kernel-0481-amdgpu-display-power) | RC linux-omarchy 7.2.15-1.101; Quattro keeps it until it picks up the trunk | in 7.2.11 stable (`04ee82fec489`), so in the 7.2.15 base; the rest of 0481 stays |
