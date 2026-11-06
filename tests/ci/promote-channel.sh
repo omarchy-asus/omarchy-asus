@@ -6,7 +6,7 @@
 #   2. refusals: no such recipe, a held recipe, a recipe the source db lacks, the source at
 #      another version than main's recipe, a file whose bytes differ from the db's SHA-256,
 #      the release serving other bytes or not serving it, a bad signature, an unreadable
-#      release, a file already staged with other bytes
+#      release, a file already staged with other bytes (--dry-run too)
 #   3. passing: --dry-run stages nothing; a real run hands bin/publish --channel quattro
 #      exactly the recipe's packages (a split package's too) from quattro's stage dir, byte
 #      for byte, and leaves out a same-base package at an older version, with a note;
@@ -88,7 +88,7 @@ run() { "$S/bin/promote-channel" "$@" >"$S/out" 2>"$S/err"; }
 check() {
     local want=$1 what=$2 rc; shift 2
     run "$@"; rc=$?
-    local staged; staged=$(ls -A "$S/data/stage" "$S/data/stage-rc" 2>/dev/null | grep -v ':$' | grep -v '^$')
+    local staged; staged=$(find "$S/data/stage" "$S/data/stage-rc" -mindepth 1 2>/dev/null)
     case $want in
         ok) if ((rc == 0)); then echo "ok: $what"; else echo "FAIL: $what: exit $rc"; cat "$S/out" "$S/err"; fail=1; fi ;;
         usage) if ((rc == 2)); then echo "ok: $what"; else echo "FAIL: $what: exit $rc, want 2"; cat "$S/err"; fail=1; fi ;;
@@ -128,6 +128,11 @@ run --from rc hyprland; rc=$?
 if ((rc != 0)) && [[ ! -e $S/published && $(cat "$S/data/stage/hyprpm-0.56.2-4.103-x86_64.pkg.tar.zst") == other ]]; then
     echo "ok: a file already staged with other bytes is refused and kept"
 else echo "FAIL: a file already staged with other bytes: exit $rc"; cat "$S/err"; fail=1; fi
+fixture; mkdir -p "$S/data/stage"; echo other >"$S/data/stage/hyprpm-0.56.2-4.103-x86_64.pkg.tar.zst"
+run --from rc --dry-run hyprland; rc=$?
+if ((rc != 0)) && ! grep -q "every check passed" "$S/err" && [[ $(cat "$S/data/stage/hyprpm-0.56.2-4.103-x86_64.pkg.tar.zst") == other ]]; then
+    echo "ok: --dry-run refuses a file already staged with other bytes too"
+else echo "FAIL: --dry-run with a file already staged with other bytes: exit $rc"; cat "$S/err"; fail=1; fi
 
 echo "== 3. passing"
 fixture; check ok "--dry-run" --from rc --dry-run hyprland keyring

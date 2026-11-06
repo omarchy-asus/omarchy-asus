@@ -118,6 +118,13 @@ for r in "${recipes[@]}"; do
 done
 ((fail == 0)) || die "refusing: nothing promoted"
 
+for f in "${files[@]}"; do
+    t=$STAGE_DIR/${f##*/}
+    if [[ -e $t ]] && ! cmp -s "$f" "$t"; then
+        die "$t is already staged with other bytes: nothing promoted"
+    fi
+done
+
 say() { echo "==> $*" >&2; }
 if ((dry)); then
     say "dry run: every check passed; would promote to $to (bin/publish --channel $to):"
@@ -126,12 +133,6 @@ if ((dry)); then
 fi
 mkdir -p "$STAGE_DIR"
 staged=()
-for f in "${files[@]}"; do
-    t=$STAGE_DIR/${f##*/}
-    if [[ -e $t ]] && ! cmp -s "$f" "$t"; then
-        die "$t is already staged with other bytes: nothing promoted"
-    fi
-done
 for f in "${files[@]}"; do
     t=$STAGE_DIR/${f##*/}
     [[ -e $t ]] || cp --preserve=timestamps -- "$f" "$t"
