@@ -1,9 +1,11 @@
 #!/bin/bash
 # Is a recipe's pkgrel in the range of the release channel it is built for? (#201)
-# pacman caches by filename and each release only refuses its own duplicates, so the two
-# channels must never build the same pkgver-pkgrel: Quattro keeps the subreleases .1 to .99
-# (pkgrel 1 to 99 for our own packages), the RC channel (main, #309) .101 and up (101
-# and up). bin/rebase-recipe --channel rc starts there; bin/publish refuses a clash.
+# pacman caches by filename and each release only refuses its own duplicates. Until the Omarchy
+# 4.5 stable switch the two channels built apart, Quattro in .1 to .99 and RC in .101 and up.
+# Since then (#411) both are on main's one line: every recipe builds .101 and up (101 and up
+# for our own packages) for either channel, one channel builds a version and the other gets
+# the same file by promotion (bin/promote-channel); bin/publish refuses a name with other bytes.
+# Quattro's old .1 to .99 files stay what they are, and nothing new is built in that range.
 # The range is checked on the last number: 9.4 -> 4, 9.101 -> 101, 12 -> 12.
 # Usage: ci/check-pkgrel <quattro|rc> <pkgrel>   exit 0 in range, 1 out of it (says why),
 #                                                2 usage
@@ -15,16 +17,10 @@ if [[ ! $rel =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
 fi
 n=$((10#${rel##*.}))
 case $ch in
-    quattro)
-        ((n <= 99)) && exit 0
-        echo "pkgrel $rel is in the RC channel's range (.101 and up): Quattro keeps .1 to .99" \
-            "(1 to 99 for our own packages)"
-        ;;
-    rc)
+    quattro | rc)
         ((n >= 101)) && exit 0
-        echo "pkgrel $rel is in Quattro's range: the RC channel builds .101 and up (101 and up" \
-            "for our own packages), so its files never share a name with Quattro's" \
-            "(bin/rebase-recipe --channel rc)"
+        echo "pkgrel $rel is in the old Quattro range (.1 to .99): main builds .101 and up (101" \
+            "and up for our own packages) for every channel (bin/rebase-recipe)"
         ;;
     *) echo "ci/check-pkgrel: unknown channel '$ch' (quattro, rc)" >&2; exit 2 ;;
 esac

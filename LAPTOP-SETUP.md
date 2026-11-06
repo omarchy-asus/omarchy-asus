@@ -178,14 +178,15 @@ default is no.
 ## Release channels
 
 Our repo has two channels, each pinned to one of Omarchy's (README.md, "Release channels"):
-Quattro (the `x86_64` release) goes with Omarchy stable, RC (the `rc-x86_64` release, Omarchy 4.5
-release candidates) with Omarchy rc. Never mix them: Omarchy's migrations may install packages only
+Quattro (the `x86_64` release) goes with Omarchy stable, RC (the `rc-x86_64` release, Omarchy's
+release candidates) with Omarchy rc. Since Omarchy 4.5 shipped to stable, both serve the same 4.5
+builds, and RC is idle until Omarchy opens its next RC. Never mix them: Omarchy's migrations may install packages only
 its matching repo has, and one failed migration holds back every later one. The first setup picks
 the channel that matches your `[omarchy]` server. To switch later, use Omarchy's own command:
 
 ```bash
 omarchy-channel-set rc       # Omarchy rc; [omarchy-asus] follows to rc-x86_64
-omarchy-channel-set stable   # both back; pacman -Syyuu downgrades to the Quattro versions
+omarchy-channel-set stable   # both back; pacman -Syyuu moves to the Quattro versions
 ```
 
 `omarchy-channel-set` rewrites `/etc/pacman.conf` and the mirrorlist, runs the pre-refresh hooks,

@@ -1,7 +1,8 @@
 #!/bin/bash
 # ci/channel, offline, with a gh that fails if called:
-#   1. main (the RC trunk, #309), next/omarchy-4.5 and a PR stacked on another PR's branch are
-#      all rc (Quattro is frozen: no branch builds it), without asking GitHub;
+#   1. main (the trunk, Quattro's since the Omarchy 4.5 stable switch, #411), next/omarchy-4.5
+#      and a PR stacked on another PR's branch are all quattro (the RC channel is idle: no
+#      branch builds it), without asking GitHub;
 #   2. --conf and --tag name each channel's pacman.conf and release tag; an unknown channel
 #      or option exits non-zero and prints nothing.
 set -u
@@ -18,9 +19,9 @@ export PATH=$T/bin:$PATH STUB_LOG=$T/log
 : >"$T/log"
 
 # 1.
-check "1. main is rc" [ "$("$W/ci/channel" main)" = rc ]
-check "1. next/omarchy-4.5 is rc" [ "$("$W/ci/channel" next/omarchy-4.5)" = rc ]
-check "1. a stacked PR's base is rc" [ "$("$W/ci/channel" fix/172-x)" = rc ]
+check "1. main is quattro" [ "$("$W/ci/channel" main)" = quattro ]
+check "1. next/omarchy-4.5 is quattro" [ "$("$W/ci/channel" next/omarchy-4.5)" = quattro ]
+check "1. a stacked PR's base is quattro" [ "$("$W/ci/channel" fix/172-x)" = quattro ]
 check "1. no gh call" [ ! -s "$T/log" ]
 
 # 2.

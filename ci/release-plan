@@ -2,7 +2,9 @@
 # Plan a release build (.github/workflows/release.yml), or refuse it before anything builds.
 # Refuses (exit 1, one ::error:: line per reason):
 #   - a ref other than refs/heads/main: releases are built from main only
-#   - a channel other than rc: Quattro is frozen (#309) and builds no release here
+#   - a channel other than the one main builds for (ci/channel main: quattro since the Omarchy
+#     4.5 stable switch, #411): the other channel gets main's packages by promotion
+#     (bin/promote-channel), never from a second build
 #   - no recipe, a name without a PKGBUILD, a held recipe (recipes/<r>/HOLD, its first line
 #     the reason: merged but never built or published until the hold is removed)
 #   - linux-omarchy while RELEASE_RUNNER (the repository variable, in the environment) is not
@@ -14,7 +16,7 @@
 #   all=<JSON list>       every recipe to build
 #   recipes=<JSON list>   those built on GitHub-hosted runners (all but linux-omarchy)
 #   kernel=true|false     linux-omarchy builds, on the build host's release runner
-#   channel=rc
+#   channel=<the channel>
 #   nvidia=true|false     nvidia-open-dkms or linux-omarchy builds: the reverse-dependency
 #                         check, ci/nvidia-compat, runs on the result (against this run's
 #                         linux-omarchy-headers when the kernel builds)
@@ -28,10 +30,12 @@ fail=0
 err() { echo "::error::$*" >&2; fail=1; }
 [[ $ref == refs/heads/main ]] ||
     err "release builds run from main only, not ${ref:-(no ref)}: dispatch with --ref main"
+trunk=$(ci/channel main)
 case $channel in
-    rc) ;;
-    quattro) err "the Quattro channel is frozen (#309): release builds are rc only for now" ;;
-    *) err "unknown channel '$channel' (rc)" ;;
+    quattro | rc)
+        [[ $channel == "$trunk" ]] ||
+            err "main builds the $trunk channel (ci/channel main), not $channel: $channel gets main's packages by promotion (bin/promote-channel)" ;;
+    *) err "unknown channel '$channel' (quattro, rc)" ;;
 esac
 
 names=()

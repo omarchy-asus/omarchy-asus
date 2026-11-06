@@ -1,8 +1,8 @@
 #!/bin/bash
-# ci/check-pkgrel keeps the two release channels' filenames apart (#201): the RC channel
-# builds .101 and up (101 and up for our own packages), Quattro .1 to .99 (1 to 99).
-#   1. in range: quattro 9.4, 12, 1.99; rc 9.101, 101, 1.250
-#   2. out of range, refused with the reason: quattro 4.101, 101; rc 9.4, 13, 1.100
+# ci/check-pkgrel: since the Omarchy 4.5 stable switch (#411) both channels are on main's one
+# line, .101 and up (101 and up for our own packages); Quattro's old .1 to .99 is never built.
+#   1. in range on either channel: 9.101, 101, 1.250
+#   2. out of range on either, refused with the reason: 9.4, 13, 1.100, 1.99
 #   3. a pkgrel makepkg would refuse, an unknown channel and a missing argument
 # The recipes themselves are checked against the target branch's channel by ci/check-recipes.
 # Offline: no network, no makepkg.
@@ -16,13 +16,11 @@ check() {  # check <want exit> <channel> <pkgrel>
     else echo "FAIL: $2 $3 -> exit $rc, want $1 ($out)"; fail=1; fi
 }
 echo "== 1. in range"
-for r in 9.4 12 1.99 1; do check 0 quattro "$r"; done
-for r in 9.101 101 1.250; do check 0 rc "$r"; done
+for c in quattro rc; do for r in 9.101 101 1.250; do check 0 "$c" "$r"; done; done
 echo "== 2. out of range"
-for r in 4.101 101 1.100; do check 1 quattro "$r"; done
-for r in 9.4 13 1.100 1.99; do check 1 rc "$r"; done
-"$W/ci/check-pkgrel" rc 9.4 | grep -q 'rebase-recipe --channel rc'; r=$?
-if ((r == 0)); then echo "ok: the rc refusal says how to fix it"; else echo "FAIL: the rc refusal names no fix"; fail=1; fi
+for c in quattro rc; do for r in 9.4 13 1.100 1.99 1; do check 1 "$c" "$r"; done; done
+"$W/ci/check-pkgrel" quattro 9.4 | grep -q 'rebase-recipe'; r=$?
+if ((r == 0)); then echo "ok: the refusal says how to fix it"; else echo "FAIL: the refusal names no fix"; fail=1; fi
 echo "== 3. bad input"
 check 1 rc 9.4.1
 check 1 quattro 1a

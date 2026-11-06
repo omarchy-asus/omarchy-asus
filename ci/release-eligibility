@@ -10,12 +10,12 @@
 # bin/check-upstream runs `makepkg --printsrcinfo` in bin/recipe-sandbox (bubblewrap), so the
 # container needs user namespaces (.github/workflows/release.yml, eligibility job); it runs
 # as the unprivileged builder user, with no credentials in the container.
-# Usage: ci/release-eligibility --channel rc <recipe>...
+# Usage: ci/release-eligibility --channel quattro|rc <recipe>...
 # Env: RELEASE_DB, a db file to use instead of fetching the channel's (tests)
 # Exit: 0 every recipe eligible, 1 one is not or a check failed, 2 usage.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-[[ ${1:-} == --channel && -n ${2:-} && -n ${3:-} ]] || { echo "usage: ci/release-eligibility --channel rc <recipe>..." >&2; exit 2; }
+[[ ${1:-} == --channel && -n ${2:-} && -n ${3:-} ]] || { echo "usage: ci/release-eligibility --channel quattro|rc <recipe>..." >&2; exit 2; }
 channel=$2; shift 2
 
 if [[ ${RELEASE_ELIGIBILITY_SETUP:-1} == 1 ]]; then
