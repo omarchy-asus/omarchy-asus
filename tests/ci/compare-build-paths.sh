@@ -12,7 +12,7 @@
 #      file, a kernel module, Python bytecode), a file that is no longer compiled, a hardlink
 #      to another file, a package only the new path builds, a package only the release serves
 #   3. a version mismatch: said first, and the rest still compared
-#   4. cannot compare, exit 3: the quattro channel, a run off main, a failed run, no artifact
+#   4. cannot compare, exit 3: an unknown channel, a run off main, a failed run, no artifact
 #      for the recipe, an artifact whose digest doesn't match, a release package whose
 #      signature doesn't verify
 #   5. --served (a same-version rebuild): a run whose check job failed only on file names the
@@ -283,7 +283,7 @@ GOOD_JOBS=(plan:success eligibility:success "build (foo):success" "build (linux-
 
 # 4. cannot compare
 new 1.0-1.101; artifact
-CH=quattro check "the quattro channel" 3 "frozen"
+CH=stable check "an unknown channel" 3 "unknown channel"
 run_json feature; check "a run off main" 3 "branch is 'feature'"
 run_json main failure; check "a failed run" 3 "conclusion is 'failure'"
 run_json
@@ -302,7 +302,6 @@ run_json main failure
 ARGS=--served check "--served: a run that failed only on already-served names" 0 "SAME-VERSION REBUILD" \
     "foo-docs-1.0-1.101-x86_64.pkg.tar.zst (rc-x86_64)" "only expected differences"
 check "without --served the same run is refused" 3 "conclusion is 'failure'"
-ARGS=--served CH=quattro check "--served: still not the quattro channel" 3 "frozen"
 check_log "foo-1.0-1.101-x86_64.pkg.tar.zst: $SERVED" "foo-docs-1.0-1.101-x86_64.pkg.tar.zst: pkgrel 1.101 is out of the rc range"
 ARGS=--served check "--served: any other check error refuses" 3 "check job failed on something else: foo-docs"
 check_log

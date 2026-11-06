@@ -1,6 +1,6 @@
 #!/bin/bash
 # The release build (.github/workflows/release.yml) and its guards, offline:
-#   1. ci/release-plan, in a throwaway repo: main only, rc only (Quattro frozen, #309),
+#   1. ci/release-plan, in a throwaway repo: main only, main's channel only (quattro, #411),
 #      linux-omarchy only with RELEASE_RUNNER naming the build host's release runner, no held
 #      recipe, no unknown or missing recipe; the plan it prints
 #   2. the workflow: dispatch only; the eligibility job (tests/ci/release-eligibility.sh has
@@ -32,7 +32,7 @@ has() { grep -qF -- "$1" <<<"$2"; }
 echo "== 1. ci/release-plan"
 R=$S/repo
 mkdir -p "$R/ci" "$R/bin" "$R/build"
-cp "$W/ci/release-plan" "$R/ci/"; cp "$W/bin/release-cohort" "$R/bin/"
+cp "$W/ci/release-plan" "$W/ci/channel" "$R/ci/"; cp "$W/bin/release-cohort" "$R/bin/"
 : >"$R/build/cohorts.conf"
 for r in a b linux-omarchy nvidia-open-dkms held; do
     mkdir -p "$R/recipes/$r"; printf 'pkgname=%s\npkgver=1\npkgrel=101\n' "$r" >"$R/recipes/$r/PKGBUILD"
@@ -42,57 +42,57 @@ mkdir -p "$R/recipes/docs-only"
 plan() { env -u RELEASE_RUNNER "$R/ci/release-plan" "$@" 2>&1; }
 RR='["omarchy-asus-release"]'
 
-out=$(plan refs/heads/main rc "b a recipes/a/"); rc=$?
-check "main, rc, two recipes: exit 0" test "$rc" = 0
+out=$(plan refs/heads/main quattro "b a recipes/a/"); rc=$?
+check "main, quattro, two recipes: exit 0" test "$rc" = 0
 check "recipes sorted and de-duplicated" grep -qx 'recipes=\["a", "b"\]' <<<"$out"
 check "all: the same, with no kernel" grep -qx 'all=\["a", "b"\]' <<<"$out"
 check "kernel=false" grep -qx 'kernel=false' <<<"$out"
-check "channel=rc" grep -qx 'channel=rc' <<<"$out"
+check "channel=quattro" grep -qx 'channel=quattro' <<<"$out"
 check "nvidia=false" grep -qx 'nvidia=false' <<<"$out"
-check "nvidia-open-dkms: nvidia=true" grep -qx 'nvidia=true' <<<"$(plan refs/heads/main rc nvidia-open-dkms)"
+check "nvidia-open-dkms: nvidia=true" grep -qx 'nvidia=true' <<<"$(plan refs/heads/main quattro nvidia-open-dkms)"
 
-out=$(plan refs/heads/feature rc a); rc=$?
+out=$(plan refs/heads/feature quattro a); rc=$?
 check "another branch: refused" test "$rc" = 1
 check "another branch: says main only" has "release builds run from main only, not refs/heads/feature" "$out"
 check "another branch: no plan printed" bash -c '! grep -q "^recipes=" <<<"$1"' _ "$out"
-out=$(plan refs/tags/x rc a); rc=$?
+out=$(plan refs/tags/x quattro a); rc=$?
 check "a tag: refused" test "$rc" = 1
-out=$(plan refs/heads/main quattro a); rc=$?
-check "quattro: refused" test "$rc" = 1
-check "quattro: says frozen (#309)" has "Quattro channel is frozen (#309)" "$out"
+out=$(plan refs/heads/main rc a); rc=$?
+check "rc, which main doesn't build: refused" test "$rc" = 1
+check "rc: says main builds quattro, rc gets promotion" has "main builds the quattro channel (ci/channel main), not rc" "$out"
 out=$(plan refs/heads/main stable a); rc=$?
 check "unknown channel: refused" test "$rc" = 1
-out=$(plan refs/heads/main rc "a linux-omarchy"); rc=$?
+out=$(plan refs/heads/main quattro "a linux-omarchy"); rc=$?
 check "kernel without RELEASE_RUNNER: refused, even next to another recipe" test "$rc" = 1
 check "kernel without RELEASE_RUNNER: says it never builds on a hosted runner" \
     has "the repository variable RELEASE_RUNNER is not set" "$out"
 check "kernel without RELEASE_RUNNER: no plan printed" bash -c '! grep -q "^recipes=" <<<"$1"' _ "$out"
-out=$(RELEASE_RUNNER=$RR "$R/ci/release-plan" refs/heads/main rc "a linux-omarchy" 2>&1); rc=$?
+out=$(RELEASE_RUNNER=$RR "$R/ci/release-plan" refs/heads/main quattro "a linux-omarchy" 2>&1); rc=$?
 check "kernel with RELEASE_RUNNER: accepted" test "$rc" = 0
 check "kernel: in all" grep -qx 'all=\["a", "linux-omarchy"\]' <<<"$out"
 check "kernel: not in the hosted recipes" grep -qx 'recipes=\["a"\]' <<<"$out"
 check "kernel: kernel=true" grep -qx 'kernel=true' <<<"$out"
 check "kernel: its nvidia check runs (against its headers)" grep -qx 'nvidia=true' <<<"$out"
 check "kernel: nvidia-open-dkms itself not built" grep -qx 'nvidia_built=false' <<<"$out"
-out=$(RELEASE_RUNNER=$RR "$R/ci/release-plan" refs/heads/main rc linux-omarchy 2>&1); rc=$?
+out=$(RELEASE_RUNNER=$RR "$R/ci/release-plan" refs/heads/main quattro linux-omarchy 2>&1); rc=$?
 check "kernel alone: accepted, no hosted recipe" bash -c '[[ $1 == 0 ]] && grep -qx "recipes=\[\]" <<<"$2"' _ "$rc" "$out"
 for bad in '["ubuntu-24.04"]' '["self-hosted"]' '"omarchy-asus-release"' '[]' 'nope'; do
-    out=$(RELEASE_RUNNER=$bad "$R/ci/release-plan" refs/heads/main rc linux-omarchy 2>&1); rc=$?
+    out=$(RELEASE_RUNNER=$bad "$R/ci/release-plan" refs/heads/main quattro linux-omarchy 2>&1); rc=$?
     check "kernel with RELEASE_RUNNER=$bad: refused" test "$rc" = 1
 done
 check "a hosted RELEASE_RUNNER: says why" has "no GitHub-hosted label" \
-    "$(RELEASE_RUNNER='["ubuntu-24.04"]' "$R/ci/release-plan" refs/heads/main rc linux-omarchy 2>&1)"
+    "$(RELEASE_RUNNER='["ubuntu-24.04"]' "$R/ci/release-plan" refs/heads/main quattro linux-omarchy 2>&1)"
 check "RELEASE_RUNNER is not needed without the kernel" \
-    grep -qx 'recipes=\["a"\]' <<<"$(plan refs/heads/main rc a)"
-out=$(plan refs/heads/main rc held); rc=$?
+    grep -qx 'recipes=\["a"\]' <<<"$(plan refs/heads/main quattro a)"
+out=$(plan refs/heads/main quattro held); rc=$?
 check "held recipe: refused" test "$rc" = 1
 check "held recipe: gives the hold's reason" has "recipes/held is held: waits for upstream fix" "$out"
-out=$(plan refs/heads/main rc docs-only); rc=$?
+out=$(plan refs/heads/main quattro docs-only); rc=$?
 check "no PKGBUILD: refused" test "$rc" = 1
 check "no PKGBUILD: says no such recipe" has "no such recipe: docs-only" "$out"
-out=$(plan refs/heads/main rc "../a"); rc=$?
+out=$(plan refs/heads/main quattro "../a"); rc=$?
 check "a path outside recipes/: refused" test "$rc" = 1
-out=$(plan refs/heads/main rc ""); rc=$?
+out=$(plan refs/heads/main quattro ""); rc=$?
 check "no recipe: refused" test "$rc" = 1
 check "no recipe: says so" has "no recipe to build" "$out"
 
@@ -207,8 +207,8 @@ check "says all passed" has "all release checks passed" "$out"
 
 reset; mkpkg release-rc-a a 1-1; manifest release-rc-a
 out=$(rcheck); rc=$?
-check "Quattro pkgrel on rc: fails" test "$rc" = 1
-check "Quattro pkgrel: says why" has "in Quattro's range" "$out"
+check "an old Quattro pkgrel (.1): fails" test "$rc" = 1
+check "old Quattro pkgrel: says why" has "in the old Quattro range" "$out"
 
 reset; mkpkg release-rc-a a 1-101; manifest release-rc-a; mkpkg release-rc-a a2 1-101
 out=$(rcheck); rc=$?

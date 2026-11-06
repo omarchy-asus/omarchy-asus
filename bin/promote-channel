@@ -1,0 +1,141 @@
+#!/bin/bash
+# Promote recipes from one release channel to the other as the same files (#411): main builds
+# for one channel (ci/channel main), and the other channel gets those packages, byte for byte,
+# never from a second build (a filename names one file on every channel, and builds are not
+# reproducible). Modelled on omacom/omarchy-pkgs' bin/promote-channel.
+# Usage: bin/promote-channel --from quattro|rc [--dry-run] RECIPE...
+#   --from CH    the channel whose packages are promoted; they go to the other one
+#   --dry-run    every check, then list what would be published; nothing is copied
+# For each recipe, the packages the source channel's repo db lists with that recipe as their
+# base (split packages too: hyprland and hyprpm, the kernel and its headers) are taken, and:
+#   - the recipe exists on this checkout and is not held (recipes/<r>/HOLD);
+#   - the db has the recipe's pkgver-pkgrel here, so what is promoted is what main carries (a
+#     channel that lags or leads main is refused: rebuild or rebase first); a package of the
+#     same base at another version (one an older build made, that the recipe now replaces) is
+#     left out, with a note;
+#   - each file in the source channel's local repo matches the db's SHA-256, the digest the
+#     source release serves under its name, and carries a good signature by our key.
+# Then they are copied into the target channel's stage dir (a file already there with other
+# bytes is refused) and handed to bin/publish --channel <target> in one call, so release
+# cohorts (build/cohorts.conf) go together and bin/publish's own checks run: it signs them,
+# and refuses a name the other channel serves with other bytes. Run
+# bin/sync-release --channel <target> after, as after any publish.
+# The kernel and NVIDIA (build/revdeps.conf) wait for their G16 test before they are promoted:
+# leave them out of the list until it has passed.
+set -euo pipefail
+from='' dry=0 recipes=()
+die() { echo "promote-channel: $*" >&2; exit 1; }
+usage() { echo "usage: bin/promote-channel --from quattro|rc [--dry-run] RECIPE..." >&2; exit 2; }
+while (($#)); do
+    case $1 in
+        --from) (($# >= 2)) || usage; from=$2; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        -*) usage ;;
+        *) recipes+=("${1%/}"); shift ;;
+    esac
+done
+[[ -n $from && ${#recipes[@]} -gt 0 ]] || usage
+case $from in
+    quattro) to=rc ;;
+    rc) to=quattro ;;
+    *) die "unknown channel '$from' (quattro, rc)" ;;
+esac
+here=$(cd "$(dirname "$0")" && pwd)
+export OMARCHY_ASUS_CHANNEL=$to
+# shellcheck source=bin/env.sh
+source "$here/env.sh"
+# shellcheck source=bin/publish-lib.sh
+source "$here/publish-lib.sh"
+: "${SIGN_KEY:?no signing key fingerprint in $DATA/fingerprint}"
+src_repo=$(channel_repo_dir "$from") src_tag=$(channel_gh_tag "$from")
+src_db=$src_repo/$REPO_NAME.db.tar.gz
+[[ -r $src_db ]] || die "no $from repo db at $src_db"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+bsdtar -xf "$src_db" -C "$work" || die "cannot read $src_db"
+# base<TAB>name<TAB>version<TAB>filename<TAB>sha256, one line per package in the source db
+db_rows() {
+    local d
+    for d in "$work"/*/; do
+        [[ -f $d/desc ]] || continue
+        awk '/^%[A-Z0-9]+%$/ { k = $0; next } NF && !(k in v) { v[k] = $0 }
+             END { b = v["%BASE%"]; if (b == "") b = v["%NAME%"]
+                   print b "\t" v["%NAME%"] "\t" v["%VERSION%"] "\t" v["%FILENAME%"] "\t" v["%SHA256SUM%"] }' "$d/desc"
+    done
+}
+rows=$(db_rows)
+# recipe_version <recipe>: [epoch:]pkgver-pkgrel from its PKGBUILD's literal assignments
+recipe_version() {
+    local p=$WORKSPACE/recipes/$1/PKGBUILD v r e
+    v=$(sed -n "s/^pkgver=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}$/\1/p" "$p" | head -1)
+    r=$(sed -n "s/^pkgrel=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}$/\1/p" "$p" | head -1)
+    e=$(sed -n "s/^epoch=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}$/\1/p" "$p" | head -1)
+    [[ -n $v && -n $r && $v != *'$'* && $r != *'$'* ]] || return 1
+    echo "${e:+$e:}$v-$r"
+}
+
+rc=0; assets=$(pub_release_assets "$src_tag") || rc=$?
+((rc == 0)) || die "cannot read the $src_tag release (gh exit $rc): nothing promoted"
+fail=0 files=()
+for r in "${recipes[@]}"; do
+    r=${r#recipes/}
+    if [[ ! $r =~ ^[A-Za-z0-9][A-Za-z0-9@._+-]*$ || ! -f $WORKSPACE/recipes/$r/PKGBUILD ]]; then
+        echo "promote-channel: no such recipe: $r" >&2; fail=1; continue
+    fi
+    if [[ -f $WORKSPACE/recipes/$r/HOLD ]]; then
+        echo "promote-channel: recipes/$r is held: $(grep -v -E '^[[:space:]]*(#|$)' "$WORKSPACE/recipes/$r/HOLD" | head -1)" >&2
+        fail=1; continue
+    fi
+    want=$(recipe_version "$r") || { echo "promote-channel: cannot read $r's version from its PKGBUILD" >&2; fail=1; continue; }
+    mine=$(awk -F'\t' -v b="$r" '$1 == b' <<<"$rows")
+    if [[ -z $mine ]]; then
+        echo "promote-channel: the $from channel's db has no package built from $r" >&2; fail=1; continue
+    fi
+    if ! awk -F'\t' -v w="$want" '$3 == w {f = 1} END {exit !f}' <<<"$mine"; then
+        echo "promote-channel: $r: the $from channel has $(cut -f3 <<<"$mine" | sort -u | paste -sd' '), main's recipe is $want" >&2
+        fail=1; continue
+    fi
+    while IFS=$'\t' read -r _ name ver file sum; do
+        if [[ $ver != "$want" ]]; then
+            # a package an older build of this recipe made, which the db still serves (one the
+            # recipe now replaces, say): not main's build, so it is not promoted
+            echo "promote-channel: note: $name $ver is not $r's build at $want; left out" >&2; continue
+        fi
+        f=$src_repo/$file
+        if [[ ! -f $f || $(sha256sum "$f" | cut -d' ' -f1) != "$sum" ]]; then
+            echo "promote-channel: $file: missing from $src_repo, or not the db's SHA-256" >&2; fail=1; continue
+        fi
+        d=$(awk -F'\t' -v n="$file" '$1 == n {print $3; exit}' <<<"$assets")
+        if [[ $d != "sha256:$sum" ]]; then
+            echo "promote-channel: $file: the $src_tag release ${d:+serves other bytes ($d)}${d:-does not serve it}" >&2; fail=1; continue
+        fi
+        if ! pub_verify_sig "$f"; then
+            echo "promote-channel: $file: no good signature by our key" >&2; fail=1; continue
+        fi
+        files+=("$f")
+    done <<<"$mine"
+done
+((fail == 0)) || die "refusing: nothing promoted"
+
+say() { echo "==> $*" >&2; }
+if ((dry)); then
+    say "dry run: every check passed; would promote to $to (bin/publish --channel $to):"
+    printf '    %s\n' "${files[@]##*/}" >&2
+    exit 0
+fi
+mkdir -p "$STAGE_DIR"
+staged=()
+for f in "${files[@]}"; do
+    t=$STAGE_DIR/${f##*/}
+    if [[ -e $t ]] && ! cmp -s "$f" "$t"; then
+        die "$t is already staged with other bytes: nothing promoted"
+    fi
+done
+for f in "${files[@]}"; do
+    t=$STAGE_DIR/${f##*/}
+    [[ -e $t ]] || cp --preserve=timestamps -- "$f" "$t"
+    staged+=("$t")
+done
+say "promoting ${#staged[@]} file(s) from $from to $to; run bin/sync-release --channel $to after"
+"$here/publish" --channel "$to" "${staged[@]}"

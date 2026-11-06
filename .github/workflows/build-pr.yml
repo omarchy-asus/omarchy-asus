@@ -2,8 +2,8 @@ name: Build changed packages
 
 # Build every recipe a PR touches, one job per recipe, in a stock Arch
 # container set up with the production package sources of the channel the PR
-# targets (ci/channel: every PR is on main's line, the RC trunk, and builds
-# against Omarchy rc, build/pacman-rc.conf; Quattro is frozen, #309)
+# targets (ci/channel: every PR is on main's line, the trunk, which builds for
+# Quattro against Omarchy stable, build/pacman.conf, since the 4.5 stable switch, #411)
 # and the devtools makepkg.conf. Shaped after omarchy-pkgs' build-pr.yml
 # (changes -> build matrix -> result).
 #

@@ -60,21 +60,22 @@ On top of clud's caps, these hold across all stages:
   the release refuses a filename it already has with different bytes, and pacman caches by
   filename.
 - **Publishing goes through Steward only.** The daily rebase onto upstream, its builds and its
-  publishes are Steward's Rebase onto upstream workflow, scheduled for the RC channel (Quattro's is disabled while it is frozen), so every run
+  publishes are Steward's Rebase onto upstream workflow, scheduled for the Quattro channel (RC's is off while RC is idle), so every run
   shows on its page (docs/releases.md). No systemd timer, service or cron job builds or
   publishes: never add, install or start one. A one-off build or publish by hand
   (`bin/build-pkg`, `bin/publish`, `bin/sync-release`) is still fine.
 - **Held recipes** (`recipes/<r>/HOLD`, first line the reason) are merged but not built or
   published, by hand or by the daily rebase, until the hold is removed in its own PR.
-- **`main` is the trunk for the RC channel** (the `rc-x86_64` release, Omarchy rc, #309): every
-  recipe, patch and all the tooling live on `main`, and a change is one PR into it. Stage 6
-  passes `--channel rc` to `bin/mkchroot`, `bin/build-pkg`, `bin/publish` and
-  `bin/sync-release`. The daily rebase onto upstream publishes RC from `main`
-  (docs/releases.md). README.md "Release channels" has the pairing.
-- **Quattro is frozen** (the `x86_64` release, Omarchy stable) on what it serves until the
-  Omarchy 4.5 stable switch: nothing is rebuilt or published to it, and the build and publish
-  scripts refuse `--channel quattro` (their default) unless `OMARCHY_ASUS_ALLOW_QUATTRO=1`.
-  At the switch Quattro picks up the trunk (#309).
+- **`main` is the trunk, and it builds for Quattro** (the `x86_64` release, Omarchy stable)
+  since the Omarchy 4.5 stable switch (#411): every recipe, patch and all the tooling live on
+  `main`, and a change is one PR into it. Stage 6 uses the quattro channel (the scripts'
+  default, `--channel quattro`). `ci/channel main` is the one place that says which channel
+  `main` builds; README.md "Release channels" has the pairing.
+- **One build per version, promoted to the other channel.** The RC channel (`rc-x86_64`,
+  Omarchy rc) is idle until Omarchy opens its next RC: no branch builds for it, and its
+  schedule is off. A version `main` builds is built once, for `main`'s channel; the other
+  channel gets the same files with `bin/promote-channel` (then `bin/sync-release` for it),
+  never a second build. The kernel and NVIDIA are promoted only after their G16 test.
 - **Findings outside the task** (a flaky test, an unrelated bug) are filed with `bin/issue`,
   not fixed in passing.
 - **A carried change is recorded in the pull request that carries it**: its entry in

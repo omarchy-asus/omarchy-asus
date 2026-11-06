@@ -1,12 +1,14 @@
 #!/bin/bash
 # Print the release channel a branch builds for, and the chroot pacman.conf of that channel
-# (README.md "Release channels", bin/env.sh): main is the RC channel's trunk, built against
-# Omarchy's rc repos (build/pacman-rc.conf), and every branch is on main's line (#309), so
-# every branch, and every PR stacked on another PR's branch, is rc. Quattro (build/pacman.conf)
-# is frozen until the Omarchy 4.5 stable switch: no branch builds it.
+# (README.md "Release channels", bin/env.sh): main is the trunk, and since the Omarchy 4.5
+# stable switch (#411) it builds for Quattro, against Omarchy's stable repos (build/pacman.conf).
+# Every branch is on main's line (#309), so every branch, and every PR stacked on another PR's
+# branch, is quattro. The RC channel (build/pacman-rc.conf) is idle until Omarchy opens its next
+# RC: no branch builds it, it gets main's packages by promotion (bin/promote-channel).
+# This is the one place that says which channel main builds (bin/env.sh TRUNK_CHANNEL reads it).
 # CI passes it to ci/find-build and ci/build-recipe, so a PR builds against the package sources
 # of the channel it will be published to.
-# Usage: ci/channel <branch>          prints rc
+# Usage: ci/channel <branch>          prints quattro
 #        ci/channel --conf <channel>  prints the channel's pacman.conf path (repo-relative)
 #        ci/channel --tag <channel>   prints the channel's release tag (x86_64, rc-x86_64)
 set -euo pipefail
@@ -26,5 +28,5 @@ case ${1:?usage: ci/channel <branch> | --conf <channel> | --tag <channel>} in
         esac
         ;;
     -*) echo "usage: ci/channel <branch> | --conf <channel> | --tag <channel>" >&2; exit 2 ;;
-    *) echo rc ;;
+    *) echo quattro ;;
 esac

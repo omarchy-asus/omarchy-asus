@@ -1,18 +1,33 @@
 # Releases: keeping the channels current
 
-The RC channel is kept current with upstream once a day by Steward's Rebase onto upstream
-workflow, on one schedule: **RC** from `main`, the channel's trunk, built against Omarchy rc in
-its own chroot and published to the `rc-x86_64` release.
+The Quattro channel is kept current with upstream once a day by Steward's Rebase onto upstream
+workflow, on one schedule: **Quattro** from `main`, the trunk, built against Omarchy stable in
+its own chroot and published to the `x86_64` release. That is the Omarchy 4.5 stable switch
+(#411): until it, `main` built for RC and Quattro was frozen on its Omarchy 4.0.6-based builds
+(#309).
 
-**Quattro is frozen** (#309) on what `x86_64` serves until the Omarchy 4.5 stable switch. Its
-schedule is disabled: nothing is rebuilt or published to it, and the build and publish scripts
-refuse the quattro channel unless `OMARCHY_ASUS_ALLOW_QUATTRO=1` (`bin/sync-release --dry-run`
-still reads it). It keeps serving its current packages, never stock over our patch.
+**RC is idle** until Omarchy opens its next RC. Its schedule is off and no branch builds for it
+(`ci/channel main` says which channel `main` builds). It keeps serving what it has, never stock
+over our patch, and it gets `main`'s packages by promotion (below).
 
-**At the 4.5 stable switch**, when Omarchy ships 4.5 to stable and our Quattro channel moves with
-it, Quattro picks up the trunk: rc-built packages are promoted to stable as the exact same files
-(one filename, one set of bytes), after a G16 test for the kernel and NVIDIA. That promotion step
-is not built yet; #309 has the plan.
+**Promotion: one build, the same files on both channels.** A filename names one file on every
+channel and builds are not byte-reproducible, so a version is built once, for `main`'s channel,
+and the other channel gets those exact files: `bin/promote-channel --from <channel> <recipe>...`
+takes the packages the source channel's repo db lists for each recipe at `main`'s version,
+checks each file against the db's SHA-256, the digest the source release serves and our
+signature, copies them into the target channel's stage dir and runs `bin/publish` for the target
+on them (release cohorts together; its cross-channel check passes because the bytes are the
+same). `bin/sync-release --channel <target>` then puts them up. The kernel and NVIDIA
+(`build/revdeps.conf`) are promoted only after their G16 test. At the switch the RC-built 4.5
+packages went to Quattro this way:
+
+```bash
+bin/promote-channel --from rc --dry-run asus-rog-nkey-winlock hyprland omarchy omarchy-settings \
+    omarchy-asus-g16 omarchy-asus-g16-apply omarchy-asus-keyring quickshell
+bin/promote-channel --from rc asus-rog-nkey-winlock hyprland ...   # the same list
+bin/sync-release --dry-run && bin/sync-release
+bin/promote-channel --from rc linux-omarchy nvidia-open-dkms       # after their G16 test
+```
 
 On each channel, Arch packages come through that channel's Omarchy mirror, and `linux-omarchy`
 comes from its `[omarchy]`.
@@ -67,14 +82,14 @@ recipe is rebased. The day's run raises it as attention (`dep-mismatch`).
 
 ## Release channels
 
-| | RC | Quattro |
+| | Quattro | RC |
 |---|---|---|
-| branch | `main` (the trunk) | none: frozen until the 4.5 stable switch (#309) |
-| upstream dbs (`bin/check-upstream`) | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` |
-| chroot | `/var/lib/omarchy-asus/chroot-rc` (`build/pacman-rc.conf`) | `/var/lib/omarchy-asus/chroot` (`build/pacman.conf`) |
-| stage dir, local repo | `stage-rc`, `repo/rc-x86_64` | `stage`, `repo/x86_64` |
-| release | `rc-x86_64` | `x86_64` |
-| state | `channel-rc/` of the data dir | the data dir |
+| branch | `main` (the trunk, since the 4.5 stable switch, #411) | none: idle, gets `main`'s packages by promotion |
+| upstream dbs (`bin/check-upstream`) | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` |
+| chroot | `/var/lib/omarchy-asus/chroot` (`build/pacman.conf`) | `/var/lib/omarchy-asus/chroot-rc` (`build/pacman-rc.conf`) |
+| stage dir, local repo | `stage`, `repo/x86_64` | `stage-rc`, `repo/rc-x86_64` |
+| release | `x86_64` | `rc-x86_64` |
+| state | the data dir | `channel-rc/` of the data dir |
 
 Both channels have the same gates: holds (`recipes/<r>/HOLD`), signing and signature checks,
 checksums, the personal-information scan, release cohorts, and no regression.
@@ -121,7 +136,7 @@ container the PR check uses (#258). The first piece is `.github/workflows/releas
 and records, and **publishes nothing**. No signing key, secret or release upload is anywhere in
 it. The second is the signer on the build host, `bin/release-sign` (below), which checks a run's
 record with GitHub before it hands the packages to `bin/publish`. The daily rebase onto upstream
-runs it only for the recipes `build/release-path.conf` lists, on the rc channel: so far
+runs it only for the recipes `build/release-path.conf` lists, on `main`'s channel (quattro since #411): so far
 `asus-rog-nkey-winlock`, `hyprland`, `linux-omarchy`, `nvidia-open-dkms`, `omarchy` and
 `omarchy-settings` (a cohort, listed together), `omarchy-asus-g16`, `omarchy-asus-g16-apply` and
 `omarchy-asus-keyring`. A kernel build still waits for its G16 test before it is published, as
@@ -134,11 +149,11 @@ builds, records, attests       checks the run, stages             signs, repo db
 ```
 
 ```bash
-gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-keyring"
+gh workflow run release.yml --ref main -f channel=quattro -f recipes="omarchy-asus-keyring"
 ```
 
-- **Refused before anything builds** (`ci/release-plan`): a ref other than `main`, the Quattro
-  channel (frozen, #309), `linux-omarchy` while the repository variable `RELEASE_RUNNER` does not
+- **Refused before anything builds** (`ci/release-plan`): a ref other than `main`, a channel
+  other than `main`'s (`ci/channel main`: quattro; the other gets promotion), `linux-omarchy` while the repository variable `RELEASE_RUNNER` does not
   name the build host's release runner (it never builds on a hosted runner), a held recipe (`recipes/<r>/HOLD`), an unknown recipe, and release cohorts whose recipes disagree
   (`bin/release-cohort check-recipes`). Every later job is also skipped off `main`.
 - **Eligibility** (`ci/release-eligibility`): the daily rebase's own decision for the requested
@@ -149,8 +164,8 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   expired upstream db, ...) fail the run. Upstream PR states are not read here. `check-upstream`
   runs `makepkg --printsrcinfo` in `bin/recipe-sandbox`, so this job's container gets user
   namespaces and its own `/proc` (it holds no token).
-- **Build:** one job per recipe (but the kernel) on `ubuntu-24.04`, `ci/build-recipe --channel rc --release` in the
-  PR check's container, so the channel's package sources (`build/pacman-rc.conf`), the devtools
+- **Build:** one job per recipe (but the kernel) on `ubuntu-24.04`, `ci/build-recipe --channel <channel> --release` in the
+  PR check's container, so the channel's package sources (`build/pacman.conf` for quattro), the devtools
   makepkg config and the packager (`omarchy-asus`) are the chroot's. As in the chroot, build dependencies come from the channel's Omarchy and Arch repos,
   never from `[omarchy-asus]`. `NO_DISTCC` is honoured where distcc is on (the build host's
   runner). The build step holds no token; `tests/ci/build-recipe-no-secrets.sh` covers this
@@ -166,9 +181,9 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
   runner's setup.
 
   ```bash
-  gh workflow run release.yml --ref main -f channel=rc -f recipes="linux-omarchy"
+  gh workflow run release.yml --ref main -f channel=quattro -f recipes="linux-omarchy"
   ```
-- **Recorded:** the artifact `release-rc-<recipe>` holds the packages (no `-debug` ones) and their
+- **Recorded:** the artifact `release-<channel>-<recipe>` holds the packages (no `-debug` ones) and their
   `SHA256SUMS`, kept 14 days, and the attest job makes a build-provenance attestation for every
   package (`gh attestation verify <file> -R omarchy-asus/omarchy-asus`). That job is the only one
   that can request an OIDC token, and it runs no recipe code.
@@ -188,9 +203,9 @@ gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-ke
 ### The signer: `bin/release-sign`
 
 ```bash
-bin/release-sign --channel rc --dry-run <run ID>   # every check, then list the files
-bin/release-sign --channel rc <run ID>             # the same, then bin/publish --channel rc
-bin/sync-release --channel rc --dry-run            # the caller's next step, as after any publish
+bin/release-sign --channel quattro --dry-run <run ID>   # every check, then list the files
+bin/release-sign --channel quattro <run ID>             # the same, then bin/publish --channel quattro
+bin/sync-release --channel quattro --dry-run            # the caller's next step, as after any publish
 ```
 
 The runner that builds also runs PR jobs under one account, so a package on its own proves
@@ -202,7 +217,7 @@ error, a missing or malformed field, no attestation) is a refusal.
   local configuration, never in the repo: `OMARCHY_ASUS_RUNNER_USER`, or the first line of
   `~/.local/share/omarchy-asus/runner-user` (`RUNNER_USER`, `bin/env.sh`). With neither set it
   refuses.
-- **Channel:** `rc` only. Quattro is refused (frozen, #309), with no override.
+- **Channel:** `main`'s only (`ci/channel main`: quattro since #411). The other channel is refused, with no override: it gets `main`'s packages by promotion (`bin/promote-channel`).
 - **The run:** in `omarchy-asus/omarchy-asus`, head repository too (a fork's run is refused);
   workflow path exactly `.github/workflows/release.yml`; event `workflow_dispatch` (a run from
   `pull_request`, `pull_request_target`, `push` or anything else is refused); head branch
@@ -210,7 +225,7 @@ error, a missing or malformed field, no attestation) is a refusal.
   commit off `main` is refused whatever the branch name says); completed, conclusion `success`.
 - **Jobs:** `attest`, `result` and the `build (<recipe>)` job of every artifact it uses
   concluded `success` (latest attempt).
-- **Artifacts:** every artifact of the run is `release-rc-<recipe>` (any other name, another
+- **Artifacts:** every artifact of the run is `release-<channel>-<recipe>` (any other name, another
   channel's included, is refused), its name unique in the run, not expired, and from this run,
   commit and repository. Each is downloaded on its own (the artifact's zip, not
   `gh run download`) and read into its own directory, so the layout never depends on how many
@@ -223,8 +238,8 @@ error, a missing or malformed field, no attestation) is a refusal.
   --source-digest <the run's commit> --signer-digest <the same>`, and its answer must name this
   run (one of its attempts), that workflow at `refs/heads/main`, the commit, and the file by name
   and digest.
-- **Then** it copies the files into the channel's stage dir (`stage-rc`; a file already there
-  with other bytes is refused) and runs `bin/publish --channel rc` on exactly those files. The
+- **Then** it copies the files into the channel's stage dir (`stage` for quattro; a file already there
+  with other bytes is refused) and runs `bin/publish --channel quattro` on exactly those files. The
   signing is `bin/publish`'s: the signer never signs or reads the key itself.
 - **Runs no recipe or artifact code:** no `makepkg`, no PKGBUILD, no install scriptlets. The only
   archive it opens is the artifact zip, read with `bsdtar` into a private temp dir that is
@@ -236,25 +251,25 @@ error, a missing or malformed field, no attestation) is a refusal.
 
 `build/release-path.conf` is the switch: one recipe per line. A recipe listed there is no longer
 built in the chroot by the daily rebase onto upstream; after its merge the release workflow builds
-it on `main` and `bin/release-sign` checks that run and publishes it. It holds only on the rc
-channel from `main`. A recipe it doesn't list (or every recipe, with the file empty or missing)
+it on `main` and `bin/release-sign` checks that run and publishes it. It holds only on `main`'s
+channel, from `main`. A recipe it doesn't list (or every recipe, with the file empty or missing)
 builds in the chroot as before. A release cohort (`build/cohorts.conf`) is listed whole or not at
 all.
 
 A recipe is listed only after the two paths have been compared for it and match:
 
 1. **Build it on the new path:** run the release workflow for that recipe on `main`, and note the
-   run ID once it has finished. When the recipe is at the version the rc release already serves
+   run ID once it has finished. When the recipe is at the version the channel's release already serves
    (the comparison the switch needs), the run fails its check job on purpose: the release already
    serves files by those names, and builds are not byte-reproducible. Compare it with `--served`.
 
    ```bash
-   gh workflow run release.yml --ref main -f channel=rc -f recipes="omarchy-asus-keyring"
+   gh workflow run release.yml --ref main -f channel=quattro -f recipes="omarchy-asus-keyring"
    ```
-2. **Compare** that run with what the rc release serves today:
+2. **Compare** that run with what the channel's release serves today:
 
    ```bash
-   bin/compare-build-paths --channel rc --served omarchy-asus-keyring <run ID>
+   bin/compare-build-paths --channel quattro --served omarchy-asus-keyring <run ID>
    ```
 
    `--served` accepts a run that failed only because the release already serves its file names:
@@ -266,8 +281,8 @@ A recipe is listed only after the two paths have been compared for it and match:
    opens with `SAME-VERSION REBUILD` and the file names. Without `--served` only a run that
    succeeded is compared. `bin/release-sign` never accepts such a run.
 
-   It downloads the run's `release-rc-<recipe>` artifact (its digest and `SHA256SUMS` checked,
-   into a directory of its own) and the packages the rc release serves from that recipe (through
+   It downloads the run's `release-<channel>-<recipe>` artifact (its digest and `SHA256SUMS` checked,
+   into a directory of its own) and the packages the channel's release serves from that recipe (through
    `ci/fetch-release`: the signed db, then each package's signature), and compares each package:
    the version first, then the `.PKGINFO` fields (dependencies, optdepends, provides, conflicts,
    replaces, backup and the rest), the file list with type, mode, owner, link target and

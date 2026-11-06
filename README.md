@@ -104,7 +104,7 @@ one. That means we have to keep up. A daily check compares each package with ups
 rebuilds it when upstream moves. If a patch stops applying or the build fails, our last build
 stays published and the run flags what needs fixing: on our channels you always get our patched
 version, never the stock one, until upstream folds the fix in and we drop the recipe. That check is a daily workflow in
-[Steward](docs/releases.md), on the RC channel (Quattro is frozen, #309): it rebases our patches onto upstream's new recipe,
+[Steward](docs/releases.md), on the Quattro channel (RC is idle until Omarchy's next RC): it rebases our patches onto upstream's new recipe,
 builds it in a clean chroot, opens a pull request that gets an agent check and a second-model
 review, and publishes only after CI passes and the PR merges. There is no systemd timer,
 service or cron job that builds or publishes, and there must not be one: every rebase, build and publish shows up as a run
@@ -116,41 +116,44 @@ Each of our channels is pinned to one of Omarchy's, and a machine switches both 
 
 | our channel | built from | chroot and machines use Omarchy's | release (`Server`) |
 |---|---|---|---|
-| RC | `main` | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` | `rc-x86_64` (`.../releases/download/rc-$arch`) |
-| Quattro | frozen (#309) | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` | [`x86_64`](https://github.com/omarchy-asus/omarchy-asus/releases/tag/x86_64) (`.../releases/download/$arch`) |
+| Quattro | `main` | `pkgs.omarchy.org/stable`, `stable-mirror.omarchy.org` | [`x86_64`](https://github.com/omarchy-asus/omarchy-asus/releases/tag/x86_64) (`.../releases/download/$arch`) |
+| RC | idle: `main`'s packages, promoted | `pkgs.omarchy.org/rc`, `rc-mirror.omarchy.org` | `rc-x86_64` (`.../releases/download/rc-$arch`) |
 
-`main` is the trunk for the RC channel: every recipe and all the tooling live there, and RC is
-built and published from it. The Quattro channel (`x86_64`) is frozen on what it serves until the
-Omarchy 4.5 stable switch: nothing is rebuilt or published to it, and `bin/build-pkg`,
-`bin/publish`, `bin/unpublish`, `bin/sync-release` (except `--dry-run`) and `bin/rebase-recipe`
-refuse it unless `OMARCHY_ASUS_ALLOW_QUATTRO=1`. Quattro keeps serving its current packages.
+`main` is the trunk: every recipe and all the tooling live there. Since the Omarchy 4.5 stable
+switch (#411) it builds for the Quattro channel (`x86_64`), against Omarchy stable, and the daily
+rebase onto upstream keeps Quattro current. The RC channel (`rc-x86_64`) is idle until Omarchy
+opens its next RC: nothing builds for it, and it gets `main`'s packages as the same files with
+`bin/promote-channel` (below). `ci/channel main` says which channel `main` builds.
 
 Mixing them breaks upgrades: Omarchy 4.5's migrations install packages that may only exist in
 Omarchy's rc repo, and one failed migration holds back every later one, ours included. On a G16,
-switching is Omarchy's own `omarchy-channel-set rc` (or `stable`, which downgrades to the Quattro
-versions): the pre-refresh hook `omarchy-asus-setup` installs moves the `[omarchy-asus]` server to
+switching is Omarchy's own `omarchy-channel-set rc` (or `stable`, which moves to the Quattro
+versions, the same 4.5 builds since the stable switch): the pre-refresh hook `omarchy-asus-setup` installs moves the `[omarchy-asus]` server to
 the release that matches `[omarchy]` before the upgrade runs, so `omarchy update` and
 `omarchy-channel-set` need nothing of ours. A first setup picks the channel that matches the
 machine's Omarchy channel. An install set up before the hook did this gets it by running
 `omarchy-asus-setup` again (LAPTOP-SETUP.md, "Release channels").
 
-On the build host, the build and publish scripts take `--channel rc` (default `quattro`, which is
-frozen): `bin/mkchroot --channel rc` makes the RC chroot from `build/pacman-rc.conf`,
-`bin/build-pkg --channel rc` builds in it and stages in its own dir, and `bin/publish`/`bin/sync-release
---channel rc` sign and upload to the RC repo and release only, with the same signature, checksum
-and personal-information checks. A package staged for one channel is refused by the other's
-`bin/publish`. The daily rebase onto upstream keeps RC current from `main`, in the RC chroot,
-published to `rc-x86_64` ([docs/releases.md](docs/releases.md)).
+On the build host, the build and publish scripts take `--channel quattro|rc` (default
+`quattro`, the channel `main` builds): `bin/mkchroot` makes the channel's chroot from its
+pacman.conf (`build/pacman.conf`, `build/pacman-rc.conf`), `bin/build-pkg` builds in it and stages
+in its own dir, and `bin/publish`/`bin/sync-release` sign and upload to that channel's repo and
+release only, with the same signature, checksum and personal-information checks. A package
+staged for one channel is refused by the other's `bin/publish`. The daily rebase onto upstream
+keeps Quattro current from `main`, in the stable chroot, published to `x86_64`
+([docs/releases.md](docs/releases.md)).
 
-A package filename names one file on both channels, since pacman caches by filename. The RC
-channel's `pkgrel` sits in its own range: a package rebuilt from a stock one is
-`<upstream pkgrel>.101` and up on RC (`.1` to `.99`, reserved for Quattro's frozen files), and
-our own packages are 101 and up on RC (1 to 99 on Quattro). `bin/rebase-recipe --channel rc`
-starts at `.101`, the recipes lint (`ci/check-pkgrel`) checks `main` in the RC range, and
-`bin/publish` refuses a filename the other channel's repo or release already has with different
-bytes. RC sorts above Quattro for the same upstream release, so a switch back to Quattro is a
-downgrade, which `omarchy-channel-set stable` already does (its refresh runs `pacman -Syyuu`),
-and the 4.5 stable switch is an upgrade.
+A package filename names one file on both channels, since pacman caches by filename, and builds
+are not byte-reproducible, so a version is built once, for `main`'s channel, and the other channel
+gets the same files: `bin/promote-channel --from <channel> <recipe>...` takes the packages the
+source channel serves at `main`'s version, checks their bytes and signatures, and hands them to
+`bin/publish` for the other channel (then `bin/sync-release` for it). The kernel and NVIDIA are
+promoted only after their G16 test. Both channels' `pkgrel` is on `main`'s one line: a package
+rebuilt from a stock one is `<upstream pkgrel>.101` and up, our own packages 101 and up
+(`bin/rebase-recipe`, checked by the recipes lint, `ci/check-pkgrel`). Quattro's files from
+before the switch (`.1` to `.99`, 1 to 99) are never built again, and the 4.5 builds sort above
+them, so the switch is an upgrade. `bin/publish` refuses a filename the other channel's repo or
+release already has with different bytes.
 
 ## Supported hardware
 
@@ -224,6 +227,9 @@ Where our fixes are headed (every carried change and its upstream state:
   build of a package the previous release served and a recipe of the checkout it runs from
   still ships (RC: the Quattro release counts too; docs/releases.md, "No regression"), so run
   it from a checkout of the channel's branch.
+- `bin/promote-channel --from quattro|rc [--dry-run] <recipe>...`: gives the other channel the
+  packages one channel serves at `main`'s version, as the same files (bytes, release digest and
+  signature checked), through `bin/publish`; then `bin/sync-release` for that channel.
 - `bin/issue find|file|comment|labels|template`: the issue tracker helper (duplicate check,
   PII scan); agents read [AGENTS.md](AGENTS.md) first. Offline tests:
   `python3 -I tests/test_issue.py`.

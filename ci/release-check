@@ -4,7 +4,7 @@
 # could never be published fails its run instead of reaching the signer. Runs on the CI host,
 # never in the build container, on the downloaded artifacts; it runs no recipe code.
 #   1. manifest: each artifact dir's SHA256SUMS lists exactly its packages, and they match
-#   2. pkgrel: in the channel's range (ci/check-pkgrel; rc builds .101 and up)
+#   2. pkgrel: in the channel's range (ci/check-pkgrel: .101 and up)
 #   3. release cohorts: no member without its partner at the same version, in this build or
 #      in the channel's published db (bin/release-cohort check-publish; the db from
 #      ci/fetch-release --db, signature-checked)
@@ -13,7 +13,7 @@
 #      (bin/publish, bin/sync-release): bump pkgrel. Read with publish-lib's
 #      pub_release_assets; a release that can't be read fails the check.
 # The reverse-dependency check is ci/nvidia-compat, its own job (it needs the container).
-# Usage: ci/release-check --channel rc <dir>
+# Usage: ci/release-check --channel quattro|rc <dir>
 #   <dir>/<artifact>/{*.pkg.tar.zst,SHA256SUMS}, one directory per artifact; or, when the
 #   download matched a single artifact (download-artifact then extracts it straight into
 #   <dir>), <dir>/{*.pkg.tar.zst,SHA256SUMS}. Each artifact's SHA256SUMS is checked on its own.
@@ -21,7 +21,7 @@
 # Exit: 0 all passed, 1 a check failed (each failure is an ::error:: line), 2 usage.
 set -uo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-[[ ${1:-} == --channel && -n ${2:-} && -d ${3:-} ]] || { echo "usage: ci/release-check --channel rc <dir>" >&2; exit 2; }
+[[ ${1:-} == --channel && -n ${2:-} && -d ${3:-} ]] || { echo "usage: ci/release-check --channel quattro|rc <dir>" >&2; exit 2; }
 channel=$2 dir=$(realpath "$3")
 CHANNELS=(quattro rc)
 GH_REPO=${GITHUB_REPOSITORY:-omarchy-asus/omarchy-asus}

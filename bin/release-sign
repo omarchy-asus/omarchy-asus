@@ -26,8 +26,10 @@
 # reads is the artifact zip), and leaves bin/sync-release to the caller. It is a command, run
 # once per release: no daemon, unit, timer or cron job.
 #
-# Usage: bin/release-sign --channel rc [--dry-run] RUN_ID
-#   --channel rc  the only channel it serves (Quattro is frozen, #309; no override)
+# Usage: bin/release-sign --channel CH [--dry-run] RUN_ID
+#   --channel CH  the channel main builds for (ci/channel main: quattro since the Omarchy 4.5
+#                 stable switch, #411), the only one it serves; the other channel gets main's
+#                 packages by promotion (bin/promote-channel), never from a second build
 #   --dry-run     every check, then print the files and stop: nothing staged or published
 # Exit: 0 published (or, with --dry-run, would publish), 1 refused, 2 usage.
 set -euo pipefail
@@ -48,9 +50,11 @@ done
 [[ -n $channel && -n $run_id ]] || usage
 [[ $run_id =~ ^[1-9][0-9]{0,19}$ ]] || die "run ID '$run_id' is not a number"
 case $channel in
-    rc) ;;
-    quattro) die "the Quattro channel is frozen until the Omarchy 4.5 stable switch (#309)" ;;
-    *) die "unknown channel '$channel' (rc only)" ;;
+    quattro | rc)
+        trunk=$("$(dirname "$0")/../ci/channel" main)
+        [[ $channel == "$trunk" ]] ||
+            die "main builds the $trunk channel (ci/channel main), not $channel: $channel gets main's packages by promotion (bin/promote-channel)" ;;
+    *) die "unknown channel '$channel' (quattro, rc)" ;;
 esac
 
 export OMARCHY_ASUS_CHANNEL=$channel

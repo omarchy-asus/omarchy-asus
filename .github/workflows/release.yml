@@ -6,7 +6,7 @@ name: Release build
 # digests, SHA256SUMS and attestations) before it hands the files to bin/publish; nothing
 # runs it yet, so nothing reads these artifacts.
 #
-#   plan     ci/release-plan: main only, the rc channel only (Quattro is frozen, #309),
+#   plan     ci/release-plan: main only, main's channel only (ci/channel main: quattro, #411),
 #            no held recipe (recipes/<r>/HOLD), the release cohorts' recipes agree, and
 #            linux-omarchy only while RELEASE_RUNNER names the build host's release runner
 #   build    one job per recipe but the kernel, on GitHub-hosted runners: ci/build-recipe
@@ -44,10 +44,10 @@ on:
         description: "Space-separated recipe directories to build (linux-omarchy builds on the build host's release runner)."
         required: true
       channel:
-        description: "Release channel (rc only for now: Quattro is frozen, #309)."
+        description: "Release channel: the one main builds for (ci/channel main: quattro since #411)."
         type: choice
-        options: [rc, quattro]
-        default: rc
+        options: [quattro, rc]
+        default: quattro
 
 concurrency:
   group: release-${{ github.event.inputs.channel }}

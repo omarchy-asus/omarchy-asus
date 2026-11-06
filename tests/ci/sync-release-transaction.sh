@@ -47,8 +47,6 @@ export OMARCHY_ASUS_WORKSPACE=$S/ws OMARCHY_ASUS_DATA=$S/data GNUPGHOME=$S/data/
     PII_DENYLIST=$S/denylist FAKE_REL=$S/release FAKE_LOG=$S/gh.log FAKE_CALLS=$S/calls \
     PATH=$S/bin:$PATH
 unset PII_SCAN SYNC_ADOPT_REMOTE PRUNE_GRACE_HOURS PUBLISH_LOCK_WAIT OMARCHY_ASUS_PUBLISH_LOCKED OMARCHY_ASUS_CHANNEL
-# Quattro is frozen (#309); this test runs the default (quattro) channel's code, so it overrides
-export OMARCHY_ASUS_ALLOW_QUATTRO=1
 # bin/sync-release talks to the live release (env.sh fixes GH_REPO/GH_TAG), so the fake gh
 # must win: a BASH_ENV that puts another dir first on PATH (a wrapper's gh shim) would hand
 # the uploads to the real gh. Drop it, and give any real gh that still runs no credentials.
