@@ -1,0 +1,124 @@
+# EXPERIMENTAL: ASUS ROG Zephyrus G16 GA605KM only.
+#
+# omarchy-asus-g16-mic (#401, part of #400): `g16-mic`, an opt-in processor for
+# the G16's internal microphones. `g16-mic run --source <node.name>` captures
+# exactly that PipeWire source and offers two virtual sources, g16_mic_processed
+# (raw, omni, fixed beam or direction tracking, mono) and g16_mic_raw (every
+# channel, untouched). Echo cancellation is PipeWire's own module-echo-cancel,
+# through config fragments installed under
+# /usr/share/omarchy-asus-g16-mic/pipewire/ that a user links in to opt in:
+# g16-mic-aec.conf (the default) is echo cancellation only, noise suppression
+# and gain control off, so every word is kept; g16-mic-aec-ns-high.conf adds
+# noise suppression at PipeWire's fixed high level, a word-loss risk to check
+# on the G16 before relying on it. Nothing is started or enabled at install time, nothing goes into /etc or
+# pipewire.conf.d, and the default source is unchanged. See README.md.
+#
+# A local package with no upstream build to track, so pkgrel does not use the
+# repo's "<upstream>.1" scheme.
+
+pkgname=omarchy-asus-g16-mic
+pkgver=0.1.0
+pkgrel=104
+pkgdesc='Opt-in G16 microphone processing host: raw, omni, fixed beam and direction tracking as PipeWire sources (EXPERIMENTAL)'
+arch=('x86_64')
+url='https://github.com/omarchy-asus/omarchy-asus'
+license=('MIT')
+depends=('pipewire' 'fftw' 'glibc')
+makedepends=('meson' 'webrtc-audio-processing-1')
+checkdepends=('wireplumber' 'util-linux')  # util-linux: prlimit for test_pw_live step 12
+optdepends=('wireplumber: links the capture stream to the named source')
+options=('!debug')
+source=('meson.build'
+        'meson_options.txt'
+        'g16mic.h'
+        'g16mic_host.h'
+        'g16mic_handoff.h'
+        'rt.c'
+        'calib.c'
+        'match.c'
+        'dsp.c'
+        'track.c'
+        'engine.c'
+        'status.c'
+        'handoff.c'
+        'host.c'
+        'main.c'
+        'test_util.h'
+        'test_signals.h'
+        'test_rt.c'
+        'test_calib.c'
+        'test_match.c'
+        'test_beam.c'
+        'test_track.c'
+        'test_engine.c'
+        'test_status.c'
+        'test_handoff.c'
+        'test_aec.cpp'
+        'test_pw_helper.c'
+        'test_pw_live.sh'
+        'g16-mic-aec.conf'
+        'g16-mic-aec-ns-high.conf'
+        'calibration.example.conf'
+        'README.md'
+        'LICENSE')
+sha256sums=('2a295e92fc16a23721ebb1cede3ad3eedeba9e0e53ac097bf487370f766be705'
+            '7988573a6a927f72476bad0935a9ddcac93dc6af066d79ae7d3e040a9f38156d'
+            '97b5780ded5d0e604303b17f69e37c3b4d91fc52de96274f6060c62beeff1a2f'
+            '19d4f2ff41a43e206fa32580657eb9f97e5e29c9f8f9892ec38a22bc59238f21'
+            'f477a4bb5fff3de100dd79e720abce87c8d6c92ba464b9bbcf4c4c160eeac38b'
+            '8d50eec5f1d8a673718e9c6af546b5600ed1eb4fe0720c22f9a82ab93de9775e'
+            '1e342cf150fa6673d64e1366586897e4e1ccb2d3a74ec860c1ddd5557b5da99a'
+            'ba65379ce234be122f12e96ffcd57f2cb8de01084afb220ec411c9bdc2fdb172'
+            '0da609d7d0a538222e14a6e03f0b33d457bd6a3007fef2e717f351061e36e9c6'
+            'be446738a92073e3b680259af71455029e2059c4ebd70d0de9946ba513879841'
+            '590be55f4fe1059fb105ddb8eb8cd53cd0acf1d94cae3f87fd0df2bdcbf072a5'
+            'dc4c2eff3f1fd6a5112c342b8a6d1f9db13fcfd98a3bdeceedc6e58e867c84aa'
+            '3b6318c3bbf2f7757b0b8ef98d3bb4deedab0e1337999834fd0b51f585095356'
+            'd23c35aad1475cb8a5fb31c2d403a7fa162c80f79106b4010ddd01cff2308d3c'
+            '8e3fddf8972ca74c024d951f62b1d8302e1da5016755d19e7ab2a65fc56afd6a'
+            '9e97fc9b31a9f3316782c867c80c3e4026d325d679d383124fe8dbab224e8b56'
+            'a728df2beb508e99a31d479587e258a7174cc89c479e96bfe1e9a06260963d8d'
+            '1ecc120e836991611a36118de67841da22e335e9741b980e5fca32bc167275d3'
+            'fddff7cad1d3dde347180219c7fdd243befb4248198a17e9f087c9fd1741332f'
+            '595e8ef6cd6aeb14253a6c0f5a93ae28442316010874fc3581571245018a40d7'
+            '3d1677788523f815a82bf791e3710b8ea1a6ddd737bfda4765fcf8189922e649'
+            '7b5fad65e454eeffe47606b4088b87e4cfa69cd35bccc9f268f17b430bd706b5'
+            '5b84dd7166d1bf73e8b104e5cffa88c70572fcb3c8f86e15a6bd9b57a5949c58'
+            'fd81cc374e817c32bf1891cc235b14e53d1140852a11a79840c10cc1089dd73f'
+            '5cee8308954bc2628f56efead828730f6637c93bb17a5b39acb5303b41cbd790'
+            'bb7a1de8309ad7dbc104792764df5859fad1c49f0a57dbe13679b87654258cbb'
+            '9ef6f950eef0d5b74340c838f7da276629da070cf0b5d34f0f78b39f519b9221'
+            '1d8534b0e40cc4a497d5eb94817b66bd76700df7865719f4d7338ce134944046'
+            '04cc71b71a2773ac78bcc1fc6584b61c64d62da99f41f46e4d5763028f418887'
+            '67c1c99dbaa95b384fc93c09f5a3dcdb6c6879771e00b5daeb0bb9f009fdfcb1'
+            'fa568c2bc882ecc19edd1df3ad6789c8199885eebc3a79f9e75c9dd169d784cf'
+            'c0fc33ff749531fa9dc603c5e9debcf9d7b9720084ee3773dd07abb455c54ac0'
+            '4be2cb6dc9833c8f66886e92c3d4b0b06f359917c986104c286f2a06288e0d2e')
+
+build() {
+  arch-meson . build -Daec_tests=enabled
+  meson compile -C build
+}
+
+check() {
+  # Synthetic signals only: the real-time core, calibration, source matching,
+  # beam, tracking, the engine's fallbacks and crossfades, the status file, and
+  # the WebRTC echo canceller PipeWire's module uses (delay, drift, double talk;
+  # the echo-cancel-only default and the opt-in noise-suppression-high settings).
+  # test_handoff drives the capture-to-outputs hand-off on a simulated schedule:
+  # exactly one quantum per output buffer, all buffering in g16-mic's own
+  # bounded queue (8 cycles per output), oldest-first counted overflow, the stop
+  # drain delivering the last accepted cycle, the source-loss tail counted
+  # exactly, and no stale audio after a reconnect.
+  # test_pw_live adds the isolated live PipeWire test: a private daemon with
+  # only null/dummy drivers and a private WirePlumber under a temporary
+  # directory, nothing audible and no real devices (checkdepends: wireplumber),
+  # steps 1-14, the last a consumer-only stall past the queue bound.
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
