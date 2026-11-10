@@ -1,0 +1,2 @@
+# SPDX-License-Identifier: MIT
+option('aec_tests', type: 'feature', value: 'auto', description: 'Build the WebRTC echo-cancellation test (needs webrtc-audio-processing-1)')
