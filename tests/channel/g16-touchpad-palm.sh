@@ -16,7 +16,10 @@
 #   5. that threshold, against every contact of a capture from the G16
 #      (tests/channel/fixtures/asuf1209-touchpad-contacts.tsv): every fingertip stays at or under
 #      it, and every palm goes over it or carries the pad's palm flag in every report, except the
-#      palm brushes of a few reports that strength can't tell from a fingertip.
+#      palm brushes of a few reports that strength can't tell from a fingertip. And it sits
+#      just above the capture's strongest fingertip: a palm lands light and climbs, and until it
+#      passes the threshold it is a finger, so every unit of room left over the fingertips is
+#      landing time a palm can scroll or count for a click with (#390).
 set -u
 W=$(cd "$(dirname "$0")/../.." && pwd)
 R=$W/recipes/omarchy-asus-g16
@@ -241,6 +244,9 @@ tips, palms, brief, flat = of("fingertip"), of("palm"), of("palm-brief"), of("fl
 check(t > 0, "threshold read from the quirk: %d" % t, "")
 over = [c for c in tips if c[3] > t]
 check(not over, "all %d fingertips stay at or under %d (peak %d)" % (len(tips), t, max(c[3] for c in tips)), over)
+tip_peak = max(c[3] for c in tips)
+check(t <= tip_peak + 1, "%d leaves no unused room over the strongest fingertip (%d)" % (t, tip_peak),
+      "(a palm reads as a finger while it climbs to the threshold; lower it to %d)" % (tip_peak + 1))
 missed = [c for c in palms if c[3] <= t and c[2] < c[1]]
 check(not missed, "all %d palms go over %d or are flagged throughout" % (len(palms), t), missed)
 long_brief = [c for c in brief if c[1] > 15 or c[2]]
