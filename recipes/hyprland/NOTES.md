@@ -1,4 +1,4 @@
-# hyprland 0.56.2-4.105
+# hyprland 0.56.2-4.106
 
 **Base:** Arch's `hyprland` 0.56.2-4 packaging, commit `abb207b` ("upgpkg: 0.56.2-4") of
 https://gitlab.archlinux.org/archlinux/packaging/packages/hyprland. The Omarchy stable mirror's
@@ -7,16 +7,18 @@ Arch's `extra`. Arch's split (`hyprland` + `hyprpm`, split out in 0.56.2-3) is u
 packages are built at 0.56.2-4.103 and replace exactly what Arch ships. The PKGBUILD is Arch's (0BSD, see
 `LICENSE`).
 
-**Our changes to Arch's PKGBUILD:** `pkgrel=4.105`, `(omarchy-asus build)` appended to both
+**Our changes to Arch's PKGBUILD:** `pkgrel=4.106`, `(omarchy-asus build)` appended to both
 `pkgdesc`s (`pkgbuild-pkgdesc-label.diff`), plus `reconnect-render-offset.patch` and
 `seat-leave-on-capability-loss.patch`, `output-late-bind-inert.patch`,
-`output-global-destroy-delay.patch` and `xwayland-no-focus-window.patch` added to `source`/`sha256sums` and applied, in that order, at the
+`output-global-destroy-delay.patch`, `xwayland-no-focus-window.patch` and
+`session-lock-removed-output.patch` added to `source`/`sha256sums` and applied, in that order, at the
 end of `prepare()`.
 On the RC channel our pkgrel is Arch's pkgrel + `.101` and up (`.1` to `.99` is Quattro's range, where
 this recipe is at 4.2): 4.101 moved the recipe into the RC range (#201), 4.102 added
 `seat-leave-on-capability-loss.patch` (#302, #305), and 4.103 changes nothing in the packages: it
 releases them once through the release workflow (`build/release-path.conf`, #258). 4.104, built on `main` for
-Quattro since the Omarchy 4.5 stable switch (#411), adds the two output patches (#422). 4.105 adds `xwayland-no-focus-window.patch` (#424).
+Quattro since the Omarchy 4.5 stable switch (#411), adds the two output patches (#422). 4.105 adds `xwayland-no-focus-window.patch` (#424), 4.106
+`session-lock-removed-output.patch` (#131).
 
 **No `hyprland-debug`:** the chroot path also published a `hyprland-debug` package; the release
 workflow publishes no `-debug` packages, so the RC channel stopped serving it when this recipe moved
@@ -95,6 +97,21 @@ old X11 window as active.
 (MR 1761); Wine reverted its own None-means-desktop fix (wine MR 8108, reverted by 8117) in favour of
 them. Drop the patch once a Hyprland release no longer sets None when a Wayland window is focused.
 
+**Patch:** `session-lock-removed-output.patch` (`src/protocols/SessionLock.cpp`,
+`CSessionLockProtocol::onGetLockSurface`, the `CSessionLockSurface` constructor). Backport of
+hyprwm/Hyprland#16784 (main `8b6f4329`, "protocols/session-lock: fix removed output causing a protocol
+error"), `src/` only: its test extends `tests/protocols/Output.cpp`, which 0.56.2's test tree doesn't
+have. While the session is locked and an output vanishes (an HDMI plug during hibernate, a resume
+flicker), the shell can ask for a lock surface on a `wl_output` whose monitor is already gone. 0.56.2
+returned without creating the `ext_session_lock_surface_v1` object, so the client's later `destroy` of
+that id was a protocol error: Hyprland disconnected the shell and showed its "lockscreen app died"
+screen on every monitor (#131). The patch creates the object anyway, with only its destroy handlers,
+no configure and no `newLockSurface`, so the client can destroy it.
+
+**Upstream status (checked 2026-11-10):** merged on `main` 2026-11-02 (`8b6f4329`) and released in 0.57.1
+(release-branch commit `518be87e`). Omarchy closed omacom/omarchy#11084 as fixed by it for Omarchy 4.6.0.
+`DELTA`'s `fixed-upstream` lines flag the first release with either commit; drop the patch there.
+
 **Rebase when Arch moves:** `bin/auto-update` does this automatically from `DELTA`
 (`bin/rebase-recipe hyprland --version <arch ver> --out <dir> --verify` by hand). The
 `fixed-upstream` line flags the first release that contains `e9e2f64c`. By hand:
@@ -111,6 +128,7 @@ them. Drop the patch once a Hyprland release no longer sets None when a Wayland 
    and drop it if no client dies.
    If the release's `CXWM::activateSurface` no longer sets `XCB_WINDOW_NONE` for a Wayland focus, run #424's
    test without `xwayland-no-focus-window.patch` and drop it if the game is deactivated.
+   If the release contains `8b6f4329` or `518be87e` (0.57.1 and later), drop `session-lock-removed-output.patch`.
    Only when no patch is left, `bin/unpublish hyprland hyprpm` and delete this recipe. Regenerate
    each patch that is still needed against the new source (`makepkg --nobuild --nodeps` in a scratch copy).
 4. Run `bin/check-upstream`, then `bin/build-pkg recipes/hyprland`.
