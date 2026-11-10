@@ -13,5 +13,7 @@ patch output-late-bind-inert.patch prepare
 fixed-upstream hyprwm/Hyprland 5b6b75ac5 v{pkgver}
 # ours: removed wl_output globals are destroyed 5 s later, not at once; not on main (checked 2026-11-10)
 patch output-global-destroy-delay.patch prepare
+# not on Hyprland main (checked 2026-11-10); wlroots, KWin and Weston carry the same change
+patch xwayland-no-focus-window.patch prepare
 # main has the same fix (e9e2f64c, #16140); flag the first release that contains it
 fixed-upstream hyprwm/Hyprland e9e2f64c v{pkgver}
