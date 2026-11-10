@@ -59,6 +59,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [EXPERIMENTAL display idle kept allowed with every CRTC off](#kernel-9908-dm-idle-kept) | linux-omarchy | 9908 | RC only | not submitted |
 | [EXPERIMENTAL the GA605KM keyboard declares only its Caps Lock LED](#kernel-9909-nkey-caps-led-only) | linux-omarchy | 9909 | RC only | not submitted |
 | [EXPERIMENTAL debugfs to send the SMU AllowZstates message](#kernel-9910-smu-allow-zstates) | linux-omarchy | 9910 | RC only | ours-only |
+| [EXPERIMENTAL raw four-channel internal mic capture on the GA605K](#kernel-9911-ga605k-raw-mic) | linux-omarchy | 9911 | Quattro | not submitted |
 | [hibernate power-off](#nvidia-0001-hibernate-power-off) | nvidia-open-dkms | 0001 | both | open |
 | [NVPCF defer (+refcount fix)](#nvidia-0002-nvpcf-defer) | nvidia-open-dkms | 0002 | both | open |
 | [nvkms semaphore leak](#nvidia-0003-semaphore-leak) | nvidia-open-dkms | 0003 | both | open |
@@ -688,6 +689,35 @@ Add the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
   logged by `echo 'file dcn35_smu.c +p' > /sys/kernel/debug/dynamic_debug/control`.
 - **Upstream: ours-only.** An experiment.
 - **Drop when:** the test is done.
+
+<a id="kernel-9911-ga605k-raw-mic"></a>
+### EXPERIMENTAL raw four-channel internal mic capture on the GA605K (9911)
+
+- **Component:** `linux-omarchy`, `9911-EXPERIMENTAL-alsa-hda-realtek-ga605k-raw-mic-capture-default-off.patch`,
+  after 9910. Quattro (main) since 7.2.15-1.102; RC gets it by promotion
+  after its G16 test. Touches `sound/hda/codecs/realtek/alc269.c` only.
+- **What:** with `snd_hda_codec_alc269.ga605k_raw_mic=1` (read-only, default 0), the GA605K's
+  ALC285 (codec SSID 1043:1314 only) gets a separate four-channel capture PCM, `ALC285 Raw Mic`:
+  ADC 0x07 (selector 0x24, pin 0x12; raw0-1, "raw") and ADC 0x09 (mixer 0x22, pin 0x13; raw2-3,
+  "aux") on one stream tag and format at channel offsets 0 and 2. The generic parser only offers
+  the two internal mic pins one at a time, through one converter. The PCM offers only the
+  rates and formats both converters support. It and the normal capture PCMs refuse each other
+  (`-EBUSY`); while it is open the capture source control returns `-EBUSY`, a mic auto-switch
+  waits until it closes, and a codec re-init re-applies its routing. ADC 0x09's gain and mute
+  follow `Capture Volume`/`Capture Switch`. A new fixup between the GA605K headset-mic and speaker
+  fixups (both unchanged) does it; with the parameter at 0 it returns at once: no PCM, control
+  or verb changes. No vendor coefficient writes. Whether the extra channels are independent,
+  and their order and polarity, is unknown; they are named raw and aux only.
+- **Test:** `tests/channel/linux-omarchy-9911-raw-mic.sh` (wiring, and a `W=1` compile of
+  `alc269.o` in the exact recipe tree). On the G16, Steward card #404: boot with the parameter,
+  `arecord -l` shows the Raw Mic device, `--dump-hw-params` on its `hw:` device shows 4 channels
+  and only the common rates and formats, opening it while the stereo capture is in use gives
+  `EBUSY`; with the parameter off, stereo, headset and speakers are unchanged. Undo: remove the
+  parameter. Issue: #403 (part of #400).
+- **Upstream: not submitted.** A model-scoped experiment; a submission only once the G16 shows the
+  extra channels are independent.
+- **Drop when:** the G16 shows the extra channels are not independent, or once an upstream
+  equivalent exists.
 
 ## NVIDIA: nvidia-open-dkms
 
