@@ -2192,8 +2192,8 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   byte only takes nibble pairs, and ASUS's Windows filter driver splits it the same way). The
   HID-BPF program moves them into per-finger Tip Pressure, Width and Height fields (report size
   unchanged), so hid-multitouch publishes `ABS_MT_PRESSURE` and `ABS_MT_TOUCH_MAJOR`/`MINOR`;
-  the quirk sets `AttrPalmPressureThreshold=70` and `AttrPressureRange=none` (touch-down stays
-  contact-based, as without the fixup).
+  the quirk sets `AttrPalmPressureThreshold=63` (70 until 1.0.0-107) and `AttrPressureRange=none`
+  (touch-down stays contact-based, as without the fixup).
 - **Test:** `tests/channel/g16-touchpad-palm.sh` checks the descriptor rewrite and the report
   repack against the pad's descriptor offline (the rewrite matches the kernel's byte for byte).
   A 53 s raw capture from the G16, replayed through a uhid copy of the pad with the program
@@ -2203,9 +2203,18 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   read at most 62; every palm down for more than a few reports went past 70 (the lightest,
   unflagged just inside the right edge, peaked at 71-77), and a deliberately flattened finger
   reached 73, so at 70 it counts as a palm. Thresholds 70-100 all removed the palm scrolls, 130
-  let one back, 70 let the least palm motion through. The same test checks the threshold against
+  let one back, 70 let the least palm motion through. After eight days of daily use at 70 some
+  palms still scrolled and went Back (#390), so 1.0.0-107 lowers it to 63, just above the
+  strongest fingertip (62 over 4063 reports): a palm lands light and climbs, and until it passes
+  the threshold it is a finger. In the capture that landing (9 to 114 reports, mostly in the
+  outer 20 mm of each side) was the only time a palm counted as a finger; replayed the same way
+  (one uhid copy, libinput readers at 55-80 side by side), 63 cut it by 42% and the pointer
+  motion made by palms alone by a quarter against 70, with the two scrolls, the clicks and
+  fingertip motion unchanged. A side-strip boost would cut more but the capture has no
+  fingertip in those strips to show it safe. The same test checks the threshold against
   every contact of the capture (`tests/channel/fixtures/asuf1209-touchpad-contacts.tsv`): it
-  fails at 80 on those light palms and at 60 on a fast-swipe fingertip. Two unflagged palm
+  fails at 80 on those light palms, at 61 on a fast-swipe fingertip, and above 63 for leaving
+  landing room over the fingertips. Two unflagged palm
   brushes of 7 and 14 reports peak at 68 and 59, inside the fingertips' range; strength can't
   catch them, and disable-while-typing covers them while typing. The cell counts don't separate palms: as a palm
   size threshold, 6 cells dropped a real two-finger scroll and 7 or more let palm scrolls
@@ -2236,7 +2245,7 @@ Two reports, sent separately or not at all; a human decides. Neither is filed.
   > cells (which grow with motion, so they don't separate palms). The attached program moves
   > them into per-finger Tip Pressure, Width and Height and keeps the report length, so
   > hid-multitouch exports ABS_MT_PRESSURE and ABS_MT_TOUCH_MAJOR/MINOR. With
-  > `AttrPalmPressureThreshold=70` and `AttrPressureRange=none`, a replay of a capture of typing
+  > `AttrPalmPressureThreshold=63` and `AttrPressureRange=none`, a replay of a capture of typing
   > with resting palms loses every palm-made two-finger scroll and keeps the deliberate ones.
 
 ## Our packages

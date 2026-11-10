@@ -338,7 +338,7 @@ reached 73, so it counts as a palm too.
   accepts only this pad's 764-byte descriptor.
 - `81-hid-bpf-omarchy-asus-g16.hwdb` tells udev-hid-bpf (a dependency) to load it for I2C
   2808:0219.
-- `50-omarchy-asus-g16-touchpad.quirks` sets, for the same pad, `AttrPalmPressureThreshold=70`
+- `50-omarchy-asus-g16-touchpad.quirks` sets, for the same pad, `AttrPalmPressureThreshold=63`
   (a touch above it is a palm until it lifts: no pointer motion, no scroll, no gesture, not
   counted for a clickfinger click) and `AttrPressureRange=none`, so libinput keeps telling
   touch-down by contact as before rather than by strength (a light fingertip reads about 20).
@@ -350,6 +350,13 @@ the pad, with the program attached by udev-hid-bpf, hid-multitouch and libinput 
 three palm-made scrolls and a pinch. With the quirk: none, and the two real scrolls, the clicks
 and fingertip pointer motion are unchanged. Palm pressure thresholds 70 to 100 gave the same
 result, 130 let a palm scroll back, and 70 let the least palm pointer motion through.
+1.0.0-107 lowers it to 63, just above the strongest fingertip: after eight days of daily use at
+70 some palms still scrolled and went Back. A palm lands light and climbs, and until it passes
+the threshold it is a finger; in the capture that landing (9 to 114 reports, mostly in the outer
+20 mm of each side) was the only time a palm counted as a finger. In the same replay 63 cut
+that time by 42% and the pointer motion made by palms alone by a quarter against 70, with the
+two scrolls, the clicks and fingertip motion unchanged; at 61 or below a captured fingertip
+counts as a palm.
 `tests/channel/g16-touchpad-palm.sh` checks the threshold against every contact of that capture
 (`tests/channel/fixtures/asuf1209-touchpad-contacts.tsv`): all fingertips at or under it, all
 palms over it or flagged by the pad, except two unflagged palm brushes of 7 and 14 reports that
@@ -363,12 +370,13 @@ reads libinput's quirks when it starts, so the change takes effect at the next b
 
 **Check:** `sudo udev-hid-bpf list-loaded` lists `0010-FocalTech__ASUF1209.bpf.o` on the
 touchpad, and `sudo libinput quirks list` on the touchpad's event node (`sudo libinput
-list-devices` names it) prints `AttrPalmPressureThreshold=70`. `sudo libinput debug-events
+list-devices` names it) prints `AttrPalmPressureThreshold=63`. `sudo libinput debug-events
 --verbose` logs `palm detected (pressure)` for a resting palm.
 
 **Tuning:** a finger that stops moving the pointer is being taken for a palm; a palm that
-still scrolls is under the threshold. Raising it to 74 gives the flattened finger back and
-lets the lightest resting palms through. Override it in `/etc/libinput/local-overrides.quirks`
+still scrolls is under the threshold. Raising it gives fingertips more room and lets landing
+palms count as fingers for longer (70 was the first setting, 74 gives the flattened finger
+back); below 62 the capture's strongest fingertip counts as a palm. Override it in `/etc/libinput/local-overrides.quirks`
 with the same match lines and another `AttrPalmPressureThreshold`, then log out and back in.
 
 **This one isn't a fork mirror:** the fork has no equivalent.

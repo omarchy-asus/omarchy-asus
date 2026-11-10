@@ -4,14 +4,17 @@
 # ABS_MT_TOUCH_MAJOR/MINOR and its signal strength (0-255) as ABS_MT_PRESSURE.
 #
 # Palms are told by strength. Captured on the G16, a fingertip reads at most
-# 62 (resting, moving or clicking). Every palm that stays down more than a few
-# reports goes past 70, most within a few frames and many up to 255; the
-# lightest, resting just inside the right edge without the pad's palm flag,
-# peak at 71-77. A deliberately flattened finger reaches 73, so at 70 it
-# counts as a palm: the price of catching those light palms. Replayed through
-# hid-multitouch and libinput, every palm-made scroll in the capture stopped
-# at any threshold from 70 to 100 (130 let one back), and 70 let the least
-# palm pointer motion through. A touch above it is a palm until it lifts.
+# 62 (resting, moving or clicking; 4063 reports). Every palm that stays down
+# more than a few reports goes past 70, often to 255, but a palm lands light
+# and climbs: until it passes the threshold libinput takes it for a finger.
+# In the capture that landing (9 to 114 reports, up to 0.45 s, mostly in the
+# outer 20 mm of each side) is the only time a palm counted as a finger at 70.
+# Replayed through hid-multitouch and libinput, 63 (just above the strongest
+# fingertip) cut that time by 42% and the pointer motion made by palms alone
+# by a quarter against 70, with the two deliberate two-finger scrolls, the
+# clicks and fingertip motion unchanged; at 61 or below a captured fingertip
+# counts as a palm. A deliberately flattened finger reaches 73 and
+# counts as a palm. A touch above it is a palm until it lifts.
 # tests/channel/g16-touchpad-palm.sh checks this threshold against every
 # contact of that capture (tests/channel/fixtures/asuf1209-touchpad-contacts.tsv).
 #
@@ -28,4 +31,4 @@ MatchVendor=0x2808
 MatchProduct=0x0219
 MatchUdevType=touchpad
 AttrPressureRange=none
-AttrPalmPressureThreshold=70
+AttrPalmPressureThreshold=63
