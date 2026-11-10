@@ -169,24 +169,29 @@ pin them. The G16 test kit (`recipes/linux-omarchy/g16-test/`) runs a check for 
 <a id="kernel-0570-gl9767-rpm"></a>
 ### GL9767 SD reader runtime PM with the slot empty (0570)
 
-- **Component:** `linux-omarchy`, `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch`. RC only
-  (7.2.8-9.113; test builds 9.105).
+- **Component:** `linux-omarchy`, `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch`
+  (7.2.8-9.113 first; 7.2.15-1.102 reworks how it settles after a removal, #418).
 - **Fixes:** sdhci-pci keeps its probe-time runtime-PM reference on the GL9767, so the G16's SD
   reader and its root port sit in D0 for the whole boot (`runtime_suspended_time` 0 over 8.5 h); a
   udev `power/control=auto` rule can't change that. The patch gives the GL9767 runtime PM: it
   suspends only with the slot empty, the host powered off, card detect stable and a PME able to
   wake it, and arms insert wakeup while suspended. A resume re-applies the vendor config-space
-  settings and rescans only when a wakeup finds a card; eight quick wakes in a row with no card
-  stop runtime suspend until the next card change. Only GL9767 readers change, and the worst case
+  settings and rescans only when a wakeup finds a card. A card removal holds suspend off for 2 s
+  (right after a removal the reader wakes straight back up from D3); a reader
+  that keeps waking with no card, or whose card detect won't settle, backs off for 2 s doubling to
+  256 s, and nothing stops runtime suspend for good. Only GL9767 readers change, and the worst case
   is the reader staying in D0, as before.
 - **Test:** the kit's `0570` check (`g16-test/test`): with the slot empty the reader reaches
-  `suspended`; with a card cycle, an insert while suspended shows the card, and after removal it suspends
-  again and stays suspended (no suspend/resume loop). Without the card cycle the removal is
-  reported untested (WARN). `tests/channel/linux-omarchy-gl9767-rpm.sh` checks the recipe wiring
-  and compiles the driver. Power: the idle A/B's `sd-off` phase is the upper bound.
+  `suspended`; with a card cycle, an insert while suspended shows the card, and after removal it
+  suspends again within a few seconds and stays suspended. Without the card cycle the removal is
+  reported untested (WARN). `tests/channel/linux-omarchy-gl9767-rpm.sh` replays the patch's
+  functions through a removal that makes the reader wake back from D3 (it must suspend again
+  within 5 s, and back off from a reader that never settles) and compiles the driver. Power: the
+  idle A/B's `sd-off` phase is the upper bound.
 - **Upstream: not submitted** (target linux-mmc). Mainline (checked 2026-10-29) gives runtime PM
   to the GL9763E only; the GL9767 has none.
-- **Drop when:** mainline gives the GL9767 runtime PM. Issue: #226.
+- **Drop when:** mainline gives the GL9767 runtime PM. Issues: #226 (done), #418 (the reader
+  stayed awake after a card was removed; open until the G16 test of 7.2.15-1.102's 0570 passes).
 
 #### Upstream report draft
 
@@ -203,8 +208,10 @@ sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assis
 > The patch sets `allow_runtime_pm` with GL9767 `runtime_suspend`/`runtime_resume`. It suspends
 > only with the slot empty, the host powered off, card detect stable and `pci_dev_run_wake()`
 > true, and arms card-insert wakeup. Resume re-applies the vendor config-space settings and
-> rescans only when the wakeup found a card. A run of wakes with no card turns runtime suspend
-> off until the next card change, so a noisy card-detect line can't make it cycle.
+> rescans only when the wakeup found a card. Right after a card is removed the controller wakes
+> straight back up from D3 several times, so a removal holds suspend off for 2 s; a run of wakes with no card, or a card detect that won't settle, backs off for 2 s
+> doubling to 256 s, so a noisy card-detect line can't make it cycle and the reader still
+> suspends again once it settles.
 
 <a id="kernel-0481-amdgpu-display-power"></a>
 ### amdgpu display power backports (0481)
