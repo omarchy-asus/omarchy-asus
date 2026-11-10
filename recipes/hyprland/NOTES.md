@@ -1,4 +1,4 @@
-# hyprland 0.56.2-4.103 (RC channel)
+# hyprland 0.56.2-4.104
 
 **Base:** Arch's `hyprland` 0.56.2-4 packaging, commit `abb207b` ("upgpkg: 0.56.2-4") of
 https://gitlab.archlinux.org/archlinux/packaging/packages/hyprland. The Omarchy stable mirror's
@@ -9,11 +9,14 @@ packages are built at 0.56.2-4.103 and replace exactly what Arch ships. The PKGB
 
 **Our changes to Arch's PKGBUILD:** `pkgrel=4.103`, `(omarchy-asus build)` appended to both
 `pkgdesc`s (`pkgbuild-pkgdesc-label.diff`), plus `reconnect-render-offset.patch` and
-`seat-leave-on-capability-loss.patch` added to `source`/`sha256sums` and applied at the end of `prepare()`.
+`seat-leave-on-capability-loss.patch`, `output-late-bind-inert.patch` and
+`output-global-destroy-delay.patch` added to `source`/`sha256sums` and applied, in that order, at the
+end of `prepare()`.
 On the RC channel our pkgrel is Arch's pkgrel + `.101` and up (`.1` to `.99` is Quattro's range, where
 this recipe is at 4.2): 4.101 moved the recipe into the RC range (#201), 4.102 added
 `seat-leave-on-capability-loss.patch` (#302, #305), and 4.103 changes nothing in the packages: it
-releases them once through the release workflow (`build/release-path.conf`, #258).
+releases them once through the release workflow (`build/release-path.conf`, #258). 4.104, built on `main` for
+Quattro since the Omarchy 4.5 stable switch (#411), adds the two output patches (#422).
 
 **No `hyprland-debug`:** the chroot path also published a `hyprland-debug` package; the release
 workflow publishes no `-debug` packages, so the RC channel stopped serving it when this recipe moved
@@ -51,6 +54,30 @@ event, and wlroots doesn't cancel touches here either, so touch is unchanged.
 Not submitted (hyprwm/Hyprland#16178, the same symptom, was closed because reports go to
 Discussions). Drop the patch once a release sends leave before dropping the capability.
 
+**Patch:** `output-late-bind-inert.patch` (`src/protocols/core/Output.{cpp,hpp}`). Backport of
+Hyprland main's `c7932c6ef` ("core/output: install cleanup handlers for inert resources") and
+`5b6b75ac5` ("core/output: make late bindings to removed outputs inert"), both 2026-10-21, `src/`
+only (their test needs main's test harness). The one change: 0.56.2 spells the removed warning
+`Log::logger->log(...)`, not `LOG(...)`. A bind to a removed output, or to one whose monitor has no
+backend output any more, gets an inert resource: no events, no `outputBound`, and its release and
+destroy handlers installed so it drains. On its own it does not stop the disconnects below.
+
+**Patch:** `output-global-destroy-delay.patch` (`src/protocols/core/Output.{cpp,hpp}`,
+`src/managers/ProtocolManager.cpp`). Ours: Hyprland destroyed a removed wl_output global at once
+(`retireOutputGlobal()` when a monitor with the same name came back, and
+`CWLOutputProtocol::destroyResource()` when the last resource was released), so every client with a
+bind in flight got libwayland's fatal `global wl_output (N) is unavailable`. On the G16 an HDMI
+connector that flickers on resume disconnected Xwayland, the shell, the portals, fcitx5 and the
+browsers at once (#422). `remove()` now records the removal and arms a timer; `canDestroy()` is
+true only 5 s after it (wlroots' `wlr_global_destroy_safe` delay) with no resource bound, and both
+paths, plus the timer's sweep, destroy only then. `isGlobalPrivileged()` also checks
+`defunctOutputs`, so a sandboxed client's late bind isn't filtered into the same error.
+
+**Upstream status (checked 2026-11-10):** `c7932c6ef` and `5b6b75ac5` are on `main`, in no release
+(v0.56.2 is the latest). `main` still destroys retired output globals at once; the delay is not
+submitted (a report draft is in docs/deltas.md#hyprland-output-global-destroy-delay). `DELTA`'s
+`fixed-upstream` line flags the first release with `5b6b75ac5`.
+
 **Rebase when Arch moves:** `bin/auto-update` does this automatically from `DELTA`
 (`bin/rebase-recipe hyprland --version <arch ver> --out <dir> --verify` by hand). The
 `fixed-upstream` line flags the first release that contains `e9e2f64c`. By hand:
@@ -61,6 +88,10 @@ Discussions). Drop the patch once a release sends leave before dropping the capa
    `reconnect-render-offset.patch`, and if the bug is gone, drop that patch. Separately, check whether the
    release's `CWLSeatProtocol::updateCapabilities()` sends `leave` before dropping a capability; if it does,
    test without `seat-leave-on-capability-loss.patch` (lock, suspend, resume, type) and drop it if typing works.
-   Only when neither patch is left, `bin/unpublish hyprland hyprpm` and delete this recipe. Regenerate
+   If the release contains `5b6b75ac5` and `c7932c6ef`, drop `output-late-bind-inert.patch`. If its
+   `CWLOutputProtocol` delays destroying a removed global, run the flicker reproducer
+   (docs/deltas.md#hyprland-output-global-destroy-delay) without `output-global-destroy-delay.patch`
+   and drop it if no client dies.
+   Only when no patch is left, `bin/unpublish hyprland hyprpm` and delete this recipe. Regenerate
    each patch that is still needed against the new source (`makepkg --nobuild --nodeps` in a scratch copy).
 4. Run `bin/check-upstream`, then `bin/build-pkg recipes/hyprland`.

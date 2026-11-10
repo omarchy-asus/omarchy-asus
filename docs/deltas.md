@@ -65,6 +65,8 @@ An upstream state that changes is updated here, with the date it was checked.
 | [HDMI with no EDID is disconnected](#nvidia-0004-hdmi-no-edid) | nvidia-open-dkms | 0004 | RC only | not submitted |
 | [reconnect render offset](#hyprland-reconnect-render-offset) | hyprland | `reconnect-render-offset.patch` | both | merged-unreleased |
 | [wl_keyboard.leave before the seat loses its keyboard](#hyprland-seat-leave) | hyprland | `seat-leave-on-capability-loss.patch` | RC only | not submitted |
+| [late binds to removed outputs are inert](#hyprland-output-late-bind-inert) | hyprland | `output-late-bind-inert.patch` | both | merged-unreleased |
+| [removed wl_output globals are destroyed 5 s later](#hyprland-output-global-destroy-delay) | hyprland | `output-global-destroy-delay.patch` | both | not submitted |
 | [asusd profile/EPP hand-off](#omarchy-0001-asusd-hand-off) | omarchy | 0001 | both | open |
 | [USB-C power policy](#omarchy-0002-usbc-power) | omarchy | 0002 | both | open |
 | [power profiles: external owner](#omarchy-0003-external-owner) | omarchy | 0003 | both | open |
@@ -781,8 +783,8 @@ still unsigned, see [0001](#nvidia-0001-hibernate-power-off)). Not opened; a hum
 
 ## Hyprland: hyprland and hyprpm
 
-0.56.2: RC 4.103, Quattro 4.2 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`).
-Once neither patch is left, `bin/unpublish hyprland hyprpm` and delete the recipe.
+0.56.2-4.104 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`), built on `main`
+for Quattro and promoted to RC. Once no patch is left, `bin/unpublish hyprland hyprpm` and delete the recipe.
 
 <a id="hyprland-reconnect-render-offset"></a>
 ### Reconnect render offset
@@ -904,6 +906,120 @@ For a human to post as a hyprwm/Hyprland Discussion.
 >
 > Tested on 0.56.2: leave arrives before `capabilities(0)`, and the window re-activates on every
 > re-add.
+
+<a id="hyprland-output-late-bind-inert"></a>
+### Late binds to removed outputs are inert
+
+- **Component:** `hyprland`/`hyprpm`, `output-late-bind-inert.patch`
+  (`src/protocols/core/Output.{cpp,hpp}`). Both channels from 0.56.2-4.104 (#422).
+- **Fixes:** a bind to a removed wl_output, or to one whose monitor has no backend output any more,
+  got a live resource: state events for a monitor that is gone, `outputBound` emitted, and (with
+  the monitor already freed) no release or destroy handler, so it never drained. Now it gets an
+  inert resource that drains on release or disconnect. It is the half of the flicker fix that
+  makes the delayed destroy below safe; on its own it does not stop the disconnects.
+- **Test:** the flicker reproducer under
+  [the delayed destroy](#hyprland-output-global-destroy-delay) exercises it: the delayed clients
+  bind outputs that are already removed, and none of them dies or leaks.
+- **Upstream: merged-unreleased.** Hyprland `main` `c7932c6efc69` ("core/output: install cleanup
+  handlers for inert resources") and `5b6b75ac5fa3` ("core/output: make late bindings to removed
+  outputs inert"), both 2026-10-21; backported as upstream wrote them, `src/` only (their
+  `tests/protocols/Output.cpp` needs main's test harness), with the removed warning spelled
+  `Log::logger->log` as in 0.56.2. Checked 2026-11-10: in no release; v0.56.2 is the latest.
+  `DELTA`'s `fixed-upstream` line flags the first release with `5b6b75ac5`.
+- **Drop when:** we rebase onto an Arch Hyprland release that contains both commits.
+
+<a id="hyprland-output-global-destroy-delay"></a>
+### Removed wl_output globals are destroyed 5 s later, not at once
+
+- **Component:** `hyprland`/`hyprpm`, `output-global-destroy-delay.patch`
+  (`src/protocols/core/Output.{cpp,hpp}`, `src/managers/ProtocolManager.cpp`). Both channels from
+  0.56.2-4.104 (#422). Ours: upstream has no fix.
+- **Fixes:** on the G16, resuming from hibernate with HDMI plugged in while asleep, the HDMI
+  connector came up, went away and came back within two seconds, and at that moment nearly every
+  Wayland client was disconnected with `wl_registry#2: error 0: global wl_output (75) is
+  unavailable`: Xwayland (not restarted), the shell, xdg-desktop-portal-gtk, fcitx5, Chrome, Slack
+  and an Electron app. Only a new session recovered. libwayland 1.26 posts that fatal error for a
+  bind to a global that has been `wl_global_destroy`ed; a global that was only
+  `wl_global_remove`d can still be bound, which is why a removed global is meant to be destroyed
+  later, once clients have seen the removal (wlroots waits 5 s, `wlr_global_destroy_safe`).
+  Hyprland 0.56.2 destroyed it at once in two places: `retireOutputGlobal()`
+  (`ProtocolManager.cpp`, a monitor with the same name added again) dropped a removed output with
+  no bound resources, and `CWLOutputProtocol::destroyResource()` dropped a removed output as soon
+  as its last resource was released. On a flicker every client has a bind in flight for the newly
+  announced output, hence the mass disconnect.
+  The patch: `remove()` records when the global was removed and arms a timer; `canDestroy()` is
+  true only 5 s after the removal with no resource bound. `retireOutputGlobal()` keeps a retired
+  output in `defunctOutputs` until then, `destroyResource()` destroys only then, and the timer's
+  `PROTO::sweepDefunctOutputs()` drops whatever has become destroyable from `defunctOutputs` and
+  `outputs` (a removed output that is never re-added now goes too, as in wlroots).
+  `isGlobalPrivileged()` also looks in `defunctOutputs`, so a sandboxed (security-context)
+  client's bind to a retired output isn't filtered into the same fatal error. Binds in the 5 s
+  window get an inert resource ([the backport above](#hyprland-output-late-bind-inert)).
+- **Evidence (headless, on the build host):** Hyprland nested in a private headless mutter
+  (render node only, its own HOME and runtime dir), ten clients that bind every announced
+  wl_output and release it on `global_remove` (four bind at once, six after 1 ms to 200 ms, as a
+  busy client would), and 60 rounds of `hyprctl output create headless FLICK`, 0-90 ms,
+  `hyprctl output remove FLICK`, 0-40 ms:
+  - stock 0.56.2-4: 4 of the 10 clients die, each with `wl_registry#2: error 0: global wl_output
+    (80) is unavailable`, the error Xwayland logged on the G16 (the delayed binders die; the
+    immediate ones survive);
+  - patched 0.56.2-4.104 (the chroot build): 0 of 10 die, in three runs of 60 rounds;
+  - lifecycle, patched: a client that binds FLICK's name 0 s, 1 s and 4 s after its removal
+    stays connected; at 6.5 s it gets "is unavailable", so the global is destroyed after the
+    delay, not leaked. After the loop, `PROTO::outputs` holds only the live output and
+    `PROTO::defunctOutputs` is empty (gdb with the debug package).
+- **Test (G16):** hibernate, plug HDMI in while it is asleep, resume: no client is disconnected
+  (`journalctl --user -b | grep -c 'is unavailable'` stays 0, Xwayland, the shell and Chrome keep
+  running). The passive HDMI recorder (`bin/g16-hdmi watch`, #158) shows whether the connector
+  flickered on that resume.
+- **Upstream: not submitted.** Hyprland `main` still destroys retired output globals at once
+  (checked 2026-11-10). Related: hyprwm/Hyprland#15351 (bound resources kept on a same-name
+  replace, the `defunctOutputs` this builds on) and `5b6b75ac5` / `c7932c6ef` (inert late binds),
+  neither of which delays the destroy.
+- **Drop when:** a Hyprland release delays destroying a removed wl_output global, and the
+  reproducer above shows no client dying without this patch.
+
+#### Upstream report draft
+
+For a human to post as a hyprwm/Hyprland Discussion (or as a pull request with the patch).
+
+> **Title:** Monitor flicker disconnects every client: removed wl_output globals are
+> wl_global_destroy'd immediately ("global wl_output (N) is unavailable")
+>
+> When a monitor disappears and comes back quickly (an HDMI connector that flickers on resume, a
+> power blip on an external screen), nearly every Wayland client is disconnected at once with
+> `wl_registry#2: error 0: global wl_output (N) is unavailable`: Xwayland, the bar, portals,
+> input methods, browsers. Hyprland keeps running but the session is unusable.
+>
+> libwayland's `registry_bind` posts that fatal error when the bound name is no longer in the
+> display's global list, i.e. after `wl_global_destroy`. A global that was only
+> `wl_global_remove`d is still bindable, which is why the removal should be followed by the
+> destroy some time later, once clients have seen `wl_registry.global_remove` (wlroots:
+> `wlr_global_destroy_safe`, 5 s). Hyprland destroys removed output globals immediately:
+>
+> - `retireOutputGlobal()` (`src/managers/ProtocolManager.cpp`), when a monitor with the same
+>   name is added again, drops the last reference to the old protocol object if no resource is
+>   bound yet, so `~IWaylandProtocol` runs `wl_global_destroy` straight away;
+> - `CWLOutputProtocol::destroyResource()` does the same once the last resource of a defunct
+>   output is released.
+>
+> Every client that has received `wl_registry.global` for that output and has a `bind` in flight
+> then gets the fatal error. On a flicker that is every client, because they all bind each new
+> wl_output as soon as it is announced. The inert late binds on main (`5b6b75ac5`, `c7932c6ef`)
+> handle binds to a removed but still-alive global; they don't stop the immediate destroy.
+>
+> Reproducer: a nested Hyprland, a few clients that bind every announced wl_output (some after a
+> short delay, as a busy client would) and release it on `global_remove`, and a loop of
+> `hyprctl output create headless FLICK; hyprctl output remove FLICK` with 0-90 ms between the
+> calls. On 0.56.2, 60 rounds kill 4 of 10 clients with "is unavailable"; with the change below,
+> none in 180 rounds.
+>
+> Suggested fix: record the removal time in `CWLOutputProtocol::remove()` and arm a timer;
+> destroy a removed output (drop it from `PROTO::outputs` / `PROTO::defunctOutputs`) only once
+> 5 s have passed and no resource is bound, from `retireOutputGlobal()`, `destroyResource()` and
+> the timer alike. `isGlobalPrivileged()` should also accept globals in `defunctOutputs`, or a
+> sandboxed client's late bind is filtered into the same error. A patch against 0.56.2 is
+> available.
 
 ## Omarchy: omarchy and omarchy-settings
 
