@@ -1,0 +1,82 @@
+diff --git i/src/xwayland/XWM.cpp w/src/xwayland/XWM.cpp
+index 5cf5c7e..ae8f9ff 100644
+--- i/src/xwayland/XWM.cpp
++++ w/src/xwayland/XWM.cpp
+@@ -560,7 +560,7 @@ void CXWM::focusWindow(SP<CXWaylandSurface> surf) {
+     }
+ 
+     if (!surf) {
+-        xcb_set_input_focus_checked(getConnection(), XCB_INPUT_FOCUS_POINTER_ROOT, XCB_NONE, XCB_CURRENT_TIME);
++        xcb_set_input_focus_checked(getConnection(), XCB_INPUT_FOCUS_POINTER_ROOT, m_noFocusWindow, XCB_CURRENT_TIME);
+         return;
+     }
+ 
+@@ -1051,6 +1051,7 @@ CXWM::CXWM() : m_connection(makeUnique<CXCBConnection>(g_pXWayland->m_server->m_
+     m_listeners.newXShellSurface = PROTO::xwaylandShell->m_events.newSurface.listen([this](const auto& surface) { onNewResource(surface); });
+ 
+     createWMWindow();
++    createNoFocusWindow();
+ 
+     xcb_flush(getConnection());
+ }
+@@ -1086,12 +1087,29 @@ void CXWM::createWMWindow() {
+     xcb_set_selection_owner(getConnection(), m_wmWindow, HYPRATOMS["_NET_WM_CM_S0"], XCB_CURRENT_TIME);
+ }
+ 
++// A mapped, 1x1, off-screen, override-redirect window that holds the X input focus and is the
++// _NET_ACTIVE_WINDOW while no X11 window is focused (as wlroots' no_focus_window).
++// isWMWindow() keeps it from becoming a managed surface.
++void CXWM::createNoFocusWindow() {
++    m_noFocusWindow    = xcb_generate_id(getConnection());
++    uint32_t values[2] = {1, XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_FOCUS_CHANGE};
++    xcb_create_window(getConnection(), XCB_COPY_FROM_PARENT, m_noFocusWindow, m_screen->root, -100, -100, 1, 1, 0, XCB_WINDOW_CLASS_COPY_FROM_PARENT, XCB_COPY_FROM_PARENT,
++                      XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK, values);
++    xcb_map_window(getConnection(), m_noFocusWindow);
++}
++
+ void CXWM::activateSurface(SP<CXWaylandSurface> surf, bool activate) {
+     if ((surf == m_focusedSurface && activate) || (surf && surf->m_overrideRedirect))
+         return;
+ 
+-    if (!surf || (!activate && Desktop::focusState()->window() && !Desktop::focusState()->window()->m_isX11)) {
+-        setActiveWindow(XCB_WINDOW_NONE);
++    // When focus leaves X11 for a Wayland window, or for no window at all, name the
++    // no-focus window as the active window and give it the X input focus, instead of None.
++    // X clients such as Wine read None as a transient state (other X window managers use it
++    // mid-switch), so they keep the deactivated window in the foreground. This follows
++    // wlroots, KWin and Weston, which all made the same change.
++    const auto FOCUSED = Desktop::focusState()->window();
++    if (!surf || (!activate && (!FOCUSED || !FOCUSED->m_isX11))) {
++        setActiveWindow(m_noFocusWindow);
+         focusWindow(nullptr);
+     } else {
+         setActiveWindow(surf ? surf->m_xID : sc<uint32_t>(XCB_WINDOW_NONE));
+@@ -1263,7 +1281,7 @@ void CXWM::updateWorkArea(int x, int y, int w, int h) {
+ }
+ 
+ bool CXWM::isWMWindow(xcb_window_t w) {
+-    return w == m_wmWindow || w == m_clipboard.window || w == m_dndSelection.window;
++    return w == m_wmWindow || w == m_noFocusWindow || w == m_clipboard.window || w == m_dndSelection.window;
+ }
+ 
+ void CXWM::updateOverrideRedirect(SP<CXWaylandSurface> surf, bool overrideRedirect) {
+diff --git i/src/xwayland/XWM.hpp w/src/xwayland/XWM.hpp
+index 5927031..03db5b8 100644
+--- i/src/xwayland/XWM.hpp
++++ w/src/xwayland/XWM.hpp
+@@ -127,6 +127,7 @@ class CXWM {
+     void                 getVisual();
+     void                 getRenderFormat();
+     void                 createWMWindow();
++    void                 createNoFocusWindow();
+     void                 initSelection();
+ 
+     void                 onNewSurface(SP<CWLSurfaceResource> surf);
+@@ -188,6 +189,7 @@ class CXWM {
+     xcb_screen_t*                             m_screen = nullptr;
+ 
+     xcb_window_t                              m_wmWindow;
++    xcb_window_t                              m_noFocusWindow = XCB_WINDOW_NONE;
+ 
+     wl_event_source*                          m_eventSource = nullptr;
+ 

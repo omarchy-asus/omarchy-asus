@@ -1,4 +1,4 @@
-# hyprland 0.56.2-4.104
+# hyprland 0.56.2-4.105
 
 **Base:** Arch's `hyprland` 0.56.2-4 packaging, commit `abb207b` ("upgpkg: 0.56.2-4") of
 https://gitlab.archlinux.org/archlinux/packaging/packages/hyprland. The Omarchy stable mirror's
@@ -7,16 +7,16 @@ Arch's `extra`. Arch's split (`hyprland` + `hyprpm`, split out in 0.56.2-3) is u
 packages are built at 0.56.2-4.103 and replace exactly what Arch ships. The PKGBUILD is Arch's (0BSD, see
 `LICENSE`).
 
-**Our changes to Arch's PKGBUILD:** `pkgrel=4.103`, `(omarchy-asus build)` appended to both
+**Our changes to Arch's PKGBUILD:** `pkgrel=4.105`, `(omarchy-asus build)` appended to both
 `pkgdesc`s (`pkgbuild-pkgdesc-label.diff`), plus `reconnect-render-offset.patch` and
-`seat-leave-on-capability-loss.patch`, `output-late-bind-inert.patch` and
-`output-global-destroy-delay.patch` added to `source`/`sha256sums` and applied, in that order, at the
+`seat-leave-on-capability-loss.patch`, `output-late-bind-inert.patch`,
+`output-global-destroy-delay.patch` and `xwayland-no-focus-window.patch` added to `source`/`sha256sums` and applied, in that order, at the
 end of `prepare()`.
 On the RC channel our pkgrel is Arch's pkgrel + `.101` and up (`.1` to `.99` is Quattro's range, where
 this recipe is at 4.2): 4.101 moved the recipe into the RC range (#201), 4.102 added
 `seat-leave-on-capability-loss.patch` (#302, #305), and 4.103 changes nothing in the packages: it
 releases them once through the release workflow (`build/release-path.conf`, #258). 4.104, built on `main` for
-Quattro since the Omarchy 4.5 stable switch (#411), adds the two output patches (#422).
+Quattro since the Omarchy 4.5 stable switch (#411), adds the two output patches (#422). 4.105 adds `xwayland-no-focus-window.patch` (#424).
 
 **No `hyprland-debug`:** the chroot path also published a `hyprland-debug` package; the release
 workflow publishes no `-debug` packages, so the RC channel stopped serving it when this recipe moved
@@ -78,6 +78,23 @@ paths, plus the timer's sweep, destroy only then. `isGlobalPrivileged()` also ch
 submitted (a report draft is in docs/deltas.md#hyprland-output-global-destroy-delay). `DELTA`'s
 `fixed-upstream` line flags the first release with `5b6b75ac5`.
 
+**Patch:** `xwayland-no-focus-window.patch` (`src/xwayland/XWM.cpp`/`XWM.hpp`, `CXWM::activateSurface`,
+`CXWM::focusWindow`, new `CXWM::createNoFocusWindow`). When focus moves from an X11 window to a Wayland
+window, Hyprland set `_NET_ACTIVE_WINDOW` and the X input focus to None. Wine (10.x and later, Proton
+too) takes the foreground from `_NET_ACTIVE_WINDOW` and reads None as a transient state, so the game
+stays in the foreground: it keeps its sound with "sound in background" off, doesn't pause, keeps the
+mouse (#424). The patch does what wlroots, KWin and Weston do: a mapped, 1x1, off-screen,
+override-redirect "no focus" window, created with the WM window, is named as `_NET_ACTIVE_WINDOW` and
+gets the X input focus whenever no X11 window is focused. Wine maps a window it doesn't own to the
+desktop, so the game is deactivated. `isWMWindow()` lists it, so it never becomes a managed surface.
+The patch also covers focus going to no window at all (an empty workspace), where 0.56.2 re-named the
+old X11 window as active.
+
+**Upstream status (checked 2026-11-10):** not fixed on `main` (`activateSurface` still sets
+`XCB_WINDOW_NONE`), not submitted. The same change is in wlroots (MR 5076), KWin (MR 7664) and Weston
+(MR 1761); Wine reverted its own None-means-desktop fix (wine MR 8108, reverted by 8117) in favour of
+them. Drop the patch once a Hyprland release no longer sets None when a Wayland window is focused.
+
 **Rebase when Arch moves:** `bin/auto-update` does this automatically from `DELTA`
 (`bin/rebase-recipe hyprland --version <arch ver> --out <dir> --verify` by hand). The
 `fixed-upstream` line flags the first release that contains `e9e2f64c`. By hand:
@@ -92,6 +109,8 @@ submitted (a report draft is in docs/deltas.md#hyprland-output-global-destroy-de
    `CWLOutputProtocol` delays destroying a removed global, run the flicker reproducer
    (docs/deltas.md#hyprland-output-global-destroy-delay) without `output-global-destroy-delay.patch`
    and drop it if no client dies.
+   If the release's `CXWM::activateSurface` no longer sets `XCB_WINDOW_NONE` for a Wayland focus, run #424's
+   test without `xwayland-no-focus-window.patch` and drop it if the game is deactivated.
    Only when no patch is left, `bin/unpublish hyprland hyprpm` and delete this recipe. Regenerate
    each patch that is still needed against the new source (`makepkg --nobuild --nodeps` in a scratch copy).
 4. Run `bin/check-upstream`, then `bin/build-pkg recipes/hyprland`.

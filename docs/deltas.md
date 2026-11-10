@@ -67,6 +67,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [wl_keyboard.leave before the seat loses its keyboard](#hyprland-seat-leave) | hyprland | `seat-leave-on-capability-loss.patch` | RC only | not submitted |
 | [late binds to removed outputs are inert](#hyprland-output-late-bind-inert) | hyprland | `output-late-bind-inert.patch` | both | merged-unreleased |
 | [removed wl_output globals are destroyed 5 s later](#hyprland-output-global-destroy-delay) | hyprland | `output-global-destroy-delay.patch` | both | not submitted |
+| [XWayland no-focus window](#hyprland-xwayland-no-focus-window) | hyprland | `xwayland-no-focus-window.patch` | main (Quattro) | not submitted |
 | [asusd profile/EPP hand-off](#omarchy-0001-asusd-hand-off) | omarchy | 0001 | both | open |
 | [USB-C power policy](#omarchy-0002-usbc-power) | omarchy | 0002 | both | open |
 | [power profiles: external owner](#omarchy-0003-external-owner) | omarchy | 0003 | both | open |
@@ -783,7 +784,7 @@ still unsigned, see [0001](#nvidia-0001-hibernate-power-off)). Not opened; a hum
 
 ## Hyprland: hyprland and hyprpm
 
-0.56.2-4.104 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`), built on `main`
+0.56.2-4.105 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`), built on `main`
 for Quattro and promoted to RC. Once no patch is left, `bin/unpublish hyprland hyprpm` and delete the recipe.
 
 <a id="hyprland-reconnect-render-offset"></a>
@@ -1020,6 +1021,69 @@ For a human to post as a hyprwm/Hyprland Discussion (or as a pull request with t
 > the timer alike. `isGlobalPrivileged()` should also accept globals in `defunctOutputs`, or a
 > sandboxed client's late bind is filtered into the same error. A patch against 0.56.2 is
 > available.
+
+<a id="hyprland-xwayland-no-focus-window"></a>
+### XWayland no-focus window
+
+- **Component:** `hyprland`/`hyprpm`, `xwayland-no-focus-window.patch` (`src/xwayland/XWM.cpp`,
+  `XWM.hpp`: `CXWM::activateSurface`, `CXWM::focusWindow`, `CXWM::isWMWindow`, new
+  `CXWM::createNoFocusWindow`). 0.56.2-4.105 on `main`. Work issue #424 (the G16 test).
+- **Fixes:** a Wine game (Proton, GE-Proton, plain Wine 10+) stays in the foreground when focus
+  moves from it to a native Wayland window: World of Warcraft keeps its sound with "Sound in
+  Background" off, games don't pause and keep the mouse. Switching to another X11 window works.
+  Hyprland 0.56.2 sets `_NET_ACTIVE_WINDOW` and the X input focus to None when a Wayland window
+  takes focus. Wine takes the foreground from `_NET_ACTIVE_WINDOW` (`X11DRV_GetWindowStateUpdates`)
+  and, when the window manager supports it, ignores FocusOut (`focus_out`); a window it doesn't own
+  becomes the desktop, but None means "no change", so the game is never deactivated. The patch
+  does what wlroots, KWin and Weston do: a mapped, 1x1, off-screen, override-redirect "no focus"
+  window, created next to the WM window, is named as `_NET_ACTIVE_WINDOW` and gets the X input
+  focus whenever no X11 window is focused (a Wayland window, or none at all). `isWMWindow()` lists
+  it, so Hyprland never manages it. Focus going to no window (an empty workspace) used to re-name
+  the old X11 window as active; it now goes to the no-focus window too.
+- **Evidence (headless, on the build host):** Hyprland nested in a private headless mutter (render
+  node only, its own HOME and runtime dir) on a Hyprland headless output (`hyprctl output create
+  headless`), with `xmessage` (X11) and `foot` (Wayland), focus moved with `hyprctl dispatch`;
+  `xprop -root _NET_ACTIVE_WINDOW` and `xdotool getwindowfocus` after each step:
+  - X11 window focused: both builds name the `xmessage` window;
+  - Wayland window focused: stock 0.56.2-4 reads 0x0 (None), patched (4.104 test build without #423's output patches) reads the no-focus window;
+  - empty workspace: stock keeps the `xmessage` window as active, patched names the no-focus window;
+  - back to the X11 window: both name it again. Hyprland manages one X11 window in both builds
+    (the no-focus window never becomes a client).
+- **Test (G16, #424):** WoW with "Sound in Background" off, SUPER+arrow to a window on the other
+  monitor: the sound stops, and comes back on SUPER+arrow back to WoW.
+- **Upstream: not submitted.** Not fixed on hyprwm/Hyprland `main` (checked 2026-11-10:
+  `activateSurface` still sets `XCB_WINDOW_NONE`); no Hyprland PR or issue. The same change landed
+  in wlroots (MR 5076, "xwayland: Activate the X root window when a Wayland window is activated",
+  merged 2025-06-12), KWin (MR 7664, merged 2025-06-12) and Weston (MR 1761, merged 2025-05-23).
+  Wine's own fix, None as the desktop (wine MR 8108), was reverted the next day (MR 8117): other X
+  window managers set None mid-switch, which made apps lose focus spuriously. Related:
+  ValveSoftware/Proton#8676 (KWin, closed by the KWin change), ValveSoftware/Proton#10274 (Niri,
+  open).
+- **Drop when:** a Hyprland release names a window other than None as `_NET_ACTIVE_WINDOW` when a
+  Wayland window is focused, and #424's test passes without the patch.
+
+#### Upstream report draft
+
+For a human to post to hyprwm/Hyprland (a pull request with the patch, or a Discussion).
+
+> **Title:** xwayland: focus a no-focus X window instead of None when a Wayland window is focused
+>
+> When focus moves from an XWayland window to a native Wayland window, `CXWM::activateSurface`
+> sets `_NET_ACTIVE_WINDOW` and the X input focus to None. Wine (10.x and later, including
+> Proton) reads the foreground from `_NET_ACTIVE_WINDOW` and treats None as a transient state,
+> so the game is never deactivated: it keeps playing sound with "sound in background" off, doesn't
+> pause and keeps the mouse captured. Switching to another X11 window works.
+>
+> Wine tried mapping None to the desktop (wine MR 8108) and reverted it (MR 8117) because other X
+> window managers set None during ordinary focus changes. The fix went into the compositors
+> instead: wlroots MR 5076, KWin MR 7664 and Weston MR 1761 each create a mapped, 1x1,
+> override-redirect "no focus" window and use it as `_NET_ACTIVE_WINDOW` and the input focus when
+> no X11 window is focused. Hyprland has its own XWM, so it didn't get the wlroots change.
+>
+> The attached patch does the same in `src/xwayland/XWM.cpp`: `createNoFocusWindow()` next to
+> `createWMWindow()`, `isWMWindow()` lists it, and `activateSurface()`/`focusWindow(nullptr)` use
+> it instead of `XCB_WINDOW_NONE`, also when focus goes to no window at all. Related reports:
+> ValveSoftware/Proton#8676, ValveSoftware/Proton#10274.
 
 ## Omarchy: omarchy and omarchy-settings
 
