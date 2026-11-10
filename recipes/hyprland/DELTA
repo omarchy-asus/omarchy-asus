@@ -15,5 +15,10 @@ fixed-upstream hyprwm/Hyprland 5b6b75ac5 v{pkgver}
 patch output-global-destroy-delay.patch prepare
 # not on Hyprland main (checked 2026-11-10); wlroots, KWin and Weston carry the same change
 patch xwayland-no-focus-window.patch prepare
+# backport of hyprwm/Hyprland#16784: a lock surface asked for on a removed output is inert, not a
+# protocol error; main has it as 8b6f4329, the 0.57.1 release branch as 518be87e; drop on the release that has it
+patch session-lock-removed-output.patch prepare
+fixed-upstream hyprwm/Hyprland 518be87e v{pkgver}
+fixed-upstream hyprwm/Hyprland 8b6f4329 v{pkgver}
 # main has the same fix (e9e2f64c, #16140); flag the first release that contains it
 fixed-upstream hyprwm/Hyprland e9e2f64c v{pkgver}

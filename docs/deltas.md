@@ -68,6 +68,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [late binds to removed outputs are inert](#hyprland-output-late-bind-inert) | hyprland | `output-late-bind-inert.patch` | both | merged-unreleased |
 | [removed wl_output globals are destroyed 5 s later](#hyprland-output-global-destroy-delay) | hyprland | `output-global-destroy-delay.patch` | both | not submitted |
 | [XWayland no-focus window](#hyprland-xwayland-no-focus-window) | hyprland | `xwayland-no-focus-window.patch` | main (Quattro) | not submitted |
+| [lock surfaces on removed outputs are inert](#hyprland-session-lock-removed-output) | hyprland | `session-lock-removed-output.patch` | main (Quattro) | merged-released (0.57.1) |
 | [asusd profile/EPP hand-off](#omarchy-0001-asusd-hand-off) | omarchy | 0001 | both | open |
 | [USB-C power policy](#omarchy-0002-usbc-power) | omarchy | 0002 | both | open |
 | [power profiles: external owner](#omarchy-0003-external-owner) | omarchy | 0003 | both | open |
@@ -784,7 +785,7 @@ still unsigned, see [0001](#nvidia-0001-hibernate-power-off)). Not opened; a hum
 
 ## Hyprland: hyprland and hyprpm
 
-0.56.2-4.105 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`), built on `main`
+0.56.2-4.106 (Arch's PKGBUILD plus our patches; `recipes/hyprland/NOTES.md`), built on `main`
 for Quattro and promoted to RC. Once no patch is left, `bin/unpublish hyprland hyprpm` and delete the recipe.
 
 <a id="hyprland-reconnect-render-offset"></a>
@@ -1084,6 +1085,48 @@ For a human to post to hyprwm/Hyprland (a pull request with the patch, or a Disc
 > `createWMWindow()`, `isWMWindow()` lists it, and `activateSurface()`/`focusWindow(nullptr)` use
 > it instead of `XCB_WINDOW_NONE`, also when focus goes to no window at all. Related reports:
 > ValveSoftware/Proton#8676, ValveSoftware/Proton#10274.
+
+<a id="hyprland-session-lock-removed-output"></a>
+### Lock surfaces asked for on removed outputs are inert
+
+- **Component:** `hyprland`/`hyprpm`, `session-lock-removed-output.patch`
+  (`src/protocols/SessionLock.cpp`: `CSessionLockProtocol::onGetLockSurface` and the
+  `CSessionLockSurface` constructor). 0.56.2-4.106 on `main`. Work issue #131.
+- **Fixes:** while the session is locked, an output vanishes and comes back (an HDMI monitor
+  plugged in during hibernate, a connector flickering on resume). The Omarchy shell (Quickshell)
+  asks for a lock surface on a `wl_output` whose monitor is already gone. 0.56.2 logged
+  "monitor is gone for output resource" and returned without creating the
+  `ext_session_lock_surface_v1` object, so the shell's later `destroy` of that id was an
+  "invalid object" protocol error: Hyprland disconnected the shell ("The Wayland connection
+  experienced a fatal error: Invalid argument", "error in client communication") and both screens
+  stayed on Hyprland's "lockscreen app died" screen (on the G16, 2026-11-10, 0.56.2-4.105). The
+  patch creates the object anyway with only its destroy handlers: no configure, no
+  `newLockSurface`, so nothing is drawn for the missing output and the client can destroy it.
+  Recovery of the stranded lock afterwards is [0024](#omarchy-0024-stranded-lock)'s job; this
+  removes the disconnect itself.
+- **Evidence (headless, on the build host):** Hyprland nested in a private headless mutter
+  (render node only, its own HOME, runtime dir and D-Bus session, no audio), one Hyprland headless
+  output (`hyprctl output create headless`), a minimal Quickshell config holding the lock
+  (`WlSessionLock` with one `WlSessionLockSurface`). Each cycle adds a headless output and removes
+  it 50 ms later, then waits 0.5 s; 5 runs of 30 cycles per build:
+  - stock 0.56.2-4.105: the lock client was disconnected on the first cycle in 5 of 5 runs
+    (Hyprland logs "monitor is gone for output resource" for the new lock surface, then "error in
+    client communication"; Quickshell: `invalid object 45`, "fatal error: Invalid argument");
+  - patched 0.56.2-4.106: the lock client survived all 30 cycles in 5 of 5 runs (150 lock
+    surfaces on removed outputs, each inert, so the client's destroy is no error). With
+    the output kept for 2 s, lock surfaces on live outputs are still created and configured.
+- **Test (G16, #131):** with HDMI attached, lock, hibernate, unplug or plug HDMI while off, resume:
+  the shell keeps running (no "relaunching" in `journalctl --user -b`) and the lock screen shows on
+  every monitor.
+- **Upstream: merged-released.** hyprwm/Hyprland#16784 ("protocols/session-lock: fix removed output
+  causing a protocol error", refs hyprwm/Hyprland#16679), merged on `main` 2026-11-02 as
+  `8b6f4329af2e` and released in 0.57.1 (2026-11-03) as release-branch commit `518be87efbc5`.
+  Backported `src/` only: its test extends `tests/protocols/Output.cpp`, which 0.56.2's test tree
+  doesn't have. Omarchy closed omacom/omarchy#11084 as fixed by it for Omarchy 4.6.0 (2026-11-07);
+  related: omacom/omarchy#12208, omacom/omarchy#9156. `DELTA`'s `fixed-upstream` lines flag the
+  first release with either commit.
+- **Drop when:** we rebase onto an Arch Hyprland release that contains `8b6f4329` or `518be87e`
+  (0.57.1 or later).
 
 ## Omarchy: omarchy and omarchy-settings
 
