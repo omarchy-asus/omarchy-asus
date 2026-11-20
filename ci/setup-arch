@@ -58,6 +58,21 @@ import_omarchy_key() {
     pacman-key --lsign-key "$OMARCHY_KEY" >/dev/null || return 1
 }
 
+# sync_snapshot_packages [extra packages...]: sync the snapshot databases, drop
+# any container packages absent from the snapshot (e.g. openssl-3 when the base
+# image moves ahead of the snapshot's openssl 3.6.5, #429) so they cannot clash
+# on downgrade, then downgrade/install everything to match the snapshot.
+sync_snapshot_packages() {
+    local -a foreign=()
+    pacman -Syy --noconfirm --noprogressbar
+    mapfile -t foreign < <(pacman -Qmq || true)
+    if ((${#foreign[@]})); then
+        echo "==> removing image packages absent from snapshot: ${foreign[*]}"
+        pacman -Rdd --noconfirm --noprogressbar "${foreign[@]}"
+    fi
+    pacman -Suu --noconfirm --needed --noprogressbar omarchy-keyring base-devel devtools "$@"
+}
+
 [[ ${SETUP_ARCH_SOURCE_ONLY:-} == 1 ]] && return 0
 
 channel=quattro
@@ -74,7 +89,7 @@ import_omarchy_key
 cp "$repo/$conf" /etc/pacman.conf
 echo "==> package sources ($channel channel, $conf):"
 grep -E '^(\[|Server)' /etc/pacman.conf
-pacman -Syyuu --noconfirm --needed --noprogressbar omarchy-keyring base-devel devtools "$@"
+sync_snapshot_packages "$@"
 pacman-key --populate omarchy >/dev/null
 
 # The makepkg.conf the production chroot gets (mkarchroot -M in bin/mkchroot).
