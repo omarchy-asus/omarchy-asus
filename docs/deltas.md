@@ -25,7 +25,7 @@ means only `rc-x86_64` does. Versions below are what each release serves, as of 
 
 **What the daily check watches.** `bin/check-upstream` reads `recipes/*/UPSTREAM_PRS` (one
 `owner/repo#N` per line) and reports each pull request's state; a merged one needs action. Today
-only `recipes/nvidia-open-dkms/UPSTREAM_PRS` and `recipes/quickshell/UPSTREAM_PRS` list pull requests (`recipes/omarchy{,-settings}/UPSTREAM_PRS` hold no entry since 0028 dropped), so the upstream states of every other entry
+only `recipes/nvidia-open-dkms/UPSTREAM_PRS`, `recipes/quickshell/UPSTREAM_PRS` and `recipes/omarchy{,-settings}/UPSTREAM_PRS` list pull requests (`recipes/omarchy{,-settings}/UPSTREAM_PRS` list only 0029's omacom/omarchy#16379), so the upstream states of every other entry
 are kept by hand, here and in the recipe's `NOTES.md`. `recipes/hyprland/DELTA`'s
 `fixed-upstream` line flags the first Hyprland release with a given commit. To have a GitHub pull
 request watched, add it to its recipe's `UPSTREAM_PRS`.
@@ -85,6 +85,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [stranded lock recovered while voxtype runs](#omarchy-0024-stranded-lock) | omarchy | 0024, 0027 | both (0027 RC only) | open |
 | [G16 Control widget's dead link swapped for the plugin](#omarchy-0025-widget-link) | omarchy | 0025 | RC only | ours-only |
 | [the RTX stays asleep while apps start](#omarchy-0026-rtx-asleep-at-app-start) | omarchy | 0026 | RC only | not submitted |
+| [/dev/nvidia-modeset created at boot](#omarchy-0029-nvidia-modeset-node) | omarchy | 0029 | main (Quattro) | open |
 | [floating mode waits for the app's redraw](#omarchy-general-0001-floating-redraw) | omarchy | general-0001 | RC only | not submitted |
 | [the sleep lock's monitor survives suspends](#omarchy-general-0002-sleep-monitor) | omarchy | general-0002 | RC only | not submitted |
 | [app library rescans only on real changes](#omarchy-general-0004-app-library) | omarchy | general-0004 | RC only | open |
@@ -1956,6 +1957,46 @@ omacom/omarchy, PR against `quattro` from patch 0026. Not opened; a human decide
 > and `app-search-test.sh` are extended.
 >
 > This pull request was written with Claude Code.
+
+<a id="omarchy-0029-nvidia-modeset-node"></a>
+### /dev/nvidia-modeset created at boot (0029)
+
+- **Component:** `omarchy`/`omarchy-settings`, patch 0029 (`default/udev/nvidia-modeset.rules`,
+  installed as `/etc/udev/rules.d/61-nvidia-modeset.rules` by `install/hardware/nvidia.sh` and by
+  migration `1792737693`). `main` (Quattro) since 4.5.0-3.102. Fork commit `162bd3531` on
+  `asus/v4-5-0-rc2`: upstream's three commits (`efd6483cb`, `dcdd06b8c`, `1768b566d`) squashed and
+  taken as is; on our tree the rule's install goes after 0012's hybrid if/else in `nvidia.sh`
+  instead of after the heredoc, same lines.
+- **Fixes:** nvidia-utils' `60-nvidia.rules` never runs `nvidia-modprobe -m`, so on a hybrid whose
+  panel is on the iGPU (the G16) `/dev/nvidia-modeset` is never created at boot. Games in umu's
+  Steam Runtime container (GE-Proton through umu, Battle.net's WoW) and Flatpak apps can't create it
+  themselves and fail Vulkan presentation: on the G16 WoW drew only a black window
+  (`vkCreateSwapchainKHR` -13, `VK_ERROR_UNKNOWN`), and every Play click left another invisible
+  `Wow.exe` holding about 1.3 GB of VRAM until Battle.net said no suitable GPU was found.
+  vkd3d-proton logged `Failed to create swapchain, vr -13` every frame; the X11 window was mapped
+  but black and Hyprland never listed it. It comes and goes with the outputs: on the G16 HDMI-A-1
+  is on card0 (the RTX) and the eDP and the dock's DP outputs on card1 (the AMD iGPU), so a boot
+  that uses HDMI gets the node from NVIDIA's KMS path and games work, while undocked or docked on
+  DP alone nothing creates it. Our own desktop GPU pins
+  ([0026](#omarchy-0026-rtx-asleep-at-app-start): `VK_LOADER_DRIVERS_DISABLE=*nvidia*` for the
+  desktop) make that more likely: even a host `vulkaninfo` never loads NVIDIA's ICD, so nothing on
+  the host runs `nvidia-modprobe` either. `nvidia-modprobe -m` as the user (setuid) created the
+  node; a game already running didn't recover, but the next WoW launch drew its window ten seconds
+  after Play (G16, docked, no HDMI, 2026-11-20). The rule runs it
+  when an NVIDIA display controller binds to `nvidia` and the node is missing (a GPU on `vfio-pci`
+  is left alone); the migration installs it on existing NVIDIA machines (not N1x) and replays the
+  GPU's bind while the node is missing.
+- **Test:** in the failing setup (cold boot, docked on DP, no HDMI plugged in), after a reboot with
+  the new package, `ls -l /dev/nvidia-modeset` exists before anything game-related runs, without running
+  anything by hand, and `/etc/udev/rules.d/61-nvidia-modeset.rules` matches
+  `/usr/share/omarchy/default/udev/nvidia-modeset.rules`; WoW started from Battle.net draws its
+  window, with one `Wow.exe` per launch.
+- **Upstream: open.** [omacom/omarchy#16379](https://github.com/omacom/omarchy/pull/16379) "Create
+  /dev/nvidia-modeset at boot on NVIDIA machines" (Omarchy's bot, for omacom/omarchy#15975), open as
+  of 2026-11-20. The real fix is Arch's `nvidia-utils` rule passing `-m`.
+- **Drop when:** #16379 (or an nvidia-utils rule that runs `nvidia-modprobe -m`) is in an Omarchy
+  release we build from; the rule's `TEST!="/dev/nvidia-modeset"` makes it a no-op meanwhile if
+  Arch adds `-m`.
 
 <a id="omarchy-general-0001-floating-redraw"></a>
 ### Floating mode waits for the app's redraw (general-0001)
