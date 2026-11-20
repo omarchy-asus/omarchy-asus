@@ -1973,11 +1973,21 @@ omacom/omarchy, PR against `quattro` from patch 0026. Not opened; a human decide
   themselves and fail Vulkan presentation: on the G16 WoW drew only a black window
   (`vkCreateSwapchainKHR` -13, `VK_ERROR_UNKNOWN`), and every Play click left another invisible
   `Wow.exe` holding about 1.3 GB of VRAM until Battle.net said no suitable GPU was found.
-  `nvidia-modprobe -m` by hand created the node and fixed it (G16, 2026-11-20). The rule runs it
+  vkd3d-proton logged `Failed to create swapchain, vr -13` every frame; the X11 window was mapped
+  but black and Hyprland never listed it. It comes and goes with the outputs: on the G16 HDMI-A-1
+  is on card0 (the RTX) and the eDP and the dock's DP outputs on card1 (the AMD iGPU), so a boot
+  that uses HDMI gets the node from NVIDIA's KMS path and games work, while undocked or docked on
+  DP alone nothing creates it. Our own desktop GPU pins
+  ([0026](#omarchy-0026-rtx-asleep-at-app-start): `VK_LOADER_DRIVERS_DISABLE=*nvidia*` for the
+  desktop) make that more likely: even a host `vulkaninfo` never loads NVIDIA's ICD, so nothing on
+  the host runs `nvidia-modprobe` either. `nvidia-modprobe -m` as the user (setuid) created the
+  node; a game already running didn't recover, but the next WoW launch drew its window ten seconds
+  after Play (G16, docked, no HDMI, 2026-11-20). The rule runs it
   when an NVIDIA display controller binds to `nvidia` and the node is missing (a GPU on `vfio-pci`
   is left alone); the migration installs it on existing NVIDIA machines (not N1x) and replays the
   GPU's bind while the node is missing.
-- **Test:** after a reboot with the new package, `ls -l /dev/nvidia-modeset` exists without running
+- **Test:** in the failing setup (cold boot, docked on DP, no HDMI plugged in), after a reboot with
+  the new package, `ls -l /dev/nvidia-modeset` exists before anything game-related runs, without running
   anything by hand, and `/etc/udev/rules.d/61-nvidia-modeset.rules` matches
   `/usr/share/omarchy/default/udev/nvidia-modeset.rules`; WoW started from Battle.net draws its
   window, with one `Wow.exe` per launch.
