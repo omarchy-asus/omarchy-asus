@@ -1,0 +1,643 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: omarchy-asus <noreply@github.com>
+Date: Wed, 4 Nov 2026 00:00:00 -0500
+Subject: [PATCH] EXPERIMENTAL: ALSA: hda/realtek: opt-in raw four-channel
+ internal mic capture on the GA605K
+
+EXPERIMENTAL, DEFAULT OFF (local carry for ROG Zephyrus G16 GA605K
+microphone testing; not submitted upstream).
+
+The GA605K's ALC285 (codec SSID 1043:1314) has two stereo digital mic
+pins, 0x12 and 0x13. The generic parser offers them one at a time
+through the capture source: its analog capture PCM sets up a single
+converter, so raising channels_max alone would advertise channels that
+are never routed. Its setup_pcm_stream() copies only metadata from a
+codec's stream template, not ops, so a template cannot change how the
+stream is prepared either.
+
+With snd_hda_codec_alc269.ga605k_raw_mic=1 (read-only, default 0), a new
+fixup chained between ALC285_FIXUP_ASUS_GA605K_HEADSET_MIC and
+ALC285_FIXUP_SPEAKER2_TO_DAC1 (both unchanged) adds a separate capture
+PCM, "<chip> Raw Mic", with four channels:
+
+  raw0, raw1: ADC 0x07 through selector 0x24 from pin 0x12 ("raw")
+  raw2, raw3: ADC 0x09 through mixer 0x22 from pin 0x13 ("aux")
+
+Its prepare activates both input paths through the generic path helpers
+and sets up both converters with the same stream tag and format, at
+channel offsets 0 and 2, so one DMA stream carries all four channels;
+cleanup undoes both. alc269's build_pcms calls snd_hda_gen_build_pcms()
+and then sets the ops on the created PCM itself. The PCM advertises only
+the rates and formats both converters report (snd_hda_query_supported_pcm),
+and is not created when the widget connections or paths differ from the
+expected ones, or when the two have nothing in common.
+
+The raw PCM and the normal capture PCMs exclude each other (-EBUSY),
+since both use ADC 0x07. While the raw PCM is open, the capture source
+control returns -EBUSY and a mic auto-switch is deferred and replayed
+when it closes, so mux_select() (and the dynamic ADC switch it drives)
+cannot move ADC 0x07; the dynamic ADC switch only touches a running
+normal capture stream, which cannot be open then. A codec re-init
+(resume) re-applies the raw routing after snd_hda_gen_init(); after a
+suspend the stream is prepared again, which sets up both converters
+again. ADC 0x09's input amp follows ADC 0x07's (Capture Volume, Capture
+Switch) while the raw routing is applied. Closing restores the previous
+path states, ADC 0x09's amp and the capture source's route. No vendor
+coefficients are written.
+
+With the parameter at 0 the fixup returns at once: no PCM, control, op
+or verb changes. Whether the extra channels are independent signals, and
+their order and polarity, is not known; the channels are named raw and
+aux only. Hardware behaviour is verified only by the G16 test card
+(#404); the build host only compiles it.
+---
+ sound/hda/codecs/realtek/alc269.c | 554 +++++++++++++++++++++++++++++-
+ 1 file changed, 552 insertions(+), 2 deletions(-)
+
+diff --git a/sound/hda/codecs/realtek/alc269.c b/sound/hda/codecs/realtek/alc269.c
+--- a/sound/hda/codecs/realtek/alc269.c
++++ b/sound/hda/codecs/realtek/alc269.c
+@@ -9,6 +9,549 @@
+
+ /* keep halting ALC5505 DSP, for power saving */
+ #define HALT_REALTEK_ALC5505
++
++/*
++ * EXPERIMENTAL, default off: raw four-channel internal mic capture on the
++ * ASUS ROG Zephyrus G16 GA605K (ALC285, codec SSID 1043:1314), to test
++ * whether its second stereo DMIC pin carries independent signals.
++ *
++ * The generic analog capture PCM sets up a single converter, so pin 0x13
++ * can only replace pin 0x12, through the capture source. With
++ * snd_hda_codec_alc269.ga605k_raw_mic=1 an extra capture PCM, "<chip> Raw
++ * Mic", programs ADC 0x07 (selector 0x24, pin 0x12) and ADC 0x09 (mixer
++ * 0x22, pin 0x13) with one stream tag and format, at channel offsets 0, 2:
++ *
++ *   raw0, raw1: ADC 0x07 channels 0 and 1 (pin 0x12, "raw")
++ *   raw2, raw3: ADC 0x09 channels 0 and 1 (pin 0x13, "aux")
++ *
++ * Whether the extra channels are independent, and their order and
++ * polarity, is unknown; nothing here names a position.
++ *
++ * The raw PCM and the normal capture PCMs exclude each other (-EBUSY):
++ * both use ADC 0x07. While the raw PCM is open the capture source control
++ * returns -EBUSY, a mic auto-switch waits until it closes, and a codec
++ * re-init (resume) puts the raw routing back. ADC 0x09's input amp follows
++ * ADC 0x07's (Capture Volume, Capture Switch). After a suspend the stream
++ * is prepared again, which sets up both converters again.
++ */
++static bool ga605k_raw_mic;
++module_param(ga605k_raw_mic, bool, 0444);
++MODULE_PARM_DESC(ga605k_raw_mic,
++		 "EXPERIMENTAL: add a raw 4-channel internal mic capture PCM on the ASUS GA605K (default off)");
++
++#define GA605K_RAW_CHANNELS	4
++#define GA605K_RAW_CH_PER_ADC	2
++#define GA605K_RAW_ADC		0x07	/* raw0, raw1 */
++#define GA605K_RAW_SEL		0x24
++#define GA605K_RAW_PIN		0x12
++#define GA605K_AUX_ADC		0x09	/* raw2, raw3 */
++#define GA605K_AUX_MIX		0x22
++#define GA605K_AUX_PIN		0x13
++
++/* normal capture PCMs (spec->gen.pcm_rec[]) that use an ADC: analog, alt analog */
++#define GA605K_NUM_CAP		2
++static const int ga605k_raw_cap_rec[GA605K_NUM_CAP] = { 0, 2 };
++
++struct ga605k_raw_state {
++	struct hda_codec *codec;	/* the codec that owns it, or NULL */
++	bool open;			/* raw PCM open */
++	bool routed;			/* raw routing applied */
++	bool switch_pending;		/* mic auto-switch deferred while open */
++	bool hooked;			/* controls and hooks wrapped */
++	bool same_amp;			/* both ADC input amps have the same caps */
++	bool raw_was_active;		/* path states before the raw routing */
++	bool aux_was_active;
++	int aux_amp[2];			/* ADC 0x09 input amp before the raw routing */
++	int raw_path;			/* path indices */
++	int aux_path;
++	unsigned int cap_opens;		/* normal capture streams open */
++	unsigned int busy;		/* capture source changes in flight */
++	struct hda_pcm *pcm;
++	struct hda_pcm_stream *cap[GA605K_NUM_CAP];
++	struct hda_pcm_ops cap_ops[GA605K_NUM_CAP];
++	snd_kcontrol_put_t *mux_put;
++	void (*autoswitch)(struct hda_codec *codec, struct hda_jack_callback *jack);
++	void (*cap_sync)(struct hda_codec *codec, struct snd_kcontrol *kcontrol,
++			 struct snd_ctl_elem_value *ucontrol);
++};
++
++static struct ga605k_raw_state ga605k_raw;
++static DEFINE_MUTEX(ga605k_raw_lock);
++
++/* call with ga605k_raw_lock held */
++static bool ga605k_raw_ours(struct hda_codec *codec)
++{
++	return codec && ga605k_raw.codec == codec;
++}
++
++/* ADC 0x09's input amp follows ADC 0x07's (Capture Volume, Capture Switch) */
++static void ga605k_raw_sync_gain(struct hda_codec *codec)
++{
++	int ch, val;
++
++	if (!ga605k_raw.same_amp)
++		return;
++	for (ch = 0; ch < 2; ch++) {
++		val = snd_hda_codec_amp_read(codec, GA605K_RAW_ADC, ch, HDA_INPUT, 0);
++		if (val < 0)
++			continue;
++		snd_hda_codec_amp_update(codec, GA605K_AUX_ADC, ch, HDA_INPUT, 0,
++					 HDA_AMP_MUTE | HDA_AMP_VOLMASK, val);
++	}
++}
++
++/* route pin 0x12 to ADC 0x07 and pin 0x13 to ADC 0x09; lock held */
++static int ga605k_raw_route(struct hda_codec *codec)
++{
++	struct nid_path *raw = snd_hda_get_path_from_idx(codec, ga605k_raw.raw_path);
++	struct nid_path *aux = snd_hda_get_path_from_idx(codec, ga605k_raw.aux_path);
++	int ch;
++
++	if (!raw || !aux)
++		return -ENODEV;
++	if (!ga605k_raw.routed) {
++		ga605k_raw.raw_was_active = raw->active;
++		ga605k_raw.aux_was_active = aux->active;
++		for (ch = 0; ch < 2; ch++)
++			ga605k_raw.aux_amp[ch] = snd_hda_codec_amp_read(codec, GA605K_AUX_ADC,
++									ch, HDA_INPUT, 0);
++		ga605k_raw.routed = true;
++	}
++	snd_hda_activate_path(codec, raw, true, false);
++	snd_hda_activate_path(codec, aux, true, false);
++	ga605k_raw_sync_gain(codec);
++	return 0;
++}
++
++/* the capture source's current route for ADC 0x07, as mux_select() set it */
++static struct nid_path *ga605k_raw_mux_path(struct hda_codec *codec)
++{
++	struct alc_spec *spec = codec->spec;
++	struct hda_gen_spec *gen = &spec->gen;
++	unsigned int adc, mux;
++
++	if (gen->dyn_adc_switch) {
++		mux = gen->cur_mux[0];
++		if (mux >= gen->input_mux.num_items)
++			return NULL;
++		adc = gen->dyn_adc_idx[mux];
++	} else {
++		for (adc = 0; adc < gen->num_adc_nids; adc++)
++			if (gen->adc_nids[adc] == GA605K_RAW_ADC)
++				break;
++		if (adc >= gen->num_adc_nids || adc >= ARRAY_SIZE(gen->cur_mux))
++			return NULL;
++		mux = gen->cur_mux[adc];
++		if (mux >= gen->input_mux.num_items)
++			return NULL;
++	}
++	if (adc >= AUTO_CFG_MAX_INS)
++		return NULL;
++	return snd_hda_get_path_from_idx(codec, gen->input_paths[mux][adc]);
++}
++
++/* undo ga605k_raw_route() and give the capture source its route back; lock held */
++static void ga605k_raw_unroute(struct hda_codec *codec)
++{
++	struct nid_path *raw, *aux, *cur;
++	int ch;
++
++	if (!ga605k_raw.routed)
++		return;
++	ga605k_raw.routed = false;
++	raw = snd_hda_get_path_from_idx(codec, ga605k_raw.raw_path);
++	aux = snd_hda_get_path_from_idx(codec, ga605k_raw.aux_path);
++	if (aux && !ga605k_raw.aux_was_active)
++		snd_hda_activate_path(codec, aux, false, false);
++	for (ch = 0; ch < 2; ch++) {
++		if (ga605k_raw.aux_amp[ch] < 0)
++			continue;
++		snd_hda_codec_amp_update(codec, GA605K_AUX_ADC, ch, HDA_INPUT, 0,
++					 HDA_AMP_MUTE | HDA_AMP_VOLMASK,
++					 ga605k_raw.aux_amp[ch]);
++	}
++	if (raw && !ga605k_raw.raw_was_active)
++		snd_hda_activate_path(codec, raw, false, false);
++	cur = ga605k_raw_mux_path(codec);
++	if (cur && cur->active)
++		snd_hda_activate_path(codec, cur, true, false);
++}
++
++static void ga605k_raw_call_autoswitch(struct hda_codec *codec,
++				       struct hda_jack_callback *jack)
++{
++	if (ga605k_raw.autoswitch)
++		ga605k_raw.autoswitch(codec, jack);
++	else
++		snd_hda_gen_mic_autoswitch(codec, jack);
++}
++
++/* a mic auto-switch while the raw PCM is open waits until it closes */
++static void ga605k_raw_autoswitch(struct hda_codec *codec,
++				  struct hda_jack_callback *jack)
++{
++	scoped_guard(mutex, &ga605k_raw_lock) {
++		if (ga605k_raw_ours(codec) && ga605k_raw.open) {
++			ga605k_raw.switch_pending = true;
++			return;
++		}
++		ga605k_raw.busy++;
++	}
++	ga605k_raw_call_autoswitch(codec, jack);
++	scoped_guard(mutex, &ga605k_raw_lock)
++		ga605k_raw.busy--;
++}
++
++static void ga605k_raw_cap_sync(struct hda_codec *codec,
++				struct snd_kcontrol *kcontrol,
++				struct snd_ctl_elem_value *ucontrol)
++{
++	if (ga605k_raw.cap_sync)
++		ga605k_raw.cap_sync(codec, kcontrol, ucontrol);
++	if (!kcontrol)
++		return;		/* a capture source change, not a level */
++	scoped_guard(mutex, &ga605k_raw_lock) {
++		if (ga605k_raw_ours(codec) && ga605k_raw.routed)
++			ga605k_raw_sync_gain(codec);
++	}
++}
++
++/* the capture source can't move ADC 0x07 away while the raw PCM is open */
++static int ga605k_raw_mux_put(struct snd_kcontrol *kcontrol,
++			      struct snd_ctl_elem_value *ucontrol)
++{
++	struct hda_codec *codec = snd_kcontrol_chip(kcontrol);
++	int err;
++
++	scoped_guard(mutex, &ga605k_raw_lock) {
++		if (ga605k_raw_ours(codec) && ga605k_raw.open)
++			return -EBUSY;
++		ga605k_raw.busy++;
++	}
++	err = ga605k_raw.mux_put(kcontrol, ucontrol);
++	scoped_guard(mutex, &ga605k_raw_lock)
++		ga605k_raw.busy--;
++	return err;
++}
++
++static int ga605k_raw_cap_index(const struct hda_pcm_stream *hinfo)
++{
++	int i;
++
++	for (i = 0; i < GA605K_NUM_CAP; i++)
++		if (ga605k_raw.cap[i] == hinfo)
++			return i;
++	return -1;
++}
++
++/* the normal capture PCMs: refused while the raw PCM is open */
++static int ga605k_raw_cap_open(struct hda_pcm_stream *hinfo,
++			       struct hda_codec *codec,
++			       struct snd_pcm_substream *substream)
++{
++	int i, err = 0;
++
++	guard(mutex)(&ga605k_raw_lock);
++	i = ga605k_raw_cap_index(hinfo);
++	if (i < 0)
++		return -ENODEV;
++	if (ga605k_raw_ours(codec) && ga605k_raw.open)
++		return -EBUSY;
++	if (ga605k_raw.cap_ops[i].open)
++		err = ga605k_raw.cap_ops[i].open(hinfo, codec, substream);
++	if (!err)
++		ga605k_raw.cap_opens++;
++	return err;
++}
++
++static int ga605k_raw_cap_close(struct hda_pcm_stream *hinfo,
++				struct hda_codec *codec,
++				struct snd_pcm_substream *substream)
++{
++	int i, err = 0;
++
++	guard(mutex)(&ga605k_raw_lock);
++	i = ga605k_raw_cap_index(hinfo);
++	if (i < 0)
++		return -ENODEV;
++	if (ga605k_raw.cap_ops[i].close)
++		err = ga605k_raw.cap_ops[i].close(hinfo, codec, substream);
++	if (ga605k_raw.cap_opens)
++		ga605k_raw.cap_opens--;
++	return err;
++}
++
++/* the raw PCM */
++static int ga605k_raw_open(struct hda_pcm_stream *hinfo,
++			   struct hda_codec *codec,
++			   struct snd_pcm_substream *substream)
++{
++	guard(mutex)(&ga605k_raw_lock);
++	if (!ga605k_raw_ours(codec))
++		return -ENODEV;
++	if (ga605k_raw.open || ga605k_raw.cap_opens || ga605k_raw.busy)
++		return -EBUSY;
++	ga605k_raw.open = true;
++	return 0;
++}
++
++static int ga605k_raw_prepare(struct hda_pcm_stream *hinfo,
++			      struct hda_codec *codec,
++			      unsigned int stream_tag,
++			      unsigned int format,
++			      struct snd_pcm_substream *substream)
++{
++	int err;
++
++	guard(mutex)(&ga605k_raw_lock);
++	if (!ga605k_raw_ours(codec) || !ga605k_raw.open)
++		return -ENODEV;
++	err = ga605k_raw_route(codec);
++	if (err < 0) {
++		ga605k_raw_unroute(codec);
++		return err;
++	}
++	/* one stream, one format; ADC 0x09 at channel offset 2 */
++	snd_hda_codec_setup_stream(codec, GA605K_RAW_ADC, stream_tag, 0, format);
++	snd_hda_codec_setup_stream(codec, GA605K_AUX_ADC, stream_tag,
++				   GA605K_RAW_CH_PER_ADC, format);
++	return 0;
++}
++
++static int ga605k_raw_cleanup(struct hda_pcm_stream *hinfo,
++			      struct hda_codec *codec,
++			      struct snd_pcm_substream *substream)
++{
++	guard(mutex)(&ga605k_raw_lock);
++	snd_hda_codec_cleanup_stream(codec, GA605K_AUX_ADC);
++	snd_hda_codec_cleanup_stream(codec, GA605K_RAW_ADC);
++	if (ga605k_raw_ours(codec))
++		ga605k_raw_unroute(codec);
++	return 0;
++}
++
++static int ga605k_raw_close(struct hda_pcm_stream *hinfo,
++			    struct hda_codec *codec,
++			    struct snd_pcm_substream *substream)
++{
++	bool replay = false;
++
++	scoped_guard(mutex, &ga605k_raw_lock) {
++		if (!ga605k_raw_ours(codec))
++			return 0;
++		ga605k_raw_unroute(codec);
++		ga605k_raw.open = false;
++		replay = ga605k_raw.switch_pending;
++		ga605k_raw.switch_pending = false;
++		if (replay)
++			ga605k_raw.busy++;
++	}
++	if (replay) {
++		/* the auto-switch deferred while the raw PCM was open */
++		ga605k_raw_call_autoswitch(codec, NULL);
++		scoped_guard(mutex, &ga605k_raw_lock)
++			ga605k_raw.busy--;
++	}
++	return 0;
++}
++
++static const struct hda_pcm_ops ga605k_raw_ops = {
++	.open = ga605k_raw_open,
++	.close = ga605k_raw_close,
++	.prepare = ga605k_raw_prepare,
++	.cleanup = ga605k_raw_cleanup,
++};
++
++static void ga605k_raw_probe(struct hda_codec *codec)
++{
++	struct nid_path *path;
++	int raw_path = 0, aux_path = 0;
++	bool same_amp;
++
++	BUILD_BUG_ON(2 * GA605K_RAW_CH_PER_ADC != GA605K_RAW_CHANNELS);
++
++	if (snd_hda_get_conn_index(codec, GA605K_RAW_SEL, GA605K_RAW_PIN, 0) < 0 ||
++	    snd_hda_get_conn_index(codec, GA605K_RAW_ADC, GA605K_RAW_SEL, 0) < 0 ||
++	    snd_hda_get_conn_index(codec, GA605K_AUX_MIX, GA605K_AUX_PIN, 0) < 0 ||
++	    snd_hda_get_conn_index(codec, GA605K_AUX_ADC, GA605K_AUX_MIX, 0) < 0) {
++		codec_warn(codec, "EXPERIMENTAL raw mic: unexpected connections, no raw PCM\n");
++		return;
++	}
++	/* the paths array can move when a path is added: keep indices */
++	path = snd_hda_add_new_path(codec, GA605K_RAW_PIN, GA605K_RAW_ADC, GA605K_RAW_SEL);
++	if (path && path->depth == 3)
++		raw_path = snd_hda_get_path_idx(codec, path);
++	path = snd_hda_add_new_path(codec, GA605K_AUX_PIN, GA605K_AUX_ADC, GA605K_AUX_MIX);
++	if (path && path->depth == 3)
++		aux_path = snd_hda_get_path_idx(codec, path);
++	if (!raw_path || !aux_path) {
++		codec_warn(codec, "EXPERIMENTAL raw mic: no capture path, no raw PCM\n");
++		return;
++	}
++	same_amp = query_amp_caps(codec, GA605K_RAW_ADC, HDA_INPUT) ==
++		   query_amp_caps(codec, GA605K_AUX_ADC, HDA_INPUT);
++
++	scoped_guard(mutex, &ga605k_raw_lock) {
++		if (ga605k_raw.codec) {
++			codec_warn(codec, "EXPERIMENTAL raw mic: in use on another codec\n");
++			return;
++		}
++		ga605k_raw.codec = codec;
++		ga605k_raw.raw_path = raw_path;
++		ga605k_raw.aux_path = aux_path;
++		ga605k_raw.same_amp = same_amp;
++		ga605k_raw.open = false;
++		ga605k_raw.routed = false;
++		ga605k_raw.switch_pending = false;
++		ga605k_raw.hooked = false;
++		ga605k_raw.cap_opens = 0;
++		ga605k_raw.pcm = NULL;
++	}
++}
++
++/* after the controls are built: wrap the capture source and the input hooks */
++static void ga605k_raw_build(struct hda_codec *codec)
++{
++	struct alc_spec *spec = codec->spec;
++	struct snd_kcontrol *kctl;
++
++	guard(mutex)(&ga605k_raw_lock);
++	if (!ga605k_raw_ours(codec) || ga605k_raw.hooked)
++		return;
++	ga605k_raw.hooked = true;
++	kctl = snd_hda_find_mixer_ctl(codec, "Capture Source");
++	if (!kctl)
++		kctl = snd_hda_find_mixer_ctl(codec, "Input Source");
++	if (kctl && kctl->put && kctl->put != ga605k_raw_mux_put) {
++		ga605k_raw.mux_put = kctl->put;
++		kctl->put = ga605k_raw_mux_put;
++	}
++	ga605k_raw.autoswitch = spec->gen.mic_autoswitch_hook;
++	spec->gen.mic_autoswitch_hook = ga605k_raw_autoswitch;
++	ga605k_raw.cap_sync = spec->gen.cap_sync_hook;
++	spec->gen.cap_sync_hook = ga605k_raw_cap_sync;
++}
++
++static int ga605k_raw_build_pcm(struct hda_codec *codec)
++{
++	struct alc_spec *spec = codec->spec;
++	struct hda_pcm_stream *str;
++	unsigned int bps_raw, bps_aux;
++	u64 fmt_raw, fmt_aux;
++	u32 rate_raw, rate_aux, sub_raw, sub_aux;
++	struct hda_pcm *info;
++	int i;
++
++	scoped_guard(mutex, &ga605k_raw_lock) {
++		if (!ga605k_raw_ours(codec) || ga605k_raw.pcm)
++			return 0;
++	}
++	if (snd_hda_query_supported_pcm(codec, GA605K_RAW_ADC, &rate_raw, &fmt_raw,
++					&sub_raw, &bps_raw) ||
++	    snd_hda_query_supported_pcm(codec, GA605K_AUX_ADC, &rate_aux, &fmt_aux,
++					&sub_aux, &bps_aux) ||
++	    !(rate_raw & rate_aux) || !(fmt_raw & fmt_aux)) {
++		codec_warn(codec, "EXPERIMENTAL raw mic: no common format, no raw PCM\n");
++		return 0;
++	}
++	info = snd_hda_codec_pcm_new(codec, "%s Raw Mic", codec->core.chip_name);
++	if (!info) {
++		codec_warn(codec, "EXPERIMENTAL raw mic: no memory, no raw PCM\n");
++		return 0;
++	}
++	info->pcm_type = HDA_PCM_TYPE_AUDIO;
++	str = &info->stream[SNDRV_PCM_STREAM_CAPTURE];
++	str->substreams = 1;
++	str->channels_min = GA605K_RAW_CHANNELS;
++	str->channels_max = GA605K_RAW_CHANNELS;
++	str->nid = GA605K_RAW_ADC;
++	str->rates = rate_raw & rate_aux;
++	str->formats = fmt_raw & fmt_aux;
++	str->subformats = sub_raw & sub_aux;
++	str->maxbps = min(bps_raw, bps_aux);
++	/* the ops go on the created stream: setup_pcm_stream() copies none */
++	str->ops = ga605k_raw_ops;
++
++	scoped_guard(mutex, &ga605k_raw_lock) {
++		ga605k_raw.pcm = info;
++		for (i = 0; i < GA605K_NUM_CAP; i++) {
++			struct hda_pcm *pcm = spec->gen.pcm_rec[ga605k_raw_cap_rec[i]];
++
++			ga605k_raw.cap[i] = NULL;
++			if (!pcm || !pcm->stream[SNDRV_PCM_STREAM_CAPTURE].substreams)
++				continue;
++			str = &pcm->stream[SNDRV_PCM_STREAM_CAPTURE];
++			ga605k_raw.cap[i] = str;
++			ga605k_raw.cap_ops[i] = str->ops;
++			str->ops.open = ga605k_raw_cap_open;
++			str->ops.close = ga605k_raw_cap_close;
++		}
++	}
++	codec_info(codec,
++		   "EXPERIMENTAL raw 4-channel mic PCM: ADC 0x%02x (pin 0x%02x) + ADC 0x%02x (pin 0x%02x), rates 0x%x formats 0x%llx\n",
++		   GA605K_RAW_ADC, GA605K_RAW_PIN, GA605K_AUX_ADC, GA605K_AUX_PIN,
++		   info->stream[SNDRV_PCM_STREAM_CAPTURE].rates,
++		   (unsigned long long)info->stream[SNDRV_PCM_STREAM_CAPTURE].formats);
++	return 0;
++}
++
++/* codec init (probe, resume): snd_hda_gen_init() has just restored the
++ * capture source's route, so put the raw routing back while it is in use
++ */
++static void ga605k_raw_reinit(struct hda_codec *codec)
++{
++	guard(mutex)(&ga605k_raw_lock);
++	if (ga605k_raw_ours(codec) && ga605k_raw.routed)
++		ga605k_raw_route(codec);
++}
++
++static void ga605k_raw_free(struct hda_codec *codec)
++{
++	guard(mutex)(&ga605k_raw_lock);
++	if (!ga605k_raw_ours(codec))
++		return;
++	ga605k_raw.codec = NULL;
++	ga605k_raw.pcm = NULL;
++	ga605k_raw.open = false;
++	ga605k_raw.routed = false;
++	ga605k_raw.switch_pending = false;
++	ga605k_raw.hooked = false;
++	ga605k_raw.cap_opens = 0;
++}
++
++static void alc285_fixup_asus_ga605k_raw_mic(struct hda_codec *codec,
++					     const struct hda_fixup *fix,
++					     int action)
++{
++	if (!ga605k_raw_mic || codec->core.vendor_id != 0x10ec0285 ||
++	    codec->core.subsystem_id != 0x10431314)
++		return;
++
++	switch (action) {
++	case HDA_FIXUP_ACT_PROBE:
++		ga605k_raw_probe(codec);
++		break;
++	case HDA_FIXUP_ACT_INIT:
++		ga605k_raw_reinit(codec);
++		break;
++	case HDA_FIXUP_ACT_BUILD:
++		ga605k_raw_build(codec);
++		break;
++	case HDA_FIXUP_ACT_FREE:
++		ga605k_raw_free(codec);
++		break;
++	}
++}
++
++static int alc269_build_pcms(struct hda_codec *codec)
++{
++	int err;
++
++	err = snd_hda_gen_build_pcms(codec);
++	if (err < 0)
++		return err;
++	return ga605k_raw_build_pcm(codec);
++}
+
+ static const struct hda_pcm_stream alc269_44k_pcm_analog_playback = {
+ 	.rates = SNDRV_PCM_RATE_44100, /* fixed rate */
+@@ -4364,6 +4907,7 @@ enum {
+ 	ALC274_FIXUP_HP_AIO_BIND_DACS,
+ 	ALC287_FIXUP_PREDATOR_SPK_CS35L41_I2C_2,
+ 	ALC285_FIXUP_ASUS_GA605K_HEADSET_MIC,
++	ALC285_FIXUP_ASUS_GA605K_RAW_MIC,
+ 	ALC269_FIXUP_POSITIVO_P15X_HEADSET_MIC,
+ 	ALC289_FIXUP_ASUS_ZEPHYRUS_DUAL_SPK,
+ 	ALC256_FIXUP_VAIO_RPL_MIC_NO_PRESENCE,
+@@ -7022,7 +7566,13 @@ static const struct hda_fixup alc269_fixups[] = {
+ 			{ }
+ 		},
+ 		.chained = true,
+-		.chain_id = ALC285_FIXUP_SPEAKER2_TO_DAC1
++		.chain_id = ALC285_FIXUP_ASUS_GA605K_RAW_MIC
++	},
++	[ALC285_FIXUP_ASUS_GA605K_RAW_MIC] = {
++		.type = HDA_FIXUP_FUNC,
++		.v.func = alc285_fixup_asus_ga605k_raw_mic,
++		.chained = true,
++		.chain_id = ALC285_FIXUP_SPEAKER2_TO_DAC1
+ 	},
+ 	[ALC269_FIXUP_POSITIVO_P15X_HEADSET_MIC] = {
+ 		.type = HDA_FIXUP_FUNC,
+@@ -9385,7 +9935,7 @@ static const struct hda_codec_ops alc269_codec_ops = {
+ 	.probe = alc269_probe,
+ 	.remove = alc269_remove,
+ 	.build_controls = alc_build_controls,
+-	.build_pcms = snd_hda_gen_build_pcms,
++	.build_pcms = alc269_build_pcms,
+ 	.init = alc_init,
+ 	.unsol_event = snd_hda_jack_unsol_event,
+ 	.suspend = alc269_suspend,
+--
+2.51.0
