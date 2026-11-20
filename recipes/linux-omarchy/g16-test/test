@@ -19,8 +19,8 @@
 #   0773       gpiolib-acpi ignores GPIO 16 wakeups (the quirk, not a command-line option)
 #   0570       GL9767 SD reader runtime PM (#226): with the slot empty it suspends and
 #              stays suspended (under 10% active over 10 s); then a card cycle: seen
-#              when inserted while suspended, suspended and settled again after
-#              removal (the resume loop the first version had). Without the cycle
+#              when inserted while suspended, suspended and settled again within
+#              a few seconds of removal (#418). Without the cycle
 #              (declined, or no terminal) it is a WARN: removal untested
 #   0482       amdgpu replays DMUB HPDs skipped during resume (#205): the module has it,
 #              and no USB4 DP tunnel was torn down as "not active" this boot. With --dock
@@ -417,9 +417,16 @@ sd_dir() {
 }
 sd_card() { compgen -G '/sys/class/mmc_host/mmc*/mmc*:*' >/dev/null; }
 sd_state() { echo "$(<"$1/power/runtime_status") $(<"$1/power_state" 2>/dev/null) control=$(<"$1/power/control")"; }
-sd_settled() { # dir label -> 0 when suspended within 10 s and under 10% active for the next 10 s
-  local d=$1 i a0 a1
-  for ((i = 0; i < 20; i++)); do [[ $(<"$d/power/runtime_status") == suspended ]] && break; sleep 0.5; done
+sd_settled() { # dir label [settle s] -> 0 when it settles in runtime suspend (2 s with no
+  # active time) within the settle time (default 10 s), then is under 10% active for 10 s
+  local d=$1 i a0 a1 n=$((${3:-10} * 2)) p
+  p=$(<"$d/power/runtime_active_time")
+  for ((i = 0; i < n; i++)); do
+    sleep 0.5
+    a0=$(<"$d/power/runtime_active_time")
+    [[ $(<"$d/power/runtime_status") == suspended ]] && ((i >= 3 && a0 == p)) && break
+    ((i % 4 == 3)) && p=$a0
+  done
   a0=$(<"$d/power/runtime_active_time")
   sleep 10
   a1=$(<"$d/power/runtime_active_time")
@@ -445,10 +452,11 @@ check_sdreader() {
     else st=FAIL; det+=("no /dev/mmcblk0 within 5 s of inserting a card while suspended"); fi
     read -r -p "    Remove the card, then press Enter... " _
     sleep 2
-    sd_settled "$d" "after removal" || { st=FAIL; det+=("the reader does not settle in runtime suspend after the card is removed"); }
+    sd_settled "$d" "after removal" 15 || { st=FAIL; det+=("the reader does not settle in runtime suspend after the card is removed"); }
   fi
-  msg=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -m1 'times in a row with no card')
-  [[ -z $msg ]] || { st=FAIL; det+=("$msg"); }
+  # A back-off after a removal is allowed (#418); whether the reader settles decides.
+  msg=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -E 'times in a row with no card|card detect not stable' | tail -n 3)
+  [[ -z $msg ]] || det+=("kernel: $msg")
   # The empty slot passed with the first version too; only the card cycle tests the fix.
   if [[ $st == PASS ]] && ((!cycled)); then
     st=WARN

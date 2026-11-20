@@ -4,7 +4,7 @@
 
 - Upstream recipe: `pkgbuilds/linux-omarchy` in omacom/omarchy-pkgs.
 - Tracks linux-omarchy **7.2.15-1**.
-- Our version: **7.2.15-1.101**. Builds both split packages from one pkgbase:
+- Our version: **7.2.15-1.102**. Builds both split packages from one pkgbase:
   `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
   modules such as nvidia-open-dkms).
 
@@ -12,7 +12,7 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=1` -> `pkgrel=1.101` (kernel release string becomes `7.2.15-1.101-omarchy`).
+1. `pkgrel=1` -> `pkgrel=1.102` (kernel release string becomes `7.2.15-1.102-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
@@ -21,6 +21,7 @@ Compared with upstream, only:
    stable, `04ee82fec489`), 0481 now sits after upstream's own 0481, 0568/0569/0570 after upstream's 0572,
    0773 after 0777, 0807-0810 after upstream's 0808, and 0568 and 9909 moved to hid-asus quirk bits 16 and 17
    (upstream's HID update took bit 15 for `QUIRK_FILTER_CAMERA_COMPANION`).
+   7.2.15-1.102 reworks 0570 so the SD reader suspends again after a card is removed (#418).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after the last `056x`/`057x` patch (upstream's `0572-...` on 7.2.15) and with
    matching entries in `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` (BIT(16) since 7.2.15;
@@ -153,7 +154,7 @@ cycle that wakes at once.
 **Upstream.** Not submitted (target: linux-gpio). Drop it once an equivalent
 entry is merged.
 
-## 0570: GL9767 SD reader runtime PM with the slot empty (#226)
+## 0570: GL9767 SD reader runtime PM with the slot empty (#226, #418)
 
 **What.** `0570-mmc-sdhci-pci-gli-gl9767-runtime-pm.patch` gives the GL9767 entry in
 `drivers/mmc/host/sdhci-pci-gli.c` runtime PM: `allow_runtime_pm` with its own
@@ -161,25 +162,43 @@ entry is merged.
 powered off, card detect stable (`SDHCI_CD_STABLE`) and a PME able to wake it
 (`pci_dev_run_wake()`); otherwise it stays in D0 as before. Insert wakeup is armed
 while suspended. On resume it re-applies the vendor config-space settings; a wakeup
-that finds a card starts a rescan, a resume for a host claim does nothing more. Eight
-quick wakes in a row with no card stop runtime suspend until the next card change.
+that finds a card starts a rescan, a resume for a host claim does nothing more.
+
+Settling: a card removal (the remove interrupt's `card_event`) holds runtime suspend off
+for 2 s. A reader that doesn't settle backs off: 8 wakes in a row within a
+second of suspending with no card, or card detect not stable for 2 s, hold suspend off
+for 2 s, then 4, 8, ... up to 256 s; a quiet suspend of a second or more, or a card
+change, starts over. A card change is an insert or remove interrupt, or a wakeup that
+finds a card (an insert while suspended raises no interrupt: the resume's reset clears
+it). The first back-off logs `woken 8 times in a row with no card,
+runtime suspend held off for 2 s` (later ones at debug level). A delayed work item ends
+each hold, so a held reader doesn't poll. The GL9767's `card_event` (called only from
+the card-detect interrupt thread here; `mmc_rescan` calls it only for slot-gpio card
+detect) leaves the controller alone if the host has runtime-suspended again by then.
 
 **Why.** Without it sdhci-pci keeps its probe-time runtime-PM reference: the reader and
 its root port 00:02.2 sit in D0 for the whole boot (`runtime_suspended_time` 0 over
 8.5 h). A udev `power/control=auto` rule can't fix that.
 
-**History.** The first version (tested as a module swap on 9.104, 2026-10-24) suspended
-and saw a card inserted while suspended, but after removal it cycled through
-suspend/resume several times a second (74 % active, no mmc interrupts). Its resume
-queued a rescan whenever the card-present bit read set, it suspended before card
-detect had settled, and nothing bounded the cycle. The current version fixes all three.
+**History.** The first version (module swap on 9.104, 2026-10-24) suspended and saw a
+card inserted while suspended, but after removal it cycled through suspend/resume several
+times a second (74 % active, no mmc interrupts). The second (shipped in 9.113 and
+7.2.15-1.101) waited for `SDHCI_CD_STABLE` and stopped runtime suspend after 8 quick
+empty wakes until the next card change. On the G16 (2026-11-10) it hit that limit one
+second after a card was removed, so the reader stayed in D0 until the next card (#418).
+Those wakes were not host claims (they are counted only unclaimed) and found no card:
+the controller wakes straight back up from D3 for a while after a removal, which also
+switches card detect to its 630 ms plug-out debounce. 1.102 replaces the stop with the
+hold and back-off above.
 
 **Default behaviour and risk.** Only GL9767 readers change. With a card in the slot,
-or no PME from D3, nothing changes. The worst case is the reader staying in D0, as
-before.
+or no PME from D3, nothing changes. The worst case is a reader that never settles: it
+stays in D0 most of the time and tries a suspend at most every 256 s.
 
-**Test.** The kit's `0570` check (slot empty, then an optional card cycle). Power: the
-idle A/B's `sd-off` phase is the upper bound.
+**Test.** The kit's `0570` check (slot empty, then a card cycle).
+`tests/channel/linux-omarchy-gl9767-rpm.sh` replays the patch's functions through
+removals that make the reader wake back, six card cycles in a row, and a reader that
+never settles (fixtures/gl9767-rpm-sim.c), and compiles the driver. Power: the idle A/B's `sd-off` phase is the upper bound.
 
 **Upstream.** Not submitted yet (target: linux-mmc), pending the G16 result.
 
