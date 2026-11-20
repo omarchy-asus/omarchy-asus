@@ -1,1 +1,2 @@
 # PRs whose changes our patches carry; bin/check-upstream reports their state.
+omacom/omarchy#16379  0029 /dev/nvidia-modeset created at boot

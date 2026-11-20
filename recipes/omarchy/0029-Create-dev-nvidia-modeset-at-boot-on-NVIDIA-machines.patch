@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Omarchybot
+Date: Fri, 20 Nov 2026 14:37:45 -0500
+Subject: [PATCH 29/29] Create /dev/nvidia-modeset at boot on NVIDIA machines
+
+nvidia-utils' 60-nvidia.rules runs only `nvidia-modprobe -c0 -u`, so nothing creates the modeset node until something on the host opens the NVIDIA driver for display. On a hybrid laptop whose panel hangs off the iGPU that may never happen, and games under umu's Steam Runtime container or Flatpak then fail Vulkan presentation: the container cannot run the setuid helper, and Flatpak only binds the node if it existed when the sandbox was built.
+
+Install the rule the reporter proved on their machine, gated like the packaged one so a GPU bound to vfio-pci is left alone. The setup leaf replays the bind because an image's first boot runs it after coldplug; the migration replays it only while the node is missing, so a retry after a failed udevadm still creates it and another user's run is a no-op.
+
+Fixes #15975
+
+Upstream: omacom/omarchy#16379 (open), its three commits efd6483cb,
+dcdd06b8c and 1768b566d squashed, taken as is.
+
+Backport to v4.5.0-rc2: install/hardware/nvidia.sh ends in our patch
+0012's hybrid branch (no early load on hybrids), so the rule's install and
+the bind replay go after that if/else instead of after the heredoc; the
+lines are upstream's.
+
+Co-Authored-By: Maciej Szostak <3469221+szoniu@users.noreply.github.com>
+Co-Authored-By: Codex Medium <noreply@openai.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ default/udev/nvidia-modeset.rules |  5 +++++
+ install/hardware/nvidia.sh        |  6 ++++++
+ migrations/1792737693.sh          | 16 ++++++++++++++++
+ 3 files changed, 27 insertions(+)
+ create mode 100644 default/udev/nvidia-modeset.rules
+ create mode 100644 migrations/1792737693.sh
+
+diff --git a/default/udev/nvidia-modeset.rules b/default/udev/nvidia-modeset.rules
+new file mode 100644
+index 000000000..06e1fffb9
+--- /dev/null
++++ b/default/udev/nvidia-modeset.rules
+@@ -0,0 +1,5 @@
++# nvidia-utils' 60-nvidia.rules never runs nvidia-modprobe -m, so /dev/nvidia-modeset can be missing on hybrid laptops,
++# and Steam Runtime and Flatpak containers can neither create it nor see one made after they started.
++ACTION=="add|bind", ATTR{vendor}=="0x10de", ATTR{class}=="0x03[0-9]*", \
++  DRIVER=="nvidia", TEST!="/dev/nvidia-modeset", \
++  RUN+="/usr/bin/nvidia-modprobe -m"
+diff --git a/install/hardware/nvidia.sh b/install/hardware/nvidia.sh
+index 226b1184b..1e4fa1f20 100644
+--- a/install/hardware/nvidia.sh
++++ b/install/hardware/nvidia.sh
+@@ -54,4 +54,10 @@ EOF
+   else
+     rm -f /etc/mkinitcpio.conf.d/nvidia.conf
+   fi
++
++  # Create /dev/nvidia-modeset at boot, so containerized games can present on hybrid laptops
++  install -Dm644 "$OMARCHY_PATH/default/udev/nvidia-modeset.rules" /etc/udev/rules.d/61-nvidia-modeset.rules
++  # An image's first boot runs this after coldplug, so replay the GPU's bind for the new rule
++  udevadm control --reload 2>/dev/null || true
++  udevadm trigger --action=bind --subsystem-match=pci --attr-match=vendor=0x10de --attr-match='class=0x03*' 2>/dev/null || true
+ fi
+diff --git a/migrations/1792737693.sh b/migrations/1792737693.sh
+new file mode 100644
+index 000000000..b497c77ac
+--- /dev/null
++++ b/migrations/1792737693.sh
+@@ -0,0 +1,16 @@
++echo "Create /dev/nvidia-modeset at boot, so containerized games can present on hybrid NVIDIA laptops"
++
++rule=/etc/udev/rules.d/61-nvidia-modeset.rules
++
++if omarchy-hw-nvidia && ! omarchy-hw-aarch64-n1x && omarchy-cmd-present nvidia-modprobe; then
++  if ! cmp -s "$OMARCHY_PATH/default/udev/nvidia-modeset.rules" "$rule"; then
++    sudo install -Dm644 "$OMARCHY_PATH/default/udev/nvidia-modeset.rules" "$rule"
++  fi
++
++  # Replayed until the node exists, so a retry after a failed udevadm still creates it and another user's run is a no-op
++  if [[ ! -e /dev/nvidia-modeset ]]; then
++    sudo udevadm control --reload
++    sudo udevadm trigger --action=bind --subsystem-match=pci --attr-match=vendor=0x10de --attr-match='class=0x03*'
++    sudo udevadm settle
++  fi
++fi
+-- 
+2.56.0
+

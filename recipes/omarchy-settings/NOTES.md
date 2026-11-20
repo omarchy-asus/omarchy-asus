@@ -1,4 +1,4 @@
-# omarchy-settings 4.5.0-3.101 (EXPERIMENTAL, RC channel)
+# omarchy-settings 4.5.0-3.102 (EXPERIMENTAL, RC channel)
 
 Built from the same source tree and the same patches as `omarchy`, kept in lockstep with it.
 The base, the patch list, the migration caveats and the rebase steps are in
