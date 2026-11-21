@@ -70,7 +70,7 @@ SHAs are the commits of omacom/omarchy#12428, reachable there.
 **Dropped on 4.5.0:** 0014-0015 (webcam menu guard from udev): omacom/omarchy#15910, `7388fe251`
 on `v4-5-0`, in v4.5.0; its `bin/omarchy-hw-webcam` is byte for byte what the two patches made.
 0028 (the lock takes typing after an NVIDIA VT switch): omacom/omarchy#17277, `00e4a1223` on
-`v4-5-0`, in v4.5.0. Quattro's 4.0.6 recipes still carry 0014-0015 until it picks up the trunk.
+`v4-5-0`, in v4.5.0. Quattro dropped them too when it moved to these recipes (#411).
 
 **General fixes (`general-` series):** fixes to Omarchy's own software that don't help the
 hardware, carried without a separate approval and kept apart from the ASUS patches above.
