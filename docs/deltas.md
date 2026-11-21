@@ -78,10 +78,8 @@ An upstream state that changes is updated here, with the date it was checked.
 | [ALC285 Master at 100%](#omarchy-0009-alc285-master) | omarchy | 0009 | both | not submitted |
 | [rtkit on x86_64](#omarchy-0010-rtkit) | omarchy | 0010-0011, 0022 | both | open |
 | [no NVIDIA early load in the initramfs](#omarchy-0012-initramfs) | omarchy | 0012-0013, 0021 | both | open |
-| [webcam guard from udev](#omarchy-0014-webcam-guard) | omarchy | 0014-0015 | Quattro only | merged, released (v4.5.0) |
 | [Tailscale panel](#omarchy-0016-tailscale) | omarchy | 0016 | both | open / merged-unreleased |
 | [clamshell state from logind events](#omarchy-0017-monitor-watch-logind) | omarchy | 0017 | both | not submitted |
-| [launcher icon index throttle](#omarchy-0018-launcher-icon-index) | omarchy | 0018 | Quattro only | not submitted |
 | [stranded lock recovered while voxtype runs](#omarchy-0024-stranded-lock) | omarchy | 0024, 0027 | both (0027 RC only) | open |
 | [G16 Control widget's dead link swapped for the plugin](#omarchy-0025-widget-link) | omarchy | 0025 | RC only | ours-only |
 | [the RTX stays asleep while apps start](#omarchy-0026-rtx-asleep-at-app-start) | omarchy | 0026 | RC only | not submitted |
@@ -1627,48 +1625,6 @@ bullets.)
 - **Drop when:** #8263 (or #10065) is in an Omarchy release we build from.
 - **Notes:** formerly tracked in issue #29.
 
-<a id="omarchy-0014-webcam-guard"></a>
-### Webcam menu guard from udev (0014-0015)
-
-- **Component:** `omarchy`/`omarchy-settings`, patches 0014-0015 (`bin/omarchy-hw-webcam`). Quattro
-  only since RC's 4.5.0-3.101, which dropped them: omacom/omarchy v4.5.0 has #15910 ([Dropped](#dropped)).
-  Before that both channels, in different versions: RC's 0015 (since 4.5.0rc1-1.111, #330) is fork commits
-  `1c396770` + `5ba289be` + `ccd0f93d` on `asus/v4-5-0-rc1`, squashed, the last two being #15910's
-  fixes (its `b6080af8` and `e5437fda`) taken unchanged; Quattro's 0015 is `6c7d7001` alone. Fork
-  branch `perf/webcam-guard-udev`.
-- **Fixes:** Omarchy's webcam menu guard opens the camera devices to decide whether to show webcam
-  entries, which powers up the camera (and on some systems wakes other devices). The change answers
-  from udev data instead. 0015 (`6c7d7001`, "Read every udev record before asking the webcams")
-  walks every node first, exits 0 on any recorded capture node, and asks the devices only if some
-  node had no record. On RC it also trusts a capture record only from a real camera (a node with a
-  parent device, so not a v4l2loopback node, whose role follows its producer) that this user can
-  read and write; anything else is asked live.
-- **Test:** open the Omarchy menu repeatedly: the webcam LED doesn't flicker, `sudo fuser
-  /dev/video*` shows nothing while the menu opens, and the webcam entries still appear.
-- **Measurements (G16, at `6c7d7001`, 2026-10-18):** stock 125 ms per call with the camera awake
-  about 2.6 s; patched about 5.5 ms per call, camera stays suspended, same answer.
-- **Upstream: merged, released in v4.5.0** (`7388fe251` on `v4-5-0`, checked 2026-11-05; its
-  `bin/omarchy-hw-webcam` is byte for byte what RC's 0014-0015 made).
-  [omacom/omarchy#15910](https://github.com/omacom/omarchy/pull/15910)
-  "Answer the webcam menu guard from udev instead of opening cameras", merged on `quattro` on
-  2026-10-29 as `2afe8589`; not in any tag yet, so not in v4.5.0-rc3 (checked 2026-11-02). It replaced our
-  omacom/omarchy#15670, closed unmerged on 2026-10-19 (maintainers can't push to an
-  organization-owned fork), and carries our two commits unchanged plus one fix on top: udev keeps
-  the role it recorded when a v4l2loopback node appeared, so an `exclusive_caps=1` loopback that
-  ffmpeg streams into is recorded `:video_output:` and our guard answers **no** while the camera
-  streams, and a loopback recorded `:capture:` keeps answering yes after its producer stops.
-  #15910 trusts a `:capture:` record only from a node with a parent device (v4l2loopback nodes have
-  none) and asks the device otherwise. Upstream checked it with ftrace in a VM (`quattro` opened the
-  capture node twice per call, #15910 zero times, same answers); `screenrecording-test.sh`,
-  `menu-test.sh`, `menu-guards-test.sh`, `menu-guard-budget-test.sh` and `./test/cli` pass. It
-  notes an interaction with omacom/omarchy#15616 (udev's record doesn't carry I/O MC).
-- **Refreshed on RC (#330):** RC carries #15910's fixes, so the loopback bug above and the yes for
-  a camera the user can't open are gone there. Quattro (frozen) still ships both until it moves to
-  the 4.5 recipes.
-- **Drop when:** #15910 (or an equivalent) is in an Omarchy release we build from: dropped on RC at
-  4.5.0-3.101; Quattro drops it when it picks up the 4.5 recipes.
-- **Notes:** formerly tracked in issue #30.
-
 <a id="omarchy-0016-tailscale"></a>
 ### Tailscale panel (0016)
 
@@ -1764,67 +1720,6 @@ omacom/omarchy, PR against `quattro`. Not opened; a human decides.
 > (fill in after the G16 run).
 >
 > Overlaps #14711 in `bin/omarchy-hyprland-monitor-watch`. Whichever lands second needs a rebase.
->
-> This pull request was written with Claude Code.
-
-<a id="omarchy-0018-launcher-icon-index"></a>
-### Launcher icon index throttle (0018, Quattro only)
-
-- **Component:** `omarchy`/`omarchy-settings` 4.0.6-1.3, patch 0018
-  (`shell/services/AppLibrary.qml`). Quattro only: RC replaced it with
-  [general-0004](#omarchy-general-0004-app-library) in 1.109 (#299), and the fork reverted it on
-  `asus/v4-5-0-rc1` (`e2ce62938`). Fork branch `perf/launcher-icon-index` (`0f5fc1a9` plus fixup
-  `2dcec7e7`).
-- **Fixes:** opening the launcher walked every icon theme with `find` (about 9,000 paths, 75 ms)
-  and indexed each path in its own JS callback on the GUI thread while the menu animated in. 0018
-  rescans on open at most once a minute (desktop-entry changes still rescan at once, and a change
-  that fires during a scan queues one more) and indexes in a single pass.
-- **Test:** open the launcher repeatedly: the animation is smooth and `find` over the icon themes
-  runs at most once a minute (`pgrep -a find` or `execsnoop`); install a new app: its icon appears
-  at once. No G16 run is recorded.
-- **Upstream: not submitted**, and superseded by the plan below. Related open PRs, not ours:
-  omacom/omarchy#6505 "queue in-flight icon index scans in AppLibrary" (conflicts, overlaps in
-  intent), omacom/omarchy#14992 (complementary; now general-0004), omacom/omarchy#11610 and
-  omacom/omarchy#9408 (merge cleanly). omacom/omarchy#15167 (merged, in v4.5.0-rc1) makes each scan
-  one `find` pass per icon tree.
-- **Plan (2026-10-22):** a once-a-minute timer is the wrong shape: it rescans when nothing changed
-  and an icon that lands inside the window waits. Instead: (1) bring in #14992 (done on RC as
-  general-0004); (2) replace the rescan on open with a cheap change check: compare the modification
-  times of the icon theme caches (`icon-theme.cache`, regenerated by the pacman hook) and the user
-  icon directories against the last scan's, a few `stat` calls instead of walking ~9,000 paths,
-  which still covers the first-install race (the shell can start before packages place their
-  icons) without a timer; (3) keep 0018's single-pass indexing. Steps 2 and 3 are not done yet and
-  not submitted; test cases: no scan on an unchanged app list, no scan on open with unchanged
-  caches, a scan after one changes, single-pass indexing; on the G16: no `find` on repeated opens,
-  a new app's icon on the next open, no rescan after saving a dotfile in the home directory.
-- **Drop when:** Quattro moves to 4.5 (general-0004 then covers it), or an equivalent is released.
-- **Notes:** formerly tracked in issue #33.
-
-#### Upstream report draft
-
-omacom/omarchy, PR against `quattro`, for the plan's steps 2 and 3 rather than 0018's timer (not
-written yet; the text below describes it). Open it after omacom/omarchy#14992 and reference
-omacom/omarchy#6505. Not opened; a human decides.
-
-> **Title:** Rescan launcher icons on open only when the icon caches changed
->
-> Opening the launcher rescans every icon theme (about 9,000 paths) and indexes each path in its
-> own JS callback on the GUI thread while the menu animates in. #15167 made the scan one `find`
-> per icon tree, and #14992 stops the rescans on unrelated home-directory changes, but the rescan
-> on open still runs every time, as a guard against the shell starting before packages have
-> placed their icons.
->
-> This keeps that guard with a cheap change check: on open, compare the modification times of the
-> `icon-theme.cache` files (rewritten by the pacman hook) and the user icon directories against
-> the last scan's, a few `stat` calls, and rescan only when one changed. The index is built in a
-> single pass instead of one callback per path. Desktop-entry changes still rescan at once.
->
-> Measured: the icon walk is about 9,000 paths and 75 ms of `find` per open. (Fill in this
-> change's results after a G16 run: no `find` on repeated opens, a new app's icon on the next
-> open.)
->
-> **Tests.** No scan on an unchanged app list, no scan on open with unchanged caches, a scan
-> after one changes, and the single-pass index.
 >
 > This pull request was written with Claude Code.
 
@@ -2070,7 +1965,8 @@ omacom/omarchy#13782 offering it as an alternative. Not opened; a human decides.
 ### The app library rescans only on real changes (general-0004)
 
 - **Component:** `omarchy`/`omarchy-settings`, patch general-0004 (fork commit `f8df8d7a3`). RC
-  only (since 1.109, #299); replaces [0018](#omarchy-0018-launcher-icon-index) there.
+  only (since 1.109, #299), and Quattro since its move to the 4.5 recipes (#411); replaced 0018
+  ([Dropped](#dropped)).
 - **Fixes:** quickshell's `DesktopEntries` watches every ancestor of the applications directories,
   the home directory included, so any dotfile save re-ran the hidden-entries scan and the icon index
   (2-12% of a core with nothing installed). It now rescans only when the app list really changes
@@ -2080,7 +1976,11 @@ omacom/omarchy#13782 offering it as an alternative. Not opened; a human decides.
   appear.
 - **Upstream: open.** omacom/omarchy#14992 "Rescan the app library only when the app list changes"
   (another contributor's PR; its commit `00697bf8c3`). The once-on-open rescan (the first-install
-  race) is still there; see the plan under [0018](#omarchy-0018-launcher-icon-index).
+  race) is still there. A possible follow-up, not written or submitted: on open, compare the
+  modification times of the `icon-theme.cache` files and the user icon directories against the
+  last scan's (a few `stat` calls instead of walking about 9,000 paths, 75 ms of `find`) and rescan
+  only when one changed, with the index built in one pass; open it after #14992 and reference
+  omacom/omarchy#6505.
 - **Drop when:** #14992 is in an Omarchy release we build from.
 
 <a id="omarchy-pkgbuild-pin-settings"></a>
@@ -2686,9 +2586,9 @@ Work still in issues, not in any recipe on `main` today:
 |---|---|---|---|
 | 9900, EXPERIMENTAL Zen 5c-first soft park (five default-off scheduler knobs: amd_hfi ranking, soft wakeup preference, workload-class steering, SMT packing, NOHZ idle balancer) | linux-omarchy, both channels, ours-only | RC linux-omarchy 7.2.8-9.112; Quattro keeps its frozen build until it picks up the trunk | the battery A/B (#10, 2026-10-27, console only on the G16) found no win at idle: ranking efficiency or inverted, wake_preferred all and wake_pack each within 0.03 W of stock, all three together 0.14 W worse; RAPL package power is only 0.36-0.43 W at idle, so the cores have almost nothing left to save. The light-load half was not run; the CPU-setting A/B (#328) found nothing under light load either |
 | 0028, the lock takes typing after an NVIDIA VT switch (#302, #393) | omarchy RC | RC 4.5.0-3.101 | upstream's omacom/omarchy#17277 (`00e4a1223` on `v4-5-0`) is in v4.5.0, the release this build is based on. It made `LockView.qml` give the password field its focus back after a VT switch and the first blank countdown after a resume 15 s; Hyprland's [seat-leave](#hyprland-seat-leave) patch stays for other Qt windows |
-| 0014-0015, webcam menu guard from udev (RC) | omarchy RC | RC 4.5.0-3.101; still on Quattro ([0014-0015](#omarchy-0014-webcam-guard)) | upstream's omacom/omarchy#15910 (`7388fe251` on `v4-5-0`) is in v4.5.0, with the same `bin/omarchy-hw-webcam` RC's patches made |
+| 0014-0015, webcam menu guard from udev | omarchy, both channels | RC 4.5.0-3.101; Quattro with its move to the 4.5 recipes (#411) | upstream's omacom/omarchy#15910 (`7388fe251` on `v4-5-0`, merged on `quattro` as `2afe8589`) is in v4.5.0, with the same `bin/omarchy-hw-webcam` RC's patches made (Quattro's older 0015, `6c7d7001` alone, lacked #15910's v4l2loopback fix). Measured on the G16 at `6c7d7001`: 125 ms per call with the camera awake about 2.6 s, against about 5.5 ms with it left suspended. Formerly issue #30 |
 | general-0003, the lock's password field lost the keyboard after a suspend (#295) | omarchy RC | RC 4.5.0rc1-1.110 (#306) | the Hyprland seat fix ([seat-leave](#hyprland-seat-leave)) sends `wl_keyboard.leave`, so Qt re-activates the lock window with stock `LockView.qml`; reverted on the fork by `b5af08c6` |
-| 0018, launcher icon index throttle | omarchy RC | RC 4.5.0rc1-1.109 (#299) | replaced by upstream's [#14992](#omarchy-general-0004-app-library); still on Quattro ([0018](#omarchy-0018-launcher-icon-index)) |
+| 0018, launcher icon index throttle | omarchy, both channels | RC 4.5.0rc1-1.109 (#299); Quattro with its move to the 4.5 recipes (#411) | replaced by upstream's omacom/omarchy#14992, carried as [general-0004](#omarchy-general-0004-app-library). Its follow-up plan (rescan on open only when the icon theme caches changed, single-pass indexing) was never written or submitted. Formerly issue #33 |
 | 0481's self-refresh-on-tearing-flips part (`2e54a92e0136`) | linux-omarchy, part of [0481](#kernel-0481-amdgpu-display-power) | RC linux-omarchy 7.2.15-1.101; Quattro keeps it until it picks up the trunk | in 7.2.11 stable (`04ee82fec489`), so in the 7.2.15 base; the rest of 0481 stays |
 | `asus-zephyrus-g16-control`, the G16 Control widget package | asus-rog-nkey-winlock | RC (0.1.0-103 replaces it) | the widget is the omarchy-asus plugin (#183); RC's `asus-rog-nkey-winlock` replaces the transitional package |
 | hid-asus Win-lock DKMS module (`recipes/hid-asus-winlock-dkms-reference/`) | out of tree | linux-omarchy 7.2.8-9.1 | the same patch is in the kernel as [0568](#kernel-0568-winlock); kept as a reference, not built |
