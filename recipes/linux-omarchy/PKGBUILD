@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.15
-pkgrel=4.101
+pkgrel=4.102
 # NVIDIA's open kernel modules ship prebuilt as $pkgbase-nvidia-open, built in
 # this recipe so every kernel lands with modules for it and nobody compiles
 # them through DKMS on a kernel update. Keep this version in step with
@@ -289,6 +289,11 @@ source=(
   9909-EXPERIMENTAL-hid-asus-ga605km-keyboard-caps-lock-led-only.patch
   # EXPERIMENTAL, sends nothing by default: amdgpu debugfs amdgpu_smu_allow_zstates sends the SMU AllowZstates message (0x25) on an explicit write, for GA605KM idle testing; see NOTES.md
   9910-EXPERIMENTAL-amd-pm-smu-allow-zstates-debugfs.patch
+  # omarchy-asus: our nvidia-open-dkms fixes, applied to the prebuilt NVIDIA modules ($pkgbase-nvidia-open) by prepare()
+  nvidia-0001-nvidia-skip-teardown-in-nv_pci_shutdown-while-hibernate-suspended.diff
+  nvidia-0002-nvidia-defer-NVPCF-notify-while-runtime-suspended.diff
+  nvidia-0003-nvidia-modeset-free-semaphore-surface-callback-when-already-signalled.diff
+  nvidia-0004-nvidia-drm-report-HDMI-without-EDID-as-disconnected.diff
 )
 source_x86_64=(config.x86_64)
 validpgpkeys=(
@@ -738,7 +743,11 @@ b2sums=('a1d1a6572667dfd75f7dde083a8d461db98e08bbc67cdd395e2d73a422ee487bd14392c
         '7abf5b34b5deba8a48e527ad64eb5636c2e0014371649e831fc06a10481c133a565d5e6a3730a7b3548538b49c2714ed5c942094b031f9625845c2072e3db5aa'
         '6a5635f04d9a0fe82e313a2f076bb1ec63c9e67c0f4f692307b286ce251c5b5bf6f5bcb5c3ffd7e85afa67ea580ebac46fc06bcfc5153a03108a99a7d50cce72'
         '71d68c440862ccb1d18d5f0dd94338a7509d778285865f361222367ddd2c7f4ca01e702939398b99ac752d585880bb3f685fefa0d5871d631c6af2d79f01f509'
-        'dec25bcacdd7209760d85e9b6ef8c6da9d89b2a3bf4f00fe305cdcdd43f7a762492c1b465d61ea0b0808c19de8869e601d2beab1a9493fb15683d5f4eb8f2277')
+        'dec25bcacdd7209760d85e9b6ef8c6da9d89b2a3bf4f00fe305cdcdd43f7a762492c1b465d61ea0b0808c19de8869e601d2beab1a9493fb15683d5f4eb8f2277'
+        'be0da6e6a328f992d3a87f86da581bb88c197c8a685d5edea77e40d2a5222686f109e66d9ecf8446c6dfe76465ca9d782db659962b2bd913ec701a12c0eb7a23'
+        'dcdecc046150a2872fc3c2a44add42bde5454073e83317758da627b5330ad571b6943af821f448fa2f83572270e66dd9e897edd81b3af59cd36a6c79d88bf036'
+        '5c56e8502b1c5fd837fa19ccb3d307725e6b7e945497ca5975db4063afae6ed49d3cd961eec33f35c68c9e10eec00a7e578d95a8b7e6376b728b72fbd9a257c7'
+        '45f1f69b129a1e6b1617a8a7abd23f51fb9725fd0c1981f2c9583c8f06fafb8f5a47f486b283c6c1a7b4830c7236427bf642cfc27c763dc79c5e0e14008fb2f7')
 b2sums_x86_64=('8b0d1e01287bfeead4744b72c6cfebec43c25d3bf4bf98755e5eb116e4e8807929aa8d5973275897b89984d4906d3cd063e61c2b9e6a732640d7c506d53b9196')
 
 # https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
@@ -1184,7 +1193,11 @@ sha256sums=('d0f6b1d7324c937ccaeb5c4ca7084bfcf71db2edb3e2d3a31f0ad83a681809ab'
             '2f660fd955f013169ddfe3b78da2ae1bc834ece054073c43dc47c3c23e7b0fa9'
             '7792744f2b346137302442a68923c55a404414fd9825261afdac61a980d9c0b5'
             '16495e9569991fd48785e36cc0154a1778abe7965feb343353c77e4fa42cba4a'
-            '098f9420f8818078c2e0f56f604b7a62934d822d25c01f977e247d4418ae3a34')
+            '098f9420f8818078c2e0f56f604b7a62934d822d25c01f977e247d4418ae3a34'
+            'e90790010f8dc57f12282b41ab04f629757acf3d7ad0d39c4791f2c6b7f2f547'
+            'd0c625aabff29bff60d6a6979bbed1f6e4e6dd9b1f9be9ee74fdb95107b2d1fb'
+            '65bdb11a81da3f56ac3ae5268725389cfbdd4fa8e833d62d8238048ebf2d5450'
+            'b7af1e344fcf3d202888fb7dff9ca931f4ba4db2c6aa2f77a41d6c01ce95eb2b')
 
 export KBUILD_BUILD_HOST=omarchy
 export KBUILD_BUILD_USER=$pkgbase
@@ -1210,6 +1223,17 @@ prepare() {
     [[ $src = *.patch ]] || continue
     echo "Applying patch $src..."
     patch -Np1 --fuzz=0 < "../$src"
+  done
+
+  # omarchy-asus: the prebuilt NVIDIA modules carry the same fixes as our
+  # nvidia-open-dkms (recipes/nvidia-open-dkms/000*.patch, copied here as
+  # nvidia-*.diff so the loop above leaves them alone).
+  for src in "${source[@]}"; do
+    src="${src%%::*}"
+    src="${src##*/}"
+    [[ $src = nvidia-*.diff ]] || continue
+    echo "Applying NVIDIA patch $src..."
+    patch -d "$srcdir/$_nvidia" -Np1 --fuzz=0 < "../$src"
   done
 
   echo "Setting config..."

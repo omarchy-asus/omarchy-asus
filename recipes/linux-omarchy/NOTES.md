@@ -3,10 +3,25 @@
 ## Base
 
 - Upstream recipe: `pkgbuilds/linux-omarchy` in omacom/omarchy-pkgs.
-- Tracks linux-omarchy **7.2.15-1**.
-- Our version: **7.2.15-1.101**. Builds both split packages from one pkgbase:
-  `linux-omarchy` and `linux-omarchy-headers` (headers are required by DKMS
-  modules such as nvidia-open-dkms).
+- Tracks linux-omarchy **7.2.15-4**.
+- Our version: **7.2.15-4.102**. Builds three split packages from one pkgbase:
+  `linux-omarchy`, `linux-omarchy-headers` (headers are required by DKMS
+  modules such as nvidia-open-dkms) and, since upstream's 7.2.15-4,
+  `linux-omarchy-nvidia-open` (NVIDIA's open modules prebuilt for this kernel;
+  conflicts with nvidia-open-dkms).
+
+## NVIDIA fixes on the prebuilt modules (nvidia-*.diff)
+
+Upstream's 7.2.15-4 builds NVIDIA's open kernel modules inside this recipe and
+ships them as `linux-omarchy-nvidia-open`, which conflicts with (and so replaces)
+our patched `nvidia-open-dkms`. So the prebuilt modules get the same four fixes:
+`nvidia-000N-*.diff` are copies of `recipes/nvidia-open-dkms/000N-*.patch`
+(named `.diff` so prepare()'s kernel `*.patch` loop skips them), applied to
+`$srcdir/$_nvidia` by the prepare() hunk in `pkgbuild-nvidia-patches.diff`.
+Keep them identical to the nvidia-open-dkms copies: when one of those changes or
+drops, change or drop it here in the same pull request (docs/deltas.md, NVIDIA
+section). When upstream's `_nvidiaver` moves, check they still apply at fuzz 0
+(`--verify` does).
 
 ## What we change
 
@@ -410,7 +425,8 @@ reproduces steps 1-5 below, taking the checksums of upstream's files from upstre
 PKGBUILD and hashing only our own patches. The manual steps:
 
 1. Copy upstream's `pkgbuilds/linux-omarchy/` over this directory (keep this
-   NOTES.md, the g16-test kit and our patches: 0481, 0482, 0568, 0569, 0570, 0773, 0807, 0808, 0809, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910).
+   NOTES.md, the g16-test kit, our patches: 0481, 0482, 0568, 0569, 0570, 0773, 0807, 0808, 0809, 0810, 9901, 9902, 9903, 9904, 9905, 9906, 9907, 9908, 9909, 9910, and the nvidia-000N-*.diff copies with
+   pkgbuild-nvidia-patches.diff).
 2. Add them back to `source=()`: 0481 after the last `04xx` patch, 0482 after our 0481, 0568, 0569 and 0570 after the
    last `056x`/`057x` patch, 0773 after the last `077x` patch, 0807, 0808, 0809 and 0810 after the last `080x` patch
    (upstream reuses some of these numbers; `DELTA`'s globs place ours after upstream's),
