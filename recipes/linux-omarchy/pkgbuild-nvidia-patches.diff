@@ -1,0 +1,20 @@
+--- a/PKGBUILD
++++ b/PKGBUILD
+@@ -1212,6 +1212,17 @@
+     patch -Np1 --fuzz=0 < "../$src"
+   done
+ 
++  # omarchy-asus: the prebuilt NVIDIA modules carry the same fixes as our
++  # nvidia-open-dkms (recipes/nvidia-open-dkms/000*.patch, copied here as
++  # nvidia-*.diff so the loop above leaves them alone).
++  for src in "${source[@]}"; do
++    src="${src%%::*}"
++    src="${src##*/}"
++    [[ $src = nvidia-*.diff ]] || continue
++    echo "Applying NVIDIA patch $src..."
++    patch -d "$srcdir/$_nvidia" -Np1 --fuzz=0 < "../$src"
++  done
++
+   echo "Setting config..."
+   cp ../config.$CARCH .config
+   make olddefconfig

@@ -697,6 +697,12 @@ Add the `Assisted-by:` tag the kernel's rules on AI assistants ask for.
 615.78.08: RC 1.102, Quattro 1.3. `recipes/nvidia-open-dkms/UPSTREAM_PRS` lists 0001-0003, so the
 daily check reports their pull requests' state. When no patch is left, unpublish the package.
 
+Since linux-omarchy 7.2.15-4.102 the same four patches are also applied to the NVIDIA modules
+upstream now prebuilds in the kernel recipe (`linux-omarchy-nvidia-open`, which conflicts with
+`nvidia-open-dkms`), as `recipes/linux-omarchy/nvidia-000N-*.diff`. Refreshing or dropping a
+patch here does the same to its copy there, in the same pull request
+(`recipes/linux-omarchy/NOTES.md`, "NVIDIA fixes on the prebuilt modules").
+
 <a id="nvidia-0001-hibernate-power-off"></a>
 ### Hibernate power-off (0001, NVIDIA/open-gpu-kernel-modules#1412)
 

@@ -1,0 +1,30 @@
+diff --git a/kernel-open/nvidia-drm/nvidia-drm-connector.c b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+--- a/kernel-open/nvidia-drm/nvidia-drm-connector.c
++++ b/kernel-open/nvidia-drm/nvidia-drm-connector.c
+@@ -179,6 +179,26 @@
+     drm_connector_set_vrr_capable_property(&nv_connector->base, pDetectParams->vrrSupported ? true : false);
+ #endif
+ 
++    /*
++     * An HDMI sink always provides an EDID over DDC.  If RM reports the
++     * connector connected but no EDID could be read, the connect state is
++     * stale (seen after resume from hibernation, with nothing plugged in):
++     * report the connector disconnected, as i915 does, so userspace does not
++     * light up a phantom output and keep the GPU awake.  A forced connector
++     * or an EDID override still counts as connected.
++     */
++    if (pDetectParams->connected &&
++        nv_connector->type == NVKMS_CONNECTOR_TYPE_HDMI &&
++        connector->force == DRM_FORCE_UNSPECIFIED &&
++        !pDetectParams->overrideEdid &&
++        pDetectParams->edid.bufferSize == 0) {
++        NV_DRM_DEV_LOG_INFO(
++            nv_dev,
++            "No EDID on connected HDMI connector %s; treating it as disconnected",
++            connector->name);
++        return false;
++    }
++
+     if (pDetectParams->connected) {
+         if (!pDetectParams->overrideEdid && pDetectParams->edid.bufferSize) {
+ 
