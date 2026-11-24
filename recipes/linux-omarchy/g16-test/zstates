@@ -1,0 +1,1998 @@
+#!/usr/bin/env python3
+"""zstates: does AllowZstates start runtime S0i2 in the bit-16 idle state? (#249, kernel 9.111 or later)
+
+On 9.110 idlemask bit 16 read idle at runtime once the PSP was runtime-suspended and the
+keyboard/Bluetooth xHCI (67:00.0) was asleep, with the screen really off and display idle
+allowed (the g-plus and g-hold kits); every bit of the runtime gate mask 0x07C39109 read idle
+except bit 8. The SMU's timein_s0i2 still stayed 0 and socket power didn't drop. The SMU image
+suggests its runtime deep-idle gate also needs a Z-state enable fed by AllowZstates
+(PPSMC_MSG_AllowZstates 0x25), which Linux never sends. 9.111 added the debugfs switch
+dri/<amdgpu minor>/amdgpu_smu_allow_zstates (patch 9910; 0, 8 or 9), and lets the built-in
+keyboard (0b05:19b6) autosuspend: hid-asus declares only its Caps Lock LED (9909) and
+omarchy-asus-g16's udev rule (1.0.0-104 and later) puts it on power/control=auto. Every
+linux-omarchy since carries 9901-9910 (7.2.15-1.101 does), so the installed kernel runs it:
+no test kernel, no reboot.
+
+One question: in the idle state where bit 16 clears, does sending AllowZstates (9, then 8)
+make the SMU enter runtime S0i2 (timein_s0i2 rising, battery power dropping)?
+
+  K   the keyboard, screen on. K0 as installed (nothing changed): does 3-4 autosuspend by
+      itself (9909 + the udev rule)? K1 Bluetooth soft-blocked: does 67:00.0 sleep too? Only if
+      not: K2 asusd, g16-winlockd and the user's g16-winlock stopped, the keyboard's LEDs and
+      backlight off (the g-hold B state); only if still not: K3 the keyboard deauthorized.
+      Up to 10 s each, runtime_status at 10 Hz.
+  key the keyboard asleep, the key check: the run log says "press Shift once"; the kit reads
+      the keyboard's event nodes (read only, no grab) and its runtime_status at 20 Hz for up
+      to 45 s: did the press wake it, and was the press itself delivered (a Shift press
+      before its release) or lost? No press in the window: not checked, the run goes on.
+  G   amdgpu.dcn35_s0i2=1 and amdgpu.dm_idle_all_off=1 (set with the screen on), the screen
+      off (DPMS; verified by Hyprland's dpmsStatus AND the eDP connector's kernel DPMS
+      state), the PSP runtime-suspended (ccp.psp_rpm_delay_ms=2000 + power/control=auto,
+      9906); then up to 15 s for bit 16 to read idle.
+  Z   30 s each: base (nothing sent), AllowZstates(9), AllowZstates(8), AllowZstates(0) (the
+      restore). The idlemask, the screen, 3-4, 67:00.0, the PSP and battery watts at 1 Hz; at each phase's
+      start and end only: SMU metrics (9907 smu_metrics_runtime: timein_s0i2 and the per-IP
+      "time condition not met" counters), RAPL package energy, gpu_metrics socket power,
+      every CPU's cpuidle usage and time (wakeups/s) and /proc/interrupts;
+      display idle (amdgpu_dm_ips_status "Idle optimization"). A phase is INVALID unless the
+      screen reads off by both checks at its start and end and in 90% of the 1 Hz reads,
+      the PSP stays suspended, and 67:00.0 is asleep in 90% of reads; an INVALID phase is
+      run once more.
+Stops early: no base in the idle state (bit 16 idle in under 80% of reads): no message is
+sent. AllowZstates(9) clearly starts S0i2 (timein_s0i2 grows by 10% of the phase or more
+AND battery power drops 0.2 W or more): 8 is skipped. Neither 9 nor 8 changes anything: 0
+is sent without a measured phase.
+
+  zstates               run it: on battery, one root prompt, about 4 minutes; hands off
+                        except one Shift press when the run log asks (about 30 s in)
+  zstates --check       read-only preflight as you (no root, nothing changed)
+  zstates --dry-run     the whole run against a fake sysfs tree in a temporary directory,
+                        with a kernel emulator; no root, nothing on this machine changed
+                        (--sim-kbd k0|k1|k2|k3: the level at which the keyboard sleeps;
+                         --sim-udev yes|no: whether the udev rule set power/control=auto;
+                         --sim-z z9|z8|counter|drop|none: what the messages do;
+                         --sim-key kept|lost|none: the Shift press;
+                         --sim-state ok|nobit16|screen: the idle state)
+
+Never: the eDP connector's `status` (force-off froze Hyprland), recursive sysfs globs, NVRAM
+or BIOS writes, the RTX or anything under it (64:00.x), the global ASPM policy, unbinding a
+driver, loading modules, audio (nothing makes a sound), Wi-Fi (it stays on).
+
+Everything goes back on exit from an undo journal under /run (the keyboard first, then newest
+first): AllowZstates(0) if the last value sent wasn't 0, the LEDs' triggers and brightness,
+asusd, g16-winlockd and g16-winlock, power/control values, Bluetooth, the parameters, the
+PSP's runtime PM, DPMS on. A root watchdog unit does the same if the kit dies or passes its
+deadline. The SMU's Z-state setting isn't readable back; a reboot resets it.
+
+Root: pkexec through the desktop's polkit agent (G16_POLKIT_REASON=<wrapper> runs
+`<wrapper> run REASON -- pkexec ...`; G16_ROOT=sudo uses sudo).
+Exit status: 0 the run finished (whatever the verdict), 1 a problem, 2 bad usage.
+"""
+import argparse
+import errno
+import glob
+import json
+import os
+import pwd
+import re
+import select
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+ISSUE = 249
+NAME = "zstates"
+SELF = os.path.realpath(__file__)
+# 7.2.8-9.111 or later, or any later kernel version (each carries 9901-9910; the preflight checks
+# their files, and the root stage 9907's and 9910's debugfs files)
+KERNEL_RE = re.compile(r"^(7\.2\.8-9\.1(1[1-9]|[2-9][0-9])|7\.2\.(9|[1-9][0-9])-[0-9.]+|7\.([3-9]|[1-9][0-9])\.[0-9]+-[0-9.]+)-omarchy")
+ROOT = ""                                # the fake tree's directory in --dry-run; "" on the G16
+FAKE = None                              # the --dry-run world (commands and the kernel emulator)
+
+PCI = "/sys/bus/pci/devices"
+USB = "/sys/bus/usb/devices"
+RFKILL = "/sys/class/rfkill"
+INPUT = "/sys/class/input"
+LEDS = "/sys/class/leds"
+KBD_BL = "/sys/class/leds/asus::kbd_backlight/brightness"
+POWERCAP = "/sys/class/powercap"
+IGPU_BDF = "0000:65:00.0"
+PSP_BDF = "0000:65:00.2"
+PSP_DIR = f"{PCI}/{PSP_BDF}"
+PSP_IDS = ("0x1022", "0x17e0")
+XHCI_KBD = "0000:67:00.0"
+KBD_IDS = ("0b05", "19b6")
+P_S0I2 = "/sys/module/amdgpu/parameters/dcn35_s0i2"          # 9901
+P_IDLE = "/sys/module/amdgpu/parameters/dm_idle_all_off"     # 9902/9908
+P_DELAY = "/sys/module/ccp/parameters/psp_rpm_delay_ms"      # 9906
+IDLEMASK = "/sys/kernel/debug/amd_pmc/amd_pmc_idlemask"
+SMU_METRICS = "/sys/kernel/debug/amd_pmc/smu_metrics_runtime"  # 9907
+DRI = "/sys/kernel/debug/dri"
+ZFILE = "amdgpu_smu_allow_zstates"                           # 9910
+IPS_FILE = "amdgpu_dm_ips_status"
+INTERRUPTS = "/proc/interrupts"
+CPU_DIR = "/sys/devices/system/cpu"
+DMI = ("/sys/class/dmi/id/product_name", "/sys/class/dmi/id/board_name")
+RUN_DIR = "/run/g16-zstates"
+BITS = (5, 16, 20)
+GATE_MASK = 0x07C39109           # the runtime gate mask; bit 8 can't read idle from a running CPU
+SOCKET_OFF = 112                 # gpu_metrics_v3_0 average_socket_power (mW)
+DROP_W = 0.2                     # a battery power drop that counts (the gpu_metrics socket reading
+                                 # over-reads ~2 W at idle and RAPL package is only ~0.4 W, #249)
+GAUGE_LAG_S = 8                  # the battery gauge lags ~8 s: a phase's first reads are left out
+CLEAR_SHARE = 0.10               # timein_s0i2 growth, as a share of the phase, that counts as clear
+IDLE_OK = 0.8                    # bit 16 idle in this share of reads: the idle state
+VALID_SHARE = 0.9                # screen off / 67:00.0 asleep in this share of 1 Hz reads
+PHASE_S, KBD_WAIT_S, KEY_WAIT_S, IDLE_WAIT_S = 30, 10, 45, 15
+RPM_WAIT_S, DELAY_MS, AUTOSUSPEND_MS, UNIT_WAIT_S, LOG_WAIT_S = 15, 2000, 2000, 5, 3
+DEADLINE_S = 600
+EV_KEY, KEY_LEFTSHIFT, KEY_RIGHTSHIFT = 1, 42, 54
+EVENT = struct.Struct("llHHi")   # struct input_event on 64-bit
+K_LEVELS = {"K0": "as installed (nothing changed)",
+            "K1": "Bluetooth soft-blocked",
+            "K2": "also asusd, g16-winlockd and g16-winlock stopped, the keyboard's LEDs and backlight off",
+            "K3": "also the keyboard deauthorized"}
+PHASES = {"base": ("the idle state, nothing sent", None),
+          "Z9": ("AllowZstates(9) sent: Z9 and Z8 allowed", 9),
+          "Z8": ("AllowZstates(8) sent: Z8 only", 8),
+          "Z0": ("AllowZstates(0) sent: disallowed (the restore)", 0)}
+ZLINE_RE = re.compile(r"EXPERIMENTAL: SMU AllowZstates\((\d+)\) sent: (-?\d+), arg register (0x[0-9a-fA-F]+)")
+ERR_RE = re.compile(r"\*ERROR\*|dmub.*(timeout|timed out|error|fail)|REG_WAIT timeout|"
+                    r"amdgpu.*(timeout|timed out|failed|hang|reset|error)|SMU.*(fail|error|timeout|busy)|"
+                    r"ccp.*(error|fail|timeout)|psp.*(timeout|timed out|error|fail|dead)|"
+                    r"xhci.*(error|fail|timeout|died|halt)|usb .*(error|fail|timeout)|btusb.*(error|fail|timeout)|"
+                    r"usbhid.*(error|fail|timeout)|asus.*(error|fail|timeout)|AER|PCIe Bus Error|WARNING: CPU", re.I)
+
+
+# ---------------------------------------------------------------------------- the filesystem
+# Every path in the code is the real one; ROOT (the fake tree, --dry-run) is put in front here.
+
+def fs(p):
+    return ROOT + p
+
+
+def rd(p, d=None):
+    try:
+        with open(fs(p), errors="replace") as f:
+            return f.read(16384).strip()
+    except OSError:
+        return d
+
+
+def wr(p, v):
+    """One write(2), sysfs style (O_TRUNC)."""
+    try:
+        fd = os.open(fs(p), os.O_WRONLY | os.O_TRUNC)
+        try:
+            data = f"{v}\n".encode()
+            return os.write(fd, data) == len(data)
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+
+
+def wr_dbg(p, v):
+    """One write(2) to a debugfs file (no O_TRUNC). -> None, or the error ("EINVAL Invalid argument")."""
+    try:
+        fd = os.open(fs(p), os.O_WRONLY)
+        try:
+            os.write(fd, f"{v}\n".encode())
+        finally:
+            os.close(fd)
+        return None
+    except OSError as e:
+        return f"{errno.errorcode.get(e.errno, e.errno)} {e.strerror}"
+
+
+def exists(p):
+    return os.path.exists(fs(p))
+
+
+def isdir(p):
+    return os.path.isdir(fs(p))
+
+
+def gl(pattern):
+    """One level of glob (never recursive), the results as real paths."""
+    return sorted(x[len(ROOT):] for x in glob.glob(fs(pattern)))
+
+
+def real(p):
+    r = os.path.realpath(fs(p))
+    return r[len(ROOT):] if ROOT and r.startswith(ROOT) else r
+
+
+def num(p):
+    v = rd(p, "")
+    return int(v) if v.lstrip("-").isdigit() else None
+
+
+def run_cmd(argv, timeout=30):
+    if FAKE is not None:
+        return FAKE.cmd(argv)
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def have(tool):
+    return True if FAKE is not None else shutil.which(tool) is not None
+
+
+def systemctl(*a, user=None):
+    return run_cmd(["systemctl", *(["--user", "-M", f"{user}@"] if user else []), *a])
+
+
+def is_active(unit, user=None):
+    r = systemctl("is-active", unit, user=user)
+    return r is not None and r.stdout.strip() == "active"
+
+
+def kernel_all(since):
+    r = run_cmd(["journalctl", "-k", "-q", "-o", "cat", "--since", f"@{int(since)}"])
+    return r.stdout.splitlines() if r is not None else []
+
+
+def kernel_lines(since):
+    return [ln for ln in kernel_all(since) if ERR_RE.search(ln) and "SMU idlemask" not in ln
+            and "EXPERIMENTAL" not in ln][:30]
+
+
+def wait_for(fn, secs, step=0.25):
+    t0 = time.monotonic()
+    while True:
+        v = fn()
+        if v or time.monotonic() - t0 >= secs:
+            return v, time.monotonic() - t0
+        time.sleep(step)
+
+
+# ---------------------------------------------------------------------------- readings
+
+def battery():
+    for s in gl("/sys/class/power_supply/*"):
+        if rd(s + "/type") == "Battery" and rd(s + "/scope") != "Device":
+            return s
+    return None
+
+
+def bat_point(bat):
+    if not bat:
+        return None
+    e, c, v = num(bat + "/energy_now"), num(bat + "/charge_now"), num(bat + "/voltage_now")
+    return {"t": time.monotonic(), "status": rd(bat + "/status"),
+            "energy_uwh": e if e is not None else (c * v / 1e6 if c is not None and v else None)}
+
+
+def bat_now_w(bat):
+    """Battery watts now: current_now x voltage_now (power_now where the gauge has it)."""
+    if not bat:
+        return None
+    pw = num(bat + "/power_now")
+    if pw is not None:
+        return abs(pw) / 1e6
+    c, v = num(bat + "/current_now"), num(bat + "/voltage_now")
+    return abs(c) * v / 1e12 if c is not None and v else None
+
+
+def bat_avg_w(b0, b1):
+    if not b0 or not b1 or b0.get("energy_uwh") is None or b1.get("energy_uwh") is None or b1["t"] <= b0["t"]:
+        return None
+    return (b0["energy_uwh"] - b1["energy_uwh"]) / 1e6 * 3600 / (b1["t"] - b0["t"])
+
+
+def amdgpu_dev():
+    for c in gl("/sys/class/drm/card[0-9]*"):
+        if "-" in os.path.basename(c):
+            continue
+        d = real(c + "/device")
+        if os.path.basename(real(d + "/driver")) == "amdgpu" and exists(d + "/gpu_metrics"):
+            return d, os.path.basename(c)
+    return None, None
+
+
+def edp_connectors(dev):
+    out = []
+    for c in gl("/sys/class/drm/card*-eDP-*"):
+        card = os.path.basename(c).split("-")[0]
+        if dev and real(f"/sys/class/drm/{card}/device") != dev:
+            continue
+        if rd(c + "/status") == "connected":
+            out.append(c)
+    return out
+
+
+def dri_dir(card):
+    """The amdgpu device's DRM debugfs directory: dri/<minor>, else dri/<PCI address>; its
+    `name` must name the iGPU. Only these two directories are looked at."""
+    m = re.fullmatch(r"card(\d+)", card or "")
+    for d in ([f"{DRI}/{m.group(1)}"] if m else []) + [f"{DRI}/{IGPU_BDF}"]:
+        if IGPU_BDF in (rd(d + "/name", "") or "") and "amdgpu" in (rd(d + "/name", "") or ""):
+            return d
+    return None
+
+
+def rapl_dir():
+    for d in gl(POWERCAP + "/intel-rapl:*"):
+        if rd(d + "/name") == "package-0":
+            return d
+    return None
+
+
+def socket_w(dev):
+    try:
+        with open(fs(dev + "/gpu_metrics"), "rb") as f:
+            b = f.read()
+    except OSError:
+        return None
+    if len(b) < SOCKET_OFF + 4 or b[2] != 3 or b[3] != 0:
+        return None
+    v = struct.unpack_from("<I", b, SOCKET_OFF)[0]
+    return None if v == 0xFFFFFFFF else v / 1000
+
+
+def parse_mask(t):
+    m = re.search(r"0x[0-9a-fA-F]+", t or "")
+    return int(m.group(0), 16) if m else None
+
+
+def busy_gate_bits(mask):
+    if mask is None:
+        return None
+    return [b for b in range(32) if (GATE_MASK >> b) & 1 and not (mask >> b) & 1]
+
+
+IP_RE = re.compile(r"^\s*(\d+)\s+(\S+)\s+([01])\s+(\d+)\s+(\d+)\s*$")
+
+
+def parse_metrics(text):
+    """9907's smu_metrics_runtime -> {"dump": "ok 0" | "rejected ...", "timein_s0i2": n, ...,
+    "ips": {idx: [name, notmet_total]}}, or None."""
+    if not text:
+        return None
+    out, ips = {}, {}
+    for ln in text.splitlines():
+        m = re.match(r"Dump data \(0x[0-9a-f]+\): (.*)$", ln)
+        if m:
+            out["dump"] = m.group(1).strip()
+            continue
+        m = re.match(r"([a-z0-9_]+): (\d+|0x[0-9a-f]+)$", ln)
+        if m:
+            out[m.group(1)] = int(m.group(2), 0)
+            continue
+        m = IP_RE.match(ln)
+        if m:
+            ips[int(m.group(1))] = [m.group(2) if m.group(2) != "-" else f"ip{m.group(1)}", int(m.group(5))]
+    if ips:
+        out["ips"] = ips
+    return out or None
+
+
+def s0i2_delta(m0, m1):
+    a, b = m0 or {}, m1 or {}
+    if not str(b.get("dump", "")).startswith("ok") or "timein_s0i2" not in a or "timein_s0i2" not in b:
+        return None
+    return b["timein_s0i2"] - a["timein_s0i2"]
+
+
+def ip_growth(m0, m1, top=4):
+    """The IPs whose "time condition not met" total grew most between two readings."""
+    a, b = (m0 or {}).get("ips") or {}, (m1 or {}).get("ips") or {}
+    g = sorted(((b[k][1] - a[k][1], b[k][0]) for k in b if k in a and b[k][1] > a[k][1]), reverse=True)
+    return [[n, d] for d, n in g[:top]]
+
+
+def idle_opt(text):
+    m = re.search(r"Idle optimization:\s*(\d+)", text or "")
+    return int(m.group(1)) if m else None
+
+
+def parse_interrupts(text):
+    lines = (text or "").splitlines()
+    if not lines:
+        return {}
+    ncpu = len(lines[0].split())
+    out = {}
+    for ln in lines[1:]:
+        if ":" not in ln:
+            continue
+        label, rest = ln.split(":", 1)
+        toks = rest.split()
+        counts = [int(x) for x in toks[:ncpu] if x.isdigit()]
+        out[label.strip()] = [sum(counts), " ".join(toks[len(counts):])]
+    return out
+
+
+def irq_summary(q0, q1, dt):
+    if not q0 or not q1 or not dt or dt <= 0:
+        return None
+    rate = {k: (q1[k][0] - q0[k][0]) / dt for k in q1 if k in q0 and q1[k][0] >= q0[k][0]}
+    dev = sorted(((r, f"{k}: {q1[k][1]}".strip()) for k, r in rate.items() if k.isdigit() and r > 0), reverse=True)
+    return {"total_ps": sum(rate.values()), "loc_ps": rate.get("LOC"), "res_ps": rate.get("RES"),
+            "top": [[d, round(r, 1)] for r, d in dev[:3]]}
+
+
+def cpuidle_read():
+    out = {}
+    for c in gl(CPU_DIR + "/cpu[0-9]*"):
+        states = sorted(gl(c + "/cpuidle/state[0-9]*"), key=lambda s: int(s.rsplit("state", 1)[1]))
+        if states:
+            out[os.path.basename(c)] = {"name": rd(states[-1] + "/name", "?"),
+                                        "usage": [num(s + "/usage") or 0 for s in states],
+                                        "time": [num(s + "/time") or 0 for s in states]}
+    return out
+
+
+def cpu_summary(i0, i1, dt):
+    if not i0 or not i1 or not dt or dt <= 0:
+        return None
+    cpus = [c for c in i1 if c in i0 and len(i0[c]["usage"]) == len(i1[c]["usage"])]
+    if not cpus:
+        return None
+    du = sum(i1[c]["usage"][-1] - i0[c]["usage"][-1] for c in cpus)
+    dtime = sum(i1[c]["time"][-1] - i0[c]["time"][-1] for c in cpus)
+    wake = sum(sum(i1[c]["usage"]) - sum(i0[c]["usage"]) for c in cpus)
+    return {"deep": i1[cpus[0]]["name"], "deep_avg_ms": dtime / du / 1000 if du > 0 else None,
+            "deep_share": dtime / 1e6 / (dt * len(cpus)), "wake_ps": wake / dt}
+
+
+def rapl_w(r0, r1):
+    """Average package watts between two (energy_uj, max_range_uj, t) readings, across a wrap."""
+    if not r0 or not r1 or r0[0] is None or r1[0] is None or r1[2] <= r0[2]:
+        return None
+    d = r1[0] - r0[0]
+    if d < 0 and r0[1]:
+        d += r0[1]
+    return d / 1e6 / (r1[2] - r0[2]) if d >= 0 else None
+
+
+def hypr_instance():
+    run = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if re.match(r"^[A-Za-z0-9_]+$", sig) and os.path.exists(f"{run}/hypr/{sig}/.socket.sock"):
+        return sig
+    socks = [x for x in glob.glob(run + "/hypr/*/.socket.sock")
+             if re.match(r"^[A-Za-z0-9_]+$", os.path.basename(os.path.dirname(x)))]
+    return os.path.basename(os.path.dirname(max(socks, key=os.path.getmtime))) if socks else ""
+
+
+def usb_find(ids, bdf):
+    for d in gl(USB + "/*"):
+        if not exists(d + "/idVendor"):
+            continue
+        if f"/{bdf}/" in real(d) and (rd(d + "/idVendor"), rd(d + "/idProduct")) == ids:
+            return d
+    return None
+
+
+def under(path, cls_glob):
+    """Class entries (eventN, hidrawN) whose sysfs path is below path."""
+    base = real(path) + "/"
+    return sorted(os.path.basename(h) for h in gl(cls_glob) if real(h).startswith(base))
+
+
+def led_trigger(path):
+    t = rd(path, "") or ""
+    m = re.search(r"\[([^\]]+)\]", t)
+    return m.group(1) if m else (t if re.fullmatch(r"[\w:.-]+", t) else None)
+
+
+def kbd_led_dirs(usb_path):
+    base = real(usb_path) + "/"
+    return [led for led in gl(LEDS + "/input*::*")
+            if real(led + "/device").startswith(base) or real(led).startswith(base)]
+
+
+def kbd_led_state(usb_path):
+    out = {os.path.basename(d): f"{rd(d + '/brightness', '-')}/{led_trigger(d + '/trigger')}"
+           for d in kbd_led_dirs(usb_path)}
+    if exists(KBD_BL):
+        d = os.path.dirname(KBD_BL)
+        out[os.path.basename(d)] = f"{rd(KBD_BL, '-')}/{led_trigger(d + '/trigger')}"
+    return out
+
+
+def share(vals, want):
+    vals = [v for v in vals if v is not None]
+    return sum(1 for v in vals if v == want) / len(vals) if vals else None
+
+
+# ---------------------------------------------------------------------------- the screen
+
+class Display:
+    """DPMS through the user's Hyprland (Lua dispatch first, the legacy form if refused),
+    verified by Hyprland's dpmsStatus and the eDP connector's kernel DPMS state."""
+
+    def __init__(self, user, uid, sig, connectors):
+        self.base = (["hyprctl"] if FAKE is not None else
+                     ["runuser", "-u", user, "--", "/usr/bin/env", "-i", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                      f"HYPRLAND_INSTANCE_SIGNATURE={sig}", "PATH=/usr/bin:/bin", "hyprctl"])
+        self.connectors = connectors
+
+    def _ctl(self, *a):
+        r = run_cmd(self.base + list(a), timeout=10)
+        return r.stdout.strip() if r is not None else ""
+
+    def hypr(self):
+        """True: every monitor's dpmsStatus on; False: all off; None: mixed or unreadable."""
+        try:
+            mons = [m for m in json.loads(self._ctl("-j", "monitors") or "x") if not m.get("disabled")]
+        except ValueError:
+            return None
+        states = {bool(m.get("dpmsStatus")) for m in mons}
+        return states.pop() if len(states) == 1 else None
+
+    def kernel_off(self):
+        vals = [rd(c + "/dpms") for c in self.connectors]
+        if not vals or any(v not in ("On", "Off") for v in vals):
+            return None
+        return all(v == "Off" for v in vals)
+
+    def _dispatch(self, on):
+        r = self._ctl("dispatch", 'hl.dsp.dpms({ action = "%s" })' % ("enable" if on else "disable"))
+        if r != "ok":
+            self._ctl("dispatch", "dpms", "on" if on else "off")
+
+    def off_verified(self):
+        return self.kernel_off() is True and self.hypr() is False
+
+    def set(self, on, attempts=3, wait=4.0):
+        for _ in range(attempts):
+            self._dispatch(on)
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < wait:
+                time.sleep(0.25)
+                if self.kernel_off() is (not on) and self.hypr() is on:
+                    return True
+        return False
+
+    def back_on(self):
+        return self.set(True, attempts=5)
+
+
+class HyprEvents(threading.Thread):
+    """Hyprland's event socket, event names only (titles are private). Read-only."""
+
+    def __init__(self, uid, sig):
+        super().__init__(daemon=True)
+        self.path, self.lock, self.events, self.t0 = f"/run/user/{uid}/hypr/{sig}/.socket2.sock", threading.Lock(), None, 0
+
+    def run(self):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(self.path)
+            buf = b""
+            while True:
+                d = s.recv(4096)
+                if not d:
+                    return
+                buf += d
+                *lines, buf = buf.split(b"\n")
+                for ln in lines:
+                    name = ln.split(b">>", 1)[0].decode("ascii", "replace")[:32]
+                    with self.lock:
+                        if self.events is not None and len(self.events) < 50:
+                            self.events.append([round(time.monotonic() - self.t0, 1), name])
+        except OSError:
+            return
+
+    def record(self):
+        with self.lock:
+            self.events, self.t0 = [], time.monotonic()
+
+    def take(self):
+        with self.lock:
+            ev, self.events = self.events or [], None
+        return ev
+
+
+# ---------------------------------------------------------------------------- the undo journal
+
+class Journal:
+    """Undo actions, one JSON line each, written (and fsynced) before the change they undo."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def add(self, **e):
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, (json.dumps(e) + "\n").encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def entries(self):
+        try:
+            with open(self.path) as f:
+                return [json.loads(ln) for ln in f if ln.strip()]
+        except (OSError, ValueError):
+            return []
+
+
+def led_back(e):
+    """One LED back: its trigger first, its brightness second, both read back (writing
+    brightness 0 drops a trigger; a kbd-* trigger sets the LED from the console's state)."""
+    path, old, tp, trig = e["path"], e["old"], e.get("trigger_path"), e.get("trigger")
+    want_trig = tp if tp and trig not in (None, "none") else None
+    if want_trig and led_trigger(tp) != trig:
+        wr(tp, trig)
+    if old is not None and rd(path) != old:
+        wr(path, old)
+    if want_trig and led_trigger(tp) != trig:
+        wr(tp, trig)
+    probs = []
+    if want_trig and led_trigger(tp) != trig:
+        probs.append(f"trigger {led_trigger(tp)} (wanted {trig})")
+    if old is not None and rd(path) != old:
+        probs.append(f"brightness {rd(path)} (wanted {old})")
+    return f"{path.split('/')[-2]} not back: " + ", ".join(probs) if probs else None
+
+
+def undo_one(e, display=None):
+    """One journalled change back, if it is not back already. -> a problem, or None."""
+    k = e.get("k")
+    if k == "auth":
+        if rd(e["path"]) == "0" and not (wr(e["path"], 1) and rd(e["path"]) == "1"):
+            return f"could not authorize the keyboard again: echo 1 > {e['path']}"
+    elif k == "winlock":
+        if e["sys"] and not any(is_active(u) for u in e["sys"]):
+            nodes, _ = wait_for(lambda: under(e["usb"], "/sys/class/hidraw/hidraw*"), 8)
+            units = [f"g16-winlockd@{n}.service" for n in nodes] or e["sys"]
+            systemctl("start", *units)
+            ok, _ = wait_for(lambda: any(is_active(u) for u in units), 3)
+            if not ok:
+                return "g16-winlockd is not running again (no keyboard hidraw node took it)"
+        if e["user_active"] and not is_active("g16-winlock.service", user=e["user"]):
+            systemctl("start", "g16-winlock.service", user=e["user"])
+            if not is_active("g16-winlock.service", user=e["user"]):
+                return "could not start the user's g16-winlock.service again"
+    elif k == "sysunit":
+        if not is_active(e["unit"]):
+            systemctl("start", e["unit"])
+            ok, _ = wait_for(lambda: is_active(e["unit"]), UNIT_WAIT_S)
+            if not ok:
+                return f"could not start {e['unit']} again"
+            if e.get("bl_path") and e.get("bl") is not None:
+                time.sleep(0 if FAKE is not None else 2)     # asusd re-applies its keyboard settings on start
+                if rd(e["bl_path"]) != e["bl"] and not (wr(e["bl_path"], e["bl"]) and rd(e["bl_path"]) == e["bl"]):
+                    return f"could not put the keyboard backlight back to {e['bl']}"
+    elif k == "led":
+        return led_back(e)
+    elif k in ("ctl", "rfkill", "param"):
+        if rd(e["path"]) != e["old"] and not (wr(e["path"], e["old"]) and rd(e["path"]) == e["old"]):
+            return f"could not put {e['path']} back to {e['old']}"
+    elif k == "rpm":
+        if rd(e["control_path"]) != e["control"] and not wr(e["control_path"], e["control"]):
+            return f"could not put the PSP's power/control back to {e['control']}"
+        if rd(e["delay_path"]) != e["delay"] and not wr(e["delay_path"], e["delay"]):
+            return f"could not put psp_rpm_delay_ms back to {e['delay']}"
+    elif k == "zstate":
+        err = wr_dbg(e["path"], 0)
+        if err:
+            return f"could not send AllowZstates(0) ({err}); a reboot resets it"
+    elif k == "screen" and display is not None:
+        if not display.back_on():
+            return "the screen did not read back on (hyprctl and the kernel): press a key"
+    return None
+
+
+def undo(journal, display=None):
+    """Everything journalled back: the keyboard first (authorized), then newest first.
+    AllowZstates(0) only if the last value sent wasn't 0. Idempotent. -> problems."""
+    es = journal.entries()
+    zs = [e for e in es if e.get("k") == "zstate"]
+    order = ([e for e in es if e.get("k") == "auth"]
+             + ([zs[-1]] if zs and zs[-1].get("v") != 0 else [])
+             + [e for e in reversed(es) if e.get("k") not in ("auth", "zstate")])
+    probs = []
+    for e in order:
+        p = undo_one(e, display)
+        if p:
+            probs.append(p)
+    return probs
+
+
+# ---------------------------------------------------------------------------- hardware
+
+class Hw:
+    def __init__(self, display, events, journal, user):
+        self.display, self.events, self.j, self.user = display, events, journal, user
+        self.dev, self.card = amdgpu_dev()
+        self.bat = battery()
+        self.kpath = usb_find(KBD_IDS, XHCI_KBD)
+        dd = dri_dir(self.card)
+        self.zpath = f"{dd}/{ZFILE}" if dd and exists(f"{dd}/{ZFILE}") else None
+        self.ips = f"{dd}/{IPS_FILE}" if dd and exists(f"{dd}/{IPS_FILE}") else None
+        self.rapl = rapl_dir()
+
+    # -- readings
+    def status(self, path):
+        return rd(path + "/power/runtime_status")
+
+    def suspended(self, bdf):
+        return self.status(f"{PCI}/{bdf}") == "suspended"
+
+    def kbd_status(self):
+        return self.status(self.kpath) if self.kpath else None
+
+    def mask(self):
+        return parse_mask(rd(IDLEMASK, ""))
+
+    def smu_start(self):
+        return exists(SMU_METRICS) and wr_dbg(SMU_METRICS, "start") is None
+
+    def smu(self):
+        return parse_metrics(rd(SMU_METRICS, "")) if exists(SMU_METRICS) else None
+
+    def rapl_read(self):
+        if not self.rapl:
+            return None
+        return (num(self.rapl + "/energy_uj"), num(self.rapl + "/max_energy_range_uj"), time.monotonic())
+
+    def idle_opt(self):
+        return idle_opt(rd(self.ips, "")) if self.ips else None
+
+    def kbd_power(self):
+        if not self.kpath:
+            return {}
+        p = self.kpath + "/power/"
+        return {"control": rd(p + "control"), "delay_ms": rd(p + "autosuspend_delay_ms"),
+                "status": rd(p + "runtime_status"), "wakeup": rd(p + "wakeup"),
+                "active_ms": num(p + "active_duration"), "connected_ms": num(p + "connected_duration"),
+                "leds": kbd_led_state(self.kpath)}
+
+    def services(self):
+        return {"asusd": is_active("asusd.service"), "winlockd": bool(self._winlockd_units()),
+                "winlock_user": is_active("g16-winlock.service", user=self.user)}
+
+    def sample_k(self, secs):
+        """3-4 and 67:00.0 runtime_status at 10 Hz."""
+        out = {"kbd": [], "xhci": []}
+        t0, k = time.monotonic(), 0
+        while time.monotonic() - t0 < secs:
+            out["kbd"].append(self.kbd_status())
+            out["xhci"].append(self.status(f"{PCI}/{XHCI_KBD}"))
+            k += 1
+            time.sleep(max(0.0, t0 + k * 0.1 - time.monotonic()))
+        return out
+
+    def point(self):
+        """A phase's start and end."""
+        return {"smu": self.smu(), "rapl": self.rapl_read(), "bat": bat_point(self.bat),
+                "sock": socket_w(self.dev) if self.dev else None, "koff": self.display.kernel_off(),
+                "hypr": self.display.hypr(), "ipsopt": self.idle_opt(), "psp": self.status(PSP_DIR),
+                "idle": cpuidle_read(), "irq": parse_interrupts(rd(INTERRUPTS, "")), "mono": time.monotonic()}
+
+    def hold(self, secs, stop=None):
+        """1 Hz: the idlemask, the screen (kernel DPMS), 3-4, 67:00.0, the PSP. stop(reads) ends it early."""
+        out = {"masks": [], "koff": [], "kbd": [], "xhci": [], "psp": [], "bw": []}
+        if self.events:
+            self.events.record()
+        t0, k = time.monotonic(), 0
+        while time.monotonic() - t0 < secs:
+            out["masks"].append(self.mask())
+            out["koff"].append(self.display.kernel_off())
+            out["kbd"].append(self.kbd_status())
+            out["xhci"].append(self.status(f"{PCI}/{XHCI_KBD}"))
+            out["psp"].append(self.status(PSP_DIR))
+            out["bw"].append((time.monotonic() - t0, bat_now_w(self.bat)))
+            k += 1
+            if stop and stop(out):
+                out["stopped"] = k
+                break
+            time.sleep(max(0.0, t0 + k - time.monotonic()))
+        out["events"] = self.events.take() if self.events else []
+        return out
+
+    def devices(self):
+        """What the restore check compares: before the run and after it."""
+        out = {PSP_BDF: {"control": rd(PSP_DIR + "/power/control", "-")}}
+        if self.kpath:
+            out["3-4"] = {"control": rd(self.kpath + "/power/control", "-"),
+                          "authorized": rd(self.kpath + "/authorized", "-"),
+                          "delay_ms": rd(self.kpath + "/power/autosuspend_delay_ms", "-")}
+            out["leds"] = {"control": json.dumps(kbd_led_state(self.kpath), sort_keys=True)}
+        out["services"] = {"control": json.dumps(self.services(), sort_keys=True)}
+        for r in gl(RFKILL + "/rfkill*"):
+            if rd(r + "/type") in ("bluetooth", "wlan"):
+                out[f"{os.path.basename(r)} ({rd(r + '/type')})"] = {"control": rd(r + "/soft", "-")}
+        for p in (P_S0I2, P_IDLE, P_DELAY):
+            out[os.path.basename(p)] = {"control": rd(p, "-")}
+        return out
+
+    # -- changes, each journalled first
+    def param(self, path, v):
+        old = rd(path)
+        if old not in ("Y", "N"):
+            return False
+        self.j.add(k="param", path=path, old=old)
+        want = "Y" if v else "N"
+        return wr(path, 1 if v else 0) and bool(wait_for(lambda: rd(path) == want, 1, step=0.05)[0])
+
+    def screen(self, on):
+        if not on:
+            self.j.add(k="screen")
+        return self.display.set(on)
+
+    def psp_rpm(self):
+        ctl = PSP_DIR + "/power/control"
+        self.j.add(k="rpm", control_path=ctl, control=rd(ctl, "on"), delay_path=P_DELAY, delay=rd(P_DELAY, "0"))
+        if not (wr(P_DELAY, DELAY_MS) and wr(ctl, "auto")):
+            return False, "could not set psp_rpm_delay_ms / power/control"
+        ok, t = wait_for(lambda: self.suspended(PSP_BDF), RPM_WAIT_S)
+        if ok:
+            return True, f"runtime PM (9906): suspended after {t:.1f} s, power_state {rd(PSP_DIR + '/power_state', '?')}"
+        return False, f"runtime PM (9906): not suspended in {RPM_WAIT_S} s"
+
+    def tee_holders(self):
+        if FAKE is not None:
+            return []
+        out = set()
+        for fd in glob.glob("/proc/[0-9]*/fd/*"):
+            try:
+                if os.readlink(fd) in ("/dev/tee0", "/dev/teepriv0"):
+                    pdir = fd.split("/fd/")[0]
+                    out.add(f"{rd(pdir + '/comm', '?')}[{os.path.basename(pdir)}]")
+            except OSError:
+                continue
+        return sorted(out)
+
+    def _set(self, path, v):
+        old = rd(path)
+        if old is None or old == str(v):
+            return f"{os.path.basename(path)} {old}"
+        self.j.add(k="ctl", path=path, old=old)
+        wr(path, v)
+        return f"{os.path.basename(path)} {old} -> {rd(path)}"
+
+    def kbd_auto(self):
+        p = self.kpath + "/power/"
+        return [self._set(p + "autosuspend_delay_ms", AUTOSUSPEND_MS), self._set(p + "control", "auto")]
+
+    def bt_block(self):
+        rows = []
+        for r in gl(RFKILL + "/rfkill*"):
+            if rd(r + "/type") != "bluetooth":
+                continue
+            old = rd(r + "/soft")
+            if old == "0":
+                self.j.add(k="rfkill", path=r + "/soft", old="0")
+                wr(r + "/soft", 1)
+            rows.append(f"{rd(r + '/name', '?')} soft {old} -> {rd(r + '/soft')}")
+        return rows
+
+    def _winlockd_units(self):
+        r = systemctl("list-units", "--plain", "--no-legend", "--state=active", "g16-winlockd@*")
+        return [ln.split()[0] for ln in (r.stdout.splitlines() if r is not None else []) if ln.strip()]
+
+    def services_stop(self):
+        out = []
+        units = self._winlockd_units()
+        user_active = is_active("g16-winlock.service", user=self.user)
+        if units or user_active:
+            self.j.add(k="winlock", sys=units, user=self.user, user_active=user_active, usb=self.kpath)
+            if user_active:
+                systemctl("stop", "g16-winlock.service", user=self.user)
+            if units:
+                systemctl("stop", *units)
+            out += units + (["g16-winlock.service (user)"] if user_active else [])
+        if is_active("asusd.service"):
+            self.j.add(k="sysunit", unit="asusd.service", bl_path=KBD_BL if exists(KBD_BL) else None, bl=rd(KBD_BL))
+            systemctl("stop", "asusd.service")
+            out.append("asusd.service")
+        return out
+
+    def lights_off(self):
+        rows = []
+        for path in ([os.path.dirname(KBD_BL)] if exists(KBD_BL) else []) + kbd_led_dirs(self.kpath):
+            b, tp = path + "/brightness", path + "/trigger"
+            old, trig = rd(b), led_trigger(tp)
+            if old in (None, "0") and trig in (None, "none"):
+                continue
+            self.j.add(k="led", path=b, old=old, trigger_path=tp, trigger=trig)
+            if trig not in (None, "none"):
+                wr(tp, "none")
+            wr(b, 0)
+            rows.append(f"{os.path.basename(path)} {old} -> {rd(b)}")
+        return rows
+
+    def kbd_deauth(self):
+        p = self.kpath + "/authorized"
+        self.j.add(k="auth", path=p)
+        return wr(p, 0) and rd(p) == "0"
+
+    def send_z(self, v):
+        """AllowZstates(v) through 9910's debugfs file. -> {"v", "err", "line", "ret", "arg"}."""
+        self.j.add(k="zstate", path=self.zpath, v=v)
+        t0 = time.time()
+        err = wr_dbg(self.zpath, v)
+        found = None
+        if not err:
+            t1 = time.monotonic()
+            while found is None and time.monotonic() - t1 < LOG_WAIT_S:
+                for ln in kernel_all(t0 - 1):
+                    m = ZLINE_RE.search(ln)
+                    if m and int(m.group(1)) == v:
+                        found = m
+                if found is None:
+                    time.sleep(0.25)
+        return {"v": v, "err": err, "line": found.group(0) if found else None,
+                "ret": int(found.group(2)) if found else None, "arg": found.group(3) if found else None}
+
+    def key_check(self, secs, log):
+        """The keyboard asleep: wait for one key press, read the event nodes (no grab) and 3-4's
+        runtime_status at 20 Hz. -> what happened."""
+        nodes = under(self.kpath, INPUT + "/event*")
+        fds = []
+        for n in nodes:
+            try:
+                fds.append(os.open(fs(f"/dev/input/{n}"), os.O_RDONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+        out = {"nodes": nodes, "opened": len(fds), "asleep": False, "woke_s": None, "events": [], "other_wakes": 0,
+               "window": secs}
+        if not fds:
+            out["why"] = "no keyboard event node could be opened"
+            return out
+        try:
+            ok, _ = wait_for(lambda: self.kbd_status() == "suspended", KBD_WAIT_S)
+            if not ok:
+                out["why"] = f"3-4 not asleep within {KBD_WAIT_S} s"
+                return out
+            out["asleep"] = True
+            log("KEY CHECK: the keyboard is asleep now: press Shift once (only once), then hands off again")
+            t0 = time.monotonic()
+            woke = None
+            last = None
+            while time.monotonic() - t0 < secs:
+                st = self.kbd_status()
+                now = time.monotonic() - t0
+                if st != "suspended" and woke is None:
+                    woke = now
+                ready, _, _ = select.select(fds, [], [], 0.05)
+                for fd in ready:
+                    try:
+                        data = os.read(fd, EVENT.size * 64)
+                    except OSError:
+                        data = b""
+                    if not data:
+                        time.sleep(0.05)
+                        continue
+                    for i in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                        _, _, typ, code, val = EVENT.unpack_from(data, i)
+                        if typ == EV_KEY and val in (0, 1):
+                            out["events"].append([round(time.monotonic() - t0, 2), code, val])
+                            last = time.monotonic()
+                if woke is not None and not out["events"] and now - woke > 2.0:
+                    # it woke without a key: not a test of a press from asleep; wait to sleep again
+                    out["other_wakes"] += 1
+                    woke = None
+                    if not wait_for(lambda: self.kbd_status() == "suspended", KBD_WAIT_S)[0]:
+                        out["why"] = "woke without a key press and did not sleep again"
+                        return out
+                if last and time.monotonic() - last > 1.0:
+                    break
+            out["woke_s"] = woke
+            return out
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+
+def key_verdict(k):
+    """-> ("kept" | "lost" | "not checked", why)."""
+    if not k:
+        return "not checked", "not reached"
+    if k.get("why"):
+        return "not checked", k["why"]
+    ev = k.get("events") or []
+    if not ev:
+        if k.get("woke_s") is not None:
+            return "lost", f"3-4 woke at +{k['woke_s']:.2f} s but no key event arrived"
+        return "not checked", f"no key pressed in {k.get('window', KEY_WAIT_S):.0f} s"
+    t, code, val = ev[0]
+    shift = code in (KEY_LEFTSHIFT, KEY_RIGHTSHIFT)
+    name = "Shift" if shift else f"key code {code}"
+    if val == 1:
+        return "kept", (f"{name} press delivered at +{t:.2f} s (3-4 woke at +{k['woke_s']:.2f} s), then its release"
+                        if k.get("woke_s") is not None else f"{name} press delivered at +{t:.2f} s")
+    return "lost", f"the first event was {name}'s release at +{t:.2f} s: the press that woke it was dropped"
+
+
+# ---------------------------------------------------------------------------- summaries
+
+def bit_shares(masks):
+    good = [m for m in masks if m is not None]
+    return ({b: (sum(1 for m in good if (m >> b) & 1) / len(good) if good else None) for b in BITS},
+            max(set(good), key=good.count) if good else None, len(good))
+
+
+def phase_summary(name, p0, p1, h, sent):
+    idle, top, n = bit_shares(h.get("masks") or [])
+    secs = (p1.get("mono") or 0) - (p0.get("mono") or 0)
+    koff = share(h.get("koff") or [], True)
+    xhci = share(h.get("xhci") or [], "suspended")
+    psp = share(h.get("psp") or [], "suspended")
+    why = []
+    if not (p0.get("koff") is True and p0.get("hypr") is False):
+        why.append("the screen not verified off at the start")
+    if not (p1.get("koff") is True and p1.get("hypr") is False):
+        why.append("the screen not verified off at the end")
+    if koff is None or koff < VALID_SHARE:
+        why.append(f"kernel DPMS Off in {fmt_share(koff)} of reads")
+    if psp is None or psp < 1.0 or p0.get("psp") != "suspended" or p1.get("psp") != "suspended":
+        why.append(f"the PSP suspended in {fmt_share(psp)} of reads")
+    if xhci is None or xhci < VALID_SHARE:
+        why.append(f"67:00.0 asleep in {fmt_share(xhci)} of reads")
+    d = s0i2_delta(p0.get("smu"), p1.get("smu"))
+    return {"phase": name, "label": PHASES[name][0], "sent": sent, "secs": secs, "reads": n,
+            "idle": idle, "top_mask": top, "busy_gate": busy_gate_bits(top),
+            "s0i2": d, "s0i2_0": (p0.get("smu") or {}).get("timein_s0i2"), "s0i2_1": (p1.get("smu") or {}).get("timein_s0i2"),
+            "dump": (p1.get("smu") or {}).get("dump"), "ips": ip_growth(p0.get("smu"), p1.get("smu")),
+            "rapl_w": rapl_w(p0.get("rapl"), p1.get("rapl")), "sock0": p0.get("sock"), "sock1": p1.get("sock"),
+            "bat_w": hold_bat_w(h.get("bw") or [], secs) or bat_avg_w(p0.get("bat"), p1.get("bat")),
+            "status": sorted({x for x in ((p0.get("bat") or {}).get("status"), (p1.get("bat") or {}).get("status")) if x}),
+            "ipsopt": [p0.get("ipsopt"), p1.get("ipsopt")], "koff": koff, "xhci": xhci, "kbd": share(h.get("kbd") or [], "suspended"),
+            "valid": not why, "invalid_why": why, "events": h.get("events") or [], "stopped": h.get("stopped"),
+            "cpu": cpu_summary(p0.get("idle"), p1.get("idle"), secs),
+            "irqs": irq_summary(p0.get("irq"), p1.get("irq"), secs)}
+
+
+def hold_bat_w(bw, secs):
+    """A phase's battery watts: the mean of its 1 Hz reads after the gauge's lag."""
+    lag = GAUGE_LAG_S if secs >= 2 * GAUGE_LAG_S else 0
+    vals = [w for t, w in bw if t >= lag and w is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def power_w(x):
+    """A phase's power: battery watts, else RAPL's average, else gpu_metrics' start/end average."""
+    if x.get("bat_w") is not None:
+        return x["bat_w"]
+    if x.get("rapl_w") is not None:
+        return x["rapl_w"]
+    vals = [v for v in (x.get("sock0"), x.get("sock1")) if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def effect(x, base):
+    """A Z phase against base -> (counter grew, share of the phase in S0i2, power drop W or None)."""
+    grew = bool(x.get("s0i2"))
+    sh = (x["s0i2"] / 1e6 / x["secs"]) if grew and x.get("secs") else 0.0
+    pb, px = power_w(base) if base else None, power_w(x)
+    drop = pb - px if pb is not None and px is not None else None
+    return grew, sh, drop
+
+
+def clear_yes(x, base):
+    grew, sh, drop = effect(x, base)
+    return x["valid"] and grew and sh >= CLEAR_SHARE and drop is not None and drop >= DROP_W - 1e-9
+
+
+def verdict(res):
+    """-> (headline, word): YES / PARTIAL / NO / INCOMPLETE."""
+    ph = {x["phase"]: x for x in res.get("phases") or []}
+    base = ph.get("base")
+    if res.get("stopped"):
+        return f"not answered: {res['stopped']}", "INCOMPLETE"
+    if not base:
+        return "not answered: no base phase", "INCOMPLETE"
+    zs = [ph[n] for n in ("Z9", "Z8") if n in ph]
+    for x in zs:
+        if clear_yes(x, base):
+            _, sh, drop = effect(x, base)
+            return (f"YES: AllowZstates({x['sent']['v']}) starts runtime S0i2 (timein_s0i2 +{x['s0i2'] / 1000:.0f} ms, "
+                    f"{sh * 100:.0f}% of the phase; battery power {drop:.2f} W below base)"), "YES"
+    for x in zs:
+        if not x["valid"]:
+            continue
+        grew, sh, drop = effect(x, base)
+        if grew:
+            return (f"PARTIAL: timein_s0i2 grows after AllowZstates({x['sent']['v']}) (+{x['s0i2'] / 1000:.0f} ms) but "
+                    f"battery power doesn't drop {DROP_W} W ({fmt_w(drop)} lower)"), "PARTIAL"
+        if drop is not None and drop >= DROP_W - 1e-9:
+            return (f"PARTIAL: battery power drops {drop:.2f} W after AllowZstates({x['sent']['v']}) but timein_s0i2 "
+                    f"stays"), "PARTIAL"
+    rejected = [x for x in zs if (x.get("sent") or {}).get("err") or (x.get("sent") or {}).get("ret")]
+    valid = [x for x in zs if x["valid"]]
+    if len(valid) == len(zs) and zs and not rejected:
+        return ("NO: neither AllowZstates(9) nor (8) starts runtime S0i2 in the bit-16 idle state "
+                "(timein_s0i2 +0, battery power unchanged)" if len(zs) == 2 else
+                "NO: AllowZstates did not start runtime S0i2"), "NO"
+    if rejected:
+        return ("not answered: the SMU or the driver refused AllowZstates (" +
+                ", ".join(f"{x['sent']['v']}: {x['sent'].get('err') or x['sent'].get('ret')}" for x in rejected) + ")"), \
+            "INCOMPLETE"
+    return "not answered: " + ", ".join(f"{x['phase']} INVALID" for x in zs if not x["valid"]), "INCOMPLETE"
+
+
+# ---------------------------------------------------------------------------- the run
+
+class StopRun(Exception):
+    pass
+
+
+def run(hw, a, log, r):
+    """K, the key check, G, the Z phases, into r (kept if this raises). The caller puts everything back."""
+    secs = a.phase_secs
+    r.update({"kbd": [], "phases": [], "notes": [], "sends": [], "tee_holders": hw.tee_holders(),
+              "before": hw.devices(), "kbd_level": None, "key": None, "g": None, "stopped": None})
+    if r["tee_holders"]:
+        r["problems"].append("TEE in use (" + ", ".join(r["tee_holders"]) + "): the PSP can't be suspended")
+        return r
+
+    def on_charger(statuses):
+        if any(s not in ("Discharging", None) for s in statuses):
+            r["problems"].append("on the charger")
+            raise StopRun
+
+    try:
+        # K: the keyboard, the screen on
+        if hw.display.kernel_off() is not False and not hw.screen(True):
+            r["problems"].append("the screen did not read on at the start")
+            return r
+        r["kbd_installed"] = hw.kbd_power()
+        r["services_before"] = hw.services()
+        if (r["kbd_installed"] or {}).get("control") != "auto":
+            r["notes"].append(f"3-4 power/control was {r['kbd_installed'].get('control')}, not auto: the udev rule "
+                              f"(omarchy-asus-g16 1.0.0-104 or later) did not apply; set to auto for the run")
+        r["auto"] = hw.kbd_auto()
+        level = None
+        for name in K_LEVELS:
+            if name == "K1":
+                r["bt"] = hw.bt_block()
+            elif name == "K2":
+                r["stopped_units"] = hw.services_stop()
+                r["lights"] = hw.lights_off()
+            elif name == "K3":
+                r["deauth"] = hw.kbd_deauth()
+            p0 = hw.kbd_power()
+            smp = hw.sample_k(a.kbd_secs)
+            p1 = hw.kbd_power()
+            row = {"level": name, "label": K_LEVELS[name], "kbd": share(smp["kbd"], "suspended"),
+                   "xhci": share(smp["xhci"], "suspended"), "kbd_end": smp["kbd"][-1] if smp["kbd"] else None,
+                   "xhci_end": smp["xhci"][-1] if smp["xhci"] else None,
+                   "active_ms": (p1.get("active_ms") - p0.get("active_ms")) if p0.get("active_ms") is not None
+                   and p1.get("active_ms") is not None else None, "leds": p0.get("leds")}
+            r["kbd"].append(row)
+            log(f"{name} ({K_LEVELS[name]}): 3-4 asleep {fmt_share(row['kbd'])}, 67:00.0 asleep {fmt_share(row['xhci'])}")
+            if row["xhci_end"] == "suspended" and (row["xhci"] or 0) >= 0.3:
+                level = name
+                break
+        r["kbd_level"] = level
+        if level is None:
+            r["stopped"] = "67:00.0 never slept, even with the keyboard deauthorized"
+            return r
+        on_charger([hw.bat and rd(hw.bat + "/status")])
+
+        # the key check (not with the keyboard deauthorized)
+        if level != "K3":
+            r["key"] = hw.key_check(a.key_secs, log)
+            kv, why = key_verdict(r["key"])
+            log(f"key check: {kv} ({why})")
+            wait_for(lambda: hw.suspended(XHCI_KBD), KBD_WAIT_S, step=0.25)
+
+        # G
+        if not (hw.param(P_S0I2, 1) and hw.param(P_IDLE, 1)):
+            raise RuntimeError("could not set dcn35_s0i2 and dm_idle_all_off to 1")
+        if not hw.screen(False):
+            r["stopped"] = "the screen did not turn off (hyprctl and the kernel)"
+            return r
+        ok, how = hw.psp_rpm()
+        r["g"] = how
+        if not ok:
+            r["stopped"] = f"the PSP did not runtime-suspend ({how})"
+            return r
+        ok, t = wait_for(lambda: hw.mask() is not None and (hw.mask() >> 16) & 1 == 1, IDLE_WAIT_S, step=0.5)
+        r["bit16_wait"] = f"bit 16 read idle {t:.1f} s after G" if ok else f"bit 16 not idle {IDLE_WAIT_S} s after G"
+        log(r["bit16_wait"])
+        r["smu_start"] = hw.smu_start()
+
+        def reblank():
+            if not hw.display.off_verified():
+                ok = hw.screen(False)
+                r["notes"].append(f"the screen was back on before a phase; turned off again: {ok}")
+
+        def screen_on_twice(h):
+            k = h["koff"]
+            return len(k) >= 2 and k[-1] is False and k[-2] is False
+
+        def phase(name, tries=2):
+            sent = None
+            for attempt in range(tries):
+                reblank()
+                wait_for(lambda: hw.suspended(XHCI_KBD), KBD_WAIT_S, step=0.25)
+                if PHASES[name][1] is not None and sent is None:
+                    sent = hw.send_z(PHASES[name][1])
+                    r["sends"].append(sent)
+                    log(f"AllowZstates({sent['v']}): " + (f"write refused: {sent['err']}" if sent["err"] else
+                                                          (sent["line"] or "sent, no kernel line seen")))
+                    if sent["err"] or sent["ret"]:
+                        x = {"phase": name, "label": PHASES[name][0], "sent": sent, "skipped": "the message was refused",
+                             "valid": False, "invalid_why": ["refused"]}
+                        r["phases"].append(x)
+                        return x
+                p0 = hw.point()
+                h = hw.hold(secs, stop=screen_on_twice)
+                p1 = hw.point()
+                x = phase_summary(name, p0, p1, h, sent)
+                x["attempt"] = attempt + 1
+                log(f"{name}: {'valid' if x['valid'] else 'INVALID (' + '; '.join(x['invalid_why']) + ')'}; bit16 "
+                    f"{fmt_share(x['idle'][16])}; timein_s0i2 {x['s0i2']}; package {fmt_w(power_w(x))}")
+                on_charger(x["status"])
+                if x["valid"] or attempt == tries - 1:
+                    r["phases"].append(x)
+                    return x
+                r["notes"].append(f"{name} INVALID on try {attempt + 1} ({'; '.join(x['invalid_why'])}): run once more")
+            return None
+
+        base = phase("base")
+        if not base["valid"] or (base["idle"][16] or 0) < IDLE_OK:
+            r["stopped"] = ("the base phase was INVALID (" + "; ".join(base["invalid_why"]) + ")" if not base["valid"] else
+                            f"bit 16 idle in only {fmt_share(base['idle'][16])} of base reads: not the idle state")
+            r["notes"].append("no AllowZstates message was sent")
+            return r
+        if base.get("s0i2"):
+            r["notes"].append(f"timein_s0i2 already grew in base (+{base['s0i2']}) before any message")
+        z9 = phase("Z9")
+        if clear_yes(z9, base):
+            r["notes"].append("AllowZstates(9) clearly started S0i2: AllowZstates(8) skipped")
+        else:
+            phase("Z8")
+        changed = any(x.get("valid") and (effect(x, base)[0] or (effect(x, base)[2] or 0) >= DROP_W - 1e-9)
+                      for x in r["phases"] if x["phase"] in ("Z9", "Z8"))
+        if changed:
+            phase("Z0")
+        else:
+            s = hw.send_z(0)
+            r["sends"].append(s)
+            r["notes"].append("nothing changed with 9 or 8: AllowZstates(0) sent without a measured phase ("
+                              + (s["err"] or s["line"] or "no kernel line seen") + ")")
+    except StopRun:
+        pass
+    return r
+
+
+# ---------------------------------------------------------------------------- the report
+
+def fmt_share(x):
+    return "-" if x is None else f"{x * 100:.0f}%"
+
+
+def fmt_w(x):
+    return "-" if x is None else f"{x:.2f} W"
+
+
+def fmt_num(x, nd=0):
+    return "-" if x is None else f"{x:.{nd}f}"
+
+
+def restore_diff(before, after):
+    out = []
+    for n, d in before.items():
+        x = after.get(n) or {}
+        for f in ("control", "authorized", "delay_ms"):
+            if f in d and d.get(f) != x.get(f):
+                out.append(f"{n} {f} {d.get(f)} -> {x.get(f)}")
+    return out
+
+
+def report(res, kernel, a):
+    head, word = verdict(res)
+    v = "FAIL" if res.get("errors") else word
+    kv, kwhy = key_verdict(res.get("key"))
+    lvl = res.get("kbd_level")
+    inst = res.get("kbd_installed") or {}
+    o = [f"## AllowZstates in the bit-16 idle state on the G16: {head} (#{ISSUE})", "",
+         f"Kernel {kernel}, omarchy-asus-g16 {res.get('g16_pkg') or '-'}, on battery, one Shift press, otherwise hands off. "
+         f"K: the keyboard as installed, then Bluetooth blocked, then (only if needed) asusd, g16-winlockd and g16-winlock "
+         f"stopped with the LEDs off, then (only if needed) the keyboard deauthorized. G: amdgpu.dcn35_s0i2=1, "
+         f"amdgpu.dm_idle_all_off=1, the screen off (Hyprland dpmsStatus and the eDP connector's kernel DPMS), the PSP "
+         f"(65:00.2) runtime-suspended. Z: {a.phase_secs} s phases, base, then AllowZstates 9, 8 and 0 through 9910's "
+         f"debugfs file; the idlemask, the screen, 3-4, 67:00.0 and the PSP at 1 Hz; SMU metrics (9907), RAPL, "
+         f"gpu_metrics, the battery, cpuidle and interrupts at each phase's start and end."
+         + (" **Dry run: a fake sysfs tree and a simulated kernel.**" if a.dry_run else ""), "",
+         "**Verdict:** " + (f"FAIL (kernel errors in the log); {head}." if v == "FAIL" else f"{head}."), "",
+         f"- keyboard (9909 + the udev rule): power/control {inst.get('control', '-')} as installed (wakeup "
+         f"{inst.get('wakeup', '-')}); 67:00.0 slept at **{lvl or 'no level'}**"
+         + (f" ({K_LEVELS[lvl]})" if lvl else "")
+         + ("" if lvl in ("K0", "K1") else ": **9909 + the udev rule alone were not enough**" if lvl else ""),
+         f"- key wake: **{kv}** ({kwhy})" + (f"; {res['key']['other_wakes']} wake(s) without a key first"
+                                              if (res.get("key") or {}).get("other_wakes") else ""),
+         f"- G: {res.get('g') or 'not reached'}; {res.get('bit16_wait') or '-'}",
+         f"- SMU logging restarted before the phases (9907 `start`): {res.get('smu_start', '-')}"]
+    for s in res.get("sends") or []:
+        o.append(f"- AllowZstates({s['v']}): " + (f"**write refused: {s['err']}**" if s.get("err") else
+                                                  f"`{s['line']}`" if s.get("line") else "written, no kernel line seen"))
+    if res.get("after"):
+        diff = restore_diff(res.get("before") or {}, res["after"])
+        o.append("- after the run, everything as before it (power/control, authorized, autosuspend delay, each LED's "
+                 "brightness and trigger, services, rfkill, parameters): " + ("yes" if not diff else "**NO**: " + "; ".join(diff)))
+    o.append(f"- kernel log (amdgpu, SMU, DMUB, ccp, xHCI/USB, usbhid, asus, Bluetooth, WARN): "
+             f"{len(res.get('errors') or []) or 'clean'}")
+    if res.get("kbd"):
+        o += ["", "K, the keyboard (screen on; runtime_status at 10 Hz):", "",
+              "| level | what | 3-4 asleep | 67:00.0 asleep | 3-4 active_duration (ms) | keyboard LEDs |",
+              "|---|---|---|---|---|---|"]
+        for k in res["kbd"]:
+            lit = [n for n, s in (k.get("leds") or {}).items() if not str(s).startswith(("0/", "-/"))]
+            o.append(f"| {k['level']} | {k['label']} | {fmt_share(k['kbd'])} | {fmt_share(k['xhci'])} | "
+                     f"+{k['active_ms'] if k['active_ms'] is not None else '-'} | {'lit: ' + ', '.join(lit) if lit else 'all off'} |")
+        if res.get("stopped_units") is not None:
+            o.append(f"\nK2 stopped: {', '.join(res['stopped_units']) or 'nothing was running'}; LEDs: "
+                     f"{', '.join(res.get('lights') or []) or 'all already off'}.")
+    ph = res.get("phases") or []
+    if ph:
+        base = next((x for x in ph if x["phase"] == "base"), None)
+        o += ["", "Z, the phases:", "",
+              "| phase | what | s | valid | bit 5 / 16 / 20 idle | idlemask (most read) | gate bits busy | "
+              "timein_s0i2 start -> end (delta, share) | package W (RAPL) | battery W vs base | socket W (gpu_metrics) start -> end | "
+              "battery W | Idle opt. start, end | wakeups/s | deepest state avg ms, share | interrupts/s (LOC) |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for x in ph:
+            if x.get("skipped"):
+                o.append(f"| {x['phase']} | {x['label']} | - | {x['skipped']} | | | | | | | | | | | | |")
+                continue
+            grew, sh, drop = effect(x, base) if x["phase"] != "base" else (bool(x.get("s0i2")), 0, None)
+            c, q = x.get("cpu") or {}, x.get("irqs") or {}
+            idle = x["idle"]
+            o.append(f"| {x['phase']} | {x['label']} | {fmt_num(x['secs'])} | "
+                     f"{'yes' if x['valid'] else '**INVALID**: ' + '; '.join(x['invalid_why'])} | "
+                     f"{fmt_share(idle[5])} / {fmt_share(idle[16])} / {fmt_share(idle[20])} | "
+                     f"{'0x%08x' % x['top_mask'] if x['top_mask'] is not None else '-'} | "
+                     f"{', '.join(map(str, x['busy_gate'])) if x['busy_gate'] else ('none' if x['busy_gate'] == [] else '-')} | "
+                     f"{x['s0i2_0'] if x['s0i2_0'] is not None else '-'} -> {x['s0i2_1'] if x['s0i2_1'] is not None else '-'} "
+                     f"({x['s0i2'] if x['s0i2'] is not None else '-'}" + (f", {sh * 100:.0f}%" if grew and x['phase'] != 'base' else "")
+                     + f") | {fmt_num(x['rapl_w'], 2)} | {('-' if drop is None else f'{-drop:+.2f}') if x['phase'] != 'base' else ''} | "
+                     f"{fmt_num(x['sock0'], 2)} -> {fmt_num(x['sock1'], 2)} | {fmt_num(x['bat_w'], 2)} | "
+                     f"{x['ipsopt'][0] if x['ipsopt'][0] is not None else '-'}, {x['ipsopt'][1] if x['ipsopt'][1] is not None else '-'} | "
+                     f"{fmt_num(c.get('wake_ps'))} | {fmt_num(c.get('deep_avg_ms'), 2)}, {fmt_share(c.get('deep_share'))} | "
+                     f"{fmt_num(q.get('total_ps'))} ({fmt_num(q.get('loc_ps'))}) |")
+        o += ["", f"Battery W is the mean of the 1 Hz current x voltage reads after the gauge's first {GAUGE_LAG_S} s, "
+              f"and it decides the verdict; package W is RAPL package-0's energy over the phase; socket W is "
+              f"gpu_metrics average_socket_power at its start and end (it over-reads about 2 W at idle). Gate bits busy: the bits of 0x{GATE_MASK:08X} reading 0 in the most-read idlemask "
+              f"(bit 8 can't read idle from a running CPU). A phase is valid when the screen reads off by both checks "
+              f"at its start and end and in {VALID_SHARE * 100:.0f}% of reads, the PSP stays suspended and 67:00.0 is "
+              f"asleep in {VALID_SHARE * 100:.0f}% of reads."]
+        ipr = [(x["phase"], x.get("ips") or []) for x in ph if x.get("ips")]
+        if ipr:
+            o += ["", "SMU per-IP \"time condition not met\" growth (the largest per phase): "
+                  + "; ".join(f"{n}: " + ", ".join(f"{ip} +{d}" for ip, d in g) for n, g in ipr)]
+        tops = [(x["phase"], (x.get("irqs") or {}).get("top") or []) for x in ph if not x.get("skipped")]
+        if any(t for _, t in tops):
+            o += ["", "Busiest device interrupts/s: " + "; ".join(f"{n}: " + (", ".join(f"{d} {r}" for d, r in t) or "none")
+                                                                for n, t in tops)]
+    k = res.get("key")
+    if k and k.get("events"):
+        o += ["", "Key check events (s after the prompt, key code, 1 press / 0 release): "
+              + ", ".join(f"+{t} {c} {v}" for t, c, v in k["events"][:10])]
+    ev = [(x["phase"], e) for x in ph for e in x.get("events") or []]
+    if ev:
+        o += ["", "Hyprland events during the phases (names only): " + "; ".join(f"{p} +{e[0]} s {e[1]}" for p, e in ev[:20])]
+    if res.get("notes"):
+        o += ["", "Notes: " + "; ".join(res["notes"])]
+    if res.get("fake_after"):
+        o += ["", "Fake tree after the run: " + ", ".join(f"{k} {v}" for k, v in res["fake_after"].items())]
+    if res.get("errors"):
+        o += ["", "<details><summary>Kernel log</summary>", "", "```", *res["errors"], "```", "", "</details>"]
+    if res.get("problems"):
+        o += ["", "Problems: " + "; ".join(res["problems"])]
+    o += ["", "<sub>recipes/linux-omarchy/g16-test/zstates</sub>"]
+    return "\n".join(o) + "\n", v
+
+
+def normalize(res):
+    for x in res.get("phases", []):
+        if "idle" in x:
+            x["idle"] = {int(k): v for k, v in x["idle"].items()}
+    return res
+
+
+# ---------------------------------------------------------------------------- preflight
+
+def preflight(root_view):
+    """-> problems that stop the run before anything is changed. root_view: the debugfs files too."""
+    bad = []
+    if not KERNEL_RE.match(os.uname().release) and FAKE is None:
+        bad.append(f"running {os.uname().release}: needs linux-omarchy 7.2.8-9.111 or later (9909/9910)")
+    if "GA605" not in "".join(rd(p, "") or "" for p in DMI):
+        bad.append("not a GA605 (the G16)")
+    bat = battery()
+    if not bat or rd(bat + "/status") != "Discharging":
+        bad.append("not on battery: unplug the charger")
+    if (rd(PSP_DIR + "/vendor"), rd(PSP_DIR + "/device")) != PSP_IDS:
+        bad.append(f"{PSP_BDF} is not the 1022:17e0 PSP")
+    for p, what in ((P_DELAY, "ccp.psp_rpm_delay_ms (9906)"), (P_S0I2, "amdgpu.dcn35_s0i2 (9901)"),
+                    (P_IDLE, "amdgpu.dm_idle_all_off (9908)")):
+        if not exists(p):
+            bad.append(f"no {what}")
+    if rd(PSP_DIR + "/power/runtime_status") != "active":
+        bad.append("the PSP is not runtime-active now")
+    dev, card = amdgpu_dev()
+    if not dev or not edp_connectors(dev):
+        bad.append("no connected eDP connector on the amdgpu card")
+    if not usb_find(KBD_IDS, XHCI_KBD):
+        bad.append(f"no 0b05:19b6 keyboard under {XHCI_KBD}")
+    if not rapl_dir():
+        bad.append("no RAPL package-0 under /sys/class/powercap")
+    if root_view:
+        if parse_mask(rd(IDLEMASK, "")) is None:
+            bad.append(f"can't read {IDLEMASK}")
+        if not exists(SMU_METRICS):
+            bad.append("no amd_pmc smu_metrics_runtime (9907)")
+        dd = dri_dir(card)
+        if not dd or not exists(f"{dd}/{ZFILE}"):
+            bad.append(f"no {ZFILE} in the amdgpu DRM debugfs directory (9910)")
+    return bad
+
+
+def check(a):
+    """--check: read-only, as the user."""
+    bad = preflight(False)
+    k = usb_find(KBD_IDS, XHCI_KBD)
+    print(f"kernel {os.uname().release}")
+    if k:
+        print(f"keyboard {os.path.basename(k)}: power/control {rd(k + '/power/control')}, autosuspend_delay_ms "
+              f"{rd(k + '/power/autosuspend_delay_ms')}, runtime_status {rd(k + '/power/runtime_status')}, wakeup "
+              f"{rd(k + '/power/wakeup')}; LEDs {json.dumps(kbd_led_state(k), sort_keys=True)}")
+    print(f"67:00.0 runtime_status {rd(PCI + '/' + XHCI_KBD + '/power/runtime_status')}; PSP "
+          f"{rd(PSP_DIR + '/power/runtime_status')}")
+    print("debugfs (idlemask, 9907, 9910): checked by the root stage")
+    if bad:
+        print("would not start:\n  - " + "\n  - ".join(bad))
+        return 1
+    print("ready (the root stage checks the debugfs files)")
+    return 0
+
+
+# ---------------------------------------------------------------------------- root, watchdog
+
+def journal_path(pid):
+    return os.path.join(RUN_DIR, f"{pid}.journal")
+
+
+def stage_watchdog(a):
+    """Root, its own unit: when the root stage dies or passes the deadline, undo its journal."""
+    if os.geteuid() != 0:
+        return 1
+    j = Journal(a.journal)
+    done = a.journal + ".done"
+    end = time.monotonic() + a.deadline
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    while time.monotonic() < end and not os.path.exists(done):
+        try:
+            os.kill(a.parent, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(1)
+    if os.path.exists(done):
+        return 0
+    try:
+        os.kill(a.parent, signal.SIGTERM)
+        for _ in range(60):
+            time.sleep(1)
+            os.kill(a.parent, 0)
+        os.kill(a.parent, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if os.path.exists(done):
+        return 0
+    dev, _ = amdgpu_dev()
+    disp = Display(a.user, a.uid, a.hypr, edp_connectors(dev)) if a.user else None
+    probs = undo(j, disp)
+    print("zstates watchdog: restored" + (": " + "; ".join(probs) if probs else ""), file=sys.stderr)
+    open(done, "w").close()
+    return 0
+
+
+def execute(a, user, uid, sig, journal_file, log, watchdog=True):
+    """The root part: preflight, the watchdog, the run, the undo. -> results."""
+    res = {"phases": [], "problems": [], "errors": [], "notes": []}
+    bad = preflight(True)
+    if bad:
+        res["problems"] += ["not started, nothing was changed: " + "; ".join(bad)]
+        res["not_started"] = True
+        return res
+    j = Journal(journal_file)
+    t0 = time.time()
+    unit = f"g16-zstates-watchdog-{os.getpid()}"
+    if watchdog:
+        sr = subprocess.run(["systemd-run", "-q", "--collect", f"--unit={unit}", sys.executable, "-I", SELF,
+                             "--stage", "watchdog", "--parent", str(os.getpid()), "--journal", j.path,
+                             "--deadline", str(DEADLINE_S), "--user", user, "--uid", str(uid), "--hypr", sig],
+                            capture_output=True, text=True)
+        if sr.returncode != 0:
+            res["problems"].append("the watchdog did not start; not started")
+            res["not_started"] = True
+            return res
+    dev, _ = amdgpu_dev()
+    disp = Display(user, uid, sig, edp_connectors(dev))
+    ev = None
+    if FAKE is None:
+        ev = HyprEvents(uid, sig)
+        ev.start()
+    hw = Hw(disp, ev, j, user)
+    r = run_cmd(["pacman", "-Q", "omarchy-asus-g16"])
+    res["g16_pkg"] = r.stdout.split()[-1] if r is not None and r.returncode == 0 and r.stdout.split() else None
+
+    def on_term(*_):
+        raise KeyboardInterrupt
+
+    old = (signal.signal(signal.SIGTERM, on_term), signal.signal(signal.SIGHUP, on_term))
+    try:
+        run(hw, a, log, res)
+    except KeyboardInterrupt:
+        res["problems"].append("interrupted")
+    except (RuntimeError, OSError) as e:
+        res["problems"].append(str(e))
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        res["problems"] += undo(j, disp)
+        open(j.path + ".done", "w").close()
+        if watchdog:
+            subprocess.run(["systemctl", "stop", f"{unit}.service"], capture_output=True)
+        signal.signal(signal.SIGTERM, old[0])
+        signal.signal(signal.SIGHUP, old[1])
+    res["after"] = hw.devices()
+    time.sleep(0 if FAKE is not None else 2)
+    res["errors"] = kernel_lines(t0 - 1)
+    return res
+
+
+def stage_root(a):
+    if os.geteuid() != 0:
+        print("zstates: the root stage needs root", file=sys.stderr)
+        return 1
+    uid = int(os.environ.get("PKEXEC_UID") or os.environ.get("SUDO_UID") or -1)
+    try:
+        pw = pwd.getpwuid(uid)
+    except (KeyError, OverflowError):
+        print("zstates: can't tell who asked (no PKEXEC_UID/SUDO_UID)", file=sys.stderr)
+        return 1
+    out = os.path.realpath(a.out)
+    if not out.startswith(pw.pw_dir.rstrip("/") + "/") or os.stat(out).st_uid != uid:
+        print("zstates: the output directory must be the user's own, in their home", file=sys.stderr)
+        return 1
+    os.makedirs(RUN_DIR, mode=0o700, exist_ok=True)
+    res = execute(a, pw.pw_name, uid, a.hypr, journal_path(os.getpid()), lambda m: print(m, flush=True))
+    os.setegid(pw.pw_gid)
+    os.seteuid(uid)
+    try:
+        fd = os.open(os.path.join(out, "results.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(res, f, indent=1)
+    finally:
+        os.seteuid(0)
+        os.setegid(0)
+    return 0
+
+
+# ---------------------------------------------------------------------------- --dry-run: a fake tree and kernel
+
+class Fake:
+    """A fake sysfs/debugfs/proc tree under a temporary directory, the commands the kit runs, and
+    a kernel emulator thread that moves the tree the way the G16's kernel would."""
+
+    PCI_DEV = "/sys/devices/pci0000:00"
+
+    def __init__(self, root, sim):
+        self.root, self.sim = root, sim
+        self.lock = threading.Lock()
+        self.units = {"asusd.service": True, "g16-winlockd@hidraw0.service": True}
+        self.user_units = {"g16-winlock.service": True}
+        self.kmsg = []
+        self.stop = threading.Event()
+        self.s0i2_us = 0.0
+        self.energy_uj = 1_000_000_000.0
+        self.charge = 60_000_000.0
+        self.wk = 0
+        self.irq = 0
+        self.kbd_wake_until = 0.0
+        self.key_state = "idle"
+        self.key_t = 0.0
+        self.kbd_fifo = None
+        self.pending = []
+        self.dpms_glitch = None
+        self.z = None
+        self.zsent = 0
+        self.t = time.monotonic()
+        self.build()
+
+    # -- the tree
+    def p(self, path):
+        return self.root + path
+
+    def put(self, path, v):
+        os.makedirs(os.path.dirname(self.p(path)), exist_ok=True)
+        tmp = self.p(path) + ".tmp"
+        with open(tmp, "wb" if isinstance(v, bytes) else "w") as f:
+            f.write(v if isinstance(v, bytes) else f"{v}\n")
+        os.replace(tmp, self.p(path))
+
+    def get(self, path, d=None):
+        try:
+            with open(self.p(path)) as f:
+                return f.read().strip()
+        except OSError:
+            return d
+
+    def link(self, path, target):
+        os.makedirs(os.path.dirname(self.p(path)), exist_ok=True)
+        os.symlink(os.path.relpath(self.p(target), os.path.dirname(self.p(path))), self.p(path))
+
+    def pci(self, parent, bdf, ids, control="on", status="active", state="D0", driver=None):
+        d = f"{self.PCI_DEV}/{parent}/{bdf}"
+        self.put(d + "/vendor", ids[0])
+        self.put(d + "/device", ids[1])
+        self.put(d + "/power/control", control)
+        self.put(d + "/power/runtime_status", status)
+        self.put(d + "/power_state", state)
+        self.link(f"{PCI}/{bdf}", d)
+        if driver:
+            os.makedirs(self.p(f"/sys/bus/pci/drivers/{driver}"), exist_ok=True)
+            self.link(d + "/driver", f"/sys/bus/pci/drivers/{driver}")
+        return d
+
+    def build(self):
+        s = self.sim
+        self.put("/sys/class/dmi/id/product_name", "ROG Zephyrus G16 GA605KM_GA605KM")
+        self.put("/sys/class/power_supply/BAT1/type", "Battery")
+        self.put("/sys/class/power_supply/BAT1/status", "Charging" if s.ac else "Discharging")
+        self.put("/sys/class/power_supply/BAT1/charge_now", int(self.charge))
+        self.put("/sys/class/power_supply/BAT1/voltage_now", 15_800_000)
+        self.igpu = self.pci("0000:00:08.1", IGPU_BDF, ("0x1002", "0x150e"), control="auto", driver="amdgpu")
+        self.put(self.igpu + "/gpu_metrics", self.metrics_blob(4.6))
+        self.psp = self.pci("0000:00:08.1", PSP_BDF, PSP_IDS, driver="ccp")
+        self.xhci = self.pci("0000:00:08.3", XHCI_KBD, ("0x1022", "0x151e"), control="auto", driver="xhci_hcd")
+        self.pci("0000:00:03.1", "0000:64:00.0", ("0x10de", "0x28e0"), driver="nvidia")
+        card = self.igpu + "/drm/card1"
+        os.makedirs(self.p(card), exist_ok=True)
+        self.link(card + "/device", self.igpu)
+        self.link("/sys/class/drm/card1", card)
+        self.put(card + "/card1-eDP-1/status", "connected")
+        self.put(card + "/card1-eDP-1/dpms", "On")
+        self.link("/sys/class/drm/card1-eDP-1", card + "/card1-eDP-1")
+        self.kbd = self.xhci + "/usb3/3-4"
+        for f, v in (("idVendor", "0b05"), ("idProduct", "19b6"), ("authorized", 1), ("busnum", 3),
+                     ("power/control", "auto" if s.udev == "yes" else "on"), ("power/autosuspend_delay_ms", 2000),
+                     ("power/runtime_status", "active"), ("power/wakeup", "enabled"), ("power/active_duration", 8_000_000),
+                     ("power/connected_duration", 8_000_000)):
+            self.put(f"{self.kbd}/{f}", v)
+        self.link(f"{USB}/3-4", self.kbd)
+        inp = self.kbd + "/3-4:1.0/0003:0B05:19B6.0001/input/input35"
+        os.makedirs(self.p(inp + "/event5"), exist_ok=True)
+        self.link(f"{INPUT}/event5", inp + "/event5")
+        self.put(inp + "/input35::capslock/brightness", 0)
+        self.put(inp + "/input35::capslock/trigger", "none [kbd-capslock] kbd-numlock")
+        self.link(f"{LEDS}/input35::capslock", inp + "/input35::capslock")
+        os.makedirs(self.p("/sys/class/hidraw"), exist_ok=True)
+        os.makedirs(self.p(self.kbd + "/3-4:1.0/0003:0B05:19B6.0001/hidraw/hidraw0"), exist_ok=True)
+        self.link("/sys/class/hidraw/hidraw0", self.kbd + "/3-4:1.0/0003:0B05:19B6.0001/hidraw/hidraw0")
+        self.put("/sys/class/leds/asus::kbd_backlight/brightness", 1)
+        self.put("/sys/class/leds/asus::kbd_backlight/trigger", "[none]")
+        os.makedirs(self.p("/dev/input"), exist_ok=True)
+        os.mkfifo(self.p("/dev/input/event5"))
+        for n, typ, name in (("rfkill0", "bluetooth", "hci0"), ("rfkill1", "wlan", "phy0")):
+            self.put(f"{RFKILL}/{n}/type", typ)
+            self.put(f"{RFKILL}/{n}/soft", 0)
+            self.put(f"{RFKILL}/{n}/name", name)
+        self.put(P_S0I2, "N")
+        self.put(P_IDLE, "N")
+        self.put(P_DELAY, -1)
+        self.put("/sys/kernel/debug/dri/1/name", f"amdgpu dev={IGPU_BDF} unique={IGPU_BDF}")
+        if s.missing != "zstates":
+            self.put(f"/sys/kernel/debug/dri/1/{ZFILE}", "")
+        self.put("/sys/kernel/debug/dri/0/name", "nvidia-drm dev=0000:64:00.0 unique=0000:64:00.0")
+        self.put(f"/sys/kernel/debug/dri/1/{IPS_FILE}", "Idle optimization: 0")
+        self.put(POWERCAP + "/intel-rapl:0/name", "package-0")
+        self.put(POWERCAP + "/intel-rapl:0/max_energy_range_uj", 65532610987)
+        self.put(POWERCAP + "/intel-rapl:0:0/name", "core")
+        for c in range(4):
+            for i, n in enumerate(("POLL", "C1", "C3")):
+                self.put(f"{CPU_DIR}/cpu{c}/cpuidle/state{i}/name", n)
+        self.tick(0.0)
+
+    @staticmethod
+    def metrics_blob(w):
+        b = bytearray(256)
+        b[2], b[3] = 3, 0
+        struct.pack_into("<I", b, SOCKET_OFF, int(w * 1000))
+        return bytes(b)
+
+    # -- the emulated kernel
+    def screen_off(self):
+        return self.get("/sys/class/drm/card1-eDP-1/dpms") == "Off"
+
+    def disp_idle(self):
+        return self.screen_off() and self.get(P_S0I2) == "Y" and self.get(P_IDLE) == "Y"
+
+    def tick(self, dt):
+        s = self.sim
+        now = time.monotonic()
+        with self.lock:
+            for prm in (P_S0I2, P_IDLE):
+                v = self.get(prm)
+                if v in ("1", "0"):
+                    self.put(prm, "Y" if v == "1" else "N")
+            # the PSP: runtime PM once its control is auto
+            psp_auto = self.get(self.psp + "/power/control") == "auto"
+            self.put(self.psp + "/power/runtime_status", "suspended" if psp_auto else "active")
+            self.put(self.psp + "/power_state", "D3hot" if psp_auto else "D0")
+            # the keyboard
+            bt_off = self.get(f"{RFKILL}/rfkill0/soft") == "1"
+            deauth = self.get(self.kbd + "/authorized") == "0"
+            auto = self.get(self.kbd + "/power/control") == "auto"
+            svc_off = not self.units["asusd.service"] and not any(
+                v for k, v in self.units.items() if k.startswith("g16-winlockd@")) and not self.user_units["g16-winlock.service"]
+            lights = self.get(self.kbd + "/3-4:1.0/0003:0B05:19B6.0001/input/input35/input35::capslock/brightness") != "0"
+            k_ok = {"k0": auto, "k1": auto, "k2": auto and svc_off and not lights, "k3": False}[s.kbd]
+            ksusp = deauth or (k_ok and now >= self.kbd_wake_until)
+            self.put(self.kbd + "/power/runtime_status", "suspended" if ksusp else "active")
+            if not ksusp:
+                self.put(self.kbd + "/power/active_duration", int(self.get(self.kbd + "/power/active_duration", "0"))
+                         + int(dt * 1000))
+            self.put(self.kbd + "/power/connected_duration",
+                     int(self.get(self.kbd + "/power/connected_duration", "0")) + int(dt * 1000))
+            xsusp = ksusp and (bt_off or s.kbd == "k0")
+            self.put(self.xhci + "/power/runtime_status", "suspended" if xsusp else "active")
+            # the screen: a glitch (the panel back on for a while) in --sim-state screen
+            if self.dpms_glitch and now >= self.dpms_glitch[0]:
+                if now < self.dpms_glitch[1]:
+                    self.put("/sys/class/drm/card1-eDP-1/dpms", "On")
+                else:
+                    self.put("/sys/class/drm/card1-eDP-1/dpms", self.dpms_glitch[2])
+                    self.dpms_glitch = None
+            # AllowZstates: a new write logs its kernel line
+            zv = self.get(f"/sys/kernel/debug/dri/1/{ZFILE}", "")
+            if zv and zv != "x":
+                v = int(zv)
+                self.kmsg.append(f"amdgpu {IGPU_BDF}: EXPERIMENTAL: SMU AllowZstates({v}) sent: 0, arg register 0x{v:08x}")
+                self.z = v
+                self.put(f"/sys/kernel/debug/dri/1/{ZFILE}", "x")
+                if s.state == "screen" and v == 9 and not self.zsent:
+                    self.dpms_glitch = (now + 0.5, now + 3.0, "Off")
+                self.zsent += 1
+            # the idlemask
+            di = self.disp_idle()
+            b16 = di and self.get(self.psp + "/power/runtime_status") == "suspended" and xsusp and s.state != "nobit16"
+            busy = {1, 8, 13, 14, 21} | (set() if di else {5, 20}) | (set() if b16 else {16})
+            mask = 0xFFFFFFFF
+            for b in busy:
+                mask &= ~(1 << b)
+            want = {"z9": (9,), "z8": (8,), "counter": (9, 8), "drop": (9, 8), "none": ()}[s.z]
+            s0i2 = b16 and self.z in want
+            self.s0i2_us += dt * 1e6 * 0.7 if s0i2 and s.z != "drop" else 0
+            w = 3.6 if s0i2 and s.z != "counter" else 4.6
+            self.energy_uj += w * dt * 1e6
+            self.charge -= (w + 1.5) * dt / 3600 / 15.8 * 1e6
+            self.wk += int(dt * (150 if s0i2 else 600))
+            self.irq += 0 if xsusp else int(dt * 125)
+            self.put("/sys/class/power_supply/BAT1/charge_now", int(self.charge))
+            self.put("/sys/class/power_supply/BAT1/current_now", int((w + 1.5) / 15.8 * 1e6))
+            self.put(POWERCAP + "/intel-rapl:0/energy_uj", int(self.energy_uj))
+            self.put(self.igpu + "/gpu_metrics", self.metrics_blob(w + 0.1))
+            self.put(IDLEMASK, f"0x{mask:08x}")
+            self.put(f"/sys/kernel/debug/dri/1/{IPS_FILE}", f"Idle optimization: {1 if di else 0}")
+            ips = "".join(f"{i:2d} {n:<8} 1 0 {int(t)}\n" for i, (n, t) in enumerate(
+                (("DISPLAY", 0 if di else self.t * 1000), ("USB3_0", 0 if xsusp else self.t * 1000),
+                 ("CCP", 0 if b16 else self.t * 900))))
+            if self.sim.missing != "metrics":
+                self.put(SMU_METRICS, f"Dump data (0x6): ok 0\ntable_version: 3\nhint_count: 1\ntimein_s0i2: {int(self.s0i2_us)}\n"
+                     f"active_ips: 0x7\nidx name active timecondition_notmet_lastcapture timecondition_notmet_totaltime\n{ips}")
+            for c in range(4):
+                for i in range(3):
+                    self.put(f"{CPU_DIR}/cpu{c}/cpuidle/state{i}/usage", self.wk * (1 if i == 2 else 2 if i == 1 else 0))
+                    self.put(f"{CPU_DIR}/cpu{c}/cpuidle/state{i}/time", self.wk * (1600 if i == 2 else 100 if i == 1 else 0))
+            self.put(INTERRUPTS, "           CPU0       CPU1\n"
+                                 f" 45: {self.irq} 0 IR-PCI-MSIX-{XHCI_KBD} 0-edge xhci_hcd\n"
+                                 f"LOC: {self.wk} {self.wk} Local timer interrupts\n"
+                                 f"RES: {self.wk // 4} 0 Rescheduling interrupts\n")
+            self.t += dt
+        self.key(now, ksusp)
+
+    def key(self, now, ksusp):
+        """The Shift press: once the kit has the event node open and the keyboard has slept 0.5 s."""
+        if self.sim.key == "none" or self.key_state == "done":
+            return
+        if self.kbd_fifo is None:
+            try:
+                self.kbd_fifo = os.open(self.p("/dev/input/event5"), os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                return
+        if self.key_state == "idle" and ksusp:
+            self.key_state, self.key_t = "asleep", now
+        elif self.key_state == "asleep" and now - self.key_t >= 0.5:
+            self.kbd_wake_until = now + 2.0
+            ev = []
+            if self.sim.key == "kept":
+                ev.append(EVENT.pack(0, 0, EV_KEY, KEY_LEFTSHIFT, 1))
+            ev.append(EVENT.pack(0, 0, EV_KEY, KEY_LEFTSHIFT, 0))
+            self.key_state = "pressed"
+            self.key_t = now
+            self.pending = ev
+        elif self.key_state == "pressed" and now - self.key_t >= 0.15:
+            try:
+                os.write(self.kbd_fifo, b"".join(self.pending))
+            except OSError:
+                pass
+            self.key_state = "done"
+
+    def loop(self):
+        last = time.monotonic()
+        while not self.stop.is_set():
+            time.sleep(0.05)
+            now = time.monotonic()
+            self.tick(now - last)
+            last = now
+
+    def start(self):
+        self.th = threading.Thread(target=self.loop, daemon=True)
+        self.th.start()
+
+    def close(self):
+        self.stop.set()
+        self.th.join(2)
+        if self.kbd_fifo is not None:
+            os.close(self.kbd_fifo)
+
+    # -- the commands
+    def cmd(self, argv):
+        out, rc = "", 0
+        user = len(argv) > 1 and argv[0] == "systemctl" and argv[1] == "--user"
+        a = argv[4:] if user else argv[1:]
+        units = self.user_units if user else self.units
+        if argv[0] == "systemctl":
+            with self.lock:
+                if a[0] == "is-active":
+                    out = "active" if units.get(a[1]) else "inactive"
+                elif a[0] in ("start", "stop"):
+                    for u in a[1:]:
+                        units[u] = a[0] == "start"
+                elif a[0] == "list-units":
+                    out = "\n".join(f"{u} loaded active running" for u, v in units.items()
+                                    if v and u.startswith("g16-winlockd@"))
+        elif argv[0] == "hyprctl":
+            dpms = self.get("/sys/class/drm/card1-eDP-1/dpms")
+            if a[:2] == ["-j", "monitors"]:
+                out = json.dumps([{"name": "eDP-1", "dpmsStatus": dpms == "On", "disabled": False}])
+            elif a[0] == "dispatch":
+                on = "enable" in a[1] or a[1:] == ["dpms", "on"]
+                with self.lock:
+                    self.put("/sys/class/drm/card1-eDP-1/dpms", "On" if on else "Off")
+                    if self.dpms_glitch:
+                        self.dpms_glitch = (self.dpms_glitch[0], self.dpms_glitch[1], "On" if on else "Off")
+                out = "ok"
+        elif argv[0] == "journalctl":
+            with self.lock:
+                out = "\n".join(self.kmsg)
+        elif argv[0] == "pacman":
+            out = "omarchy-asus-g16 1.0.0-106"
+        else:
+            rc = 1
+        return subprocess.CompletedProcess(argv, rc, out + "\n", "")
+
+
+# ---------------------------------------------------------------------------- front
+
+def front(a):
+    global ROOT, FAKE
+    kernel = os.uname().release
+    if a.dry_run:
+        tmp = tempfile.mkdtemp(prefix="zstates-dry-")
+        try:
+            fake = Fake(tmp, a)
+            ROOT, FAKE = tmp, fake
+            fake.start()
+            try:
+                res = execute(a, "user", os.getuid(), "fake", os.path.join(tmp, "journal"),
+                              lambda m: print(m, flush=True), watchdog=False)
+            finally:
+                fake.close()
+            res["fake_after"] = {"3-4 power/control": rd(USB + "/3-4/power/control"), "dpms": rd("/sys/class/drm/card1-eDP-1/dpms"),
+                                 "last AllowZstates": fake.z, "PSP control": rd(PSP_DIR + "/power/control")}
+        finally:
+            ROOT, FAKE = "", None
+            shutil.rmtree(tmp, ignore_errors=True)
+        res = normalize(json.loads(json.dumps(res)))
+        kernel = "7.2.15-1.101-omarchy (dry run)"
+        if res.get("not_started"):
+            print("zstates (dry run): " + "; ".join(res["problems"]), file=sys.stderr)
+            return 1
+    else:
+        bad = preflight(False)
+        for t in ("systemd-run", "systemctl", "journalctl", "pkexec"):
+            if not have(t):
+                bad.append(f"no {t}")
+        sig = hypr_instance()
+        if not sig:
+            bad.append("no running Hyprland found")
+        if bad:
+            print("zstates: not starting, nothing was changed:\n  - " + "\n  - ".join(bad), file=sys.stderr)
+            return 1
+        state = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                             "omarchy-asus-g16-test")
+        os.makedirs(state, exist_ok=True)
+        out = tempfile.mkdtemp(prefix="zstates-", dir=state)
+        args = [sys.executable, "-I", SELF, "--stage", "root", "--out", out, "--hypr", sig]
+        why = (f"G16 Z-state test (#{ISSUE}): the screen off, display idle, the PSP and the keyboard asleep, "
+               f"Bluetooth off; the AllowZstates message sent to the power firmware (9, 8, then 0). About 4 minutes; "
+               f"press Shift once when the log asks, otherwise hands off; everything goes back as it is now")
+        if os.environ.get("G16_POLKIT_REASON"):
+            cmd = [os.environ["G16_POLKIT_REASON"], "run", why, "--", "pkexec", *args]
+        elif os.environ.get("G16_ROOT") == "sudo":
+            cmd = ["sudo", *args]
+        else:
+            cmd = ["pkexec", "--disable-internal-agent", *args]
+        print(f"==> {why}", flush=True)
+        if subprocess.run(cmd).returncode != 0:
+            print("zstates: the root stage failed", file=sys.stderr)
+            return 1
+        try:
+            with open(os.path.join(out, "results.json")) as f:
+                res = normalize(json.load(f))
+        except (OSError, ValueError):
+            print("zstates: no results from the root stage", file=sys.stderr)
+            return 1
+        if res.get("not_started"):
+            print("zstates: " + "; ".join(res["problems"]), file=sys.stderr)
+            return 1
+    text, v = report(res, kernel, a)
+    name = f"omarchy-asus-g16-zstates-{os.uname().release}-{time.strftime('%Y%m%d-%H%M%S')}.md"
+    path = os.path.join(tempfile.gettempdir() if a.dry_run else os.path.expanduser("~"), name)
+    with open(path, "w") as f:
+        f.write(text)
+    print(f"\n{text}\n==> {v}; report: {path}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="zstates", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--sim-kbd", dest="kbd", choices=["k0", "k1", "k2", "k3"], default="k1")
+    ap.add_argument("--sim-udev", dest="udev", choices=["yes", "no"], default="yes")
+    ap.add_argument("--sim-z", dest="z", choices=["z9", "z8", "counter", "drop", "none"], default="none")
+    ap.add_argument("--sim-key", dest="key", choices=["kept", "lost", "none"], default="kept")
+    ap.add_argument("--sim-state", dest="state", choices=["ok", "nobit16", "screen"], default="ok")
+    ap.add_argument("--sim-ac", dest="ac", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--sim-missing", dest="missing", choices=["none", "zstates", "metrics"], default="none",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--phase-secs", type=int, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--stage", choices=["front", "root", "watchdog"], default="front", help=argparse.SUPPRESS)
+    ap.add_argument("--out", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--hypr", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--user", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--uid", type=int, default=-1, help=argparse.SUPPRESS)
+    ap.add_argument("--parent", type=int, default=-1, help=argparse.SUPPRESS)
+    ap.add_argument("--journal", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--deadline", type=int, default=DEADLINE_S, help=argparse.SUPPRESS)
+    a = ap.parse_args()
+    if a.hypr and not re.match(r"^[A-Za-z0-9_]+$", a.hypr):
+        ap.error("bad --hypr")
+    if a.phase_secs is not None and not a.dry_run:
+        ap.error("--phase-secs is for --dry-run only")
+    a.phase_secs = a.phase_secs or (3 if a.dry_run else PHASE_S)
+    a.kbd_secs = 1.0 if a.dry_run else KBD_WAIT_S
+    a.key_secs = 6.0 if a.dry_run else KEY_WAIT_S
+    if a.stage == "watchdog":
+        if a.parent <= 1 or not a.journal.startswith(RUN_DIR + "/"):
+            ap.error("the watchdog stage is started by the root stage")
+        return stage_watchdog(a)
+    if a.stage == "root":
+        return stage_root(a)
+    if a.check:
+        return check(a)
+    return front(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
