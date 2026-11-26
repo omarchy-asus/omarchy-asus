@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: rdoupe <1207041+rdoupe@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 00:00:00 -0500
+Subject: [PATCH] drm/amd/display: Stop using PSR on a link whose PSR exit
+ timed out
+
+Since the power module (3c108046e1d6), the ISM leaves PSR1 from the
+vblank control worker whenever a vblank requestor appears:
+amdgpu_dm_crtc_set_static_screen_optimze() sets psr_event_vsync with
+wait set, and set_psr_enable() then polls the PSR state every 500 us
+for up to 1000 tries until it reads PSR_STATE0. amdgpu_dm_commit_planes()
+flushes the vblank control workqueue before programming any plane, so
+while that worker polls, every atomic commit on every CRTC waits too.
+
+On a ROG Zephyrus G16 (GA605KM, Radeon 860M, Samsung ATNA60DL04-0 OLED
+eDP, PSR1) driving two more monitors through a USB4 dock, the eDP's PSR
+state stuck at PSR_STATE2a. Each exit request then polled out the full
+500 ms. The ASSERT in the timeout path is WARN_ON_ONCE, so it fired once:
+
+  WARNING: drivers/gpu/drm/amd/amdgpu/../display/modules/power/power_psr.c:236 at mod_power_set_psr_event+0x4bc/0x4f0 [amdgpu]
+  Workqueue: dm_vblank_control_workqueue amdgpu_dm_crtc_vblank_control_worker [amdgpu]
+   amdgpu_dm_psr_set_event+0xce/0xe0 [amdgpu]
+   dm_ism_commit_idle_optimization_state+0x5b/0x160 [amdgpu]
+   amdgpu_dm_ism_commit_event+0x2e3/0x9b0 [amdgpu]
+   amdgpu_dm_crtc_vblank_control_worker+0xb5/0xc0 [amdgpu]
+
+After that, the cursor and every screen stuttered for hours, with the
+commit worker blocked in __flush_workqueue() from amdgpu_dm_commit_planes().
+Writing 1 to debugfs disallow_edp_enter_psr ended the stalls at once: it
+sets the link's psr_version to unsupported, so the ISM stops sending PSR
+events.
+
+When a PSR exit times out, clear psr_feature_enabled on the link and say
+so once in the log, and skip the wait while it's clear. The link then
+stays out of PSR, as edp_set_psr_allow_active() sends nothing to the
+firmware without psr_feature_enabled, until the next PSR setup on a mode
+set of the eDP (DPMS, suspend) sets it again. Until then the panel stays
+out of self-refresh and its PSR error IRQs go unhandled
+(handle_hpd_irq_psr_sink() checks the same flag). Before this change,
+every commit waited 500 ms.
+
+Signed-off-by: rdoupe <1207041+rdoupe@users.noreply.github.com>
+---
+diff --git i/drivers/gpu/drm/amd/display/modules/power/power_psr.c w/drivers/gpu/drm/amd/display/modules/power/power_psr.c
+index 5ecb570c2..af82e3b85 100644
+--- i/drivers/gpu/drm/amd/display/modules/power/power_psr.c
++++ w/drivers/gpu/drm/amd/display/modules/power/power_psr.c
+@@ -206,6 +206,13 @@ static bool set_psr_enable(struct mod_power *mod_power,
+ 		return false;
+ 	}
+ 
++	/*
++	 * With PSR given up on this link (below), there is no state change to
++	 * wait for.
++	 */
++	if (!link->psr_settings.psr_feature_enabled)
++		wait = false;
++
+ 	if (wait == true) {
+ 
+ 		DC_TRACE_LEVEL_MESSAGE(DAL_TRACE_LEVEL_INFORMATION,
+@@ -238,6 +245,23 @@ static bool set_psr_enable(struct mod_power *mod_power,
+ 								WPP_BIT_FLAG_Firmware_PsrState,
+ 								"set psr enable: ERROR: retry_count=%u: Unexpectedly long wait for PSR state change.",
+ 								retry_count);
++
++			/*
++			 * PSR didn't leave self-refresh. The ISM asks for this
++			 * exit from the vblank control worker whenever vblank
++			 * is needed, and every atomic commit flushes that
++			 * workqueue, so a PSR state machine that stopped
++			 * answering stalls each commit on every CRTC for the
++			 * whole wait. Stop using PSR on this link instead:
++			 * psr_feature_enabled is set again by the next PSR
++			 * setup, on a mode set.
++			 */
++			if (!psr_enable && link->psr_settings.psr_feature_enabled) {
++				link->psr_settings.psr_feature_enabled = false;
++				drm_warn(link->ctx->logger->dev,
++					 "PSR exit timed out in state %d; PSR off on this link until the next mode set\n",
++					 (int)state);
++			}
+ 		}
+ 	} else {
+ 		DC_TRACE_LEVEL_MESSAGE(DAL_TRACE_LEVEL_INFORMATION,

@@ -3,7 +3,7 @@
 
 pkgbase=linux-omarchy
 pkgver=7.2.15
-pkgrel=1.101
+pkgrel=1.103
 pkgdesc='Omarchy Linux (BORE CPU scheduler, ADIOS I/O scheduler)'
 url='https://omarchy.org'
 arch=(
@@ -110,6 +110,7 @@ source=(
   0481-amd-display-dcn31-compbuf-wait.patch{,.sig}
   0481-drm-amd-display-power-backports.patch
   0482-drm-amd-display-replay-dmub-hpd-skipped-in-suspend.patch
+  0484-drm-amd-display-psr-off-after-exit-timeout.patch
   0510-sound-updates.patch{,.sig}
   0511-asoc-updates.patch{,.sig}
   0512-sound-fixes-1.patch{,.sig}
@@ -404,6 +405,7 @@ b2sums=('a1d1a6572667dfd75f7dde083a8d461db98e08bbc67cdd395e2d73a422ee487bd14392c
         'SKIP'
         '20c5212c5336b6b1b61d0dc25718fe20f22ee675d7e09db78ec02b2498ca982d62f796e107e93336e1b24ffb88e76d8c3321523e093335b5f9e7fbb3ac8f2dce'
         '912d46320dd426b67e7b8a93f9d135ffa69fdc1db50ab949102b82613270ee018f2e8d348e5b665ef374c631c801813a3500343cf7625681dd3414c15e2aa0d7'
+        '02c250c37fdcfc4339a1bc86a187b35e3e669c1e52cdbb150ffde309d1f67933607d20461d04eb4ab3e9437c6b198d4a424e30ee6000831ae7159a9909018efc'
         '6aeca95da5153fd5dfa6434f4696c329561b63f32f579afbc6cf756808de3dee1167aa4b2b62ed364865814424cd1e5e4e513b94809e5b6f8e4f95c5f8dd76af'
         'SKIP'
         '2ec380ddab61528a4498442a113df516707ded3c6f4c23c9a50d68c1f4a685e8f613194f7fac0354faaf8da8a2a6e15576a37695262c912fa5cdaa74ae1c65fc'
@@ -805,6 +807,7 @@ sha256sums=('d0f6b1d7324c937ccaeb5c4ca7084bfcf71db2edb3e2d3a31f0ad83a681809ab'
             'SKIP'
             '4b4c106d1121c1352e38bc625b34fe21e5d19e8ab7127b065ce7e3709aa6704e'
             '0476b8a7380c6d22e7ac0795676708a29b9380a0fa22e9b617ae0ac39cfd1ac3'
+            '17452a2758ae9470153f9b9f3d8d6d19ecc9cc1fc4d8044d8428b5c3b2554a27'
             '66cba8c31d78c79e17c691b80f6530fce307a9471cbb7b79426f137c635fa69e'
             'SKIP'
             'df2f6ccaceaee924c93b4a8e63b9621871b79ac90d2d38eebbd4517961f949e6'
