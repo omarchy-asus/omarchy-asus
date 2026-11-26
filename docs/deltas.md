@@ -44,6 +44,7 @@ An upstream state that changes is updated here, with the date it was checked.
 | [GL9767 SD reader runtime PM with the slot empty](#kernel-0570-gl9767-rpm) | linux-omarchy | 0570 | RC only | not submitted |
 | [amdgpu display power backports](#kernel-0481-amdgpu-display-power) | linux-omarchy | 0481 | both | merged-unreleased |
 | [amdgpu replays DMUB HPDs skipped in resume](#kernel-0482-dmub-hpd-replay) | linux-omarchy | 0482 | RC only | not submitted |
+| [amdgpu turns PSR off after a PSR exit times out](#kernel-0484-psr-exit-timeout) | linux-omarchy | 0484 | both | not submitted |
 | [gpiolib-acpi ignores GPIO 16 wakeups on the GA605KM](#kernel-0773-gpio16-wake) | linux-omarchy | 0773 | both | not submitted |
 | [asus-armoury GA605KM power limits](#kernel-0807-armoury-power-limits) | linux-omarchy | 0807 | both | not submitted |
 | [asus-wmi restores the thermal policy after hibernation](#kernel-0808-thermal-policy-restore) | linux-omarchy | 0808 | RC only | not submitted |
@@ -294,6 +295,52 @@ sent; a human decides. Add the `Assisted-by:` tag the kernel's rules on AI assis
 >
 > Tested on the GA605KM: 40 of 40 docked s2idle cycles brought both monitors back. The
 > replug-while-suspended case still needs a re-run on the patched kernel.
+
+<a id="kernel-0484-psr-exit-timeout"></a>
+### amdgpu turns PSR off after a PSR exit times out (0484)
+
+- **Component:** `linux-omarchy`, `0484-drm-amd-display-psr-off-after-exit-timeout.patch`, after
+  0482. Both channels, from 7.2.15-1.103 (#436).
+- **Fixes:** on the G16, docked with two DP monitors, the eDP's PSR state stuck part-way into
+  self-refresh (`psr_state` 4, `PSR_STATE2a`). The ISM leaves PSR from the vblank control worker
+  and waits up to 500 ms for it, and every atomic commit flushes that worker, so the cursor and
+  all three screens stuttered for hours. A single `power_psr.c:236` warning was logged, because
+  it's `WARN_ON_ONCE`. Now a PSR exit that times out clears the link's `psr_feature_enabled` (logged once:
+  `PSR exit timed out in state N; PSR off on this link until the next mode set`) and nothing
+  waits on that link again until the next mode set of the eDP (DPMS, suspend) sets up PSR afresh.
+- **Test:** on the G16, `psr_state` (debugfs `eDP-1/psr_state`) still reaches 6 on a static screen
+  and 0 while the cursor moves. The fault is intermittent (once in about 2.5 days), so a passive
+  logger is the real test: `journalctl -k -f | grep -E 'PSR exit timed out|power_psr.c'`. When it
+  hits, the cursor stays smooth.
+- **Upstream: not submitted** (target amd-gfx). Checked 2026-11-26: mainline still polls for up to
+  500 ms in `set_psr_enable()` from the vblank control worker. bd0c00982166 (already in 7.2.15),
+  57decaa0e378 and 2f08de495c6d fix other paths.
+- **Drop when:** upstream bounds or moves that wait, or recovers a PSR state machine that stops
+  answering.
+- **Notes:** the cost is the eDP's self-refresh saving until the next mode set, small on the G16
+  (#230). Details: NOTES.md, "0484".
+
+#### Upstream report draft
+
+amd-gfx mailing list, as a patch with 0484's commit message ("drm/amd/display: Stop using PSR on a
+link whose PSR exit timed out"); the cover text below. Not sent; a human decides. Add the
+`Assisted-by:` tag the kernel's rules on AI assistants ask for.
+
+> **Subject:** drm/amd/display: a stuck PSR exit stalls every atomic commit for 500 ms
+>
+> On a Strix Point laptop (DCN 3.5, PSR1 OLED eDP; an ASUS ROG Zephyrus G16 GA605KM) driving two
+> more DP monitors through a USB4 dock, the eDP's PSR state stuck at `PSR_STATE2a`. From then on,
+> each time the ISM left PSR (`amdgpu_dm_crtc_set_static_screen_optimze()`, `psr_event_vsync`,
+> wait set), `set_psr_enable()` polled for the full 1000 x 500 us. `amdgpu_dm_commit_planes()`
+> flushes `vblank_control_workqueue` before programming planes, so every commit on every CRTC
+> waited with it: cursor stutter on all screens, the commit worker in D state in
+> `__flush_workqueue()`. The timeout's `ASSERT` is `WARN_ON_ONCE`, so it logged once
+> (`power_psr.c:236`, from `amdgpu_dm_crtc_vblank_control_worker`). Writing 1 to debugfs
+> `disallow_edp_enter_psr` ended it at once.
+>
+> The patch treats a timed-out PSR exit as a dead PSR link: it clears `psr_feature_enabled`,
+> which the next PSR setup sets again, and skips the wait while it's clear. Whether the wait
+> belongs in the vblank worker at all, and why DMUB stays in STATE2a, is for AMD.
 
 <a id="kernel-0773-gpio16-wake"></a>
 ### gpiolib-acpi ignores GPIO 16 wakeups on the GA605KM (0773)

@@ -12,7 +12,7 @@
 
 Compared with upstream, only:
 
-1. `pkgrel=1` -> `pkgrel=1.101` (kernel release string becomes `7.2.15-1.101-omarchy`).
+1. `pkgrel=1` -> `pkgrel=1.103` (kernel release string becomes `7.2.15-1.103-omarchy`).
    History: 9.1 added 0568 and 9900; 9.2 added 0569 and 0807; 9.3 added 0481;
    9.4 added 0773; 9.5 added 0482; 9.101 is 9.5 moved into the RC channel's
    range (.101 and up, so no file shares a name with Quattro's; #201); 9.102 added 0810; 9.103 added 0808;
@@ -20,7 +20,8 @@ Compared with upstream, only:
    7.2.15-1.101 is the rebase onto 7.2.15-1: 0481 lost its self-refresh-on-tearing-flips part (in 7.2.11
    stable, `04ee82fec489`), 0481 now sits after upstream's own 0481, 0568/0569/0570 after upstream's 0572,
    0773 after 0777, 0807-0810 after upstream's 0808, and 0568 and 9909 moved to hid-asus quirk bits 16 and 17
-   (upstream's HID update took bit 15 for `QUIRK_FILTER_CAMERA_COMPANION`).
+   (upstream's HID update took bit 15 for `QUIRK_FILTER_CAMERA_COMPANION`). 7.2.15-1.103 added 0484 (#436;
+   1.102 is taken by the open PRs #406 and #421, and 1.104 and 1.105 are G16 test builds).
 2. New patch `0568-hid-asus-pass-through-rog-nkey-win-lock-reports.patch`,
    added to `source=()` after the last `056x`/`057x` patch (upstream's `0572-...` on 7.2.15) and with
    matching entries in `b2sums` and `sha256sums`. It adds `QUIRK_HID_WIN_LOCK` (BIT(16) since 7.2.15;
@@ -59,6 +60,9 @@ Compared with upstream, only:
 18. `9908-EXPERIMENTAL-...` after 9907 (see "EXPERIMENTAL: 9908" below).
 19. `9909-EXPERIMENTAL-...` after 9908 (see "EXPERIMENTAL: 9909" below).
 20. `9910-EXPERIMENTAL-...` after 9909 (see "EXPERIMENTAL: 9910" below).
+21. New patch `0484-drm-amd-display-psr-off-after-exit-timeout.patch` after `0482-...`
+    (a PSR exit that times out turns PSR off on the link instead of stalling every commit;
+    see "0484" below).
 
 Our patches have no `.sig` (upstream's patch signatures are made by the
 Omarchy kernel maintainer's key); their checksums pin them instead.
@@ -943,3 +947,43 @@ teardown, and both monitors are lit.
 
 **Upstream.** Not submitted (target: amd-gfx). A draft report is on #205.
 Drop it once upstream handles HPDs that arrive late in resume.
+
+## 0484: PSR off on a link whose PSR exit timed out (#436)
+
+**What.** `0484-drm-amd-display-psr-off-after-exit-timeout.patch`, after 0482
+(no other patch touches `modules/power/power_psr.c`). When `set_psr_enable()`
+polls out its whole wait (1000 x 500 us) for PSR to leave self-refresh, it
+clears the link's `psr_feature_enabled` and logs once with `drm_warn`:
+`PSR exit timed out in state N; PSR off on this link until the next mode set`.
+It skips the wait while `psr_feature_enabled` is clear.
+`edp_set_psr_allow_active()` sends nothing to the firmware without the flag, and
+`amdgpu_dm_psr_set_event()` returns early, so the ISM stops asking. The next
+PSR setup on a mode set of the eDP itself (DPMS, suspend; not one on a dock
+monitor) sets the flag again (`dc_link_setup_psr()`). Until then the panel's
+PSR error IRQs go unhandled too (`handle_hpd_irq_psr_sink()` checks the flag).
+
+**Why.** Since the 7.2 power module (3c108046e1d6), the ISM leaves PSR1 from the
+vblank control worker with `wait` set, and `amdgpu_dm_commit_planes()` flushes
+that workqueue before every plane update. On the G16 (docked, eDP plus two DP
+monitors) the eDP's PSR state stuck at 4 (`PSR_STATE2a`). From then on, each
+exit polled out the full 500 ms and every screen stuttered for hours. The
+timeout's `ASSERT` is `WARN_ON_ONCE`, so it logged once
+(`power_psr.c:236 ... amdgpu_dm_crtc_vblank_control_worker`). Writing 1 to
+debugfs `eDP-1/disallow_edp_enter_psr` ended it at once (it sets the link's
+`psr_version` to unsupported, so the ISM stops sending PSR events; 0484
+reaches the same state through `psr_feature_enabled`). Upstream fixes since
+7.2.15 don't cover this. bd0c00982166 is already in 7.2.15. 57decaa0e378 needs a
+DSC slice-height assert at boot, which the G16 doesn't log. 2f08de495c6d is
+about DPMS off on external-only setups.
+
+**Default behaviour and risk.** Nothing changes while PSR answers. After a
+timeout, the eDP stays out of self-refresh until the next mode set (DPMS,
+hotplug, suspend), which costs the panel's self-refresh saving, small on the
+G16 (#230). Before this change, every commit waited 500 ms. Risk: low.
+
+**Test** (on the G16, booted on this kernel): a static screen still reaches
+`psr_state` 6 and moving the cursor drops it to 0
+(`/sys/kernel/debug/dri/<amdgpu>/eDP-1/psr_state`). The fault is intermittent
+(once in about 2.5 days), so a passive logger is the test:
+`journalctl -k -f | grep -E 'PSR exit timed out|power_psr.c'`. When it hits,
+the cursor stays smooth and no kworker sits in D state in `__flush_workqueue`.
